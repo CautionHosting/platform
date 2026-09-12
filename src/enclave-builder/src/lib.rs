@@ -143,6 +143,7 @@ impl CacheType {
 }
 
 impl EnclaveBuilder {
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_cache(
         enclave_source: impl Into<String>,
         enclave_version: impl Into<String>,
@@ -315,6 +316,7 @@ impl EnclaveBuilder {
         extract::extract_static_binary(&image.reference, binary_path, &self.work_dir).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn build_eif_native(
         &self,
         user_fs_path: &std::path::Path,
@@ -422,6 +424,7 @@ impl EnclaveBuilder {
         None
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn build_enclave(
         &self,
         user_image: &UserImage,
@@ -587,6 +590,7 @@ impl EnclaveBuilder {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn build_enclave_from_filesystem(
         &self,
         user_fs_path: PathBuf,
@@ -735,6 +739,7 @@ impl EnclaveBuilder {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn build_enclave_auto(
         &self,
         user_image: &UserImage,

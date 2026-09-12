@@ -140,10 +140,10 @@ fn archive_url_to_git_url(archive_url: &str) -> Option<String> {
 fn extract_ref_from_archive_url(url: &str) -> Option<String> {
     if let Some(archive_pos) = url.find("/archive/") {
         let after_archive = &url[archive_pos + 9..];
-        let ref_part = if after_archive.starts_with("refs/heads/") {
-            &after_archive[11..]
-        } else if after_archive.starts_with("refs/tags/") {
-            &after_archive[10..]
+        let ref_part = if let Some(rest) = after_archive.strip_prefix("refs/heads/") {
+            rest
+        } else if let Some(rest) = after_archive.strip_prefix("refs/tags/") {
+            rest
         } else {
             after_archive
         };
@@ -399,7 +399,7 @@ pub async fn get_or_clone_enclave_source(
             let mut entry = entry.context("Failed to read archive entry")?;
             entry
                 .unpack_in(&download_dir)
-                .with_context(|| format!("Failed to extract entry"))?;
+                .context("Failed to extract entry")?;
         }
 
         let enclave_source_dir = find_top_level_dir(&download_dir)
@@ -583,7 +583,7 @@ async fn get_or_clone_framework_source_from_urls(
 }
 
 async fn extract_framework_archive(archive_bytes: &[u8], download_dir: &Path) -> Result<PathBuf> {
-    let decoder = GzDecoder::new(&archive_bytes[..]);
+    let decoder = GzDecoder::new(archive_bytes);
     let mut archive = Archive::new(decoder);
 
     for entry in archive
@@ -592,11 +592,11 @@ async fn extract_framework_archive(archive_bytes: &[u8], download_dir: &Path) ->
     {
         let mut entry = entry.context("Failed to read framework archive entry")?;
         entry
-            .unpack_in(&download_dir)
-            .with_context(|| format!("Failed to extract entry"))?;
+            .unpack_in(download_dir)
+            .context("Failed to extract entry")?;
     }
 
-    let framework_source_dir = find_top_level_dir(&download_dir)
+    let framework_source_dir = find_top_level_dir(download_dir)
         .await
         .context("Failed to find top-level directory in extracted framework source")?;
     Ok(framework_source_dir)
