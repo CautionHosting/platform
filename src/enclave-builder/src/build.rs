@@ -1141,7 +1141,7 @@ mod tests {
     fn test_tool_commit_resolution() {
         // Env-var mutations are process-global; serialize on the crate-wide lock
         // so parallel tests in this binary don't see each other's temp values.
-        let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         for var in [
             "ENCLAVEOS_COMMIT",
             "BOOTPROOF_COMMIT",
@@ -1173,6 +1173,7 @@ mod tests {
         );
         std::env::remove_var("BOOTPROOF_COMMIT");
         assert_eq!(resolve_bootproof_commit(), DEFAULT_BOOTPROOF_COMMIT);
+        drop(guard);
     }
 
     #[tokio::test]
