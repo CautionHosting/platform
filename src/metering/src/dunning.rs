@@ -1,15 +1,37 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::Result;
+use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use std::sync::Arc;
 
 use crate::AppState;
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum RunDunningCycleError {
+    #[error("dunning cycle database error [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum CheckPaymentResolvedError {
+    #[error("could not check payment status [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
 /// Runs every hour. Detects delinquent orgs, sends escalating emails, and
 /// suspends resources after 7 days of non-payment.
+#[tracing::instrument(skip_all)]
 pub async fn run_dunning_loop(state: Arc<AppState>) {
-    // Check every hour
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
 
     loop {
@@ -20,7 +42,10 @@ pub async fn run_dunning_loop(state: Arc<AppState>) {
     }
 }
 
-async fn run_dunning_cycle(state: &AppState) -> Result<()> {
+#[tracing::instrument(skip_all, err)]
+async fn run_dunning_cycle(state: &AppState) -> Result<(), RunDunningCycleError> {
+    use RunDunningCycleErrorCtx as Ctx;
+
     // 1. Detect orgs with past_due subscriptions that don't have payment_failed_at set yet
     let newly_delinquent: Vec<(uuid::Uuid,)> = sqlx::query_as(
         r#"
@@ -32,7 +57,8 @@ async fn run_dunning_cycle(state: &AppState) -> Result<()> {
         "#,
     )
     .fetch_all(&state.pool)
-    .await?;
+    .await
+    .with_context(Ctx::database())?;
 
     for (org_id,) in &newly_delinquent {
         tracing::info!("Marking org {} as payment-failed", org_id);
@@ -41,7 +67,8 @@ async fn run_dunning_cycle(state: &AppState) -> Result<()> {
         )
         .bind(org_id)
         .execute(&state.pool)
-        .await?;
+        .await
+        .with_context(Ctx::database())?;
     }
 
     // 2. Also detect fully-managed orgs with negative derived balance and no payment method
@@ -60,7 +87,8 @@ async fn run_dunning_cycle(state: &AppState) -> Result<()> {
         "#,
     )
     .fetch_all(&state.pool)
-    .await?;
+    .await
+    .with_context(Ctx::database())?;
 
     for (org_id,) in &negative_balance_orgs {
         tracing::info!(
@@ -72,7 +100,8 @@ async fn run_dunning_cycle(state: &AppState) -> Result<()> {
         )
         .bind(org_id)
         .execute(&state.pool)
-        .await?;
+        .await
+        .with_context(Ctx::database())?;
     }
 
     // 3. Process orgs that are in dunning (exclude credit-suspended orgs — handled by real-time system)
@@ -85,7 +114,8 @@ async fn run_dunning_cycle(state: &AppState) -> Result<()> {
         "#,
     )
     .fetch_all(&state.pool)
-    .await?;
+    .await
+    .with_context(Ctx::database())?;
 
     if delinquent_orgs.is_empty() {
         return Ok(());
@@ -105,7 +135,6 @@ async fn run_dunning_cycle(state: &AppState) -> Result<()> {
             tracing::info!("Org {} has resolved payment, clearing dunning", org_id);
 
             if stage == "suspended" {
-                // Unsuspend: call API to restart instances
                 unsuspend_org(state, *org_id).await;
             }
 
@@ -114,7 +143,8 @@ async fn run_dunning_cycle(state: &AppState) -> Result<()> {
             )
             .bind(org_id)
             .execute(&state.pool)
-            .await?;
+            .await
+            .with_context(Ctx::database())?;
             continue;
         }
 
@@ -138,7 +168,8 @@ async fn run_dunning_cycle(state: &AppState) -> Result<()> {
                 )
                 .bind(org_id)
                 .execute(&state.pool)
-                .await?;
+                .await
+                .with_context(Ctx::database())?;
             }
             "warning_sent" if days_overdue >= 3 => {
                 // Day 3: send suspension warning
@@ -158,7 +189,8 @@ async fn run_dunning_cycle(state: &AppState) -> Result<()> {
                 )
                 .bind(org_id)
                 .execute(&state.pool)
-                .await?;
+                .await
+                .with_context(Ctx::database())?;
             }
             "reminder_sent" if days_overdue >= 7 => {
                 // Day 7: suspend resources
@@ -177,14 +209,21 @@ async fn run_dunning_cycle(state: &AppState) -> Result<()> {
 }
 
 /// Check if an org has resolved its payment issues.
-async fn check_payment_resolved(pool: &sqlx::PgPool, org_id: uuid::Uuid) -> Result<bool> {
+#[tracing::instrument(skip_all, err)]
+async fn check_payment_resolved(
+    pool: &sqlx::PgPool,
+    org_id: uuid::Uuid,
+) -> Result<bool, CheckPaymentResolvedError> {
+    use CheckPaymentResolvedErrorCtx as Ctx;
+
     // Check if all subscriptions are active (not past_due)
     let has_past_due: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM subscriptions WHERE organization_id = $1 AND status = 'past_due')"
     )
     .bind(org_id)
     .fetch_one(pool)
-    .await?;
+    .await
+    .with_context(Ctx::database())?;
 
     if has_past_due {
         return Ok(false);
@@ -196,7 +235,8 @@ async fn check_payment_resolved(pool: &sqlx::PgPool, org_id: uuid::Uuid) -> Resu
     )
     .bind(org_id)
     .fetch_one(pool)
-    .await?;
+    .await
+    .with_context(Ctx::database())?;
 
     if has_payment_method {
         return Ok(true);
@@ -216,12 +256,14 @@ async fn check_payment_resolved(pool: &sqlx::PgPool, org_id: uuid::Uuid) -> Resu
     )
     .bind(org_id)
     .fetch_one(pool)
-    .await?;
+    .await
+    .with_context(Ctx::database())?;
 
     Ok(has_balance)
 }
 
 /// Call the API service to suspend all running resources for an org.
+#[tracing::instrument(skip_all)]
 async fn suspend_org(state: &AppState, org_id: uuid::Uuid) {
     let api_url = std::env::var("API_URL").unwrap_or_else(|_| "http://api:8080".to_string());
     // We need a user_id for internal auth — use any org member
@@ -286,6 +328,7 @@ async fn suspend_org(state: &AppState, org_id: uuid::Uuid) {
 }
 
 /// Call the API service to unsuspend (restart) stopped resources for an org.
+#[tracing::instrument(skip_all)]
 async fn unsuspend_org(state: &AppState, org_id: uuid::Uuid) {
     let api_url = std::env::var("API_URL").unwrap_or_else(|_| "http://api:8080".to_string());
 
@@ -335,6 +378,7 @@ async fn unsuspend_org(state: &AppState, org_id: uuid::Uuid) {
 }
 
 /// Send a dunning email to all members of an org.
+#[tracing::instrument(skip_all)]
 pub(crate) async fn send_dunning_email(
     state: &AppState,
     org_id: uuid::Uuid,

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{Context, Result};
+use dterror::{BoxError, Location, ResultExt as _};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -15,6 +15,85 @@ use crate::AppState;
 pub(crate) const LOCK_COLLECTION: i64 = 1001;
 pub(crate) const LOCK_MONTHLY_BILLING: i64 = 1002;
 pub(crate) const LOCK_SUBSCRIPTION_BILLING: i64 = 1003;
+
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub(crate) enum TriggerCollectionError {
+    #[error("collection cycle failed [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for TriggerCollectionError {
+    fn into_response(self) -> axum::response::Response {
+        tracing::error!(?self, "trigger_collection failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal error"})),
+        )
+            .into_response()
+    }
+}
+
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub(crate) enum CollectionCycleError {
+    #[error("collection cycle database error [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub(crate) enum CollectResourceUsageError {
+    #[error("could not query tracked resource [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("resource '{resource_id}' not found [{location}]")]
+    NotFound {
+        resource_id: String,
+        location: Location,
+    },
+    #[error("no pricing configured for resource '{resource_id}' ({provider}) [{location}]")]
+    NoPricing {
+        resource_id: String,
+        provider: String,
+        location: Location,
+    },
+}
+
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub(crate) enum CollectNetworkEgressError {
+    #[error("CloudWatch metric query failed [{location}]")]
+    CloudWatch {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("no pricing configured for network egress on resource '{resource_id}' ({provider}) [{location}]")]
+    NoPricing {
+        resource_id: String,
+        provider: String,
+        location: Location,
+    },
+    #[error("network egress database insert failed [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
 
 /// Try to acquire an advisory lock, run the closure, and release the lock.
 /// Returns None if the lock is already held by another instance.
@@ -35,20 +114,22 @@ pub(crate) async fn advisory_unlock(pool: &sqlx::PgPool, lock_id: i64) {
         .await;
 }
 
-#[tracing::instrument(skip_all)]
-pub async fn trigger_collection(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+#[tracing::instrument(skip_all, err)]
+pub async fn trigger_collection(
+    State(state): State<Arc<AppState>>,
+) -> Result<(StatusCode, Json<serde_json::Value>), TriggerCollectionError> {
+    use TriggerCollectionErrorCtx as Ctx;
+
     // Bypass advisory lock for explicitly triggered collections — the lock only
     // prevents duplicate background loop runs, not manual API invocations.
-    match run_collection_cycle_inner(&state).await {
-        Ok(count) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"collected": count})),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
-    }
+    let count = run_collection_cycle_inner(&state)
+        .await
+        .with_context(Ctx::database())?;
+
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({"collected": count})),
+    ))
 }
 
 #[tracing::instrument(skip_all)]
@@ -64,7 +145,7 @@ pub async fn run_collection_loop(state: Arc<AppState>, interval_secs: u64) {
 }
 
 #[tracing::instrument(skip_all, err)]
-async fn run_collection_cycle(state: &AppState) -> Result<usize> {
+async fn run_collection_cycle(state: &AppState) -> Result<usize, CollectionCycleError> {
     if !try_advisory_lock(&state.pool, LOCK_COLLECTION).await {
         tracing::debug!("Collection cycle skipped — another instance holds the lock");
         return Ok(0);
@@ -75,7 +156,11 @@ async fn run_collection_cycle(state: &AppState) -> Result<usize> {
 }
 
 #[tracing::instrument(skip_all, err)]
-pub(crate) async fn run_collection_cycle_inner(state: &AppState) -> Result<usize> {
+pub(crate) async fn run_collection_cycle_inner(
+    state: &AppState,
+) -> Result<usize, CollectionCycleError> {
+    use CollectionCycleErrorCtx as Ctx;
+
     tracing::info!("Running metering collection cycle");
 
     // Reconcile: stop tracking resources that have been destroyed in compute_resources
@@ -117,7 +202,8 @@ pub(crate) async fn run_collection_cycle_inner(state: &AppState) -> Result<usize
         "#,
     )
     .fetch_all(&state.pool)
-    .await?;
+    .await
+    .with_context(Ctx::database())?;
 
     let mut collected = 0;
     let mut orgs_with_deductions = HashSet::new();
@@ -175,7 +261,9 @@ pub(crate) async fn collect_resource_usage(
     state: &AppState,
     resource_id: &str,
     minimum_interval: std::time::Duration,
-) -> Result<bool> {
+) -> Result<bool, CollectResourceUsageError> {
+    use CollectResourceUsageErrorCtx as Ctx;
+
     let resource = sqlx::query_as::<_, TrackedResource>(
         r#"
         SELECT resource_id, organization_id, user_id, application_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
@@ -185,8 +273,12 @@ pub(crate) async fn collect_resource_usage(
     )
     .bind(resource_id)
     .fetch_optional(&state.pool)
-    .await?
-    .context("Resource not found")?;
+    .await
+    .with_context(Ctx::database())?
+    .ok_or_else(|| CollectResourceUsageError::NotFound {
+        resource_id: resource_id.to_string(),
+        location: std::panic::Location::caller(),
+    })?;
 
     let now = time::OffsetDateTime::now_utc();
     let last_billed = resource.last_billed_at;
@@ -221,19 +313,17 @@ pub(crate) async fn collect_resource_usage(
         }),
     };
 
-    let pricing = state
-        .calculator
-        .calculate_pricing(&usage)
-        .with_context(|| {
-            format!(
-                "No pricing configured for resource {} ({})",
-                resource.resource_id, resource.provider
-            )
-        })?;
+    let pricing = state.calculator.calculate_pricing(&usage).ok_or_else(|| {
+        CollectResourceUsageError::NoPricing {
+            resource_id: resource.resource_id.clone(),
+            provider: resource.provider.clone(),
+            location: std::panic::Location::caller(),
+        }
+    })?;
     let cost = pricing.total_cost_usd(usage.quantity);
 
     // Record usage and advance last_billed_at atomically to prevent double-counting
-    let mut tx = state.pool.begin().await?;
+    let mut tx = state.pool.begin().await.with_context(Ctx::database())?;
 
     sqlx::query(
         r#"
@@ -257,15 +347,17 @@ pub(crate) async fn collect_resource_usage(
     .bind(now)
     .bind(&usage.metadata)
     .execute(&mut *tx)
-    .await?;
+    .await
+    .with_context(Ctx::database())?;
 
     sqlx::query(r#"UPDATE tracked_resources SET last_billed_at = $1 WHERE resource_id = $2"#)
         .bind(now)
         .bind(resource_id)
         .execute(&mut *tx)
-        .await?;
+        .await
+        .with_context(Ctx::database())?;
 
-    tx.commit().await?;
+    tx.commit().await.with_context(Ctx::database())?;
 
     tracing::debug!(
         "Recorded usage for {}: {:.4} hours, ${:.4}",
@@ -289,14 +381,15 @@ pub(crate) async fn collect_resource_usage(
 }
 
 /// Query CloudWatch for NetworkOut bytes and bill for egress.
-#[tracing::instrument(skip_all, fields(organization_id = %resource.organization_id, application_id = ?resource.application_id), err)]
+#[tracing::instrument(skip_all, err)]
 async fn collect_network_egress(
     state: &AppState,
     resource: &TrackedResource,
     start: time::OffsetDateTime,
     end: time::OffsetDateTime,
-) -> Result<()> {
+) -> Result<(), CollectNetworkEgressError> {
     use aws_sdk_cloudwatch::types::{Dimension, Statistic};
+    use CollectNetworkEgressErrorCtx as Ctx;
 
     let cloudwatch_instance_id = resource
         .metadata
@@ -327,7 +420,7 @@ async fn collect_network_egress(
         .statistics(Statistic::Sum)
         .send()
         .await
-        .context("CloudWatch GetMetricStatistics failed")?;
+        .with_context(Ctx::cloud_watch())?;
 
     let total_bytes: f64 = result.datapoints().iter().filter_map(|dp| dp.sum()).sum();
 
@@ -356,15 +449,13 @@ async fn collect_network_egress(
         }),
     };
 
-    let pricing = state
-        .calculator
-        .calculate_pricing(&usage)
-        .with_context(|| {
-            format!(
-                "No pricing configured for network egress on resource {} ({})",
-                resource.resource_id, resource.provider
-            )
-        })?;
+    let pricing = state.calculator.calculate_pricing(&usage).ok_or_else(|| {
+        CollectNetworkEgressError::NoPricing {
+            resource_id: resource.resource_id.clone(),
+            provider: resource.provider.clone(),
+            location: std::panic::Location::caller(),
+        }
+    })?;
     let cost = pricing.total_cost_usd(usage.quantity);
     let cost_cents = (cost * 100.0).round() as i64;
 
@@ -394,7 +485,8 @@ async fn collect_network_egress(
     .bind(end)
     .bind(&usage.metadata)
     .execute(&state.pool)
-    .await?;
+    .await
+    .with_context(Ctx::database())?;
 
     tracing::info!(
         "Network egress for {}: {:.4} GB, ${:.4}",

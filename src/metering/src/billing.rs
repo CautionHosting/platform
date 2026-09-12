@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{Context, Result};
 use axum::{
     Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
 };
+use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::sync::Arc;
 
@@ -19,11 +19,102 @@ use crate::collection::{
 use crate::cost_explorer;
 use crate::credits::get_ledger_balance_cents;
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum BillingUserForOrgError {
+    #[error("could not query billing user for organization [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("organization has no members for billing [{location}]")]
+    NoMembers { location: Location },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum CloseOpenSubscriptionSegmentError {
+    #[error("could not close subscription segment [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum MonthlyBillingCycleError {
+    #[error("monthly billing cycle failed [{location}]")]
+    Failed {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum SubscriptionMaintenanceError {
+    #[error("subscription maintenance database error [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum TriggerMonthlyBillingError {
+    #[error("trigger monthly billing failed [{location}]")]
+    Failed {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum GetBillingEstimateError {
+    #[error("cost explorer request failed [{location}]")]
+    Aws {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for TriggerMonthlyBillingError {
+    fn into_response(self) -> axum::response::Response {
+        tracing::error!(?self, "trigger_monthly_billing failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal error"})),
+        )
+            .into_response()
+    }
+}
+
+impl IntoResponse for GetBillingEstimateError {
+    fn into_response(self) -> axum::response::Response {
+        tracing::error!(?self, "get_billing_estimate failed");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "internal error"})),
+        )
+            .into_response()
+    }
+}
+
 /// Monthly billing loop.
 ///
 /// Subscription continuity checks run every hour. The AWS month-end catch-up
 /// should only run during the first few days of a month because it bills the
 /// month that just closed.
+#[tracing::instrument(skip_all)]
 pub async fn run_monthly_billing_loop(state: Arc<AppState>) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
 
@@ -47,8 +138,14 @@ pub async fn run_monthly_billing_loop(state: Arc<AppState>) {
     }
 }
 
-async fn billing_user_for_org(pool: &PgPool, organization_id: uuid::Uuid) -> Result<uuid::Uuid> {
-    sqlx::query_scalar(
+#[tracing::instrument(skip_all, err)]
+async fn billing_user_for_org(
+    pool: &PgPool,
+    organization_id: uuid::Uuid,
+) -> Result<uuid::Uuid, BillingUserForOrgError> {
+    use BillingUserForOrgErrorCtx as Ctx;
+
+    let user_id = sqlx::query_scalar(
         "SELECT user_id
          FROM organization_members
          WHERE organization_id = $1
@@ -57,15 +154,23 @@ async fn billing_user_for_org(pool: &PgPool, organization_id: uuid::Uuid) -> Res
     )
     .bind(organization_id)
     .fetch_optional(pool)
-    .await?
-    .context("Organization has no members for billing")
+    .await
+    .with_context(Ctx::database())?
+    .ok_or_else(|| BillingUserForOrgError::NoMembers {
+        location: std::panic::Location::caller(),
+    })?;
+
+    Ok(user_id)
 }
 
+#[tracing::instrument(skip_all, err)]
 async fn close_open_subscription_segment(
     tx: &mut Transaction<'_, Postgres>,
     subscription_id: uuid::Uuid,
     period_end: chrono::DateTime<chrono::Utc>,
-) -> Result<()> {
+) -> Result<(), CloseOpenSubscriptionSegmentError> {
+    use CloseOpenSubscriptionSegmentErrorCtx as Ctx;
+
     sqlx::query(
         "UPDATE subscription_ledger
          SET billing_period_end = $1
@@ -76,13 +181,15 @@ async fn close_open_subscription_segment(
     .bind(period_end)
     .bind(subscription_id)
     .execute(&mut **tx)
-    .await?;
+    .await
+    .with_context(Ctx::database())?;
 
     Ok(())
 }
 
 /// Run the monthly billing cycle
-async fn run_monthly_billing_cycle(state: &AppState) -> Result<()> {
+#[tracing::instrument(skip_all, err)]
+async fn run_monthly_billing_cycle(state: &AppState) -> Result<(), MonthlyBillingCycleError> {
     if !try_advisory_lock(&state.pool, LOCK_MONTHLY_BILLING).await {
         tracing::debug!("Monthly billing skipped — another instance holds the lock");
         return Ok(());
@@ -92,7 +199,12 @@ async fn run_monthly_billing_cycle(state: &AppState) -> Result<()> {
     result
 }
 
-async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
+#[tracing::instrument(skip_all, err)]
+async fn run_monthly_billing_cycle_inner(
+    state: &AppState,
+) -> Result<(), MonthlyBillingCycleError> {
+    use MonthlyBillingCycleErrorCtx as Ctx;
+
     let (start_date, end_date) = cost_explorer::previous_month_billing_period();
     let billing_period = format!("{} to {}", start_date, end_date);
 
@@ -104,12 +216,12 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
 
     let ce_client = cost_explorer::CostExplorerClient::new()
         .await
-        .context("Failed to create Cost Explorer client")?;
+        .with_context(Ctx::failed())?;
 
     let org_costs = ce_client
         .get_all_org_costs(&start_date, &end_date)
         .await
-        .context("Failed to fetch AWS costs")?;
+        .with_context(Ctx::failed())?;
 
     tracing::info!("Found costs for {} organizations", org_costs.len());
 
@@ -240,8 +352,10 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
             }
         };
 
-        let mut tx = state.pool.begin().await?;
-        let balance_cents = get_ledger_balance_cents(&mut *tx, org_id).await?;
+        let mut tx = state.pool.begin().await.with_context(Ctx::failed())?;
+        let balance_cents = get_ledger_balance_cents(&mut *tx, org_id)
+            .await
+            .with_context(Ctx::failed())?;
 
         let credits_applied = balance_cents.min(remaining_cost_cents);
         let remainder_cents = remaining_cost_cents - credits_applied;
@@ -287,9 +401,10 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
             "uncollected_amount_cents": remainder_cents,
         }))
         .execute(&mut *tx)
-        .await?;
+        .await
+        .with_context(Ctx::failed())?;
 
-        tx.commit().await?;
+        tx.commit().await.with_context(Ctx::failed())?;
     }
 
     tracing::info!("Monthly billing cycle complete — direct remainder charging is disabled");
@@ -298,7 +413,8 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<()> {
 }
 
 /// Check whether subscriptions should remain active.
-async fn run_subscription_maintenance(state: &AppState) -> Result<()> {
+#[tracing::instrument(skip_all, err)]
+async fn run_subscription_maintenance(state: &AppState) -> Result<(), SubscriptionMaintenanceError> {
     if !try_advisory_lock(&state.pool, LOCK_SUBSCRIPTION_BILLING).await {
         tracing::debug!("Subscription maintenance skipped — another instance holds the lock");
         return Ok(());
@@ -308,7 +424,12 @@ async fn run_subscription_maintenance(state: &AppState) -> Result<()> {
     result
 }
 
-async fn run_subscription_maintenance_inner(state: &AppState) -> Result<()> {
+#[tracing::instrument(skip_all, err)]
+async fn run_subscription_maintenance_inner(
+    state: &AppState,
+) -> Result<(), SubscriptionMaintenanceError> {
+    use SubscriptionMaintenanceErrorCtx as Ctx;
+
     let subs = sqlx::query(
         r#"
         SELECT id, organization_id, status, cancel_at_period_end
@@ -318,7 +439,8 @@ async fn run_subscription_maintenance_inner(state: &AppState) -> Result<()> {
         "#,
     )
     .fetch_all(&state.pool)
-    .await?;
+    .await
+    .with_context(Ctx::database())?;
 
     if subs.is_empty() {
         return Ok(());
@@ -340,12 +462,16 @@ async fn run_subscription_maintenance_inner(state: &AppState) -> Result<()> {
             );
         }
 
-        let balance_cents = get_ledger_balance_cents(&state.pool, org_id).await?;
+        let balance_cents = get_ledger_balance_cents(&state.pool, org_id)
+            .await
+            .with_context(Ctx::database())?;
 
         if cancel_at_end || balance_cents <= 0 {
             let now = chrono::Utc::now();
-            let mut tx = state.pool.begin().await?;
-            close_open_subscription_segment(&mut tx, sub_id, now).await?;
+            let mut tx = state.pool.begin().await.with_context(Ctx::database())?;
+            close_open_subscription_segment(&mut tx, sub_id, now)
+                .await
+                .with_context(Ctx::database())?;
             sqlx::query(
                 "UPDATE subscriptions SET
                  status = 'canceled',
@@ -359,8 +485,9 @@ async fn run_subscription_maintenance_inner(state: &AppState) -> Result<()> {
             .bind(now)
             .bind(sub_id)
             .execute(&mut *tx)
-            .await?;
-            tx.commit().await?;
+            .await
+            .with_context(Ctx::database())?;
+            tx.commit().await.with_context(Ctx::database())?;
 
             tracing::info!(
                 "Subscription {} canceled ({})",
@@ -380,7 +507,8 @@ async fn run_subscription_maintenance_inner(state: &AppState) -> Result<()> {
             )
             .bind(sub_id)
             .execute(&state.pool)
-            .await?;
+            .await
+            .with_context(Ctx::database())?;
             tracing::info!("Subscription {} restored to active", sub_id);
         }
     }
@@ -389,29 +517,30 @@ async fn run_subscription_maintenance_inner(state: &AppState) -> Result<()> {
 }
 
 /// Manually trigger monthly billing (for testing or catch-up)
-pub async fn trigger_monthly_billing(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+#[tracing::instrument(skip_all, err)]
+pub async fn trigger_monthly_billing(
+    State(state): State<Arc<AppState>>,
+) -> Result<(StatusCode, Json<serde_json::Value>), TriggerMonthlyBillingError> {
+    use TriggerMonthlyBillingErrorCtx as Ctx;
+
     tracing::info!("Manually triggering monthly billing cycle");
 
-    match run_monthly_billing_cycle(&state).await {
-        Ok(()) => {
-            let (start, end) = cost_explorer::previous_month_billing_period();
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "status": "success",
-                    "message": "Monthly billing cycle completed",
-                    "billing_period": {
-                        "start": start,
-                        "end": end,
-                    }
-                })),
-            )
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
-    }
+    run_monthly_billing_cycle(&state)
+        .await
+        .with_context(Ctx::failed())?;
+
+    let (start, end) = cost_explorer::previous_month_billing_period();
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "success",
+            "message": "Monthly billing cycle completed",
+            "billing_period": {
+                "start": start,
+                "end": end,
+            }
+        })),
+    ))
 }
 
 // =============================================================================
@@ -419,45 +548,32 @@ pub async fn trigger_monthly_billing(State(state): State<Arc<AppState>>) -> impl
 // =============================================================================
 
 /// Get billing estimate for an org - current spend + projected end-of-month
-pub async fn get_billing_estimate(Path(org_id): Path<String>) -> impl IntoResponse {
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
+pub async fn get_billing_estimate(
+    Path(org_id): Path<String>,
+) -> Result<(StatusCode, Json<serde_json::Value>), GetBillingEstimateError> {
+    use GetBillingEstimateErrorCtx as Ctx;
+
     let now = time::OffsetDateTime::now_utc();
     let today = now.date();
 
-    // Get current billing period (first of month to today)
     let (start_date, end_date) = cost_explorer::current_billing_period();
 
-    // Calculate days elapsed and remaining
     let first_of_month =
         time::Date::from_calendar_date(today.year(), today.month(), 1).expect("valid date");
-    let days_elapsed = (today - first_of_month).whole_days() + 1; // +1 to include today
+    let days_elapsed = (today - first_of_month).whole_days() + 1;
     let days_in_month = days_in_month(today.year(), today.month());
     let days_remaining = days_in_month - days_elapsed as u8;
 
-    // Fetch current costs from AWS
-    let ce_client = match cost_explorer::CostExplorerClient::new().await {
-        Ok(client) => client,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Failed to initialize AWS: {}", e)})),
-            );
-        }
-    };
+    let ce_client = cost_explorer::CostExplorerClient::new()
+        .await
+        .with_context(Ctx::aws())?;
 
-    let cost_data = match ce_client
+    let cost_data = ce_client
         .get_org_costs(&org_id, &start_date, &end_date)
         .await
-    {
-        Ok(data) => data,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            );
-        }
-    };
+        .with_context(Ctx::aws())?;
 
-    // Calculate projections
     let current_spend = cost_data.total_cost;
     let daily_average = if days_elapsed > 0 {
         current_spend / days_elapsed as f64
@@ -467,19 +583,17 @@ pub async fn get_billing_estimate(Path(org_id): Path<String>) -> impl IntoRespon
     let projected_remaining = daily_average * days_remaining as f64;
     let projected_total = current_spend + projected_remaining;
 
-    // Round for display
     let current_spend = (current_spend * 100.0).round() / 100.0;
     let daily_average = (daily_average * 100.0).round() / 100.0;
     let projected_total = (projected_total * 100.0).round() / 100.0;
 
-    // Determine spend trend (compare to previous period if available)
     let spend_trend = if daily_average > 0.0 {
         "active"
     } else {
         "idle"
     };
 
-    (
+    Ok((
         StatusCode::OK,
         Json(serde_json::json!({
             "org_id": org_id,
@@ -508,10 +622,11 @@ pub async fn get_billing_estimate(Path(org_id): Path<String>) -> impl IntoRespon
             "breakdown_by_service": cost_data.costs_by_service,
             "trend": spend_trend,
         })),
-    )
+    ))
 }
 
 /// Get the number of days in a month
+#[tracing::instrument(skip_all)]
 fn days_in_month(year: i32, month: time::Month) -> u8 {
     let next_month = match month {
         time::Month::December => time::Month::January,
