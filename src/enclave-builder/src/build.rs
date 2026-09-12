@@ -851,7 +851,9 @@ fn container_runtime_artifacts(
         if !entry_type.is_dir() || path.file_name().is_none_or(|n| n != "rosetta") {
             continue;
         }
-        let Some(parent) = path.parent() else { continue };
+        let Some(parent) = path.parent() else {
+            continue;
+        };
         if parent.file_name().is_none_or(|n| n != ".cache") {
             continue;
         }
@@ -941,10 +943,13 @@ fn write_context_tar(stage_dir: &Path, context_tar: &Path) -> Result<()> {
     // can be identified by their surroundings rather than by a hardcoded path.
     let mut all_entries = std::collections::BTreeMap::new();
     {
-        let payload_file = std::fs::File::open(&payload)
-            .context("Failed to open staged application payload")?;
+        let payload_file =
+            std::fs::File::open(&payload).context("Failed to open staged application payload")?;
         let mut archive = tar::Archive::new(payload_file);
-        for entry in archive.entries().context("Failed to read application payload")? {
+        for entry in archive
+            .entries()
+            .context("Failed to read application payload")?
+        {
             let entry = entry.context("Failed to read application payload entry")?;
             let entry_type = entry.header().entry_type();
             all_entries.insert(normalized(&entry.path()?), entry_type);
@@ -966,7 +971,10 @@ fn write_context_tar(stage_dir: &Path, context_tar: &Path) -> Result<()> {
         std::fs::File::open(&payload).context("Failed to open staged application payload")?;
     let mut archive = tar::Archive::new(payload_file);
     let mut count = 0usize;
-    for entry in archive.entries().context("Failed to read application payload")? {
+    for entry in archive
+        .entries()
+        .context("Failed to read application payload")?
+    {
         let mut entry = entry.context("Failed to read application payload entry")?;
         let entry_path = entry.path()?.into_owned();
         if skip.contains(&normalized(&entry_path)) {
@@ -1020,13 +1028,18 @@ fn write_context_tar(stage_dir: &Path, context_tar: &Path) -> Result<()> {
             builder
                 .append_data(&mut header, &staged_path, &mut entry)
                 .with_context(|| {
-                    format!("Failed to stage application entry: {}", entry_path.display())
+                    format!(
+                        "Failed to stage application entry: {}",
+                        entry_path.display()
+                    )
                 })?;
         }
         count += 1;
     }
 
-    builder.finish().context("Failed to finalise build context tar")?;
+    builder
+        .finish()
+        .context("Failed to finalise build context tar")?;
     tracing::info!("Build context assembled with {} application entries", count);
     Ok(())
 }
@@ -1144,7 +1157,9 @@ mod tests {
     fn test_tool_commit_resolution() {
         // Env-var mutations are process-global; serialize on the crate-wide lock
         // so parallel tests in this binary don't see each other's temp values.
-        let guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         for var in [
             "ENCLAVEOS_COMMIT",
             "BOOTPROOF_COMMIT",
@@ -1165,7 +1180,10 @@ mod tests {
         assert_eq!(defaults.locksmith.repo, LOCKSMITH_REPO);
 
         // Env override wins (this is how the platform pins prod commits).
-        std::env::set_var("BOOTPROOF_COMMIT", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+        std::env::set_var(
+            "BOOTPROOF_COMMIT",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        );
         assert_eq!(
             resolve_bootproof_commit(),
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
@@ -1617,7 +1635,9 @@ mod tests {
     /// which is stored in a record *preceding* the entry rather than in its
     /// header. Anything that clones the raw header loses it.
     fn long_link_target() -> String {
-        let deep: Vec<String> = (0..20).map(|i| format!("very-long-segment-{i:02}")).collect();
+        let deep: Vec<String> = (0..20)
+            .map(|i| format!("very-long-segment-{i:02}"))
+            .collect();
         let target = format!("{}/libssl.so.3", deep.join("/"));
         assert!(target.len() > 100, "target must exceed the header field");
         target

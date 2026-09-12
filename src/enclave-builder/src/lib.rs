@@ -402,9 +402,7 @@ impl EnclaveBuilder {
             tracing::info!("Extracted git_url={}, ref_name={}", git_url, ref_name);
 
             if !ref_name.is_empty() {
-                if ref_name.len() == 40
-                    && ref_name.bytes().all(|byte| byte.is_ascii_hexdigit())
-                {
+                if ref_name.len() == 40 && ref_name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
                     return Some(ref_name.to_ascii_lowercase());
                 }
                 tracing::info!("Resolving framework ref '{}' to commit SHA", ref_name);
@@ -502,12 +500,11 @@ impl EnclaveBuilder {
             tracing::info!("Using external manifest for reproducible build");
             ext_manifest
         } else {
-            let enclave_src =
-                classify_enclave_source(
-                    &self.enclave_source,
-                    &self.enclave_version,
-                    enclave_source_result.commit.clone(),
-                );
+            let enclave_src = classify_enclave_source(
+                &self.enclave_source,
+                &self.enclave_version,
+                enclave_source_result.commit.clone(),
+            );
 
             let app_src = match (app_source_urls, app_commit.clone()) {
                 (Some(urls), Some(commit)) if !urls.is_empty() => {
@@ -650,12 +647,11 @@ impl EnclaveBuilder {
             tracing::info!("Using external manifest for reproducible build");
             ext_manifest
         } else {
-            let enclave_src =
-                classify_enclave_source(
-                    &self.enclave_source,
-                    &self.enclave_version,
-                    enclave_source_result.commit.clone(),
-                );
+            let enclave_src = classify_enclave_source(
+                &self.enclave_source,
+                &self.enclave_version,
+                enclave_source_result.commit.clone(),
+            );
 
             let app_src = match (app_source_urls, app_commit.clone()) {
                 (Some(urls), Some(commit)) if !urls.is_empty() => {
@@ -878,7 +874,10 @@ mod tests {
             Some("c0ffee".to_string()),
         ) {
             EnclaveSource::GitArchive { urls, commit } => {
-                assert_eq!(urls, vec!["https://example.com/enclaveos/archive/abc.tar.gz"]);
+                assert_eq!(
+                    urls,
+                    vec!["https://example.com/enclaveos/archive/abc.tar.gz"]
+                );
                 assert_eq!(commit.as_deref(), Some("c0ffee"));
             }
             other => panic!("expected GitArchive, got {other:?}"),

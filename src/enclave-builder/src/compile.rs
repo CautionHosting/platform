@@ -165,10 +165,15 @@ fn extract_ref_from_archive_url(url: &str) -> Option<String> {
 /// `ls-remote` on a credential prompt forever.
 fn guarded_git() -> Command {
     let mut cmd = Command::new("git");
-    cmd.args(["-c", "http.lowSpeedLimit=1000", "-c", "http.lowSpeedTime=300"])
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_ASKPASS", "true")
-        .stdin(std::process::Stdio::null());
+    cmd.args([
+        "-c",
+        "http.lowSpeedLimit=1000",
+        "-c",
+        "http.lowSpeedTime=300",
+    ])
+    .env("GIT_TERMINAL_PROMPT", "0")
+    .env("GIT_ASKPASS", "true")
+    .stdin(std::process::Stdio::null());
     cmd
 }
 
@@ -405,7 +410,10 @@ pub async fn get_or_clone_enclave_source(
         let enclave_source_dir = find_top_level_dir(&download_dir)
             .await
             .context("Failed to find top-level directory in extracted enclave source")?;
-        tracing::info!("Enclave source extracted to: {}", enclave_source_dir.display());
+        tracing::info!(
+            "Enclave source extracted to: {}",
+            enclave_source_dir.display()
+        );
         Ok(EnclaveSourceResult {
             path: enclave_source_dir,
             commit,
