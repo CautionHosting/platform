@@ -345,7 +345,10 @@ mod tests {
     use uuid::Uuid;
 
     fn default_rules_with_margin(margin_percent: f64) -> PricingRules {
-        PricingRules { margin_percent, ..Default::default() }
+        PricingRules {
+            margin_percent,
+            ..Default::default()
+        }
     }
 
     fn make_usage(

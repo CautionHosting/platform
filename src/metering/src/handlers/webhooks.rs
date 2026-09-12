@@ -7,10 +7,10 @@
 //! so we no longer need charge_payment_method() or cached balance logic.
 
 use axum::{
-    Json,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
+    Json,
 };
 use chrono::{DateTime, Utc};
 use dterror::{BoxError, CtxError, Location, ResultExt as _};
@@ -19,8 +19,8 @@ use sqlx::Row;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::AppState;
 use crate::credits::{credit_ledger_once, CreditOutcome};
+use crate::AppState;
 
 /// Paddle webhook payload
 #[derive(Debug, Deserialize, Serialize)]
@@ -42,9 +42,7 @@ pub(crate) enum PaddleWebhookError {
     },
 
     #[error("invalid paddle webhook signature [{location}]")]
-    InvalidSignature {
-        location: Location,
-    },
+    InvalidSignature { location: Location },
 
     #[error("malformed paddle webhook payload [{location}]")]
     MalformedPayload {
@@ -115,8 +113,8 @@ pub async fn paddle_webhook_handler(
         }
     }
 
-    let payload: PaddleWebhookPayload = serde_json::from_slice(&body)
-        .with_context(Ctx::malformed_payload())?;
+    let payload: PaddleWebhookPayload =
+        serde_json::from_slice(&body).with_context(Ctx::malformed_payload())?;
 
     tracing::info!(
         "Received Paddle webhook: {} ({})",
@@ -131,11 +129,7 @@ pub async fn paddle_webhook_handler(
         hasher.finish() as i64
     };
 
-    let mut tx = state
-        .pool
-        .begin()
-        .await
-        .with_context(Ctx::processing())?;
+    let mut tx = state.pool.begin().await.with_context(Ctx::processing())?;
 
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(lock_key)
@@ -261,11 +255,13 @@ async fn handle_subscription_event(
             source: None,
         })?;
 
-    let provider_status = data["status"].as_str().ok_or_else(|| HandleSubscriptionEventError {
-        kind: HandleSubscriptionEventErrorKind::MissingStatus,
-        location: std::panic::Location::caller(),
-        source: None,
-    })?;
+    let provider_status = data["status"]
+        .as_str()
+        .ok_or_else(|| HandleSubscriptionEventError {
+            kind: HandleSubscriptionEventErrorKind::MissingStatus,
+            location: std::panic::Location::caller(),
+            source: None,
+        })?;
     let status = match provider_status {
         "active" | "trialing" => "active",
         "past_due" => "past_due",
@@ -356,13 +352,14 @@ async fn handle_subscription_event(
                 period_end.unwrap_or(current_end),
             )
         } else {
-            let custom_data = data["custom_data"].as_object().ok_or_else(|| {
-                HandleSubscriptionEventError {
-                    kind: HandleSubscriptionEventErrorKind::MissingCustomData,
-                    location: std::panic::Location::caller(),
-                    source: None,
-                }
-            })?;
+            let custom_data =
+                data["custom_data"]
+                    .as_object()
+                    .ok_or_else(|| HandleSubscriptionEventError {
+                        kind: HandleSubscriptionEventErrorKind::MissingCustomData,
+                        location: std::panic::Location::caller(),
+                        source: None,
+                    })?;
             let organization_id = custom_data
                 .get("caution_organization_id")
                 .and_then(|value| value.as_str())
@@ -913,9 +910,15 @@ async fn handle_transaction_billed(
     .await
     .with_context(Ctx::database())?;
 
-    send_invoice_email(state, invoice_user_id, transaction_id, total, invoice_number)
-        .await
-        .with_context(Ctx::database())?;
+    send_invoice_email(
+        state,
+        invoice_user_id,
+        transaction_id,
+        total,
+        invoice_number,
+    )
+    .await
+    .with_context(Ctx::database())?;
 
     Ok(())
 }

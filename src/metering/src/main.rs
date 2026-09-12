@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use axum::{
-    Router,
     middleware,
     routing::{get, post},
+    Router,
 };
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
@@ -19,10 +19,10 @@ mod credits;
 mod paddle;
 mod types;
 
-mod balance;
 mod auth_middleware;
-mod rate_limit;
+mod balance;
 mod handlers;
+mod rate_limit;
 
 pub struct AppState {
     pub pool: sqlx::PgPool,
@@ -71,10 +71,11 @@ async fn main() {
 
     tracing::info!("Connected to database");
 
-    let internal_service_secret = auth_middleware::load_internal_service_secret().unwrap_or_else(|e| {
-        eprintln!("FATAL: {e}");
-        std::process::exit(1);
-    });
+    let internal_service_secret =
+        auth_middleware::load_internal_service_secret().unwrap_or_else(|e| {
+            eprintln!("FATAL: {e}");
+            std::process::exit(1);
+        });
 
     let paddle = paddle::PaddleClient::new(paddle_api_url, paddle_api_key, paddle_webhook_secret);
     let pricing_contents = std::fs::read_to_string("prices.json").unwrap_or_else(|e| {
@@ -91,13 +92,11 @@ async fn main() {
         eprintln!("FATAL: Failed to parse prices.json for Paddle subscription processing: {e}");
         std::process::exit(1);
     });
-    let calculator = calculator::CostCalculator::new(
-        calculator::PricingRules::load()
-            .unwrap_or_else(|e| {
-                eprintln!("FATAL: Failed to load pricing rules: {e}");
-                std::process::exit(1);
-            }),
-    );
+    let calculator =
+        calculator::CostCalculator::new(calculator::PricingRules::load().unwrap_or_else(|e| {
+            eprintln!("FATAL: Failed to load pricing rules: {e}");
+            std::process::exit(1);
+        }));
 
     let aws_config = aws_config::load_from_env().await;
     let cloudwatch = aws_sdk_cloudwatch::Client::new(&aws_config);
@@ -240,10 +239,12 @@ async fn main() {
     let addr = "0.0.0.0:8083";
     tracing::info!("Metering service listening on {}", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap_or_else(|e| {
-        eprintln!("FATAL: Failed to bind listener on {addr}: {e}");
-        std::process::exit(1);
-    });
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("FATAL: Failed to bind listener on {addr}: {e}");
+            std::process::exit(1);
+        });
     axum::serve(listener, app).await.unwrap_or_else(|e| {
         eprintln!("FATAL: Server error: {e}");
         std::process::exit(1);

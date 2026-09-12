@@ -2,22 +2,22 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use axum::{
-    Json,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
+    Json,
 };
 use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::sync::Arc;
 
-use crate::AppState;
-use crate::balance::check_balance_thresholds;
 use super::collection::{
-    LOCK_MONTHLY_BILLING, LOCK_SUBSCRIPTION_BILLING, advisory_unlock, try_advisory_lock,
+    advisory_unlock, try_advisory_lock, LOCK_MONTHLY_BILLING, LOCK_SUBSCRIPTION_BILLING,
 };
+use crate::balance::check_balance_thresholds;
 use crate::cost_explorer;
 use crate::credits::get_ledger_balance_cents;
+use crate::AppState;
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum BillingUserForOrgError {
@@ -200,9 +200,7 @@ async fn run_monthly_billing_cycle(state: &AppState) -> Result<(), MonthlyBillin
 }
 
 #[tracing::instrument(skip_all, err)]
-async fn run_monthly_billing_cycle_inner(
-    state: &AppState,
-) -> Result<(), MonthlyBillingCycleError> {
+async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<(), MonthlyBillingCycleError> {
     use MonthlyBillingCycleErrorCtx as Ctx;
 
     let (start_date, end_date) = cost_explorer::previous_month_billing_period();
@@ -414,7 +412,9 @@ async fn run_monthly_billing_cycle_inner(
 
 /// Check whether subscriptions should remain active.
 #[tracing::instrument(skip_all, err)]
-async fn run_subscription_maintenance(state: &AppState) -> Result<(), SubscriptionMaintenanceError> {
+async fn run_subscription_maintenance(
+    state: &AppState,
+) -> Result<(), SubscriptionMaintenanceError> {
     if !try_advisory_lock(&state.pool, LOCK_SUBSCRIPTION_BILLING).await {
         tracing::debug!("Subscription maintenance skipped — another instance holds the lock");
         return Ok(());

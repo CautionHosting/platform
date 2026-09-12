@@ -82,19 +82,13 @@ pub(crate) enum GetTransactionError {
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum VerifyWebhookSignatureError {
     #[error("Paddle webhook secret not configured [{location}]")]
-    SecretNotConfigured {
-        location: Location,
-    },
+    SecretNotConfigured { location: Location },
 
     #[error("missing Paddle-Signature header [{location}]")]
-    MissingHeader {
-        location: Location,
-    },
+    MissingHeader { location: Location },
 
     #[error("invalid Paddle-Signature format [{location}]")]
-    InvalidFormat {
-        location: Location,
-    },
+    InvalidFormat { location: Location },
 
     #[error("HMAC initialization failed [{location}]")]
     HmacInit {
@@ -200,8 +194,8 @@ impl PaddleClient {
         }
 
         let resp: serde_json::Value = response.json().await.with_context(Ctx::api())?;
-        let customer: PaddleCustomer = serde_json::from_value(resp["data"].clone())
-            .with_context(Ctx::api())?;
+        let customer: PaddleCustomer =
+            serde_json::from_value(resp["data"].clone()).with_context(Ctx::api())?;
 
         tracing::info!("Created Paddle customer: {}", customer.id);
         Ok(customer)
@@ -276,8 +270,8 @@ impl PaddleClient {
         }
 
         let resp: serde_json::Value = response.json().await.with_context(Ctx::api())?;
-        let transaction: PaddleTransaction = serde_json::from_value(resp["data"].clone())
-            .with_context(Ctx::api())?;
+        let transaction: PaddleTransaction =
+            serde_json::from_value(resp["data"].clone()).with_context(Ctx::api())?;
 
         tracing::info!("Created Paddle transaction: {}", transaction.id);
         Ok(transaction)
@@ -322,8 +316,8 @@ impl PaddleClient {
         }
 
         let resp: serde_json::Value = response.json().await.with_context(Ctx::api())?;
-        let transaction: PaddleTransaction = serde_json::from_value(resp["data"].clone())
-            .with_context(Ctx::api())?;
+        let transaction: PaddleTransaction =
+            serde_json::from_value(resp["data"].clone()).with_context(Ctx::api())?;
 
         Ok(transaction)
     }

@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use axum::{
-    Json,
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
+    Json,
 };
 use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use sqlx::Row;
@@ -83,14 +83,16 @@ pub(crate) async fn get_user_usage(
 
     let usage: Vec<serde_json::Value> = usage_map
         .into_iter()
-        .map(|((provider, resource_type), (total_quantity, total_cost))| {
-            serde_json::json!({
-                "provider": provider,
-                "resource_type": resource_type,
-                "total_quantity": total_quantity,
-                "total_cost": total_cost,
-            })
-        })
+        .map(
+            |((provider, resource_type), (total_quantity, total_cost))| {
+                serde_json::json!({
+                    "provider": provider,
+                    "resource_type": resource_type,
+                    "total_quantity": total_quantity,
+                    "total_cost": total_cost,
+                })
+            },
+        )
         .collect();
 
     Ok((StatusCode::OK, Json(serde_json::json!({"usage": usage}))))
