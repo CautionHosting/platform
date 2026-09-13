@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use axum::{
+    Json,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::Serialize;
 use std::error::Error;
@@ -253,9 +253,9 @@ impl ValidationError {
     pub fn help(&self) -> Option<&'static str> {
         match self {
             Self::AppNameLength { .. } => Some("Choose a name with 3-63 characters"),
-            Self::AppNameInvalidChars { .. } => {
-                Some("Use only letters, numbers, hyphens, and underscores. Must start and end with alphanumeric.")
-            }
+            Self::AppNameInvalidChars { .. } => Some(
+                "Use only letters, numbers, hyphens, and underscores. Must start and end with alphanumeric.",
+            ),
             Self::AppNameConsecutiveHyphens { .. } => {
                 Some("Use single hyphens to separate words: my-app (not my--app)")
             }
@@ -268,17 +268,15 @@ impl ValidationError {
                 Some("Use only letters, numbers, hyphens, and underscores")
             }
 
-            Self::SshKeyUnsupportedType { .. } => {
-                Some("Supported types: ssh-ed25519, ssh-rsa, ecdsa-sha2-nistp256, ecdsa-sha2-nistp384, ecdsa-sha2-nistp521")
-            }
+            Self::SshKeyUnsupportedType { .. } => Some(
+                "Supported types: ssh-ed25519, ssh-rsa, ecdsa-sha2-nistp256, ecdsa-sha2-nistp384, ecdsa-sha2-nistp521",
+            ),
 
-            Self::InvalidRole { .. } => {
-                Some("Valid roles: owner, admin, member, viewer")
-            }
+            Self::InvalidRole { .. } => Some("Valid roles: owner, admin, member, viewer"),
 
-            Self::BranchNameInvalidChars => {
-                Some("Use only letters, numbers, slashes, underscores, dots, and hyphens. Must start with alphanumeric.")
-            }
+            Self::BranchNameInvalidChars => Some(
+                "Use only letters, numbers, slashes, underscores, dots, and hyphens. Must start with alphanumeric.",
+            ),
 
             _ => None,
         }

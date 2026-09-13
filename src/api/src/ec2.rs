@@ -5,9 +5,9 @@
 //! Replaces aws-sdk-ec2 and aws-sdk-autoscaling to avoid compiling massive generated SDKs.
 
 use anyhow::{Result, bail};
-use thiserror::Error;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 
 use base64::Engine;
 
@@ -291,7 +291,10 @@ impl Ec2Client {
             .collect())
     }
 
-    pub async fn describe_regions(&self, all_regions: bool) -> Result<Vec<Region>, DescribeRegionsError> {
+    pub async fn describe_regions(
+        &self,
+        all_regions: bool,
+    ) -> Result<Vec<Region>, DescribeRegionsError> {
         let mut params = vec![
             ("Action".to_string(), "DescribeRegions".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
@@ -308,7 +311,10 @@ impl Ec2Client {
         Ok(parse_regions(&body))
     }
 
-    pub async fn instance_type_offered(&self, instance_type: &str) -> Result<bool, InstanceTypeOfferedError> {
+    pub async fn instance_type_offered(
+        &self,
+        instance_type: &str,
+    ) -> Result<bool, InstanceTypeOfferedError> {
         let params = vec![
             (
                 "Action".to_string(),
@@ -773,7 +779,8 @@ async fn signed_json_request(
         ));
     }
 
-    serde_json::from_str(&text).map_err(|e| SignedJsonRequestError::ParseJson(e, service.to_string()))
+    serde_json::from_str(&text)
+        .map_err(|e| SignedJsonRequestError::ParseJson(e, service.to_string()))
 }
 
 fn encode_form(params: &[(String, String)]) -> String {

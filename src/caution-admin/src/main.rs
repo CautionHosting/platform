@@ -119,9 +119,13 @@ async fn run_admin() -> Result<(), RunAdminError> {
                     source: None,
                 });
             }
-            tui::run(database, env::var("PLATFORM_GIT_SHA").ok(), cli.enable_write)
-                .await
-                .with_context(Ctx::new(RunAdminStage::Browse))
+            tui::run(
+                database,
+                env::var("PLATFORM_GIT_SHA").ok(),
+                cli.enable_write,
+            )
+            .await
+            .with_context(Ctx::new(RunAdminStage::Browse))
         }
         Some(Command::Findings(args)) => findings::run(&database, args)
             .await
@@ -232,8 +236,11 @@ async fn run_admin() -> Result<(), RunAdminError> {
                 .await
                 .with_context(Ctx::new(RunAdminStage::ResetWebauthn))?;
             let stdout = io::stdout();
-            writeln!(stdout.lock(), "WebAuthn credentials reset for user {user_id}")
-                .with_context(Ctx::new(RunAdminStage::PrintResetResult))
+            writeln!(
+                stdout.lock(),
+                "WebAuthn credentials reset for user {user_id}"
+            )
+            .with_context(Ctx::new(RunAdminStage::PrintResetResult))
         }
     }
 }

@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use axum::{
+    Json,
     extract::{Extension, Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
-use rand::{rngs::OsRng, RngCore};
+use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, PgPool};
@@ -22,7 +22,7 @@ use crate::validated_types::{
     AddMemberRequest, CreateOrganizationRequest, InviteMemberRequest, UpdateMemberRequest,
     UpdateOrgSettingsRequest, UpdateOrganizationRequest,
 };
-use crate::{can_manage_org, check_org_access, is_owner, AppState, AuthContext};
+use crate::{AppState, AuthContext, can_manage_org, check_org_access, is_owner};
 
 const INVITATION_EXPIRY_HOURS: i64 = 72;
 const LEGACY_DEFAULT_ORG_PREFIX: &str = "Organization for user ";

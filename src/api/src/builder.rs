@@ -7,8 +7,8 @@
 //! ephemeral EC2 instances that perform the build, upload the EIF to S3,
 //! and signal completion via an S3 status file.
 
-use anyhow::{bail, Context, Result};
-use chrono::{DateTime, Utc, TimeDelta};
+use anyhow::{Context, Result, bail};
+use chrono::{DateTime, TimeDelta, Utc};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
@@ -563,7 +563,7 @@ pub async fn execute_remote_build(
 
     // NOTE: The above advisory lock should ensure we don't have an existing build.
     let existing = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM eif_builds WHERE app_id = $1 AND status IN ('pending', 'building')"
+        "SELECT COUNT(*) FROM eif_builds WHERE app_id = $1 AND status IN ('pending', 'building')",
     )
     .bind(request.app_id)
     .fetch_one(&mut *db_tx)
@@ -705,7 +705,12 @@ pub async fn execute_remote_build(
             Ok(_) => break,
             Err(e) => {
                 if terminate_attempts >= 3 {
-                    tracing::error!("Failed to terminate builder {} after {} attempts: {}. INSTANCE MAY BE LEAKED.", instance_id, terminate_attempts, e);
+                    tracing::error!(
+                        "Failed to terminate builder {} after {} attempts: {}. INSTANCE MAY BE LEAKED.",
+                        instance_id,
+                        terminate_attempts,
+                        e
+                    );
                     break;
                 }
                 tracing::warn!(
@@ -871,8 +876,11 @@ impl BuildPhaseStateMachine {
             // Only the first message in this batch carries elapsed time.
             let elapsed = if messages.is_empty() && self.last_timestamp.is_some() {
                 Some(
-                    latest_status.timestamp.signed_duration_since(self.last_timestamp.expect("checked above"))
-                        .to_std().unwrap_or(Duration::ZERO),
+                    latest_status
+                        .timestamp
+                        .signed_duration_since(self.last_timestamp.expect("checked above"))
+                        .to_std()
+                        .unwrap_or(Duration::ZERO),
                 )
             } else {
                 None
@@ -925,7 +933,7 @@ async fn poll_build_status(
                     Ok(o) => {
                         tracing::info!("Received status: {o:?} ({:?})", String::from_utf8(body));
                         o
-                    },
+                    }
                     Err(e) => {
                         tracing::error!("Could not parse status.json: {e}");
                         tracing::error!("Received body: {:?}", String::from_utf8(body));
@@ -1386,8 +1394,10 @@ pub async fn reap_orphaned_builders(
                 } else if let (Some(itype), Some(started)) = (&instance_type, started_at) {
                     // Fallback: metering tracking failed, bill directly for the full duration
                     if let Some(pricing) = instance_pricing(itype) {
-                        bill_builder_usage(db, build_id, iid, org_id, app_id, itype, started, pricing)
-                            .await;
+                        bill_builder_usage(
+                            db, build_id, iid, org_id, app_id, itype, started, pricing,
+                        )
+                        .await;
                     } else {
                         tracing::error!(
                             "Cannot bill orphaned builder {} for build {}: unknown instance type {}",
@@ -1810,10 +1820,7 @@ mod tests {
 
         assert_eq!(messages.len(), 6); // All phases including "completed"
         assert_eq!(messages[5].phase, "completed");
-        assert_eq!(
-            messages[5].milestone,
-            Some("Cleaning up builder...")
-        );
+        assert_eq!(messages[5].milestone, Some("Cleaning up builder..."));
     }
 
     #[test]
@@ -1918,44 +1925,140 @@ mod tests {
 
     #[test]
     fn test_cache_key_deterministic() {
-        let key1 = cache_key("abc123", "enclave-v1", "run: /app", false, "X25519", false, None);
-        let key2 = cache_key("abc123", "enclave-v1", "run: /app", false, "X25519", false, None);
+        let key1 = cache_key(
+            "abc123",
+            "enclave-v1",
+            "run: /app",
+            false,
+            "X25519",
+            false,
+            None,
+        );
+        let key2 = cache_key(
+            "abc123",
+            "enclave-v1",
+            "run: /app",
+            false,
+            "X25519",
+            false,
+            None,
+        );
         assert_eq!(key1, key2);
         assert_eq!(key1.len(), 64); // SHA256 hex
     }
 
     #[test]
     fn test_cache_key_changes_with_commit() {
-        let key1 = cache_key("abc123", "enclave-v1", "run: /app", false, "X25519", false, None);
-        let key2 = cache_key("def456", "enclave-v1", "run: /app", false, "X25519", false, None);
+        let key1 = cache_key(
+            "abc123",
+            "enclave-v1",
+            "run: /app",
+            false,
+            "X25519",
+            false,
+            None,
+        );
+        let key2 = cache_key(
+            "def456",
+            "enclave-v1",
+            "run: /app",
+            false,
+            "X25519",
+            false,
+            None,
+        );
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_cache_key_changes_with_enclaveos() {
-        let key1 = cache_key("abc123", "enclave-v1", "run: /app", false, "X25519", false, None);
-        let key2 = cache_key("abc123", "enclave-v2", "run: /app", false, "X25519", false, None);
+        let key1 = cache_key(
+            "abc123",
+            "enclave-v1",
+            "run: /app",
+            false,
+            "X25519",
+            false,
+            None,
+        );
+        let key2 = cache_key(
+            "abc123",
+            "enclave-v2",
+            "run: /app",
+            false,
+            "X25519",
+            false,
+            None,
+        );
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_cache_key_changes_with_procfile() {
-        let key1 = cache_key("abc123", "enclave-v1", "run: /app", false, "X25519", false, None);
-        let key2 = cache_key("abc123", "enclave-v1", "run: /other", false, "X25519", false, None);
+        let key1 = cache_key(
+            "abc123",
+            "enclave-v1",
+            "run: /app",
+            false,
+            "X25519",
+            false,
+            None,
+        );
+        let key2 = cache_key(
+            "abc123",
+            "enclave-v1",
+            "run: /other",
+            false,
+            "X25519",
+            false,
+            None,
+        );
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_cache_key_changes_with_e2e() {
-        let key1 = cache_key("abc123", "enclave-v1", "run: /app", false, "X25519", false, None);
-        let key2 = cache_key("abc123", "enclave-v1", "run: /app", true, "X25519", false, None);
+        let key1 = cache_key(
+            "abc123",
+            "enclave-v1",
+            "run: /app",
+            false,
+            "X25519",
+            false,
+            None,
+        );
+        let key2 = cache_key(
+            "abc123",
+            "enclave-v1",
+            "run: /app",
+            true,
+            "X25519",
+            false,
+            None,
+        );
         assert_ne!(key1, key2);
     }
 
     #[test]
     fn test_cache_key_changes_with_locksmith() {
-        let key1 = cache_key("abc123", "enclave-v1", "run: /app", false, "X25519", false, None);
-        let key2 = cache_key("abc123", "enclave-v1", "run: /app", false, "X25519", true, None);
+        let key1 = cache_key(
+            "abc123",
+            "enclave-v1",
+            "run: /app",
+            false,
+            "X25519",
+            false,
+            None,
+        );
+        let key2 = cache_key(
+            "abc123",
+            "enclave-v1",
+            "run: /app",
+            false,
+            "X25519",
+            true,
+            None,
+        );
         assert_ne!(key1, key2);
     }
 
@@ -2041,7 +2144,15 @@ mod tests {
 
     #[test]
     fn test_cache_key_changes_with_key_exchange() {
-        let x25519 = cache_key("abc123", "enclave-v1", "run: /app", true, "X25519", false, None);
+        let x25519 = cache_key(
+            "abc123",
+            "enclave-v1",
+            "run: /app",
+            true,
+            "X25519",
+            false,
+            None,
+        );
         let xwing = cache_key(
             "abc123",
             "enclave-v1",
@@ -2386,11 +2497,15 @@ mod tests {
             "should reference source archive"
         );
         assert!(
-            userdata.contains("SOURCE_SHA256=\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""),
+            userdata.contains(
+                "SOURCE_SHA256=\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""
+            ),
             "should include source archive digest"
         );
         assert!(
-            userdata.contains("HELPER_SHA256=\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\""),
+            userdata.contains(
+                "HELPER_SHA256=\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\""
+            ),
             "should include helper digest"
         );
         assert!(
@@ -2458,9 +2573,8 @@ mod tests {
         );
         assert!(
             userdata.contains("ALLOW_PLAINTEXT_FALLBACK=\"true\"")
-                && userdata.contains(
-                    "CAUTION_ALLOW_PLAINTEXT_FALLBACK=\"$ALLOW_PLAINTEXT_FALLBACK\"",
-                )
+                && userdata
+                    .contains("CAUTION_ALLOW_PLAINTEXT_FALLBACK=\"$ALLOW_PLAINTEXT_FALLBACK\"",)
                 && userdata.contains("\"steve_allow_plaintext_fallback\":true"),
             "explicit plaintext fallback should reach the helper and manifest"
         );
@@ -2472,10 +2586,7 @@ mod tests {
         );
 
         // Should write status updates
-        assert!(
-            userdata.contains("set_phase"),
-            "should write status to S3"
-        );
+        assert!(userdata.contains("set_phase"), "should write status to S3");
         assert!(
             userdata.contains("\"completed\""),
             "should write completed status"

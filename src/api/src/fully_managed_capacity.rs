@@ -8,10 +8,10 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use thiserror::Error;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
 use std::sync::Arc;
+use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{AppState, AuthContext, deployment, ec2, validation};
@@ -354,10 +354,20 @@ async fn region_capacity(
         .map_err(RegionCapacityError::Quota)?
         .floor() as u32;
 
-    let vpcs_used = ec2.count_vpcs().await.map_err(RegionCapacityError::CountVpcs)?;
-    let eips_used = ec2.count_elastic_ips().await.map_err(RegionCapacityError::CountElasticIps)?;
+    let vpcs_used = ec2
+        .count_vpcs()
+        .await
+        .map_err(RegionCapacityError::CountVpcs)?;
+    let eips_used = ec2
+        .count_elastic_ips()
+        .await
+        .map_err(RegionCapacityError::CountElasticIps)?;
     let mut host_vcpus_used = 0;
-    for instance_type in ec2.active_instance_types().await.map_err(RegionCapacityError::ActiveInstanceTypes)? {
+    for instance_type in ec2
+        .active_instance_types()
+        .await
+        .map_err(RegionCapacityError::ActiveInstanceTypes)?
+    {
         let Some(vcpus) = deployment::host_vcpus_for_instance_type(&instance_type) else {
             return Err(RegionCapacityError::UnknownInstanceType(format!(
                 "Unknown active instance type reported by EC2: {}",
@@ -629,9 +639,7 @@ async fn send_capacity_waitlist_alert_request(
         .json(&request)
         .send()
         .await
-        .map_err(|error| {
-            SendCapacityWaitlistAlertRequestError::Send(error.to_string())
-        })?;
+        .map_err(|error| SendCapacityWaitlistAlertRequestError::Send(error.to_string()))?;
 
     if response.status().is_success() {
         Ok(())

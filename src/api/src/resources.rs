@@ -1,8 +1,8 @@
 use anyhow::Context;
 use axum::{
+    Json,
     extract::{Extension, Path, State},
     http::StatusCode,
-    Json,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -14,11 +14,11 @@ use crate::validated_types;
 use crate::validated_types::{
     CreateResourceRequest, CreateResourceResponse, RenameResourceRequest,
 };
-use crate::{cloud_credentials, deployment, types, validation};
 use crate::{
-    get_or_create_provider_account, get_or_create_resource_type, get_user_primary_org, AppState,
-    AuthContext,
+    AppState, AuthContext, get_or_create_provider_account, get_or_create_resource_type,
+    get_user_primary_org,
 };
+use crate::{cloud_credentials, deployment, types, validation};
 
 #[derive(Debug, Serialize, FromRow)]
 pub struct ComputeResource {
@@ -673,20 +673,19 @@ pub(crate) async fn destroy_resource_by_id(
         return Ok(());
     }
 
-    let terraform_result =
-        match destroy_credentials {
-            Ok((aws_credentials, asg_name)) => {
-                deployment::destroy_app_with_credentials(
-                    org_id,
-                    resource_id,
-                    resource_name,
-                    aws_credentials,
-                    asg_name,
-                )
-                .await
-            }
-            Err(error) => Err(error),
-        };
+    let terraform_result = match destroy_credentials {
+        Ok((aws_credentials, asg_name)) => {
+            deployment::destroy_app_with_credentials(
+                org_id,
+                resource_id,
+                resource_name,
+                aws_credentials,
+                asg_name,
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    };
     if let Err(error) = terraform_result {
         tracing::error!(resource_id = %resource_id, error = %error, "OpenTofu destroy failed");
         if !force {

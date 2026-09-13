@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use uuid::Uuid;
 
 /// Upsert a tracked resource row for a compute resource that should accrue

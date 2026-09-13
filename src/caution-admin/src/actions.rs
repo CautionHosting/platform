@@ -12,19 +12,23 @@ use uuid::Uuid;
 pub async fn reset_webauthn(user_id: Uuid) -> Result<(), ResetWebauthnError> {
     use ResetWebauthnErrorCtx as Ctx;
 
-    let api_service_url = std::env::var("API_SERVICE_URL")
-        .map_err(|source| ResetWebauthnError::MissingApiUrl {
+    let api_service_url =
+        std::env::var("API_SERVICE_URL").map_err(|source| ResetWebauthnError::MissingApiUrl {
             location: std::panic::Location::caller(),
             source: Box::new(source),
         })?;
 
-    let secret = std::env::var("INTERNAL_SERVICE_SECRET")
-        .map_err(|source| ResetWebauthnError::MissingSecret {
+    let secret = std::env::var("INTERNAL_SERVICE_SECRET").map_err(|source| {
+        ResetWebauthnError::MissingSecret {
             location: std::panic::Location::caller(),
             source: Box::new(source),
-        })?;
+        }
+    })?;
 
-    let url = format!("{}/internal/webauthn/reset", api_service_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/internal/webauthn/reset",
+        api_service_url.trim_end_matches('/')
+    );
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))

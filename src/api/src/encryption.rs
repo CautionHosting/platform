@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use aes_gcm::{
-    aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit},
 };
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use rand::RngCore;
 
 const NONCE_SIZE: usize = 12;

@@ -48,9 +48,16 @@ impl IntoResponse for WebauthnResetError {
     fn into_response(self) -> Response {
         let (status, body) = match &self {
             WebauthnResetError::UserNotFound => (StatusCode::NOT_FOUND, "user not found"),
-            WebauthnResetError::UserHasNoEmail => (StatusCode::UNPROCESSABLE_ENTITY, "user has no email address configured"),
-            WebauthnResetError::Database(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
-            WebauthnResetError::EmailFailed => (StatusCode::BAD_GATEWAY, "email service unavailable"),
+            WebauthnResetError::UserHasNoEmail => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "user has no email address configured",
+            ),
+            WebauthnResetError::Database(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            WebauthnResetError::EmailFailed => {
+                (StatusCode::BAD_GATEWAY, "email service unavailable")
+            }
         };
         (status, body).into_response()
     }
@@ -79,16 +86,15 @@ pub async fn reset_webauthn_credentials(
     })?;
 
     // Verify user exists and has an email (inside tx).
-    let user: Option<(Uuid, Option<String>)> = sqlx::query_as(
-        "SELECT id, email FROM users WHERE id = $1",
-    )
-    .bind(req.user_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| {
-        tracing::error!("Database error looking up user for reset: {:?}", e);
-        WebauthnResetError::Database(e)
-    })?;
+    let user: Option<(Uuid, Option<String>)> =
+        sqlx::query_as("SELECT id, email FROM users WHERE id = $1")
+            .bind(req.user_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| {
+                tracing::error!("Database error looking up user for reset: {:?}", e);
+                WebauthnResetError::Database(e)
+            })?;
 
     let (user_id, user_email) = match user {
         None => return Err(WebauthnResetError::UserNotFound),
@@ -146,11 +152,7 @@ pub async fn reset_webauthn_credentials(
     let token_hex = hex::encode(&token_bytes);
     let frontend_url =
         std::env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:8000".to_string());
-    let reset_url = format!(
-        "{}/reset#{}",
-        frontend_url.trim_end_matches('/'),
-        token_hex
-    );
+    let reset_url = format!("{}/reset#{}", frontend_url.trim_end_matches('/'), token_hex);
 
     let email_service_url =
         std::env::var("EMAIL_SERVICE_URL").unwrap_or_else(|_| "http://email:8082".to_string());
@@ -170,7 +172,10 @@ pub async fn reset_webauthn_credentials(
     {
         Ok(client) => client,
         Err(e) => {
-            tracing::error!("Failed to build HTTP client for webauthn reset email: {:?}", e);
+            tracing::error!(
+                "Failed to build HTTP client for webauthn reset email: {:?}",
+                e
+            );
             return Err(WebauthnResetError::EmailFailed);
         }
     };
@@ -183,7 +188,9 @@ pub async fn reset_webauthn_credentials(
     {
         Ok(response) if response.status().is_success() => {
             let body: serde_json::Value = response.json().await.unwrap_or_default();
-            body.get("success").and_then(|v| v.as_bool()).unwrap_or(false)
+            body.get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
         }
         Ok(response) => {
             tracing::error!(
@@ -250,6 +257,9 @@ mod tests {
     fn test_request_deserialization() {
         let json = r#"{"user_id": "550e8400-e29b-41d4-a716-446655440000"}"#;
         let req: WebauthnResetRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(req.user_id.to_string(), "550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(
+            req.user_id.to_string(),
+            "550e8400-e29b-41d4-a716-446655440000"
+        );
     }
 }

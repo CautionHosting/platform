@@ -476,12 +476,11 @@ pub(crate) async fn begin_termination(pool: &PgPool, resource_id: Uuid) -> Resul
     .execute(pool)
     .await?;
     if result.rows_affected() == 0 {
-        let state: Option<(String, Option<DateTime<Utc>>)> = sqlx::query_as(
-            "SELECT state::text, destroyed_at FROM compute_resources WHERE id = $1",
-        )
-        .bind(resource_id)
-        .fetch_optional(pool)
-        .await?;
+        let state: Option<(String, Option<DateTime<Utc>>)> =
+            sqlx::query_as("SELECT state::text, destroyed_at FROM compute_resources WHERE id = $1")
+                .bind(resource_id)
+                .fetch_optional(pool)
+                .await?;
         if state.is_some_and(|(state, destroyed_at)| state == "pending" && destroyed_at.is_none()) {
             bail!("resource is deploying");
         }
