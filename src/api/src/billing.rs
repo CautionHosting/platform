@@ -823,8 +823,8 @@ async fn sync_payment_methods_from_paddle(
     }
 
     for row in &local_rows {
-        if let Some(payment_method_id) = row.paddle_payment_method_id.as_deref() {
-            if !remote_ids.contains(payment_method_id) {
+        if let Some(payment_method_id) = row.paddle_payment_method_id.as_deref()
+            && !remote_ids.contains(payment_method_id) {
                 sqlx::query(
                     "UPDATE payment_methods
                      SET is_active = false, is_primary = false
@@ -840,7 +840,6 @@ async fn sync_payment_methods_from_paddle(
                     )
                 })?;
             }
-        }
     }
 
     let active_primary_count: i64 = sqlx::query_scalar(
@@ -945,11 +944,10 @@ pub async fn get_payment_methods(
     if let (Some(customer_id), Some(api_key)) = (
         paddle_customer_id.as_deref(),
         state.paddle_api_key.as_deref(),
-    ) {
-        if !state.paddle_api_url.is_empty()
+    )
+        && !state.paddle_api_url.is_empty()
             && should_sync_payment_methods(&state.db, org_id).await?
-        {
-            if let Err((status, err)) = sync_payment_methods_from_paddle(
+            && let Err((status, err)) = sync_payment_methods_from_paddle(
                 &state.db,
                 &state.paddle_api_url,
                 api_key,
@@ -965,8 +963,6 @@ pub async fn get_payment_methods(
                     err
                 );
             }
-        }
-    }
 
     let rows: Vec<(
         Uuid,
@@ -1765,11 +1761,10 @@ fn validate_credit_purchase_transaction(
     user_id: Uuid,
     purchase: &ResolvedCreditPurchase,
 ) -> Result<(), String> {
-    if let Some(expected_price_id) = purchase.price_id.as_deref() {
-        if !transaction_contains_price_id(txn, expected_price_id) {
+    if let Some(expected_price_id) = purchase.price_id.as_deref()
+        && !transaction_contains_price_id(txn, expected_price_id) {
             return Err("Transaction does not match the selected credit package".to_string());
         }
-    }
 
     let custom_data = txn["data"]["custom_data"]
         .as_object()
@@ -2404,8 +2399,8 @@ pub async fn purchase_credits(
         new_balance
     );
 
-    if new_balance > 0 {
-        if let Ok(org_id) = get_user_primary_org(&state.db, auth.user_id).await {
+    if new_balance > 0
+        && let Ok(org_id) = get_user_primary_org(&state.db, auth.user_id).await {
             let suspended: Option<chrono::DateTime<chrono::Utc>> =
                 sqlx::query_scalar("SELECT credit_suspended_at FROM organizations WHERE id = $1")
                     .bind(org_id)
@@ -2436,7 +2431,6 @@ pub async fn purchase_credits(
                 let _ = call_internal_unsuspend(&state, org_id).await;
             }
         }
-    }
 
     Ok(Json(serde_json::json!({
         "success": true,

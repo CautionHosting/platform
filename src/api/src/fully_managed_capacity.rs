@@ -485,14 +485,13 @@ pub(crate) async fn join_waitlist(
     validation::validate_email(&email)
         .map_err(|error| JoinWaitlistError::InvalidEmail(error.to_string()))?;
 
-    if let Some(cpus) = payload.requested_enclave_vcpus {
-        if cpus == 0 || cpus > MAX_FULLY_MANAGED_ENCLAVE_VCPUS {
+    if let Some(cpus) = payload.requested_enclave_vcpus
+        && (cpus == 0 || cpus > MAX_FULLY_MANAGED_ENCLAVE_VCPUS) {
             return Err(JoinWaitlistError::InvalidVCpus(
                 "requested_enclave_vcpus must be between 1 and 46; contact support for larger requests"
                     .to_string(),
             ));
         }
-    }
 
     let required_host_vcpus = payload
         .requested_enclave_vcpus

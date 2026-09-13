@@ -95,7 +95,7 @@ pub async fn get_or_generate_lockfile(data_dir: &str) -> Option<PathBuf> {
 
     // Run tofu providers lock
     let mut cmd = Command::new("tofu");
-    cmd.args(&["providers", "lock", "-platform=linux_amd64"])
+    cmd.args(["providers", "lock", "-platform=linux_amd64"])
         .current_dir(temp_dir.path());
 
     let output = match run_with_timeout(&mut cmd, 60) {
@@ -1271,7 +1271,7 @@ async fn run_tofu_init(
     }
 
     let mut cmd = Command::new("tofu");
-    cmd.args(&["init", "-no-color", "-upgrade=false", "-reconfigure"])
+    cmd.args(["init", "-no-color", "-upgrade=false", "-reconfigure"])
         .current_dir(work_dir);
 
     if let Some(creds) = credentials {
@@ -1408,7 +1408,7 @@ fn get_tofu_outputs(work_dir: &Path) -> std::result::Result<DeploymentResult, Ge
     let output = dterror::ResultExt::with_context(
         run_with_timeout(
             Command::new("tofu")
-                .args(&["output", "-json", "-no-color"])
+                .args(["output", "-json", "-no-color"])
                 .current_dir(work_dir),
             TOFU_TIMEOUT_SECS,
         ),
@@ -1511,7 +1511,7 @@ fn get_managed_onprem_tofu_outputs(
     let output = dterror::ResultExt::with_context(
         run_with_timeout(
             Command::new("tofu")
-                .args(&["output", "-json", "-no-color"])
+                .args(["output", "-json", "-no-color"])
                 .current_dir(work_dir),
             TOFU_TIMEOUT_SECS,
         ),
@@ -1710,7 +1710,7 @@ fn run_tofu_destroy(
     tracing::info!("Running tofu destroy for {}...", resource_name);
 
     let mut cmd = Command::new("tofu");
-    cmd.args(&["destroy", "-auto-approve", "-no-color"])
+    cmd.args(["destroy", "-auto-approve", "-no-color"])
         .current_dir(work_dir);
 
     if let Some(creds) = credentials {

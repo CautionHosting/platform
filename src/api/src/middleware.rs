@@ -146,11 +146,9 @@ pub async fn internal_auth_middleware(
     if let Some(user_id_str) = headers
         .get("x-authenticated-user-id")
         .and_then(|h| h.to_str().ok())
-    {
-        if let Ok(user_id) = Uuid::parse_str(user_id_str) {
+        && let Ok(user_id) = Uuid::parse_str(user_id_str) {
             request.extensions_mut().insert(AuthContext { user_id });
         }
-    }
 
     Ok(next.run(request).await)
 }

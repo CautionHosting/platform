@@ -512,11 +512,10 @@ impl BuildConfig {
                             aws_subnet_id = Some(value);
                         }
                     }
-                    "aws_security_group_id" => {
-                        if !value.is_empty() {
+                    "aws_security_group_id"
+                        if !value.is_empty() => {
                             aws_security_group_id = Some(value);
                         }
-                    }
                     _ => {}
                 }
             }

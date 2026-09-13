@@ -520,12 +520,11 @@ pub async fn get_aws_credentials_for_resource(
     resource_id: Uuid,
 ) -> Option<deployment::AwsCredentials> {
     // Check for managed on-prem credentials first
-    if let Some(encryptor) = state.encryptor.as_ref() {
-        if let Ok(Some(credential)) =
+    if let Some(encryptor) = state.encryptor.as_ref()
+        && let Ok(Some(credential)) =
             cloud_credentials::get_credential_by_resource(&state.db, org_id, resource_id).await
-        {
-            if credential.managed_on_prem {
-                if let Ok(Some(secrets)) = cloud_credentials::get_credential_secrets(
+            && credential.managed_on_prem
+                && let Ok(Some(secrets)) = cloud_credentials::get_credential_secrets(
                     &state.db,
                     encryptor,
                     org_id,
@@ -550,9 +549,6 @@ pub async fn get_aws_credentials_for_resource(
                         region,
                     });
                 }
-            }
-        }
-    }
 
     // Fall back to platform credentials for fully managed resources.
     let access_key_id = std::env::var("AWS_ACCESS_KEY_ID").ok()?;
