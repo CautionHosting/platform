@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{bail, Context, Result};
+use dterror::ResultExt;
 use std::path::{Component, Path};
 use tokio::process::Command;
 
@@ -24,15 +24,107 @@ pub fn has_explicit_build_command(build_command: Option<&str>) -> bool {
         .is_some_and(|cmd| !cmd.is_empty())
 }
 
-pub fn validate_explicit_containerfile_path(containerfile: &str) -> Result<String> {
+/// Error type for [`validate_explicit_containerfile_path`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum ValidateExplicitContainerfilePathError {
+    #[error("Procfile field `containerfile:` cannot be empty [{location}]")]
+    Empty { location: dterror::Location },
+
+    #[error("Procfile field `containerfile:` '{containerfile}' must be a relative path within the repository [{location}]")]
+    Absolute {
+        containerfile: String,
+        location: dterror::Location,
+    },
+
+    #[error("Procfile field `containerfile:` '{containerfile}' must stay within the repository [{location}]")]
+    Traversal {
+        containerfile: String,
+        location: dterror::Location,
+    },
+}
+
+/// Error type for [`build_user_image`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub enum BuildUserImageError {
+    #[error("invalid containerfile configuration: {reason} [{location}]")]
+    ValidateContainerfile {
+        reason: ValidateExplicitContainerfilePathError,
+        location: dterror::Location,
+    },
+
+    #[error(
+        "Procfile field `containerfile:` points to missing file: {containerfile} [{location}]"
+    )]
+    MissingFile {
+        containerfile: String,
+        location: dterror::Location,
+    },
+
+    #[error("failed to run build command [{location}]")]
+    RunBuild {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("build command failed: {stderr} [{location}]")]
+    BuildFailed {
+        stderr: String,
+        location: dterror::Location,
+    },
+
+    #[error("failed to load OCI tarball [{location}]")]
+    LoadOciTarball {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to load OCI tarball: {stderr} [{location}]")]
+    OciLoadFailed {
+        stderr: String,
+        location: dterror::Location,
+    },
+
+    #[error("failed to parse loaded image from docker load output [{location}]")]
+    ParseLoadedImage { location: dterror::Location },
+
+    #[error("failed to tag loaded image [{location}]")]
+    TagImage {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to tag image: {stderr} [{location}]")]
+    TagFailed {
+        stderr: String,
+        location: dterror::Location,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
+pub fn validate_explicit_containerfile_path(
+    containerfile: &str,
+) -> Result<String, ValidateExplicitContainerfilePathError> {
     let containerfile = containerfile.trim();
     if containerfile.is_empty() {
-        bail!("Procfile field `containerfile:` cannot be empty");
+        return Err(ValidateExplicitContainerfilePathError::Empty {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let path = Path::new(containerfile);
     if path.is_absolute() {
-        bail!("Procfile field `containerfile:` must be a relative path within the repository");
+        return Err(ValidateExplicitContainerfilePathError::Absolute {
+            containerfile: containerfile.to_string(),
+            location: std::panic::Location::caller(),
+        });
     }
 
     if path.components().any(|component| {
@@ -41,7 +133,10 @@ pub fn validate_explicit_containerfile_path(containerfile: &str) -> Result<Strin
             Component::ParentDir | Component::RootDir | Component::Prefix(_)
         )
     }) {
-        bail!("Procfile field `containerfile:` must stay within the repository");
+        return Err(ValidateExplicitContainerfilePathError::Traversal {
+            containerfile: containerfile.to_string(),
+            location: std::panic::Location::caller(),
+        });
     }
 
     Ok(containerfile.to_string())
@@ -145,30 +240,38 @@ fn augment_docker_build_command(build_command: &str, image_tag: &str, no_cache: 
 /// 4. Optionally loads OCI tarball for containerd-style builds
 ///
 /// Returns the image tag that was built.
+#[tracing::instrument(skip_all, err)]
 pub async fn build_user_image(
     work_dir: &Path,
     image_tag: &str,
     config: &BuildConfig,
-) -> Result<String> {
+) -> Result<String, BuildUserImageError> {
+    use BuildUserImageErrorCtx as Ctx;
+
     tracing::info!("Building Docker image with tag: {}", image_tag);
 
-    let containerfile = if !has_explicit_build_command(config.build_command.as_deref()) {
-        match config.containerfile.as_deref() {
-            Some(containerfile) => {
-                let containerfile = validate_explicit_containerfile_path(containerfile)?;
-                if !work_dir.join(&containerfile).is_file() {
-                    bail!(
-                        "Procfile field `containerfile:` points to missing file: {}",
-                        containerfile
-                    );
+    let containerfile =
+        if !has_explicit_build_command(config.build_command.as_deref()) {
+            match config.containerfile.as_deref() {
+                Some(containerfile) => {
+                    let containerfile = validate_explicit_containerfile_path(containerfile)
+                        .map_err(|e| BuildUserImageError::ValidateContainerfile {
+                            reason: e,
+                            location: std::panic::Location::caller(),
+                        })?;
+                    if !work_dir.join(&containerfile).is_file() {
+                        return Err(BuildUserImageError::MissingFile {
+                            containerfile,
+                            location: std::panic::Location::caller(),
+                        });
+                    }
+                    Some(containerfile)
                 }
-                Some(containerfile)
+                None => None,
             }
-            None => None,
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     let build_command = resolve_build_command_in_dir(
         config.build_command.as_deref(),
@@ -188,13 +291,16 @@ pub async fn build_user_image(
         .current_dir(work_dir)
         .output()
         .await
-        .context("Failed to run build command")?;
+        .with_context(Ctx::run_build())?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
         tracing::error!("Build failed:\nstdout: {}\nstderr: {}", stdout, stderr);
-        bail!("Build command failed: {}", stderr);
+        return Err(BuildUserImageError::BuildFailed {
+            stderr: stderr.to_string(),
+            location: std::panic::Location::caller(),
+        });
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -210,12 +316,15 @@ pub async fn build_user_image(
             .args(["load", "-i", &tarball_path.to_string_lossy()])
             .output()
             .await
-            .context("Failed to load OCI tarball")?;
+            .with_context(Ctx::load_oci_tarball())?;
 
         if !load_output.status.success() {
             let stderr = String::from_utf8_lossy(&load_output.stderr);
             tracing::error!("Failed to load OCI tarball: {}", stderr);
-            bail!("Failed to load OCI tarball: {}", stderr);
+            return Err(BuildUserImageError::OciLoadFailed {
+                stderr: stderr.to_string(),
+                location: std::panic::Location::caller(),
+            });
         }
 
         let load_stdout = String::from_utf8_lossy(&load_output.stdout);
@@ -233,7 +342,9 @@ pub async fn build_user_image(
                     None
                 }
             })
-            .context("Failed to parse loaded image from docker load output")?;
+            .ok_or_else(|| BuildUserImageError::ParseLoadedImage {
+                location: std::panic::Location::caller(),
+            })?;
 
         tracing::info!("Loaded image: {}, tagging as: {}", loaded_image, image_tag);
 
@@ -242,11 +353,14 @@ pub async fn build_user_image(
             .args(["tag", loaded_image, image_tag])
             .output()
             .await
-            .context("Failed to tag loaded image")?;
+            .with_context(Ctx::tag_image())?;
 
         if !tag_output.status.success() {
             let stderr = String::from_utf8_lossy(&tag_output.stderr);
-            bail!("Failed to tag image: {}", stderr);
+            return Err(BuildUserImageError::TagFailed {
+                stderr: stderr.to_string(),
+                location: std::panic::Location::caller(),
+            });
         }
     }
 

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::Result;
+use dterror::ResultExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::Path;
@@ -80,6 +80,56 @@ pub enum FrameworkSource {
     },
 }
 
+/// Error type for [`EnclaveManifest::write_to_file`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub enum WriteToFileError {
+    #[error("could not serialize manifest to JSON [{location}]")]
+    Serialize {
+        #[context(borrow = Path)]
+        path: std::path::PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("could not write manifest file '{path}' [{location}]")]
+    WriteFile {
+        #[context(borrow = Path)]
+        path: std::path::PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+}
+
+/// Error type for [`EnclaveManifest::read_from_file`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub enum ReadFromFileError {
+    #[error("could not read manifest file '{path}' [{location}]")]
+    ReadFile {
+        #[context(borrow = Path)]
+        path: std::path::PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("could not deserialize manifest JSON [{location}]")]
+    Deserialize {
+        #[context(borrow = Path)]
+        path: std::path::PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+}
+
 impl EnclaveManifest {
     pub fn new(
         app_source: Option<AppSource>,
@@ -109,15 +159,25 @@ impl EnclaveManifest {
         }
     }
 
-    pub async fn write_to_file(&self, path: &Path) -> Result<()> {
-        let json = serde_json::to_string_pretty(self)?;
-        fs::write(path, json).await?;
+    #[tracing::instrument(skip_all, err)]
+    pub async fn write_to_file(&self, path: &Path) -> Result<(), WriteToFileError> {
+        use WriteToFileErrorCtx as Ctx;
+
+        let json = serde_json::to_string_pretty(self).with_context(Ctx::serialize(path))?;
+        fs::write(path, json)
+            .await
+            .with_context(Ctx::write_file(path))?;
         Ok(())
     }
 
-    pub async fn read_from_file(path: &Path) -> Result<Self> {
-        let json = fs::read_to_string(path).await?;
-        let manifest = serde_json::from_str(&json)?;
+    #[tracing::instrument(skip_all, err)]
+    pub async fn read_from_file(path: &Path) -> Result<Self, ReadFromFileError> {
+        use ReadFromFileErrorCtx as Ctx;
+
+        let json = fs::read_to_string(path)
+            .await
+            .with_context(Ctx::read_file(path))?;
+        let manifest = serde_json::from_str(&json).with_context(Ctx::deserialize(path))?;
         Ok(manifest)
     }
 }

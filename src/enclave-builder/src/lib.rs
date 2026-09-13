@@ -72,7 +72,7 @@ pub mod extract;
 pub mod manifest;
 pub mod pcrs;
 
-use anyhow::{Context, Result};
+use dterror::ResultExt;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -142,8 +142,236 @@ impl CacheType {
     }
 }
 
+/// Error type for [`EnclaveBuilder::new_with_cache`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub enum NewWithCacheError {
+    #[error("failed to remove cached build directory '{path}' [{location}]")]
+    RemoveCachedDir {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to create work directory '{path}' [{location}]")]
+    CreateWorkDir {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+}
+
+/// Error type for [`EnclaveBuilder::new`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub enum NewError {
+    #[error("failed to create temporary work directory [{location}]")]
+    CreateTempDir {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+}
+
+/// Error type for [`EnclaveBuilder::save_pcrs_to_cache`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub(crate) enum SavePcrsToCacheError {
+    #[error("failed to serialize PCRs [{location}]")]
+    Serialize {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to write PCRs cache file '{path}' [{location}]")]
+    Write {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+}
+
+/// Error type for [`EnclaveBuilder::extract_user_image`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum ExtractUserImageError {
+    #[error("could not extract specific files [{location}]")]
+    SpecificFiles {
+        reason: extract::ExtractSpecificFilesError,
+        location: dterror::Location,
+    },
+
+    #[error("could not export image filesystem tar [{location}]")]
+    ExportTar {
+        reason: extract::ExportImageFilesystemTarError,
+        location: dterror::Location,
+    },
+}
+
+/// Error type for [`EnclaveBuilder::extract_static_binary`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum ExtractStaticBinaryError {
+    #[error("could not extract static binary [{location}]")]
+    Extract {
+        reason: extract::ExtractStaticBinaryError,
+        location: dterror::Location,
+    },
+}
+
+/// Error type for [`EnclaveBuilder::build_eif_native`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum BuildEifNativeError {
+    #[error("could not build EIF from filesystems [{location}]")]
+    Build {
+        reason: build::BuildEifFromFilesystemsError,
+        location: dterror::Location,
+    },
+}
+
+/// Error type for [`EnclaveBuilder::extract_pcrs`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum ExtractPcrsError {
+    #[error("failed to extract PCR values - ensure eif_build generated .pcrs file [{location}]")]
+    Extract {
+        reason: pcrs::ExtractPcrsFromEifError,
+        location: dterror::Location,
+    },
+}
+
+/// Error type for [`EnclaveBuilder::parse_attestation_pcrs`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum ParseAttestationPcrsError {
+    #[error("could not parse attestation document [{location}]")]
+    Parse {
+        reason: pcrs::ParseAttestationDocumentError,
+        location: dterror::Location,
+    },
+}
+
+/// Unified error type for the enclave build pipeline.
+///
+/// Covers all failure modes from [`EnclaveBuilder::build_enclave`],
+/// [`EnclaveBuilder::build_enclave_from_filesystem`], and
+/// [`EnclaveBuilder::build_enclave_auto`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub enum BuildEnclaveError {
+    #[error("invalid binary path [{location}]")]
+    InvalidBinaryPath {
+        #[location]
+        location: dterror::Location,
+    },
+
+    #[error("could not remove staging directory '{path}' [{location}]")]
+    RemoveDir {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("could not create staging directory '{path}' [{location}]")]
+    CreateDir {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("could not create binary target directory '{path}' [{location}]")]
+    CreateTargetDir {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("could not copy binary from '{from}' to '{to}' [{location}]")]
+    Copy {
+        #[context(borrow = Path)]
+        from: PathBuf,
+        #[context(borrow = Path)]
+        to: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("could not extract static binary [{location}]")]
+    ExtractStaticBinary {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("could not extract user image [{location}]")]
+    ExtractUserImage {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("could not clone enclave source [{location}]")]
+    GetOrCloneEnclaveSource {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("could not clone framework source [{location}]")]
+    GetOrCloneFrameworkSource {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("could not build EIF from filesystems [{location}]")]
+    BuildEifNative {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to extract PCR values - ensure eif_build generated .pcrs file [{location}]")]
+    ExtractPcrs {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+}
+
 impl EnclaveBuilder {
     #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(skip_all, err)]
     pub fn new_with_cache(
         enclave_source: impl Into<String>,
         enclave_version: impl Into<String>,
@@ -153,7 +381,9 @@ impl EnclaveBuilder {
         cache_type: CacheType,
         no_cache: bool,
         base_dir: &Path,
-    ) -> Result<Self> {
+    ) -> Result<Self, NewWithCacheError> {
+        use NewWithCacheErrorCtx as Ctx;
+
         let base_cache_dir = base_dir.join(cache_type.dir_name());
 
         let safe_org_id = org_id
@@ -186,11 +416,10 @@ impl EnclaveBuilder {
                 cache_type,
                 work_dir.display()
             );
-            std::fs::remove_dir_all(&work_dir)
-                .context("Failed to remove cached build directory")?;
+            std::fs::remove_dir_all(&work_dir).with_context(Ctx::remove_cached_dir(&work_dir))?;
         }
 
-        std::fs::create_dir_all(&work_dir).context("Failed to create work directory")?;
+        std::fs::create_dir_all(&work_dir).with_context(Ctx::create_work_dir(&work_dir))?;
 
         tracing::info!("{:?} cache directory: {}", cache_type, work_dir.display());
 
@@ -203,13 +432,18 @@ impl EnclaveBuilder {
         })
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub fn new(
         enclave_source: impl Into<String>,
         enclave_version: impl Into<String>,
         framework_source: impl Into<String>,
         base_dir: impl AsRef<Path>,
-    ) -> Result<Self> {
-        let work_dir = tempfile::tempdir_in(base_dir.as_ref())?.keep();
+    ) -> Result<Self, NewError> {
+        use NewErrorCtx as Ctx;
+
+        let work_dir = tempfile::tempdir_in(base_dir.as_ref())
+            .with_context(Ctx::create_temp_dir())?
+            .keep();
 
         Ok(Self {
             enclave_source: enclave_source.into(),
@@ -281,10 +515,13 @@ impl EnclaveBuilder {
         })
     }
 
-    fn save_pcrs_to_cache(&self, pcrs: &PcrValues) -> Result<()> {
+    #[tracing::instrument(skip_all, err)]
+    pub(crate) fn save_pcrs_to_cache(&self, pcrs: &PcrValues) -> Result<(), SavePcrsToCacheError> {
+        use SavePcrsToCacheErrorCtx as Ctx;
+
         let pcrs_path = self.work_dir.join("enclave.eif.pcrs");
-        let pcrs_json = serde_json::to_string_pretty(pcrs).context("Failed to serialize PCRs")?;
-        std::fs::write(&pcrs_path, pcrs_json).context("Failed to write PCRs cache file")?;
+        let pcrs_json = serde_json::to_string_pretty(pcrs).with_context(Ctx::serialize())?;
+        std::fs::write(&pcrs_path, pcrs_json).with_context(Ctx::write(&pcrs_path))?;
         tracing::info!("Saved PCRs to cache: {}", pcrs_path.display());
         Ok(())
     }
@@ -293,17 +530,27 @@ impl EnclaveBuilder {
         &self,
         image: &UserImage,
         specific_files: Option<Vec<String>>,
-    ) -> Result<PathBuf> {
+    ) -> Result<PathBuf, ExtractUserImageError> {
         if let Some(files) = specific_files {
             tracing::info!("Extracting specific files: {:?}", files);
-            extract::extract_specific_files(&image.reference, &files, &self.work_dir).await
+            extract::extract_specific_files(&image.reference, &files, &self.work_dir)
+                .await
+                .map_err(|reason| ExtractUserImageError::SpecificFiles {
+                    reason,
+                    location: std::panic::Location::caller(),
+                })
         } else {
             // Hand the build the export tar rather than an unpacked directory:
             // unpacking here would drop case-colliding entries on macOS and
             // silently change PCR0/PCR1 (issue #401). `stage_eif_components`
             // recognises a `.tar` and lets the Linux builder unpack it.
             tracing::info!("Exporting full filesystem as tar");
-            extract::export_image_filesystem_tar(&image.reference, &self.work_dir).await
+            extract::export_image_filesystem_tar(&image.reference, &self.work_dir)
+                .await
+                .map_err(|reason| ExtractUserImageError::ExportTar {
+                    reason,
+                    location: std::panic::Location::caller(),
+                })
         }
     }
 
@@ -311,9 +558,14 @@ impl EnclaveBuilder {
         &self,
         image: &UserImage,
         binary_path: &str,
-    ) -> Result<PathBuf> {
+    ) -> Result<PathBuf, ExtractStaticBinaryError> {
         tracing::info!("Extracting static binary: {}", binary_path);
-        extract::extract_static_binary(&image.reference, binary_path, &self.work_dir).await
+        extract::extract_static_binary(&image.reference, binary_path, &self.work_dir)
+            .await
+            .map_err(|reason| ExtractStaticBinaryError::Extract {
+                reason,
+                location: std::panic::Location::caller(),
+            })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -338,7 +590,7 @@ impl EnclaveBuilder {
         e2e_cors_origins: Option<String>,
         egress: bool,
         templates_dir: Option<&std::path::Path>,
-    ) -> Result<EifFile> {
+    ) -> Result<EifFile, BuildEifNativeError> {
         build::build_eif_from_filesystems(
             user_fs_path,
             bootproofd_path,
@@ -363,14 +615,31 @@ impl EnclaveBuilder {
             templates_dir,
         )
         .await
+        .map_err(|reason| BuildEifNativeError::Build {
+            reason,
+            location: std::panic::Location::caller(),
+        })
     }
 
-    pub fn extract_pcrs(&self, eif: &EifFile) -> Result<PcrValues> {
-        pcrs::extract_pcrs_from_eif(eif)
+    #[tracing::instrument(skip_all, err)]
+    pub fn extract_pcrs(&self, eif: &EifFile) -> Result<PcrValues, ExtractPcrsError> {
+        pcrs::extract_pcrs_from_eif(eif).map_err(|reason| ExtractPcrsError::Extract {
+            reason,
+            location: std::panic::Location::caller(),
+        })
     }
 
-    pub fn parse_attestation_pcrs(&self, attestation_b64: &str) -> Result<PcrValues> {
-        pcrs::parse_attestation_document(attestation_b64)
+    #[tracing::instrument(skip_all, err)]
+    pub fn parse_attestation_pcrs(
+        &self,
+        attestation_b64: &str,
+    ) -> Result<PcrValues, ParseAttestationPcrsError> {
+        pcrs::parse_attestation_document(attestation_b64).map_err(|reason| {
+            ParseAttestationPcrsError::Parse {
+                reason,
+                location: std::panic::Location::caller(),
+            }
+        })
     }
 
     pub fn compare_pcrs(&self, local: &PcrValues, remote: &PcrValues) -> bool {
@@ -423,6 +692,7 @@ impl EnclaveBuilder {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(skip_all, err)]
     pub async fn build_enclave(
         &self,
         user_image: &UserImage,
@@ -444,7 +714,9 @@ impl EnclaveBuilder {
         locksmith: bool,
         e2e_cors_origins: Option<String>,
         egress: bool,
-    ) -> Result<Deployment> {
+    ) -> Result<Deployment, BuildEnclaveError> {
+        use BuildEnclaveErrorCtx as Ctx;
+
         if let Some(cached) = self.get_cached_eif() {
             tracing::info!("Using cached EIF from: {}", cached.eif.path.display());
             return Ok(cached);
@@ -466,10 +738,14 @@ impl EnclaveBuilder {
                 "Binary path specified: {} - extracting static binary only",
                 bin_path
             );
-            self.extract_static_binary(user_image, bin_path).await?
+            self.extract_static_binary(user_image, bin_path)
+                .await
+                .with_context(Ctx::extract_static_binary())?
         } else {
             tracing::info!("No binary path specified - extracting full filesystem");
-            self.extract_user_image(user_image, None).await?
+            self.extract_user_image(user_image, None)
+                .await
+                .with_context(Ctx::extract_user_image())?
         };
 
         let enclave_source_result = compile::get_or_clone_enclave_source(
@@ -477,7 +753,8 @@ impl EnclaveBuilder {
             &self.enclave_version,
             &self.work_dir,
         )
-        .await?;
+        .await
+        .with_context(Ctx::get_or_clone_enclave_source())?;
         let enclave_source_path = enclave_source_result.path.clone();
 
         // Resolve framework_source commit
@@ -487,7 +764,8 @@ impl EnclaveBuilder {
         let framework_source_path = if external_manifest.is_some() {
             let path =
                 compile::get_or_clone_framework_source(&self.framework_source, &self.work_dir)
-                    .await?;
+                    .await
+                    .with_context(Ctx::get_or_clone_framework_source())?;
             Some(path)
         } else {
             None
@@ -568,12 +846,11 @@ impl EnclaveBuilder {
                 egress,
                 templates_dir.as_deref(),
             )
-            .await?;
+            .await
+            .with_context(Ctx::build_eif_native())?;
 
         tracing::info!("Extracting PCR values...");
-        let pcrs = self
-            .extract_pcrs(&eif)
-            .context("Failed to extract PCR values - ensure eif_build generated .pcrs file")?;
+        let pcrs = self.extract_pcrs(&eif).with_context(Ctx::extract_pcrs())?;
 
         if let Err(e) = self.save_pcrs_to_cache(&pcrs) {
             tracing::warn!("Failed to save PCRs to cache: {}", e);
@@ -588,6 +865,7 @@ impl EnclaveBuilder {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(skip_all, err)]
     pub async fn build_enclave_from_filesystem(
         &self,
         user_fs_path: PathBuf,
@@ -608,7 +886,9 @@ impl EnclaveBuilder {
         locksmith: bool,
         e2e_cors_origins: Option<String>,
         egress: bool,
-    ) -> Result<Deployment> {
+    ) -> Result<Deployment, BuildEnclaveError> {
+        use BuildEnclaveErrorCtx as Ctx;
+
         if let Some(cached) = self.get_cached_eif() {
             tracing::info!("Using cached EIF from: {}", cached.eif.path.display());
             return Ok(cached);
@@ -624,7 +904,8 @@ impl EnclaveBuilder {
             &self.enclave_version,
             &self.work_dir,
         )
-        .await?;
+        .await
+        .with_context(Ctx::get_or_clone_enclave_source())?;
         let enclave_source_path = enclave_source_result.path.clone();
 
         // Resolve framework_source commit
@@ -634,7 +915,8 @@ impl EnclaveBuilder {
         let framework_source_path = if external_manifest.is_some() {
             let path =
                 compile::get_or_clone_framework_source(&self.framework_source, &self.work_dir)
-                    .await?;
+                    .await
+                    .with_context(Ctx::get_or_clone_framework_source())?;
             Some(path)
         } else {
             None
@@ -716,12 +998,11 @@ impl EnclaveBuilder {
                 egress,
                 templates_dir.as_deref(),
             )
-            .await?;
+            .await
+            .with_context(Ctx::build_eif_native())?;
 
         tracing::info!("Extracting PCR values...");
-        let pcrs = self
-            .extract_pcrs(&eif)
-            .context("Failed to extract PCR values - ensure eif_build generated .pcrs file")?;
+        let pcrs = self.extract_pcrs(&eif).with_context(Ctx::extract_pcrs())?;
 
         if let Err(e) = self.save_pcrs_to_cache(&pcrs) {
             tracing::warn!("Failed to save PCRs to cache: {}", e);
@@ -736,6 +1017,7 @@ impl EnclaveBuilder {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(skip_all, err)]
     pub async fn build_enclave_auto(
         &self,
         user_image: &UserImage,
@@ -757,11 +1039,15 @@ impl EnclaveBuilder {
         locksmith: bool,
         e2e_cors_origins: Option<String>,
         egress: bool,
-    ) -> Result<Deployment> {
+    ) -> Result<Deployment, BuildEnclaveError> {
+        use BuildEnclaveErrorCtx as Ctx;
+
         let binary_basename = std::path::Path::new(binary_path)
             .file_name()
             .and_then(|n| n.to_str())
-            .context("Invalid binary path")?;
+            .ok_or_else(|| BuildEnclaveError::InvalidBinaryPath {
+                location: std::panic::Location::caller(),
+            })?;
 
         let run_command = run_command.or_else(|| Some(binary_path.to_string()));
 
@@ -777,10 +1063,14 @@ impl EnclaveBuilder {
             let user_service_dir = self.work_dir.join("user-service");
 
             if user_service_dir.exists() {
-                tokio::fs::remove_dir_all(&user_service_dir).await?;
+                tokio::fs::remove_dir_all(&user_service_dir)
+                    .await
+                    .with_context(Ctx::remove_dir(&user_service_dir))?;
             }
 
-            tokio::fs::create_dir_all(&user_service_dir).await?;
+            tokio::fs::create_dir_all(&user_service_dir)
+                .await
+                .with_context(Ctx::create_dir(&user_service_dir))?;
 
             let binary_path_obj = std::path::Path::new(binary_path);
             let parent_dir = binary_path_obj
@@ -788,10 +1078,14 @@ impl EnclaveBuilder {
                 .unwrap_or(std::path::Path::new("/"));
             let target_dir =
                 user_service_dir.join(parent_dir.strip_prefix("/").unwrap_or(parent_dir));
-            tokio::fs::create_dir_all(&target_dir).await?;
+            tokio::fs::create_dir_all(&target_dir)
+                .await
+                .with_context(Ctx::create_target_dir(&target_dir))?;
 
             let dest_path = target_dir.join(binary_basename);
-            tokio::fs::copy(&filesystem_binary, &dest_path).await?;
+            tokio::fs::copy(&filesystem_binary, &dest_path)
+                .await
+                .with_context(Ctx::copy(&filesystem_binary, &dest_path))?;
 
             tracing::info!("Copied binary to staging: {}", dest_path.display());
 
