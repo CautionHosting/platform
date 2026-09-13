@@ -2931,6 +2931,7 @@ dependencies = [
  "bollard",
  "bootproof-sdk 0.1.0 (git+https://codeberg.org/caution/bootproof.git?rev=b346db17523ad9b13ef41eb9c14df3328bbd80d1)",
  "coset 0.3.8",
+ "dterror 0.3.0",
  "flate2",
  "futures-util",
  "hex",

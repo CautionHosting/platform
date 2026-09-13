@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{Context, Result};
+use dterror::ResultExt;
 use flate2::read::GzDecoder;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -11,22 +11,101 @@ use tokio::process::Command;
 
 const ARCHIVE_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(5)];
 
+/// Renders an error and its `source()` chain as a single `": "`-joined string.
+fn error_chain(error: &dyn std::error::Error) -> String {
+    let mut chain = error.to_string();
+    let mut source = error.source();
+    while let Some(e) = source {
+        chain.push_str(": ");
+        chain.push_str(&e.to_string());
+        source = e.source();
+    }
+    chain
+}
+
 pub struct EnclaveBinaries {
     pub bootproofd: PathBuf,
     pub init: PathBuf,
 }
 
+/// Error type for [`compile_enclave_binaries`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub enum CompileEnclaveBinariesError {
+    #[error("failed to create build directory {path} [{location}]")]
+    CreateBuildDir {
+        #[context(borrow = Path)]
+        path: std::path::PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to write Dockerfile {path} [{location}]")]
+    WriteDockerfile {
+        #[context(borrow = Path)]
+        path: std::path::PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to create output directory {path} [{location}]")]
+    CreateOutputDir {
+        #[context(borrow = Path)]
+        path: std::path::PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to execute docker build [{location}]")]
+    ExecDockerBuild {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("docker build failed:\nstdout: {stdout}\nstderr: {stderr} [{location}]")]
+    DockerBuildFailed {
+        stdout: String,
+        stderr: String,
+        location: dterror::Location,
+    },
+
+    #[error("bootproofd binary not found at: {path} [{location}]")]
+    BootproofdNotFound {
+        path: PathBuf,
+        location: dterror::Location,
+    },
+
+    #[error("Init binary not found at: {path} [{location}]")]
+    InitNotFound {
+        path: PathBuf,
+        location: dterror::Location,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 pub async fn compile_enclave_binaries(
     enclave_source_path: &Path,
     work_dir: &Path,
-) -> Result<EnclaveBinaries> {
+) -> Result<EnclaveBinaries, CompileEnclaveBinariesError> {
+    use CompileEnclaveBinariesErrorCtx as Ctx;
+
     tracing::info!(
         "Compiling enclave binaries from source: {}",
         enclave_source_path.display()
     );
 
     let build_dir = work_dir.join("enclave-build");
-    fs::create_dir_all(&build_dir).await?;
+    fs::create_dir_all(&build_dir)
+        .await
+        .with_context(Ctx::create_build_dir(&build_dir))?;
 
     let dockerfile_content = r#"
 FROM stagex/pallet-rust@sha256:9c38bf1066dd9ad1b6a6b584974dd798c2bf798985bf82e58024fbe0515592ca AS pallet-rust
@@ -66,10 +145,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 "#;
 
     let dockerfile_path = build_dir.join("Dockerfile");
-    fs::write(&dockerfile_path, dockerfile_content).await?;
+    fs::write(&dockerfile_path, dockerfile_content)
+        .await
+        .with_context(Ctx::write_dockerfile(&dockerfile_path))?;
 
     let output_dir = work_dir.join("enclave-binaries");
-    fs::create_dir_all(&output_dir).await?;
+    fs::create_dir_all(&output_dir)
+        .await
+        .with_context(Ctx::create_output_dir(&output_dir))?;
 
     tracing::info!("Building and extracting enclave binaries with Docker...");
     let output = Command::new("docker")
@@ -86,27 +169,33 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         ])
         .output()
         .await
-        .context("Failed to execute docker build")?;
+        .with_context(Ctx::exec_docker_build())?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        anyhow::bail!(
-            "Docker build failed:\nstdout: {}\nstderr: {}",
-            stdout,
-            stderr
-        );
+        return Err(CompileEnclaveBinariesError::DockerBuildFailed {
+            stdout: stdout.to_string(),
+            stderr: stderr.to_string(),
+            location: std::panic::Location::caller(),
+        });
     }
 
     let bootproofd = output_dir.join("output").join("bootproofd");
     let init = output_dir.join("output").join("init");
 
     if !bootproofd.exists() {
-        anyhow::bail!("bootproofd binary not found at: {}", bootproofd.display());
+        return Err(CompileEnclaveBinariesError::BootproofdNotFound {
+            path: bootproofd,
+            location: std::panic::Location::caller(),
+        });
     }
 
     if !init.exists() {
-        anyhow::bail!("Init binary not found at: {}", init.display());
+        return Err(CompileEnclaveBinariesError::InitNotFound {
+            path: init,
+            location: std::panic::Location::caller(),
+        });
     }
 
     tracing::info!("Enclave binaries compiled successfully");
@@ -177,14 +266,30 @@ fn guarded_git() -> Command {
     cmd
 }
 
+/// Error type for [`archive_http_client`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub(crate) enum ArchiveHttpClientError {
+    #[error("failed to build archive HTTP client [{location}]")]
+    BuildClient {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+}
+
 /// HTTP client for enclave/framework archives. Three 90-second attempts plus
 /// bounded backoff stay within the existing five-minute ceiling.
-fn archive_http_client() -> Result<reqwest::Client> {
+#[tracing::instrument(skip_all, err)]
+fn archive_http_client() -> Result<reqwest::Client, ArchiveHttpClientError> {
+    use ArchiveHttpClientErrorCtx as Ctx;
+
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(30))
         .timeout(std::time::Duration::from_secs(90))
         .build()
-        .context("Failed to build archive HTTP client")
+        .with_context(Ctx::build_client())
 }
 
 fn is_retryable_archive_status(status: reqwest::StatusCode) -> bool {
@@ -200,12 +305,33 @@ fn is_retryable_archive_error(error: &reqwest::Error) -> bool {
         .unwrap_or_else(|| error.is_timeout() || error.is_connect() || error.is_body())
 }
 
-async fn download_archive_bytes(
+/// Error type for [`download_archive_bytes`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub(crate) enum DownloadArchiveBytesError {
+    #[error("failed to download {description} at {url} after {attempts} attempt(s) [{location}]")]
+    DownloadFailed {
+        #[context(borrow = str)]
+        url: String,
+        #[context(borrow = str)]
+        description: String,
+        attempts: usize,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
+pub(crate) async fn download_archive_bytes(
     client: &reqwest::Client,
     url: &str,
     description: &str,
     retry_delays: &[Duration],
-) -> Result<Vec<u8>> {
+) -> Result<Vec<u8>, DownloadArchiveBytesError> {
+    use DownloadArchiveBytesErrorCtx as Ctx;
+
     let attempts = retry_delays.len() + 1;
     for attempt in 1..=attempts {
         let result = async {
@@ -229,12 +355,11 @@ async fn download_archive_bytes(
                 tokio::time::sleep(delay).await;
             }
             Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "Failed to download {} after {} attempt(s)",
-                        description, attempt
-                    )
-                });
+                return Err::<Vec<u8>, reqwest::Error>(error).with_context(Ctx::download_failed(
+                    url,
+                    description,
+                    attempt,
+                ));
             }
         }
     }
@@ -323,11 +448,101 @@ pub async fn resolve_ref_to_commit(git_url: &str, ref_name: &str) -> Option<Stri
     None
 }
 
+/// Error type for [`get_or_clone_enclave_source`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub enum GetOrCloneEnclaveSourceError {
+    #[error("failed to create directory {path} [{location}]")]
+    CreateDir {
+        #[context(borrow = Path)]
+        path: std::path::PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to remove directory {path} [{location}]")]
+    RemoveDir {
+        #[context(borrow = Path)]
+        path: std::path::PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to build archive HTTP client [{location}]")]
+    BuildHttpClient {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to download enclave source archive [{location}]")]
+    DownloadArchive {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to read archive entries [{location}]")]
+    ReadEntries {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to read archive entry [{location}]")]
+    ReadEntry {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to extract entry [{location}]")]
+    ExtractEntry {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to find top-level directory in extracted enclave source [{location}]")]
+    FindTopLevelDir {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to clone enclave source [{location}]")]
+    CloneExec {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("git clone failed: {stderr} [{location}]")]
+    CloneFailed {
+        stderr: String,
+        location: dterror::Location,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 pub async fn get_or_clone_enclave_source(
     enclave_source: &str,
     enclave_version: &str,
     work_dir: &Path,
-) -> Result<EnclaveSourceResult> {
+) -> Result<EnclaveSourceResult, GetOrCloneEnclaveSourceError> {
+    use GetOrCloneEnclaveSourceErrorCtx as Ctx;
+
     // Check if it's an archive URL (tar.gz)
     if enclave_source.ends_with(".tar.gz") || enclave_source.ends_with(".tar") {
         tracing::info!(
@@ -376,20 +591,25 @@ pub async fn get_or_clone_enclave_source(
                 "Removing existing source directory: {}",
                 download_dir.display()
             );
-            fs::remove_dir_all(&download_dir).await?;
+            fs::remove_dir_all(&download_dir)
+                .await
+                .with_context(Ctx::remove_dir(&download_dir))?;
         }
 
-        fs::create_dir_all(&download_dir).await?;
+        fs::create_dir_all(&download_dir)
+            .await
+            .with_context(Ctx::create_dir(&download_dir))?;
 
         tracing::info!("Downloading archive...");
-        let client = archive_http_client()?;
+        let client = archive_http_client().with_context(Ctx::build_http_client())?;
         let archive_bytes = download_archive_bytes(
             &client,
             enclave_source,
             "enclave source archive",
             &ARCHIVE_RETRY_DELAYS,
         )
-        .await?;
+        .await
+        .with_context(Ctx::download_archive())?;
 
         tracing::info!("Downloaded {} bytes, extracting...", archive_bytes.len());
 
@@ -397,19 +617,16 @@ pub async fn get_or_clone_enclave_source(
         let decoder = GzDecoder::new(&archive_bytes[..]);
         let mut archive = Archive::new(decoder);
 
-        for entry in archive
-            .entries()
-            .context("Failed to read archive entries")?
-        {
-            let mut entry = entry.context("Failed to read archive entry")?;
+        for entry in archive.entries().with_context(Ctx::read_entries())? {
+            let mut entry = entry.with_context(Ctx::read_entry())?;
             entry
                 .unpack_in(&download_dir)
-                .context("Failed to extract entry")?;
+                .with_context(Ctx::extract_entry())?;
         }
 
         let enclave_source_dir = find_top_level_dir(&download_dir)
             .await
-            .context("Failed to find top-level directory in extracted enclave source")?;
+            .with_context(Ctx::find_top_level_dir())?;
         tracing::info!(
             "Enclave source extracted to: {}",
             enclave_source_dir.display()
@@ -433,10 +650,14 @@ pub async fn get_or_clone_enclave_source(
         // Remove existing clone directory if it exists
         if clone_dir.exists() {
             tracing::info!("Removing existing clone directory: {}", clone_dir.display());
-            fs::remove_dir_all(&clone_dir).await?;
+            fs::remove_dir_all(&clone_dir)
+                .await
+                .with_context(Ctx::remove_dir(&clone_dir))?;
         }
 
-        fs::create_dir_all(&clone_dir).await?;
+        fs::create_dir_all(&clone_dir)
+            .await
+            .with_context(Ctx::create_dir(&clone_dir))?;
 
         let output = Command::new("git")
             .args([
@@ -450,11 +671,14 @@ pub async fn get_or_clone_enclave_source(
             ])
             .output()
             .await
-            .context("Failed to clone enclave source")?;
+            .with_context(Ctx::clone_exec())?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Git clone failed: {}", stderr);
+            return Err(GetOrCloneEnclaveSourceError::CloneFailed {
+                stderr: stderr.to_string(),
+                location: std::panic::Location::caller(),
+            });
         }
 
         // Get the commit SHA from the cloned repo
@@ -503,26 +727,90 @@ pub async fn get_or_clone_enclave_source(
 ///
 /// Returns the path to the extracted source directory. Templates are at
 /// `src/enclave-builder/templates/` within the returned path.
+#[tracing::instrument(skip_all, err)]
 pub async fn get_or_clone_framework_source(
     framework_source_url: &str,
     work_dir: &Path,
-) -> Result<PathBuf> {
+) -> Result<PathBuf, GetOrCloneFrameworkSourceError> {
     let candidates = crate::archive_url_candidates(framework_source_url);
-    get_or_clone_framework_source_from_urls(&candidates, work_dir).await
+    get_or_clone_framework_source_from_urls(&candidates, work_dir)
+        .await
+        .map_err(|reason| GetOrCloneFrameworkSourceError::FromUrls {
+            reason,
+            location: std::panic::Location::caller(),
+        })
 }
 
-async fn get_or_clone_framework_source_from_urls(
+/// Error type for [`get_or_clone_framework_source`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum GetOrCloneFrameworkSourceError {
+    #[error("could not obtain framework source: {reason} [{location}]")]
+    FromUrls {
+        reason: GetOrCloneFrameworkSourceFromUrlsError,
+        location: dterror::Location,
+    },
+}
+
+/// Error type for [`get_or_clone_framework_source_from_urls`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub enum GetOrCloneFrameworkSourceFromUrlsError {
+    #[error("no framework source archive URLs provided [{location}]")]
+    EmptyUrls { location: dterror::Location },
+
+    #[error("failed to build archive HTTP client for framework source [{location}]")]
+    BuildClient {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to create directory {path} [{location}]")]
+    CreateDir {
+        #[context(borrow = Path)]
+        path: std::path::PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to remove directory {path} [{location}]")]
+    RemoveDir {
+        #[context(borrow = Path)]
+        path: std::path::PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("all framework source archive URLs failed:\n  {failures} [{location}]")]
+    AllFailed {
+        failures: String,
+        location: dterror::Location,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
+pub(crate) async fn get_or_clone_framework_source_from_urls(
     framework_source_urls: &[String],
     work_dir: &Path,
-) -> Result<PathBuf> {
+) -> Result<PathBuf, GetOrCloneFrameworkSourceFromUrlsError> {
+    use GetOrCloneFrameworkSourceFromUrlsErrorCtx as Ctx;
+
     if framework_source_urls.is_empty() {
-        return Err(anyhow::anyhow!("No framework source archive URLs provided"));
+        return Err(GetOrCloneFrameworkSourceFromUrlsError::EmptyUrls {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let download_dir = work_dir.join("framework-source");
     let retry_delays = &ARCHIVE_RETRY_DELAYS;
     let mut failures = Vec::new();
-    let client = archive_http_client()?;
+    let client = archive_http_client().with_context(Ctx::build_client())?;
 
     for framework_source_url in framework_source_urls {
         if download_dir.exists() {
@@ -530,16 +818,20 @@ async fn get_or_clone_framework_source_from_urls(
                 "Removing existing framework source directory: {}",
                 download_dir.display()
             );
-            fs::remove_dir_all(&download_dir).await?;
+            fs::remove_dir_all(&download_dir)
+                .await
+                .with_context(Ctx::remove_dir(&download_dir))?;
         }
 
-        fs::create_dir_all(&download_dir).await?;
+        fs::create_dir_all(&download_dir)
+            .await
+            .with_context(Ctx::create_dir(&download_dir))?;
 
         tracing::info!(
             "Downloading framework source archive from: {}",
             framework_source_url
         );
-        let result = match download_archive_bytes(
+        match download_archive_bytes(
             &client,
             framework_source_url,
             "framework source archive",
@@ -549,29 +841,32 @@ async fn get_or_clone_framework_source_from_urls(
         {
             Ok(archive_bytes) => {
                 tracing::info!("Downloaded {} bytes, extracting...", archive_bytes.len());
-                extract_framework_archive(&archive_bytes, &download_dir).await
-            }
-            Err(error) => Err(error),
-        };
-
-        match result {
-            Ok(framework_source_dir) => {
-                tracing::info!(
-                    "Framework source archive selected: {}",
-                    framework_source_url
-                );
-                tracing::info!(
-                    "Framework source extracted to: {}",
-                    framework_source_dir.display()
-                );
-                return Ok(framework_source_dir);
+                match extract_framework_archive(&archive_bytes, &download_dir).await {
+                    Ok(framework_source_dir) => {
+                        tracing::info!(
+                            "Framework source archive selected: {}",
+                            framework_source_url
+                        );
+                        tracing::info!(
+                            "Framework source extracted to: {}",
+                            framework_source_dir.display()
+                        );
+                        return Ok(framework_source_dir);
+                    }
+                    Err(error) => {
+                        let details = error_chain(&error);
+                        tracing::warn!(
+                            "Framework source archive failed from {}: {}",
+                            framework_source_url,
+                            details
+                        );
+                        failures
+                            .push([framework_source_url.as_str(), ": ", details.as_str()].concat());
+                    }
+                }
             }
             Err(error) => {
-                let details = error
-                    .chain()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(": ");
+                let details = error_chain(&error);
                 tracing::warn!(
                     "Framework source archive failed from {}: {}",
                     framework_source_url,
@@ -583,80 +878,147 @@ async fn get_or_clone_framework_source_from_urls(
     }
 
     let failures = failures.join("\n  ");
-    Err(anyhow::anyhow!([
-        "All framework source archive URLs failed:\n  ",
-        failures.as_str(),
-    ]
-    .concat()))
+    Err(GetOrCloneFrameworkSourceFromUrlsError::AllFailed {
+        failures,
+        location: std::panic::Location::caller(),
+    })
 }
 
-async fn extract_framework_archive(archive_bytes: &[u8], download_dir: &Path) -> Result<PathBuf> {
+/// Error type for [`extract_framework_archive`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub(crate) enum ExtractFrameworkArchiveError {
+    #[error("failed to read framework archive entries [{location}]")]
+    ReadEntries {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to read framework archive entry [{location}]")]
+    ReadEntry {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to extract entry [{location}]")]
+    ExtractEntry {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to find top-level directory in extracted framework source [{location}]")]
+    FindTopLevelDir {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
+pub(crate) async fn extract_framework_archive(
+    archive_bytes: &[u8],
+    download_dir: &Path,
+) -> Result<PathBuf, ExtractFrameworkArchiveError> {
+    use ExtractFrameworkArchiveErrorCtx as Ctx;
+
     let decoder = GzDecoder::new(archive_bytes);
     let mut archive = Archive::new(decoder);
 
-    for entry in archive
-        .entries()
-        .context("Failed to read framework archive entries")?
-    {
-        let mut entry = entry.context("Failed to read framework archive entry")?;
+    for entry in archive.entries().with_context(Ctx::read_entries())? {
+        let mut entry = entry.with_context(Ctx::read_entry())?;
         entry
             .unpack_in(download_dir)
-            .context("Failed to extract entry")?;
+            .with_context(Ctx::extract_entry())?;
     }
 
     let framework_source_dir = find_top_level_dir(download_dir)
         .await
-        .context("Failed to find top-level directory in extracted framework source")?;
+        .with_context(Ctx::find_top_level_dir())?;
     Ok(framework_source_dir)
 }
 
-#[derive(Debug, thiserror::Error)]
+/// Error type for [`find_top_level_dir`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
 pub(crate) enum FindTopLevelDirError {
-    #[error("failed to read directory {0}")]
-    ReadDir(String, #[source] std::io::Error),
-    #[error("failed to read directory entry")]
-    ReadEntry(#[source] std::io::Error),
-    #[error("failed to read entry file type")]
-    FileType(#[source] std::io::Error),
-    #[error("multiple top-level directories found in {0}")]
-    MultipleTopLevelDirs(String),
-    #[error("no top-level directory found in {0}")]
-    NoTopLevelDir(String),
+    #[error("failed to read directory {path} [{location}]")]
+    ReadDir {
+        #[context(borrow = Path)]
+        path: std::path::PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to read directory entry [{location}]")]
+    ReadEntry {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to read entry file type [{location}]")]
+    FileType {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("multiple top-level directories found in {path} [{location}]")]
+    MultipleTopLevelDirs {
+        path: PathBuf,
+        location: dterror::Location,
+    },
+
+    #[error("no top-level directory found in {path} [{location}]")]
+    NoTopLevelDir {
+        path: PathBuf,
+        location: dterror::Location,
+    },
 }
 
+#[tracing::instrument(skip_all, err)]
 async fn find_top_level_dir(dir: &Path) -> Result<PathBuf, FindTopLevelDirError> {
-    let mut entries = fs::read_dir(dir)
-        .await
-        .map_err(|e| FindTopLevelDirError::ReadDir(dir.display().to_string(), e))?;
+    use FindTopLevelDirErrorCtx as Ctx;
+
+    let mut entries = fs::read_dir(dir).await.with_context(Ctx::read_dir(dir))?;
     let mut top_dir = None;
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(FindTopLevelDirError::ReadEntry)?
-    {
+    while let Some(entry) = entries.next_entry().await.with_context(Ctx::read_entry())? {
         if entry
             .file_type()
             .await
-            .map_err(FindTopLevelDirError::FileType)?
+            .with_context(Ctx::file_type())?
             .is_dir()
         {
             if top_dir.is_some() {
-                return Err(FindTopLevelDirError::MultipleTopLevelDirs(
-                    dir.display().to_string(),
-                ));
+                return Err(FindTopLevelDirError::MultipleTopLevelDirs {
+                    path: dir.to_path_buf(),
+                    location: std::panic::Location::caller(),
+                });
             }
             top_dir = Some(entry.path());
         }
     }
-    top_dir.ok_or(FindTopLevelDirError::NoTopLevelDir(
-        dir.display().to_string(),
-    ))
+    top_dir.ok_or_else(|| FindTopLevelDirError::NoTopLevelDir {
+        path: dir.to_path_buf(),
+        location: std::panic::Location::caller(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        download_archive_bytes, get_or_clone_framework_source_from_urls,
+        download_archive_bytes, error_chain, get_or_clone_framework_source_from_urls,
         is_retryable_archive_status,
     };
     use flate2::write::GzEncoder;
@@ -764,7 +1126,7 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("after 1 attempt(s)"));
-        assert!(format!("{error:#}").contains("404 Not Found"));
+        assert!(error_chain(&error).contains("404 Not Found"));
         assert_eq!(server.await.unwrap(), 1);
     }
 

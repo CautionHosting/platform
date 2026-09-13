@@ -10,6 +10,7 @@ edition = "2021"
 # Error handling
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+dterror = { workspace = true }
 
 # Serialization
 serde = { workspace = true }

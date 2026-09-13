@@ -1,26 +1,118 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{Context, Result};
+use dterror::ResultExt;
 
 use crate::{EifFile, PcrValues};
 
-pub fn extract_pcrs_from_eif(eif: &EifFile) -> Result<PcrValues> {
+/// Error type for [`extract_pcrs_from_eif`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub enum ExtractPcrsFromEifError {
+    #[error("PCR file not found at {path}. Make sure nitro-cli build-enclave was run successfully [{location}]")]
+    FileNotFound {
+        path: std::path::PathBuf,
+        location: dterror::Location,
+    },
+
+    #[error("could not read PCR file '{path}' [{location}]")]
+    ReadFile {
+        path: std::path::PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("could not parse PCR file: {reason} [{location}]")]
+    ParseFailed {
+        reason: ParsePcrsFileError,
+        location: dterror::Location,
+    },
+}
+
+/// Error type for [`parse_pcrs_file`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum ParsePcrsFileError {
+    #[error("{label} not found in file [{location}]")]
+    Missing {
+        label: String,
+        location: dterror::Location,
+    },
+}
+
+/// Error type for [`parse_attestation_document`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub enum ParseAttestationDocumentError {
+    #[error("failed to decode attestation document base64 [{location}]")]
+    DecodeBase64 {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to parse attestation document CBOR [{location}]")]
+    ParseCbor {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("attestation document is not a CBOR array [{location}]")]
+    NotCborArray { location: dterror::Location },
+
+    #[error("invalid COSE_Sign1 structure [{location}]")]
+    InvalidCoseSign1 { location: dterror::Location },
+
+    #[error("payload is not bytes [{location}]")]
+    PayloadNotBytes { location: dterror::Location },
+
+    #[error("failed to parse attestation payload [{location}]")]
+    ParsePayload {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("attestation is not a map [{location}]")]
+    NotAMap { location: dterror::Location },
+
+    #[error("no PCRs found in attestation document [{location}]")]
+    NoPcrs { location: dterror::Location },
+
+    #[error("missing required PCRs (0, 1, or 2) in attestation document [{location}]")]
+    MissingRequiredPcrs { location: dterror::Location },
+}
+
+#[tracing::instrument(skip_all, err)]
+pub fn extract_pcrs_from_eif(eif: &EifFile) -> Result<PcrValues, ExtractPcrsFromEifError> {
+    use ExtractPcrsFromEifErrorCtx as Ctx;
+
     let pcrs_path = eif.path.with_extension("pcrs");
 
     if !pcrs_path.exists() {
-        anyhow::bail!(
-            "PCR file not found: {}. Make sure nitro-cli build-enclave was run successfully.",
-            pcrs_path.display()
-        );
+        return Err(ExtractPcrsFromEifError::FileNotFound {
+            path: pcrs_path,
+            location: std::panic::Location::caller(),
+        });
     }
 
-    let pcrs_content = std::fs::read_to_string(&pcrs_path).context("Failed to read PCR file")?;
+    let pcrs_content =
+        std::fs::read_to_string(&pcrs_path).with_context(Ctx::read_file(pcrs_path))?;
 
-    parse_pcrs_file(&pcrs_content)
+    parse_pcrs_file(&pcrs_content).map_err(|e| ExtractPcrsFromEifError::ParseFailed {
+        reason: e,
+        location: std::panic::Location::caller(),
+    })
 }
 
-pub fn parse_pcrs_file(content: &str) -> Result<PcrValues> {
+#[tracing::instrument(skip_all, err)]
+pub fn parse_pcrs_file(content: &str) -> Result<PcrValues, ParsePcrsFileError> {
     let mut pcr0 = None;
     let mut pcr1 = None;
     let mut pcr2 = None;
@@ -52,50 +144,81 @@ pub fn parse_pcrs_file(content: &str) -> Result<PcrValues> {
     }
 
     Ok(PcrValues {
-        pcr0: pcr0.context("PCR0 not found in file")?,
-        pcr1: pcr1.context("PCR1 not found in file")?,
-        pcr2: pcr2.context("PCR2 not found in file")?,
+        pcr0: pcr0.ok_or_else(|| ParsePcrsFileError::Missing {
+            label: "PCR0".to_string(),
+            location: std::panic::Location::caller(),
+        })?,
+        pcr1: pcr1.ok_or_else(|| ParsePcrsFileError::Missing {
+            label: "PCR1".to_string(),
+            location: std::panic::Location::caller(),
+        })?,
+        pcr2: pcr2.ok_or_else(|| ParsePcrsFileError::Missing {
+            label: "PCR2".to_string(),
+            location: std::panic::Location::caller(),
+        })?,
         pcr3,
         pcr4,
     })
 }
 
-pub fn parse_attestation_document(attestation_b64: &str) -> Result<PcrValues> {
+#[tracing::instrument(skip_all, err)]
+pub fn parse_attestation_document(
+    attestation_b64: &str,
+) -> Result<PcrValues, ParseAttestationDocumentError> {
     use base64::Engine;
+    use ParseAttestationDocumentErrorCtx as Ctx;
 
     let attestation_bytes = base64::engine::general_purpose::STANDARD
         .decode(attestation_b64)
-        .context("Failed to decode attestation document base64")?;
+        .with_context(Ctx::decode_base64())?;
 
-    let doc: serde_cbor::Value = serde_cbor::from_slice(&attestation_bytes)
-        .context("Failed to parse attestation document CBOR")?;
+    let doc: serde_cbor::Value =
+        serde_cbor::from_slice(&attestation_bytes).with_context(Ctx::parse_cbor())?;
 
     let array = match doc {
         serde_cbor::Value::Array(ref arr) => arr,
-        _ => anyhow::bail!("Attestation document is not a CBOR array"),
+        _ => {
+            return Err(ParseAttestationDocumentError::NotCborArray {
+                location: std::panic::Location::caller(),
+            });
+        }
     };
 
     if array.len() < 3 {
-        anyhow::bail!("Invalid COSE_Sign1 structure");
+        return Err(ParseAttestationDocumentError::InvalidCoseSign1 {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let payload_bytes = match &array[2] {
         serde_cbor::Value::Bytes(bytes) => bytes,
-        _ => anyhow::bail!("Payload is not bytes"),
+        _ => {
+            return Err(ParseAttestationDocumentError::PayloadNotBytes {
+                location: std::panic::Location::caller(),
+            });
+        }
     };
 
     let attestation: serde_cbor::Value =
-        serde_cbor::from_slice(payload_bytes).context("Failed to parse attestation payload")?;
+        serde_cbor::from_slice(payload_bytes).with_context(Ctx::parse_payload())?;
 
     let attestation_map = match attestation {
         serde_cbor::Value::Map(ref map) => map,
-        _ => anyhow::bail!("Attestation is not a map"),
+        _ => {
+            return Err(ParseAttestationDocumentError::NotAMap {
+                location: std::panic::Location::caller(),
+            });
+        }
     };
 
     let pcrs_key = serde_cbor::Value::Text("pcrs".to_string());
     let pcrs_map = match attestation_map.get(&pcrs_key) {
         Some(serde_cbor::Value::Map(ref map)) => map,
-        _ => anyhow::bail!("No PCRs found in attestation document"),
+        _ => {
+            return Err(ParseAttestationDocumentError::NoPcrs {
+                location: std::panic::Location::caller(),
+            });
+        }
     };
 
     let mut pcr_values = PcrValues {
@@ -130,7 +253,9 @@ pub fn parse_attestation_document(attestation_b64: &str) -> Result<PcrValues> {
     }
 
     if pcr_values.pcr0.is_empty() || pcr_values.pcr1.is_empty() || pcr_values.pcr2.is_empty() {
-        anyhow::bail!("Missing required PCRs (0, 1, or 2) in attestation document");
+        return Err(ParseAttestationDocumentError::MissingRequiredPcrs {
+            location: std::panic::Location::caller(),
+        });
     }
 
     Ok(pcr_values)
@@ -221,12 +346,14 @@ eee PCR4
     #[test]
     fn test_parse_pcrs_file_missing_required() {
         let content = "aaa PCR0\nbbb PCR1\n";
-        assert!(parse_pcrs_file(content).is_err()); // missing PCR2
+        let err = parse_pcrs_file(content).unwrap_err();
+        assert!(err.to_string().contains("PCR2 not found in file"));
     }
 
     #[test]
     fn test_parse_pcrs_file_empty() {
-        assert!(parse_pcrs_file("").is_err());
+        let err = parse_pcrs_file("").unwrap_err();
+        assert!(err.to_string().contains("PCR0 not found in file"));
     }
 
     #[test]
@@ -268,7 +395,6 @@ eee PCR4
 
     #[test]
     fn test_is_debug_mode_single_zero_pcr() {
-        // Any single PCR being all zeros should trigger debug mode
         let pcrs = PcrValues {
             pcr0: "000000000000".to_string(),
             pcr1: "abc123".to_string(),
@@ -290,7 +416,6 @@ eee PCR4
 
     #[test]
     fn test_is_debug_mode_pcr3_pcr4_ignored() {
-        // PCR3 and PCR4 being zero should not trigger debug mode
         let pcrs = PcrValues {
             pcr0: "abc123".to_string(),
             pcr1: "def456".to_string(),

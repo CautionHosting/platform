@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{Context, Result};
+use dterror::ResultExt;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -26,11 +26,25 @@ pub const LOCKSMITH_REPO: &str = "https://codeberg.org/caution/locksmith.git";
 pub const DEFAULT_KEY_EXCHANGE: &str = "X25519";
 const XWING_DRAFT10_KEY_EXCHANGE: &str = "XWING-DRAFT10";
 
-pub fn validate_key_exchange(value: &str) -> Result<()> {
-    anyhow::ensure!(
-        matches!(value, DEFAULT_KEY_EXCHANGE | XWING_DRAFT10_KEY_EXCHANGE),
-        "unsupported STEVE key exchange: {value}"
-    );
+/// Error type for [`validate_key_exchange`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum ValidateKeyExchangeError {
+    #[error("unsupported STEVE key exchange '{value}' [{location}]")]
+    Unsupported {
+        value: String,
+        location: dterror::Location,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
+pub fn validate_key_exchange(value: &str) -> Result<(), ValidateKeyExchangeError> {
+    if !matches!(value, DEFAULT_KEY_EXCHANGE | XWING_DRAFT10_KEY_EXCHANGE) {
+        return Err(ValidateKeyExchangeError::Unsupported {
+            value: value.to_string(),
+            location: std::panic::Location::caller(),
+        });
+    }
     Ok(())
 }
 
@@ -98,16 +112,39 @@ pub fn resolve_tool_commits() -> ToolCommits {
     }
 }
 
+/// Error type for [`resolve_templates_dir`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum ResolveTemplatesDirError {
+    #[error("CAUTION_TEMPLATES_DIR={dir} does not exist [{location}]")]
+    EnvDirMissing {
+        dir: String,
+        location: dterror::Location,
+    },
+
+    #[error("templates directory not found. Checked CAUTION_TEMPLATES_DIR, /app/templates, and {dev_path} [{location}]")]
+    NotFound {
+        dev_path: PathBuf,
+        location: dterror::Location,
+    },
+}
+
 /// Resolve the templates directory at runtime.
 ///
 /// Priority:
 /// 1. CAUTION_TEMPLATES_DIR env var (explicit override)
 /// 2. /app/templates (Docker container path)
 /// 3. CARGO_MANIFEST_DIR/templates (local dev fallback)
-fn resolve_templates_dir() -> Result<PathBuf> {
+#[tracing::instrument(skip_all, err)]
+fn resolve_templates_dir() -> Result<PathBuf, ResolveTemplatesDirError> {
     if let Ok(dir) = std::env::var("CAUTION_TEMPLATES_DIR") {
         let p = PathBuf::from(&dir);
-        anyhow::ensure!(p.exists(), "CAUTION_TEMPLATES_DIR={} does not exist", dir);
+        if !p.exists() {
+            return Err(ResolveTemplatesDirError::EnvDirMissing {
+                dir,
+                location: std::panic::Location::caller(),
+            });
+        }
         return Ok(p);
     }
 
@@ -117,15 +154,122 @@ fn resolve_templates_dir() -> Result<PathBuf> {
     }
 
     let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates");
-    anyhow::ensure!(
-        dev_path.exists(),
-        "Templates directory not found. Checked CAUTION_TEMPLATES_DIR, /app/templates, and {}",
-        dev_path.display()
-    );
+    if !dev_path.exists() {
+        return Err(ResolveTemplatesDirError::NotFound {
+            dev_path,
+            location: std::panic::Location::caller(),
+        });
+    }
     Ok(dev_path)
 }
 
+/// Error type for [`stage_eif_components`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub enum StageEifComponentsError {
+    #[error("could not validate key exchange: {reason} [{location}]")]
+    ValidateKeyExchange {
+        reason: ValidateKeyExchangeError,
+        location: dterror::Location,
+    },
+
+    #[error("could not create directory {path} [{location}]")]
+    CreateDir {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("could not stage user application: {reason} [{location}]")]
+    StageUserApplication {
+        reason: StageUserApplicationError,
+        location: dterror::Location,
+    },
+
+    #[error("could not copy enclave source: {reason} [{location}]")]
+    CopyEnclaveSource {
+        reason: CopyDirRecursiveError,
+        location: dterror::Location,
+    },
+
+    #[error("could not write enclave manifest: {reason} [{location}]")]
+    WriteManifest {
+        reason: crate::manifest::WriteToFileError,
+        location: dterror::Location,
+    },
+
+    #[error("could not resolve templates directory: {reason} [{location}]")]
+    ResolveTemplates {
+        reason: ResolveTemplatesDirError,
+        location: dterror::Location,
+    },
+
+    #[error("run.sh.template not found at {path} [{location}]")]
+    RunShTemplateNotFound {
+        path: PathBuf,
+        location: dterror::Location,
+    },
+
+    #[error("Containerfile.eif template not found at {path} [{location}]")]
+    ContainerfileTemplateNotFound {
+        path: PathBuf,
+        location: dterror::Location,
+    },
+
+    #[error("caddy-certfp.sh not found at {path} [{location}]")]
+    CaddyCertfpTemplateNotFound {
+        path: PathBuf,
+        location: dterror::Location,
+    },
+
+    #[error("could not render run.sh template: {reason} [{location}]")]
+    RenderRunSh {
+        reason: RenderRunShTemplateError,
+        location: dterror::Location,
+    },
+
+    #[error("could not render Containerfile.eif template: {reason} [{location}]")]
+    RenderContainerfile {
+        reason: RenderContainerfileTemplateError,
+        location: dterror::Location,
+    },
+
+    #[error("could not write run.sh to {path} [{location}]")]
+    WriteRunSh {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("could not write Containerfile.eif to {path} [{location}]")]
+    WriteContainerfile {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("could not copy caddy-certfp.sh from {path} [{location}]")]
+    CopyCaddy {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+}
+
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(skip_all, err)]
 pub async fn stage_eif_components(
     user_fs_path: &Path,
     enclave_source_path: &Path,
@@ -144,11 +288,20 @@ pub async fn stage_eif_components(
     e2e_cors_origins: Option<String>,
     egress: bool,
     templates_dir: Option<&Path>,
-) -> Result<PathBuf> {
-    validate_key_exchange(e2e_key_exchange)?;
+) -> Result<PathBuf, StageEifComponentsError> {
+    use StageEifComponentsErrorCtx as Ctx;
+
+    validate_key_exchange(e2e_key_exchange).map_err(|reason| {
+        StageEifComponentsError::ValidateKeyExchange {
+            reason,
+            location: std::panic::Location::caller(),
+        }
+    })?;
 
     let stage_dir = work_dir.join("eif-stage");
-    fs::create_dir_all(&stage_dir).await?;
+    fs::create_dir_all(&stage_dir)
+        .await
+        .with_context(Ctx::create_dir(&stage_dir))?;
 
     tracing::info!("Staging EIF components in: {}", stage_dir.display());
 
@@ -156,17 +309,33 @@ pub async fn stage_eif_components(
     let enclave_dir = stage_dir.join("enclave");
     let output_dir = stage_dir.join("output");
 
-    fs::create_dir_all(&app_dir).await?;
-    fs::create_dir_all(&enclave_dir).await?;
-    fs::create_dir_all(&output_dir).await?;
+    fs::create_dir_all(&app_dir)
+        .await
+        .with_context(Ctx::create_dir(&app_dir))?;
+    fs::create_dir_all(&enclave_dir)
+        .await
+        .with_context(Ctx::create_dir(&enclave_dir))?;
+    fs::create_dir_all(&output_dir)
+        .await
+        .with_context(Ctx::create_dir(&output_dir))?;
 
-    stage_user_application(user_fs_path, &stage_dir, &app_dir).await?;
+    stage_user_application(user_fs_path, &stage_dir, &app_dir)
+        .await
+        .map_err(|reason| StageEifComponentsError::StageUserApplication {
+            reason,
+            location: std::panic::Location::caller(),
+        })?;
 
     tracing::info!(
         "Staging enclave source from: {}",
         enclave_source_path.display()
     );
-    copy_dir_recursive(enclave_source_path, &enclave_dir).await?;
+    copy_dir_recursive(enclave_source_path, &enclave_dir)
+        .await
+        .map_err(|reason| StageEifComponentsError::CopyEnclaveSource {
+            reason,
+            location: std::panic::Location::caller(),
+        })?;
 
     let enclaveos_commit = manifest
         .as_ref()
@@ -208,37 +377,46 @@ pub async fn stage_eif_components(
         manifest
             .write_to_file(&manifest_path)
             .await
-            .context("Failed to write manifest.json")?;
+            .map_err(|reason| StageEifComponentsError::WriteManifest {
+                reason,
+                location: std::panic::Location::caller(),
+            })?;
         tracing::info!("Wrote manifest to: {}", manifest_path.display());
     }
 
     // Read and render templates
     let templates_dir = match templates_dir {
         Some(dir) => dir.to_path_buf(),
-        None => resolve_templates_dir()?,
+        None => {
+            resolve_templates_dir().map_err(|reason| StageEifComponentsError::ResolveTemplates {
+                reason,
+                location: std::panic::Location::caller(),
+            })?
+        }
     };
 
     let run_sh_template = templates_dir.join("run.sh.template");
-    anyhow::ensure!(
-        run_sh_template.exists(),
-        "run.sh.template not found at {}",
-        run_sh_template.display()
-    );
+    if !run_sh_template.exists() {
+        return Err(StageEifComponentsError::RunShTemplateNotFound {
+            path: run_sh_template,
+            location: std::panic::Location::caller(),
+        });
+    }
 
     let containerfile_template = templates_dir.join("Containerfile.eif");
-    anyhow::ensure!(
-        containerfile_template.exists(),
-        "Containerfile.eif template not found at {}",
-        containerfile_template.display()
-    );
+    if !containerfile_template.exists() {
+        return Err(StageEifComponentsError::ContainerfileTemplateNotFound {
+            path: containerfile_template,
+            location: std::panic::Location::caller(),
+        });
+    }
 
     let caddy_certfp_template = templates_dir.join("caddy-certfp.sh");
-    if e2e_mode == "tls" {
-        anyhow::ensure!(
-            caddy_certfp_template.exists(),
-            "caddy-certfp.sh not found at {}",
-            caddy_certfp_template.display()
-        );
+    if e2e_mode == "tls" && !caddy_certfp_template.exists() {
+        return Err(StageEifComponentsError::CaddyCertfpTemplateNotFound {
+            path: caddy_certfp_template,
+            location: std::panic::Location::caller(),
+        });
     }
 
     let run_sh_content = render_run_sh_template(
@@ -256,7 +434,11 @@ pub async fn stage_eif_components(
         e2e_cors_origins.as_deref(),
         egress,
     )
-    .await?;
+    .await
+    .map_err(|reason| StageEifComponentsError::RenderRunSh {
+        reason,
+        location: std::panic::Location::caller(),
+    })?;
     let containerfile_content = render_containerfile_template(
         &containerfile_template,
         e2e,
@@ -266,21 +448,31 @@ pub async fn stage_eif_components(
         &steve_commit,
         &locksmith_commit,
     )
-    .await?;
+    .await
+    .map_err(|reason| StageEifComponentsError::RenderContainerfile {
+        reason,
+        location: std::panic::Location::caller(),
+    })?;
 
     let run_sh_path = stage_dir.join("run.sh");
-    fs::write(&run_sh_path, &run_sh_content).await?;
+    fs::write(&run_sh_path, &run_sh_content)
+        .await
+        .with_context(Ctx::write_run_sh(&run_sh_path))?;
     tracing::info!("Generated run.sh at: {}", run_sh_path.display());
 
     let containerfile_path = stage_dir.join("Containerfile.eif");
-    fs::write(&containerfile_path, &containerfile_content).await?;
+    fs::write(&containerfile_path, &containerfile_content)
+        .await
+        .with_context(Ctx::write_containerfile(&containerfile_path))?;
     tracing::info!(
         "Generated Containerfile.eif at: {}",
         containerfile_path.display()
     );
 
     if e2e_mode == "tls" {
-        fs::copy(&caddy_certfp_template, stage_dir.join("caddy-certfp.sh")).await?;
+        fs::copy(&caddy_certfp_template, stage_dir.join("caddy-certfp.sh"))
+            .await
+            .with_context(Ctx::copy_caddy(&caddy_certfp_template))?;
     }
 
     tracing::info!(
@@ -319,7 +511,55 @@ fn process_template_blocks(content: &str, enabled_blocks: &[&str]) -> String {
     output
 }
 
+/// Error type for [`render_run_sh_template`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub enum RenderRunShTemplateError {
+    #[error("could not read run.sh template '{path}' [{location}]")]
+    ReadTemplate {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("port {port} is reserved for internal enclave services (reserved range: {reserved_start}-{reserved_end}) [{location}]")]
+    ReservedPort {
+        port: u16,
+        reserved_start: u16,
+        reserved_end: u16,
+        location: dterror::Location,
+    },
+
+    #[error("e2e builds require http_port or exactly one app port so STEVE can reach the app [{location}]")]
+    E2eRequiresHttpPort { location: dterror::Location },
+
+    #[error("http_port {port} must also be listed in ports [{location}]")]
+    HttpPortNotInPorts {
+        port: u16,
+        location: dterror::Location,
+    },
+
+    #[error("tls mode requires egress for ACME certificate issuance [{location}]")]
+    TlsRequiresEgress { location: dterror::Location },
+
+    #[error("tls mode requires http_port so enclave Caddy can reach the app [{location}]")]
+    TlsRequiresHttpPort { location: dterror::Location },
+
+    #[error("unsupported HTTP upstream protocol {protocol:?} [{location}]")]
+    UnsupportedUpstreamProtocol {
+        protocol: String,
+        location: dterror::Location,
+    },
+
+    #[error("tls mode requires a domain for trusted TLS [{location}]")]
+    TlsRequiresDomain { location: dterror::Location },
+}
+
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(skip_all, err)]
 async fn render_run_sh_template(
     template_path: &Path,
     run_command: Option<String>,
@@ -334,10 +574,12 @@ async fn render_run_sh_template(
     locksmith: bool,
     e2e_cors_origins: Option<&str>,
     egress: bool,
-) -> Result<String> {
+) -> Result<String, RenderRunShTemplateError> {
+    use RenderRunShTemplateErrorCtx as Ctx;
+
     let template = fs::read_to_string(template_path)
         .await
-        .context("Failed to read run.sh template")?;
+        .with_context(Ctx::read_template(template_path))?;
 
     let mut enabled_blocks: Vec<&str> = vec![];
     if e2e {
@@ -369,25 +611,30 @@ async fn render_run_sh_template(
         .copied()
         .find(|port| is_reserved_internal_port(*port))
     {
-        anyhow::bail!(
-            "Port {} is reserved for internal enclave services (reserved range: {}-{})",
+        return Err(RenderRunShTemplateError::ReservedPort {
             port,
-            RESERVED_INTERNAL_PORT_START,
-            RESERVED_INTERNAL_PORT_END
-        );
+            reserved_start: RESERVED_INTERNAL_PORT_START,
+            reserved_end: RESERVED_INTERNAL_PORT_END,
+            location: std::panic::Location::caller(),
+        });
     }
 
     let steve_app_port = if e2e {
         let port = match http_port {
             Some(port) => port,
             None if ports.len() == 1 => ports[0],
-            None => anyhow::bail!(
-                "e2e builds require http_port or exactly one app port so STEVE can reach the app"
-            ),
+            None => {
+                return Err(RenderRunShTemplateError::E2eRequiresHttpPort {
+                    location: std::panic::Location::caller(),
+                });
+            }
         };
 
         if !ports.contains(&port) {
-            anyhow::bail!("http_port {} must also be listed in ports", port);
+            return Err(RenderRunShTemplateError::HttpPortNotInPorts {
+                port,
+                location: std::panic::Location::caller(),
+            });
         }
 
         Some(port)
@@ -397,26 +644,39 @@ async fn render_run_sh_template(
 
     let caddy_upstream = if e2e_mode == "tls" {
         if !egress {
-            anyhow::bail!("tls mode requires egress for ACME certificate issuance");
+            return Err(RenderRunShTemplateError::TlsRequiresEgress {
+                location: std::panic::Location::caller(),
+            });
         }
-        let port =
-            http_port.context("tls mode requires http_port so enclave Caddy can reach the app")?;
+        let port = http_port.ok_or_else(|| RenderRunShTemplateError::TlsRequiresHttpPort {
+            location: std::panic::Location::caller(),
+        })?;
         if !ports.contains(&port) {
-            anyhow::bail!("http_port {} must also be listed in ports", port);
+            return Err(RenderRunShTemplateError::HttpPortNotInPorts {
+                port,
+                location: std::panic::Location::caller(),
+            });
         }
         match http_upstream_protocol {
             "http" | "" => format!("http://127.0.0.1:{port}"),
             "h2c" => format!("h2c://127.0.0.1:{port}"),
-            other => anyhow::bail!("unsupported HTTP upstream protocol {other:?}"),
+            other => {
+                return Err(RenderRunShTemplateError::UnsupportedUpstreamProtocol {
+                    protocol: other.to_string(),
+                    location: std::panic::Location::caller(),
+                });
+            }
         }
     } else {
         String::new()
     };
 
     let caddy_domain = if e2e_mode == "tls" {
-        domain
-            .filter(|domain| !domain.is_empty())
-            .context("tls mode requires a domain for trusted TLS")?
+        domain.filter(|domain| !domain.is_empty()).ok_or_else(|| {
+            RenderRunShTemplateError::TlsRequiresDomain {
+                location: std::panic::Location::caller(),
+            }
+        })?
     } else {
         ""
     };
@@ -484,6 +744,22 @@ async fn render_run_sh_template(
     Ok(result)
 }
 
+/// Error type for [`render_containerfile_template`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub enum RenderContainerfileTemplateError {
+    #[error("could not read Containerfile.eif template '{path}' [{location}]")]
+    ReadTemplate {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn render_containerfile_template(
     template_path: &Path,
     e2e: bool,
@@ -492,10 +768,12 @@ async fn render_containerfile_template(
     bootproof_commit: &str,
     steve_commit: &str,
     locksmith_commit: &str,
-) -> Result<String> {
+) -> Result<String, RenderContainerfileTemplateError> {
+    use RenderContainerfileTemplateErrorCtx as Ctx;
+
     let template = fs::read_to_string(template_path)
         .await
-        .context("Failed to read Containerfile.eif template")?;
+        .with_context(Ctx::read_template(template_path))?;
 
     let mut enabled_blocks: Vec<&str> = vec![];
     if e2e {
@@ -515,7 +793,138 @@ async fn render_containerfile_template(
         .replace("{{LOCKSMITH_COMMIT}}", locksmith_commit))
 }
 
+/// Error type for [`build_eif_from_filesystems`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub enum BuildEifFromFilesystemsError {
+    #[error("could not create directory {path} [{location}]")]
+    CreateDir {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("could not stage EIF components: {reason} [{location}]")]
+    Stage {
+        reason: StageEifComponentsError,
+        location: dterror::Location,
+    },
+
+    #[error("could not canonicalize output directory {path} [{location}]")]
+    Canonicalize {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("build context assembly panicked [{location}]")]
+    JoinPanicked {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("could not write build context tar: {reason} [{location}]")]
+    WriteContext {
+        reason: WriteContextTarError,
+        location: dterror::Location,
+    },
+
+    #[error("failed to open build context tar {path} [{location}]")]
+    OpenContextTar {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to execute docker build [{location}]")]
+    ExecDockerBuild {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("could not write build log {path} [{location}]")]
+    WriteBuildLog {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("Docker build failed. See {build_log} for full output [{location}]")]
+    DockerBuildFailed {
+        build_log: PathBuf,
+        location: dterror::Location,
+    },
+
+    #[error("EIF file was not created at: {built_eif}. Check build log: {build_log} [{location}]")]
+    EifNotFound {
+        built_eif: PathBuf,
+        build_log: PathBuf,
+        location: dterror::Location,
+    },
+
+    #[error("failed to copy EIF from {from} to {to} [{location}]")]
+    CopyEif {
+        #[context(borrow = Path)]
+        from: PathBuf,
+        #[context(borrow = Path)]
+        to: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to copy PCRs from {from} to {to} [{location}]")]
+    CopyPcrs {
+        #[context(borrow = Path)]
+        from: PathBuf,
+        #[context(borrow = Path)]
+        to: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to read EIF metadata {path} [{location}]")]
+    ReadMetadata {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to read EIF for hashing {path} [{location}]")]
+    ReadEif {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+}
+
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(skip_all, err)]
 pub async fn build_eif_from_filesystems(
     user_fs_path: &Path,
     _bootproofd_path: &Path,
@@ -538,11 +947,15 @@ pub async fn build_eif_from_filesystems(
     e2e_cors_origins: Option<String>,
     egress: bool,
     templates_dir: Option<&Path>,
-) -> Result<EifFile> {
+) -> Result<EifFile, BuildEifFromFilesystemsError> {
+    use BuildEifFromFilesystemsErrorCtx as Ctx;
+
     tracing::info!("Building EIF using transparent Containerfile approach");
 
     if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent).await?;
+        fs::create_dir_all(parent)
+            .await
+            .with_context(Ctx::create_dir(parent))?;
     }
 
     let stage_dir = stage_eif_components(
@@ -564,15 +977,21 @@ pub async fn build_eif_from_filesystems(
         egress,
         templates_dir,
     )
-    .await?;
+    .await
+    .map_err(|reason| BuildEifFromFilesystemsError::Stage {
+        reason,
+        location: std::panic::Location::caller(),
+    })?;
 
     tracing::info!("Building EIF using Docker and Containerfile.eif");
     let output_dir = stage_dir.join("output");
 
-    fs::create_dir_all(&output_dir).await?;
+    fs::create_dir_all(&output_dir)
+        .await
+        .with_context(Ctx::create_dir(&output_dir))?;
 
-    let output_dir_absolute = std::fs::canonicalize(&output_dir)
-        .context("Failed to get absolute path for output directory")?;
+    let output_dir_absolute =
+        std::fs::canonicalize(&output_dir).with_context(Ctx::canonicalize(&output_dir))?;
 
     tracing::info!(
         "Output directory (absolute): {}",
@@ -610,9 +1029,14 @@ pub async fn build_eif_from_filesystems(
         // Sits beside the stage dir so it is not swept into its own context.
         let ctx_path = work_dir.join("eif-context.tar");
         let ctx_for_task = ctx_path.clone();
-        tokio::task::spawn_blocking(move || write_context_tar(&stage_for_ctx, &ctx_for_task))
-            .await
-            .context("Build context assembly panicked")??;
+        let inner =
+            tokio::task::spawn_blocking(move || write_context_tar(&stage_for_ctx, &ctx_for_task))
+                .await
+                .with_context(Ctx::join_panicked())?;
+        inner.map_err(|reason| BuildEifFromFilesystemsError::WriteContext {
+            reason,
+            location: std::panic::Location::caller(),
+        })?;
         docker_args.push("-".to_string());
         Some(ctx_path)
     } else {
@@ -622,7 +1046,7 @@ pub async fn build_eif_from_filesystems(
 
     let stdin = match &context_tar {
         Some(path) => {
-            let file = std::fs::File::open(path).context("Failed to open build context tar")?;
+            let file = std::fs::File::open(path).with_context(Ctx::open_context_tar(path))?;
             std::process::Stdio::from(file)
         }
         None => std::process::Stdio::null(),
@@ -636,7 +1060,7 @@ pub async fn build_eif_from_filesystems(
         .current_dir(&stage_dir)
         .output()
         .await
-        .context("Failed to execute docker build")?;
+        .with_context(Ctx::exec_docker_build())?;
 
     let build_log_path = stage_dir.join("build.log");
     let mut log_content = String::new();
@@ -644,7 +1068,9 @@ pub async fn build_eif_from_filesystems(
     log_content.push_str(&String::from_utf8_lossy(&output.stdout));
     log_content.push_str("\n=== STDERR ===\n");
     log_content.push_str(&String::from_utf8_lossy(&output.stderr));
-    fs::write(&build_log_path, &log_content).await?;
+    fs::write(&build_log_path, &log_content)
+        .await
+        .with_context(Ctx::write_build_log(&build_log_path))?;
 
     tracing::info!("Build log saved to: {}", build_log_path.display());
     eprintln!("Build log saved to: {}", build_log_path.display());
@@ -655,10 +1081,10 @@ pub async fn build_eif_from_filesystems(
         eprintln!("=== Docker Build Failed ===");
         eprintln!("STDOUT:\n{}", stdout);
         eprintln!("STDERR:\n{}", stderr);
-        anyhow::bail!(
-            "Docker build failed. See {} for full output",
-            build_log_path.display()
-        );
+        return Err(BuildEifFromFilesystemsError::DockerBuildFailed {
+            build_log: build_log_path.clone(),
+            location: std::panic::Location::caller(),
+        });
     }
 
     tracing::info!("Docker build completed successfully");
@@ -686,40 +1112,32 @@ pub async fn build_eif_from_filesystems(
                 output_dir_absolute.display()
             );
         }
-        anyhow::bail!(
-            "EIF file was not created at: {}. Check build log: {}",
-            built_eif.display(),
-            build_log_path.display()
-        );
+        return Err(BuildEifFromFilesystemsError::EifNotFound {
+            built_eif,
+            build_log: build_log_path,
+            location: std::panic::Location::caller(),
+        });
     }
 
-    fs::copy(&built_eif, &output_path).await.with_context(|| {
-        format!(
-            "Failed to copy EIF from {} to {}",
-            built_eif.display(),
-            output_path.display()
-        )
-    })?;
+    fs::copy(&built_eif, &output_path)
+        .await
+        .with_context(Ctx::copy_eif(&built_eif, &output_path))?;
 
     let built_pcrs = output_dir_absolute.join("enclave.pcrs");
     let pcrs_path = output_path.with_extension("pcrs");
     if built_pcrs.exists() {
-        fs::copy(&built_pcrs, &pcrs_path).await.with_context(|| {
-            format!(
-                "Failed to copy PCRs from {} to {}",
-                built_pcrs.display(),
-                pcrs_path.display()
-            )
-        })?;
+        fs::copy(&built_pcrs, &pcrs_path)
+            .await
+            .with_context(Ctx::copy_pcrs(&built_pcrs, &pcrs_path))?;
     }
 
     let metadata = fs::metadata(&output_path)
         .await
-        .context("Failed to read EIF metadata")?;
+        .with_context(Ctx::read_metadata(&output_path))?;
 
     let file_data = fs::read(&output_path)
         .await
-        .context("Failed to read EIF for hashing")?;
+        .with_context(Ctx::read_eif(&output_path))?;
 
     let mut hasher = Sha256::new();
     hasher.update(&file_data);
@@ -749,6 +1167,27 @@ pub async fn build_eif_from_filesystems(
 /// it is never sent to Docker under this name.
 pub(crate) const APP_PAYLOAD_TAR: &str = "app.tar";
 
+/// Error type for [`stage_user_application`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub enum StageUserApplicationError {
+    #[error("could not copy user application directory: {reason} [{location}]")]
+    CopyDir {
+        reason: CopyDirRecursiveError,
+        location: dterror::Location,
+    },
+
+    #[error("failed to stage user application tar {path} [{location}]")]
+    CopyTar {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+}
+
 /// Place the user application into the EIF build context.
 ///
 /// Returns `true` when the application was left as a tar payload for the build
@@ -763,11 +1202,14 @@ pub(crate) const APP_PAYLOAD_TAR: &str = "app.tar";
 /// The narrower extract paths (specific files, static binary) still hand us a
 /// directory. They select a handful of known names where a case collision
 /// cannot arise, so they keep directory staging and the previous behaviour.
+#[tracing::instrument(skip_all, err)]
 async fn stage_user_application(
     user_fs_path: &Path,
     stage_dir: &Path,
     app_dir: &Path,
-) -> Result<bool> {
+) -> Result<bool, StageUserApplicationError> {
+    use StageUserApplicationErrorCtx as Ctx;
+
     let is_tar = user_fs_path.is_file()
         && user_fs_path
             .extension()
@@ -779,7 +1221,12 @@ async fn stage_user_application(
         // by an earlier build in the same work dir would silently win over the
         // directory we are about to stage. Clear it before, not after.
         fs::remove_file(stage_dir.join(APP_PAYLOAD_TAR)).await.ok();
-        copy_dir_recursive(user_fs_path, app_dir).await?;
+        copy_dir_recursive(user_fs_path, app_dir)
+            .await
+            .map_err(|reason| StageUserApplicationError::CopyDir {
+                reason,
+                location: std::panic::Location::caller(),
+            })?;
         return Ok(false);
     }
 
@@ -794,7 +1241,7 @@ async fn stage_user_application(
 
     fs::copy(user_fs_path, stage_dir.join(APP_PAYLOAD_TAR))
         .await
-        .context("Failed to stage user application tar")?;
+        .with_context(Ctx::copy_tar(user_fs_path))?;
 
     Ok(true)
 }
@@ -880,6 +1327,161 @@ fn container_runtime_artifacts(
     drop
 }
 
+/// Error type for [`write_context_tar`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub enum WriteContextTarError {
+    #[error("Failed to create build context tar '{path}' [{location}]")]
+    CreateContextTar {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("Failed to walk stage directory [{location}]")]
+    WalkEntry {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("Failed to strip stage prefix [{location}]")]
+    StripPrefix {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("Failed to read symlink: {path} [{location}]")]
+    ReadSymlink {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("Failed to append directory '{path}' [{location}]")]
+    AppendDir {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("Failed to open: {path} [{location}]")]
+    OpenFile {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("Failed to append file '{path}' [{location}]")]
+    AppendFile {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("Failed to open staged application payload [{location}]")]
+    OpenPayload {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("Failed to read application payload [{location}]")]
+    ReadEntries {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("Failed to read application payload entry [{location}]")]
+    ReadEntry {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to read entry path [{location}]")]
+    EntryPath {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to set header name [{location}]")]
+    SetHeader {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("Failed to read link target: {path} [{location}]")]
+    ReadLinkTarget {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("Link entry has no target: {path} [{location}]")]
+    LinkNoTarget {
+        path: PathBuf,
+        location: dterror::Location,
+    },
+
+    #[error("Failed to stage application link: {path} [{location}]")]
+    AppendLink {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("Failed to stage application entry: {path} [{location}]")]
+    AppendData {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("Failed to finalise build context tar [{location}]")]
+    Finish {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+}
+
 /// Assemble the Docker build context as a tar, expanding the application
 /// payload into `app/` entries on the way through.
 ///
@@ -901,18 +1503,23 @@ fn container_runtime_artifacts(
 /// archive or a bare Dockerfile by running a tar reader over the first 1 KiB
 /// only, and a GNU/PAX extension record at the front defeats that - the context
 /// is then parsed as a Dockerfile and the build dies on `unknown instruction`.
-fn write_context_tar(stage_dir: &Path, context_tar: &Path) -> Result<()> {
+#[tracing::instrument(skip_all, err)]
+fn write_context_tar(stage_dir: &Path, context_tar: &Path) -> Result<(), WriteContextTarError> {
     use walkdir::WalkDir;
+    use WriteContextTarErrorCtx as Ctx;
 
     let payload = stage_dir.join(APP_PAYLOAD_TAR);
-    let out = std::fs::File::create(context_tar).context("Failed to create build context tar")?;
+    let out =
+        std::fs::File::create(context_tar).with_context(Ctx::create_context_tar(context_tar))?;
     let mut builder = tar::Builder::new(out);
     builder.follow_symlinks(false);
 
     for entry in WalkDir::new(stage_dir).min_depth(1).follow_links(false) {
-        let entry = entry.context("Failed to walk stage directory")?;
+        let entry = entry.with_context(Ctx::walk_entry())?;
         let path = entry.path();
-        let rel = path.strip_prefix(stage_dir)?;
+        let rel = path
+            .strip_prefix(stage_dir)
+            .with_context(Ctx::strip_prefix())?;
 
         // The payload is expanded below under app/; it must not also appear
         // verbatim, or the context carries a redundant 9 MB blob.
@@ -922,20 +1529,24 @@ fn write_context_tar(stage_dir: &Path, context_tar: &Path) -> Result<()> {
 
         let file_type = entry.file_type();
         if file_type.is_dir() {
-            builder.append_dir(rel, path)?;
+            builder
+                .append_dir(rel, path)
+                .with_context(Ctx::append_dir(rel))?;
         } else if file_type.is_symlink() {
-            let target = std::fs::read_link(path)
-                .with_context(|| format!("Failed to read symlink: {}", path.display()))?;
+            let target = std::fs::read_link(path).with_context(Ctx::read_symlink(path))?;
             let mut header = tar::Header::new_gnu();
             header.set_entry_type(tar::EntryType::Symlink);
             header.set_size(0);
             header.set_mode(0o777);
             header.set_cksum();
-            builder.append_link(&mut header, rel, &target)?;
+            builder
+                .append_link(&mut header, rel, &target)
+                .with_context(Ctx::append_file(rel))?;
         } else {
-            let mut file = std::fs::File::open(path)
-                .with_context(|| format!("Failed to open: {}", path.display()))?;
-            builder.append_file(rel, &mut file)?;
+            let mut file = std::fs::File::open(path).with_context(Ctx::open_file(path))?;
+            builder
+                .append_file(rel, &mut file)
+                .with_context(Ctx::append_file(rel))?;
         }
     }
 
@@ -943,16 +1554,15 @@ fn write_context_tar(stage_dir: &Path, context_tar: &Path) -> Result<()> {
     // can be identified by their surroundings rather than by a hardcoded path.
     let mut all_entries = std::collections::BTreeMap::new();
     {
-        let payload_file =
-            std::fs::File::open(&payload).context("Failed to open staged application payload")?;
+        let payload_file = std::fs::File::open(&payload).with_context(Ctx::open_payload())?;
         let mut archive = tar::Archive::new(payload_file);
-        for entry in archive
-            .entries()
-            .context("Failed to read application payload")?
-        {
-            let entry = entry.context("Failed to read application payload entry")?;
+        for entry in archive.entries().with_context(Ctx::read_entries())? {
+            let entry = entry.with_context(Ctx::read_entry())?;
             let entry_type = entry.header().entry_type();
-            all_entries.insert(normalized(&entry.path()?), entry_type);
+            all_entries.insert(
+                normalized(&entry.path().with_context(Ctx::entry_path())?),
+                entry_type,
+            );
         }
     }
     let skip = container_runtime_artifacts(&all_entries);
@@ -967,16 +1577,12 @@ fn write_context_tar(stage_dir: &Path, context_tar: &Path) -> Result<()> {
     // Second pass: re-emit every payload entry under app/, header intact, so
     // file type, mode, and link targets survive exactly as `docker export`
     // recorded them.
-    let payload_file =
-        std::fs::File::open(&payload).context("Failed to open staged application payload")?;
+    let payload_file = std::fs::File::open(&payload).with_context(Ctx::open_payload())?;
     let mut archive = tar::Archive::new(payload_file);
     let mut count = 0usize;
-    for entry in archive
-        .entries()
-        .context("Failed to read application payload")?
-    {
-        let mut entry = entry.context("Failed to read application payload entry")?;
-        let entry_path = entry.path()?.into_owned();
+    for entry in archive.entries().with_context(Ctx::read_entries())? {
+        let mut entry = entry.with_context(Ctx::read_entry())?;
+        let entry_path = entry.path().with_context(Ctx::entry_path())?.into_owned();
         if skip.contains(&normalized(&entry_path)) {
             continue;
         }
@@ -992,8 +1598,8 @@ fn write_context_tar(stage_dir: &Path, context_tar: &Path) -> Result<()> {
         // date. Match the established behaviour rather than the tar.
         header.set_uid(0);
         header.set_gid(0);
-        header.set_username("")?;
-        header.set_groupname("")?;
+        header.set_username("").with_context(Ctx::set_header())?;
+        header.set_groupname("").with_context(Ctx::set_header())?;
 
         let staged_path = Path::new("app").join(&entry_path);
 
@@ -1003,8 +1609,11 @@ fn write_context_tar(stage_dir: &Path, context_tar: &Path) -> Result<()> {
             // record, so the header alone carries a truncated name or none.
             let target = entry
                 .link_name()
-                .with_context(|| format!("Failed to read link target: {}", entry_path.display()))?
-                .with_context(|| format!("Link entry has no target: {}", entry_path.display()))?
+                .with_context(Ctx::read_link_target(&entry_path))?
+                .ok_or_else(|| WriteContextTarError::LinkNoTarget {
+                    path: entry_path.clone(),
+                    location: std::panic::Location::caller(),
+                })?
                 .into_owned();
 
             // A hard link names another entry *within this archive*, so
@@ -1021,70 +1630,126 @@ fn write_context_tar(stage_dir: &Path, context_tar: &Path) -> Result<()> {
 
             builder
                 .append_link(&mut header, &staged_path, &staged_target)
-                .with_context(|| {
-                    format!("Failed to stage application link: {}", entry_path.display())
-                })?;
+                .with_context(Ctx::append_link(&entry_path))?;
         } else {
             builder
                 .append_data(&mut header, &staged_path, &mut entry)
-                .with_context(|| {
-                    format!(
-                        "Failed to stage application entry: {}",
-                        entry_path.display()
-                    )
-                })?;
+                .with_context(Ctx::append_data(&entry_path))?;
         }
         count += 1;
     }
 
-    builder
-        .finish()
-        .context("Failed to finalise build context tar")?;
+    builder.finish().with_context(Ctx::finish())?;
     tracing::info!("Build context assembled with {} application entries", count);
     Ok(())
 }
 
-async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    use walkdir::WalkDir;
+/// Error type for [`copy_dir_recursive`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub enum CopyDirRecursiveError {
+    #[error("could not create directory {path} [{location}]")]
+    CreateDir {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
 
-    fs::create_dir_all(dst).await?;
+    #[error("failed to read directory entry [{location}]")]
+    ReadEntry {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("failed to strip path prefix [{location}]")]
+    StripPrefix {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("Failed to read symlink: {path} [{location}]")]
+    ReadLink {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("Failed to create symlink:\n  link: {link}\n  target: {target} [{location}]")]
+    CreateSymlink {
+        #[context(borrow = Path)]
+        link: PathBuf,
+        #[context(borrow = Path)]
+        target: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("Failed to copy file:\n  src: {src}\n  dst: {dst} [{location}]")]
+    CopyFile {
+        #[context(borrow = Path)]
+        src: PathBuf,
+        #[context(borrow = Path)]
+        dst: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
+async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), CopyDirRecursiveError> {
+    use walkdir::WalkDir;
+    use CopyDirRecursiveErrorCtx as Ctx;
+
+    fs::create_dir_all(dst)
+        .await
+        .with_context(Ctx::create_dir(dst))?;
 
     for entry in WalkDir::new(src).follow_links(false) {
-        let entry = entry?;
+        let entry = entry.with_context(Ctx::read_entry())?;
         let path = entry.path();
-        let rel_path = path.strip_prefix(src)?;
+        let rel_path = path.strip_prefix(src).with_context(Ctx::strip_prefix())?;
         let dst_path = dst.join(rel_path);
 
         let file_type = entry.file_type();
 
         if file_type.is_dir() {
-            fs::create_dir_all(&dst_path).await?;
+            fs::create_dir_all(&dst_path)
+                .await
+                .with_context(Ctx::create_dir(&dst_path))?;
         } else if file_type.is_symlink() {
             if let Some(parent) = dst_path.parent() {
-                fs::create_dir_all(parent).await?;
+                fs::create_dir_all(parent)
+                    .await
+                    .with_context(Ctx::create_dir(parent))?;
             }
-            let target = std::fs::read_link(path)
-                .with_context(|| format!("Failed to read symlink: {}", path.display()))?;
+            let target = std::fs::read_link(path).with_context(Ctx::read_link(path))?;
             let _ = fs::remove_file(&dst_path).await;
-            std::os::unix::fs::symlink(&target, &dst_path).with_context(|| {
-                format!(
-                    "Failed to create symlink:\n  link: {}\n  target: {}",
-                    dst_path.display(),
-                    target.display()
-                )
-            })?;
+            std::os::unix::fs::symlink(&target, &dst_path)
+                .with_context(Ctx::create_symlink(&dst_path, &target))?;
         } else {
             if let Some(parent) = dst_path.parent() {
-                fs::create_dir_all(parent).await?;
+                fs::create_dir_all(parent)
+                    .await
+                    .with_context(Ctx::create_dir(parent))?;
             }
 
-            fs::copy(path, &dst_path).await.with_context(|| {
-                format!(
-                    "Failed to copy file:\n  src: {}\n  dst: {}",
-                    path.display(),
-                    dst_path.display()
-                )
-            })?;
+            fs::copy(path, &dst_path)
+                .await
+                .with_context(Ctx::copy_file(path, &dst_path))?;
         }
     }
 
@@ -1112,7 +1777,7 @@ mod tests {
         )
     }
 
-    async fn stage_test_manifest(key_exchange: &str) -> Result<EnclaveManifest> {
+    async fn stage_test_manifest(key_exchange: &str) -> anyhow::Result<EnclaveManifest> {
         let work_dir = tempfile::tempdir()?;
         let user_dir = work_dir.path().join("user");
         let enclave_dir = work_dir.path().join("enclave");
@@ -1140,7 +1805,7 @@ mod tests {
         )
         .await?;
 
-        EnclaveManifest::read_from_file(&stage_dir.join("manifest.json")).await
+        Ok(EnclaveManifest::read_from_file(&stage_dir.join("manifest.json")).await?)
     }
 
     fn run_template_file() -> tempfile::NamedTempFile {
