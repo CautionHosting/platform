@@ -267,9 +267,10 @@ impl UnitConfig {
                         location: std::panic::Location::caller(),
                     });
                 }
-                let quoted = shlex::try_quote(value).map_err(|_| FromStrError::UnquotableCommand {
-                    location: std::panic::Location::caller(),
-                })?;
+                let quoted =
+                    shlex::try_quote(value).map_err(|_| FromStrError::UnquotableCommand {
+                        location: std::panic::Location::caller(),
+                    })?;
                 out.push_str("export ");
                 out.push_str(key);
                 out.push('=');
@@ -383,7 +384,10 @@ pub enum DomainValidationError {
 #[derive(Debug, thiserror::Error)]
 pub enum SshKeyValidationError {
     #[error("ssh key exceeds the maximum length of {max} characters")]
-    TooLong { max: usize, location: dterror::Location },
+    TooLong {
+        max: usize,
+        location: dterror::Location,
+    },
 
     #[error("ssh key is missing a key type field")]
     MissingType { location: dterror::Location },
@@ -498,20 +502,26 @@ pub enum FromStrError {
         location: dterror::Location,
     },
 
-    #[error("key_exchange is only supported when e2e_encryption resolves to mode = \"steve\" [{location}]")]
+    #[error(
+        "key_exchange is only supported when e2e_encryption resolves to mode = \"steve\" [{location}]"
+    )]
     KeyExchangeRequiresSteve {
         #[location]
         location: dterror::Location,
     },
 
-    #[error("Invalid env expression for key '{key}'; only string literals and env::vault(...) are allowed [{location}]")]
+    #[error(
+        "Invalid env expression for key '{key}'; only string literals and env::vault(...) are allowed [{location}]"
+    )]
     InvalidEnvExpression {
         key: String,
         #[location]
         location: dterror::Location,
     },
 
-    #[error("Invalid env key '{key}'; keys must match [A-Za-z_][A-Za-z0-9_]* to be safely exported [{location}]")]
+    #[error(
+        "Invalid env key '{key}'; keys must match [A-Za-z_][A-Za-z0-9_]* to be safely exported [{location}]"
+    )]
     InvalidEnvKey {
         key: String,
         #[location]
@@ -656,12 +666,16 @@ fn sanitize_ssh_key(key: &str) -> Result<String, SshKeyValidationError> {
     }
 
     let mut fields = key.split_whitespace();
-    let key_type = fields.next().ok_or_else(|| SshKeyValidationError::MissingType {
-        location: std::panic::Location::caller(),
-    })?;
-    let body = fields.next().ok_or_else(|| SshKeyValidationError::MissingBody {
-        location: std::panic::Location::caller(),
-    })?;
+    let key_type = fields
+        .next()
+        .ok_or_else(|| SshKeyValidationError::MissingType {
+            location: std::panic::Location::caller(),
+        })?;
+    let body = fields
+        .next()
+        .ok_or_else(|| SshKeyValidationError::MissingBody {
+            location: std::panic::Location::caller(),
+        })?;
 
     if !(key_type.starts_with("ssh-")
         || key_type.starts_with("ecdsa-")
@@ -702,13 +716,14 @@ fn sanitize_ssh_key(key: &str) -> Result<String, SshKeyValidationError> {
 /// without rejecting any legitimate value.
 #[tracing::instrument(skip_all, err)]
 fn validate_aws_id(prefix: &str, value: &str) -> Result<(), AwsIdValidationError> {
-    let id = value.strip_prefix(prefix).and_then(|rest| rest.strip_prefix('-')).ok_or_else(|| {
-        AwsIdValidationError::WrongPrefix {
+    let id = value
+        .strip_prefix(prefix)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .ok_or_else(|| AwsIdValidationError::WrongPrefix {
             prefix: prefix.to_string(),
             value: value.to_string(),
             location: std::panic::Location::caller(),
-        }
-    })?;
+        })?;
     if !matches!(id.len(), 8 | 17)
         || !id
             .bytes()
@@ -1037,9 +1052,10 @@ impl ConfigurationFile {
             })?;
             match platform.as_str() {
                 "aws" => {
-                    let region = aws_region.ok_or(FromProcfileError::ManagedOnPremMissingRegion {
-                        location: std::panic::Location::caller(),
-                    })?;
+                    let region =
+                        aws_region.ok_or(FromProcfileError::ManagedOnPremMissingRegion {
+                            location: std::panic::Location::caller(),
+                        })?;
                     Some(Provider::Aws(AwsProviderConfig {
                         region,
                         vpc_id: aws_vpc_id,
@@ -1085,8 +1101,7 @@ impl ConfigurationFile {
     pub fn from_str(s: &str) -> Result<Self, FromStrError> {
         use FromStrErrorCtx as Ctx;
 
-        let mut config: ConfigurationFile =
-            hcl::from_str(s).with_context(Ctx::hcl_parse())?;
+        let mut config: ConfigurationFile = hcl::from_str(s).with_context(Ctx::hcl_parse())?;
 
         if let Some(provider) = config.caution.as_ref().and_then(|c| c.provider.as_ref())
             && let Err(reason) = validate_provider(provider)
@@ -1201,9 +1216,11 @@ impl ConfigurationFile {
             for enclave in enclaves.values_mut() {
                 if let Some(debug) = enclave.debug.as_mut() {
                     for key in debug.ssh_keys.iter_mut() {
-                        *key = sanitize_ssh_key(key).map_err(|reason| FromStrError::InvalidSshKey {
-                            reason,
-                            location: std::panic::Location::caller(),
+                        *key = sanitize_ssh_key(key).map_err(|reason| {
+                            FromStrError::InvalidSshKey {
+                                reason,
+                                location: std::panic::Location::caller(),
+                            }
                         })?;
                     }
                 }
@@ -1526,7 +1543,10 @@ enclave "main" {
 }
 "#;
         let err = ConfigurationFile::from_str(hcl).unwrap_err();
-        assert!(matches!(err, FromStrError::HttpPortNotInPorts { port: 9090, .. }));
+        assert!(matches!(
+            err,
+            FromStrError::HttpPortNotInPorts { port: 9090, .. }
+        ));
     }
 
     #[test]
@@ -1931,7 +1951,8 @@ enclave "main" {
     #[test]
     fn test_from_procfile_preserves_safe_ssh_key() {
         // A fully safe key (type, base64 body, and comment) is stored unchanged.
-        let procfile = "run: /app\nports: 8080\ndebug: true\nssh_keys: ssh-ed25519 AAAAC3Nza ryan@left\n";
+        let procfile =
+            "run: /app\nports: 8080\ndebug: true\nssh_keys: ssh-ed25519 AAAAC3Nza ryan@left\n";
         let config = ConfigurationFile::from_procfile(procfile).unwrap();
         let enclave = config.enclave.unwrap();
         let debug = enclave.get("default").unwrap().debug.as_ref().unwrap();
@@ -1941,7 +1962,8 @@ enclave "main" {
     #[test]
     fn test_from_procfile_strips_unsafe_ssh_key_comment() {
         // An injection payload in the comment is stripped; the key material survives.
-        let procfile = "run: /app\nports: 8080\ndebug: true\nssh_keys: ssh-rsa AAAAB3Nza ; rm -rf /\n";
+        let procfile =
+            "run: /app\nports: 8080\ndebug: true\nssh_keys: ssh-rsa AAAAB3Nza ; rm -rf /\n";
         let config = ConfigurationFile::from_procfile(procfile).unwrap();
         let enclave = config.enclave.unwrap();
         let debug = enclave.get("default").unwrap().debug.as_ref().unwrap();
@@ -2559,7 +2581,10 @@ enclave "default" {
         let procfile = "run: /app\nports: 8080\nhttp_port: 9000\ndomain: x.example.com\n";
         let err = ConfigurationFile::from_procfile(procfile).unwrap_err();
         assert!(
-            matches!(err, FromProcfileError::HttpPortNotInPorts { port: 9000, .. }),
+            matches!(
+                err,
+                FromProcfileError::HttpPortNotInPorts { port: 9000, .. }
+            ),
             "unexpected error: {err}"
         );
     }
@@ -2601,7 +2626,10 @@ managed_on_prem: true
 platform: aws
 ";
         let err = ConfigurationFile::from_procfile(procfile).unwrap_err();
-        assert!(matches!(err, FromProcfileError::ManagedOnPremMissingRegion { .. }));
+        assert!(matches!(
+            err,
+            FromProcfileError::ManagedOnPremMissingRegion { .. }
+        ));
     }
 
     fn default_unit(hcl: &str) -> UnitConfig {
@@ -3302,7 +3330,9 @@ enclave "test" {
     fn sanitize_ssh_key_rejects_too_long() {
         let long = format!("ssh-ed25519 {}", "A".repeat(MAX_SSH_KEY_LEN));
         let err = sanitize_ssh_key(&long).unwrap_err();
-        assert!(matches!(err, SshKeyValidationError::TooLong { max, .. } if max == MAX_SSH_KEY_LEN));
+        assert!(
+            matches!(err, SshKeyValidationError::TooLong { max, .. } if max == MAX_SSH_KEY_LEN)
+        );
     }
 
     #[test]
@@ -3320,6 +3350,8 @@ enclave "test" {
             security_group_id: None,
         });
         let err = validate_provider(&provider).unwrap_err();
-        assert!(matches!(err, AwsIdValidationError::MalformedId { prefix, .. } if prefix == "subnet"));
+        assert!(
+            matches!(err, AwsIdValidationError::MalformedId { prefix, .. } if prefix == "subnet")
+        );
     }
 }

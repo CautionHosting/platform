@@ -108,8 +108,7 @@ impl PricingConfig {
     pub fn parse(contents: &str, paddle_enabled: bool) -> Result<Self, ParsePricingError> {
         use ParsePricingErrorCtx as Ctx;
 
-        let mut config: Self = serde_json::from_str(contents)
-            .with_context(Ctx::json())?;
+        let mut config: Self = serde_json::from_str(contents).with_context(Ctx::json())?;
         normalize_tiers(&mut config.subscription_tiers).map_err(|e| {
             ParsePricingError::NormalizeTiers {
                 reason: e,
@@ -146,12 +145,13 @@ fn normalize_tiers(tiers: &mut DuplicateCheckedTiers) -> Result<(), NormalizeTie
                 });
             }
             (Some(monthly), None) if monthly > 0 => {
-                tier.annual_cents = monthly.checked_mul(12).ok_or_else(|| {
-                    NormalizeTiersError::Overflow {
-                        key: key.clone(),
-                        location: std::panic::Location::caller(),
-                    }
-                })?
+                tier.annual_cents =
+                    monthly
+                        .checked_mul(12)
+                        .ok_or_else(|| NormalizeTiersError::Overflow {
+                            key: key.clone(),
+                            location: std::panic::Location::caller(),
+                        })?
             }
             (None, Some(annual)) if annual > 0 && annual % 12 == 0 => {
                 tracing::warn!(tier = %key, "annual_cents is deprecated; converted deterministically to monthly_cents");
@@ -200,17 +200,22 @@ fn validate_catalog(
             location: std::panic::Location::caller(),
         });
     }
-    validate_optional_id(catalog.product_id.as_deref(), "pro_", "product", paddle_enabled)
-        .map_err(|e| match e {
-            ValidateOptionalIdError::Missing { kind, .. } => ValidateCatalogError::IdRequired {
-                kind,
-                location: std::panic::Location::caller(),
-            },
-            ValidateOptionalIdError::Malformed { kind, .. } => ValidateCatalogError::MalformedId {
-                kind,
-                location: std::panic::Location::caller(),
-            },
-        })?;
+    validate_optional_id(
+        catalog.product_id.as_deref(),
+        "pro_",
+        "product",
+        paddle_enabled,
+    )
+    .map_err(|e| match e {
+        ValidateOptionalIdError::Missing { kind, .. } => ValidateCatalogError::IdRequired {
+            kind,
+            location: std::panic::Location::caller(),
+        },
+        ValidateOptionalIdError::Malformed { kind, .. } => ValidateCatalogError::MalformedId {
+            kind,
+            location: std::panic::Location::caller(),
+        },
+    })?;
 
     let expected = [
         ("1_enclave", 1, 25000),
@@ -238,10 +243,12 @@ fn validate_catalog(
     let mut limits = HashSet::new();
     let mut ids = HashSet::new();
     for (key, expected_enclaves, expected_monthly) in expected {
-        let tier = tiers.get(key).ok_or_else(|| ValidateCatalogError::MissingTier {
-            key: key.to_owned(),
-            location: std::panic::Location::caller(),
-        })?;
+        let tier = tiers
+            .get(key)
+            .ok_or_else(|| ValidateCatalogError::MissingTier {
+                key: key.to_owned(),
+                location: std::panic::Location::caller(),
+            })?;
         if !(1..=5).contains(&tier.enclaves) {
             return Err(ValidateCatalogError::EnclaveOutOfRange {
                 key: key.to_owned(),
@@ -349,23 +356,38 @@ pub enum ParsePricingError {
     },
 
     #[error("invalid pricing configuration: {reason} [{location}]")]
-    MissingCatalog { reason: String, location: dterror::Location },
+    MissingCatalog {
+        reason: String,
+        location: dterror::Location,
+    },
 }
 
 /// Leaf error for tier normalization.
 #[derive(Debug, thiserror::Error)]
 pub enum NormalizeTiersError {
     #[error("tier `{key}` has both monthly_cents and annual_cents")]
-    BothAmounts { key: String, location: dterror::Location },
+    BothAmounts {
+        key: String,
+        location: dterror::Location,
+    },
 
     #[error("tier `{key}` monthly_cents overflows")]
-    Overflow { key: String, location: dterror::Location },
+    Overflow {
+        key: String,
+        location: dterror::Location,
+    },
 
     #[error("tier `{key}` annual_cents must be positive and divisible by 12")]
-    InvalidAnnual { key: String, location: dterror::Location },
+    InvalidAnnual {
+        key: String,
+        location: dterror::Location,
+    },
 
     #[error("tier `{key}` requires a positive monthly_cents or annual_cents")]
-    MissingAmount { key: String, location: dterror::Location },
+    MissingAmount {
+        key: String,
+        location: dterror::Location,
+    },
 }
 
 /// Leaf error for catalog validation.
@@ -384,10 +406,16 @@ pub enum ValidateCatalogError {
     EmptyTaxCategory { location: dterror::Location },
 
     #[error("Paddle {kind} ID is required")]
-    IdRequired { kind: String, location: dterror::Location },
+    IdRequired {
+        kind: String,
+        location: dterror::Location,
+    },
 
     #[error("malformed Paddle {kind} ID")]
-    MalformedId { kind: String, location: dterror::Location },
+    MalformedId {
+        kind: String,
+        location: dterror::Location,
+    },
 
     #[error("subscription_tiers must contain exactly five self-service tiers")]
     WrongTierCount { location: dterror::Location },
@@ -396,19 +424,31 @@ pub enum ValidateCatalogError {
     MixedCycles { location: dterror::Location },
 
     #[error("subscription_tiers missing tier `{key}`")]
-    MissingTier { key: String, location: dterror::Location },
+    MissingTier {
+        key: String,
+        location: dterror::Location,
+    },
 
     #[error("tier `{key}` enclave limit must be in 1..=5")]
-    EnclaveOutOfRange { key: String, location: dterror::Location },
+    EnclaveOutOfRange {
+        key: String,
+        location: dterror::Location,
+    },
 
     #[error("duplicate enclave limit")]
     DuplicateEnclaveLimit { location: dterror::Location },
 
     #[error("tier `{key}` has an invalid enclave limit")]
-    InvalidEnclaveLimit { key: String, location: dterror::Location },
+    InvalidEnclaveLimit {
+        key: String,
+        location: dterror::Location,
+    },
 
     #[error("tier `{key}` has an invalid monthly amount")]
-    InvalidMonthlyAmount { key: String, location: dterror::Location },
+    InvalidMonthlyAmount {
+        key: String,
+        location: dterror::Location,
+    },
 
     #[error("duplicate nonempty Paddle price ID")]
     DuplicatePriceId { location: dterror::Location },
@@ -418,7 +458,10 @@ pub enum ValidateCatalogError {
 #[derive(Debug, thiserror::Error)]
 pub enum ValidateOptionalIdError {
     #[error("Paddle {kind} ID is required")]
-    Missing { kind: String, location: dterror::Location },
+    Missing {
+        kind: String,
+        location: dterror::Location,
+    },
 
     #[error("malformed Paddle {kind} ID")]
     Malformed {
