@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use axum::{
+    Json,
     extract::{Extension, Request, State},
     http::{HeaderMap, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::Serialize;
 use sqlx::PgPool;
@@ -244,16 +244,15 @@ pub async fn ensure_user_has_org(db: &PgPool, user_id: Uuid) -> Result<(), Statu
         return Err(StatusCode::PAYMENT_REQUIRED);
     }
 
-    let has_org: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM organization_members WHERE user_id = $1)",
-    )
-    .bind(user_id)
-    .fetch_one(db)
-    .await
-    .map_err(|e| {
-        tracing::error!("Failed to check user org membership: {:?}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let has_org: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM organization_members WHERE user_id = $1)")
+            .bind(user_id)
+            .fetch_one(db)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to check user org membership: {:?}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
 
     if has_org {
         tracing::debug!("User {} already has organization", user_id);

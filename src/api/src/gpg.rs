@@ -7,7 +7,7 @@
 //! - CAUTION_GPG_PRIVATE_KEY: ASCII-armored or base64-encoded key content
 //! - CAUTION_GPG_KEY_PATH: path to key file
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use openpgp::armor::{Kind, Reader, ReaderMode};
 use openpgp::cert::prelude::*;
 use openpgp::crypto::SessionKey;

@@ -356,7 +356,11 @@ impl AppState {
         self.current.status = None;
     }
 
-    fn build_resource_rows(&self, resource: &Resource, relations: Vec<RelationSummary>) -> Vec<Row> {
+    fn build_resource_rows(
+        &self,
+        resource: &Resource,
+        relations: Vec<RelationSummary>,
+    ) -> Vec<Row> {
         let mut rows = relations.into_iter().map(Row::Relation).collect::<Vec<_>>();
         if resource.kind == crate::model::ResourceKind::App {
             rows.push(Row::BuildHistory(resource.summary()));

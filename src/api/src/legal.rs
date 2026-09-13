@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use axum::{
+    Json,
     extract::{Extension, State},
     http::{HeaderMap, StatusCode},
-    Json,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::{validation::validate_email, AppState, AuthContext};
+use crate::{AppState, AuthContext, validation::validate_email};
 
 #[derive(Debug, Clone, FromRow)]
 struct LegalDocumentIdentity {
@@ -163,9 +163,7 @@ struct RecipientSelection {
 }
 
 impl RecipientSelection {
-    fn from_request(
-        request: &SendLegalNoticesRequest,
-    ) -> Result<Self, (StatusCode, String)> {
+    fn from_request(request: &SendLegalNoticesRequest) -> Result<Self, (StatusCode, String)> {
         let recipient_ids = match request.recipient_ids.as_ref() {
             Some(ids) if ids.is_empty() => {
                 return Err((
@@ -780,8 +778,7 @@ fn legal_notice_document_ids(
         if !seen_types.insert(document.document_type.as_str()) {
             return Err((
                 StatusCode::BAD_REQUEST,
-                "Legal notice batches can include at most one document of each type"
-                    .to_string(),
+                "Legal notice batches can include at most one document of each type".to_string(),
             ));
         }
     }
@@ -1119,7 +1116,10 @@ mod tests {
 
     #[test]
     fn test_humanize_document_type() {
-        assert_eq!(humanize_document_type("terms_of_service"), "Terms Of Service");
+        assert_eq!(
+            humanize_document_type("terms_of_service"),
+            "Terms Of Service"
+        );
         assert_eq!(humanize_document_type("privacy_notice"), "Privacy Notice");
         assert_eq!(humanize_document_type("dpa"), "Dpa");
     }
@@ -1299,7 +1299,10 @@ mod tests {
         assert!(legal_notice_document_ids(&documents).is_ok());
 
         let dup_type_id = documents[0].document_type.clone();
-        let documents_with_dup = vec![make(Uuid::new_v4(), &dup_type_id), make(Uuid::new_v4(), &dup_type_id)];
+        let documents_with_dup = vec![
+            make(Uuid::new_v4(), &dup_type_id),
+            make(Uuid::new_v4(), &dup_type_id),
+        ];
         let error = legal_notice_document_ids(&documents_with_dup).unwrap_err();
         assert_eq!(error.0, StatusCode::BAD_REQUEST);
         assert!(error.1.contains("at most one document of each type"));

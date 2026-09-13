@@ -274,7 +274,11 @@ fn table_row(row: &Row) -> Option<TableRow<'static>> {
         Row::Aws(row) => Some(aws::table_row(row)),
         Row::AwsFinding(finding) => Some(aws::finding_row(finding)),
         Row::Action(action) => Some(TableRow::new([
-            Cell::from("ACTION").style(Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Cell::from("ACTION").style(
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Cell::from(terminal_text(action.label())),
         ])),
         Row::AwsHost(_)
@@ -394,7 +398,8 @@ fn render_resource(
                 Cell::from("View"),
             ])),
             Row::Action(action) => Some(TableRow::new([
-                Cell::from(terminal_text(action.label())).style(Style::default().fg(Color::Magenta)),
+                Cell::from(terminal_text(action.label()))
+                    .style(Style::default().fg(Color::Magenta)),
                 Cell::from("Execute").style(Style::default().fg(Color::Red)),
             ])),
             _ => None,
@@ -605,9 +610,7 @@ fn render_confirmation(frame: &mut Frame<'_>, confirmation: &crate::state::Pendi
                 .padding(Padding::left(1))
                 .title(Span::styled(
                     " CONFIRM ACTION ",
-                    Style::default()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 )),
         ),
         area,

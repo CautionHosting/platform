@@ -6,16 +6,14 @@ use dterror::{BoxError, CtxError, Location};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tempfile::TempDir;
 use std::sync::{Arc, LazyLock};
+use tempfile::TempDir;
 use tokio::fs;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 // Module-level semaphore for lockfile generation coordination (LazyLock enables deref access)
-static LOCKFILE_SEMAPHORE: LazyLock<Arc<Semaphore>> = LazyLock::new(|| {
-    Arc::new(Semaphore::new(1))
-});
+static LOCKFILE_SEMAPHORE: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(1)));
 
 /// Generate lockfile config using hcl-rs types instead of string template
 fn generate_provider_lock_config() -> String {
@@ -39,7 +37,9 @@ const TOFU_TIMEOUT_SECS: u64 = 600;
 
 /// Returns the path to the cached provider lockfile in the data directory.
 pub fn cached_lockfile_path(data_dir: &str) -> PathBuf {
-    Path::new(data_dir).join("terraform").join(".terraform.lock.hcl")
+    Path::new(data_dir)
+        .join("terraform")
+        .join(".terraform.lock.hcl")
 }
 
 /// Attempts to get or generate the provider lockfile on-demand.
@@ -51,7 +51,10 @@ pub fn cached_lockfile_path(data_dir: &str) -> PathBuf {
 /// - Always fail-open: logs warning on error, releases semaphore, returns None
 #[tracing::instrument(skip_all)]
 pub async fn get_or_generate_lockfile(data_dir: &str) -> Option<PathBuf> {
-    let permit = LOCKFILE_SEMAPHORE.acquire().await.expect("lockfile semaphore is never closed");
+    let permit = LOCKFILE_SEMAPHORE
+        .acquire()
+        .await
+        .expect("lockfile semaphore is never closed");
 
     let lockfile_path = cached_lockfile_path(data_dir);
 
@@ -68,7 +71,10 @@ pub async fn get_or_generate_lockfile(data_dir: &str) -> Option<PathBuf> {
     let temp_dir = match TempDir::new() {
         Ok(d) => d,
         Err(e) => {
-            tracing::warn!("Failed to create temp dir for lockfile generation: {}; proceeding without cache", e);
+            tracing::warn!(
+                "Failed to create temp dir for lockfile generation: {}; proceeding without cache",
+                e
+            );
             drop(permit);
             return None;
         }
@@ -79,7 +85,10 @@ pub async fn get_or_generate_lockfile(data_dir: &str) -> Option<PathBuf> {
 
     let main_tf_path = temp_dir.path().join("main.tf");
     if let Err(e) = std::fs::write(&main_tf_path, minimal_tf) {
-        tracing::warn!("Failed to write temp .tf for lockfile generation: {}; proceeding without cache", e);
+        tracing::warn!(
+            "Failed to write temp .tf for lockfile generation: {}; proceeding without cache",
+            e
+        );
         drop(permit);
         return None;
     }
@@ -92,7 +101,10 @@ pub async fn get_or_generate_lockfile(data_dir: &str) -> Option<PathBuf> {
     let output = match run_with_timeout(&mut cmd, 60) {
         Ok(o) => o,
         Err(e) => {
-            tracing::warn!("tofu providers lock failed: {}; proceeding without cache", e);
+            tracing::warn!(
+                "tofu providers lock failed: {}; proceeding without cache",
+                e
+            );
             drop(permit);
             return None;
         }
@@ -116,7 +128,11 @@ pub async fn get_or_generate_lockfile(data_dir: &str) -> Option<PathBuf> {
     let cache_terraform_dir = Path::new(data_dir).join("terraform");
 
     if let Err(e) = tokio::fs::create_dir_all(&cache_terraform_dir).await {
-        tracing::warn!("Failed to create terraform cache dir {}: {}; proceeding without cache", cache_terraform_dir.display(), e);
+        tracing::warn!(
+            "Failed to create terraform cache dir {}: {}; proceeding without cache",
+            cache_terraform_dir.display(),
+            e
+        );
         drop(permit);
         return None;
     }
@@ -127,7 +143,11 @@ pub async fn get_or_generate_lockfile(data_dir: &str) -> Option<PathBuf> {
             Some(lockfile_path)
         }
         Err(e) => {
-            tracing::warn!("Failed to copy lockfile to {}: {}; proceeding without cache", lockfile_path.display(), e);
+            tracing::warn!(
+                "Failed to copy lockfile to {}: {}; proceeding without cache",
+                lockfile_path.display(),
+                e
+            );
             None
         }
     };
@@ -160,7 +180,10 @@ pub(crate) enum RunCommandError {
         source: BoxError,
     },
     #[error("command timed out after {timeout_secs}s [{location}]")]
-    TimedOut { timeout_secs: u64, location: Location },
+    TimedOut {
+        timeout_secs: u64,
+        location: Location,
+    },
     #[error("command timed out after {timeout_secs}s; failed to read output [{location}]")]
     TimedOutReadOutput {
         timeout_secs: u64,
@@ -182,7 +205,10 @@ pub(crate) enum TofuInitError {
         source: BoxError,
     },
     #[error("tofu init failed (exit code {exit_code:?}) [{location}]")]
-    NonZeroExit { exit_code: Option<i32>, location: Location },
+    NonZeroExit {
+        exit_code: Option<i32>,
+        location: Location,
+    },
 }
 
 /// Failure modes for `tofu apply`.
@@ -196,7 +222,10 @@ pub(crate) enum TofuApplyError {
         source: BoxError,
     },
     #[error("tofu apply failed (exit code {exit_code:?}) [{location}]")]
-    NonZeroExit { exit_code: Option<i32>, location: Location },
+    NonZeroExit {
+        exit_code: Option<i32>,
+        location: Location,
+    },
 }
 
 /// Failure modes for `tofu destroy`.
@@ -210,7 +239,10 @@ pub(crate) enum TofuDestroyError {
         source: BoxError,
     },
     #[error("tofu destroy failed (exit code {exit_code:?}) [{location}]")]
-    NonZeroExit { exit_code: Option<i32>, location: Location },
+    NonZeroExit {
+        exit_code: Option<i32>,
+        location: Location,
+    },
 }
 
 /// Run a command with a timeout. Kills the process if deadline expires.
@@ -873,15 +905,11 @@ mod tests {
 
         assert!(user_data.contains(r#"%{ if e2e_mode == "tls" ~}"#));
         assert!(user_data.contains(r#"standard_ports="$standard_ports 443""#));
-        assert!(user_data.contains(
-            r#"%{ if http_port != 0 && e2e_mode == "disabled" ~}"#
-        ));
+        assert!(user_data.contains(r#"%{ if http_port != 0 && e2e_mode == "disabled" ~}"#));
         assert!(user_data.contains("TLS :443 is forwarded into the enclave"));
         assert!(user_data.contains("respond \"OK\" 200"));
         assert!(user_data.contains("redir https://${domain}{uri} 308"));
-        let redir_pos = user_data
-            .find("redir https://${domain}{uri} 308")
-            .unwrap();
+        let redir_pos = user_data.find("redir https://${domain}{uri} 308").unwrap();
         let http_site_pos = user_data[..redir_pos].rfind(":80 {").unwrap();
         let tls_mode_http_site = &user_data[http_site_pos..redir_pos];
         assert!(tls_mode_http_site.contains("handle /attestation"));
@@ -983,7 +1011,6 @@ mod tests {
         let content = hcl::to_string(&build_destroy_tf_body(true, "us-west-2")).unwrap();
         assert!(!content.contains("default_tags"));
     }
-
 }
 
 struct TerraformConfig {
@@ -1234,7 +1261,12 @@ async fn run_tofu_init(
         let dst = work_dir.join(".terraform.lock.hcl");
         match tokio::fs::copy(src, &dst).await {
             Ok(_) => tracing::info!("Using cached provider lockfile from {}", src.display()),
-            Err(e) => tracing::warn!("Failed to copy lockfile from {} to {}: {}; proceeding without cache", src.display(), dst.display(), e),
+            Err(e) => tracing::warn!(
+                "Failed to copy lockfile from {} to {}: {}; proceeding without cache",
+                src.display(),
+                dst.display(),
+                e
+            ),
         }
     }
 
@@ -1352,7 +1384,10 @@ pub(crate) enum GetTofuOutputsError {
         source: BoxError,
     },
     #[error("tofu output exited with code {exit_code:?} [{location}]")]
-    NonZeroExit { exit_code: Option<i32>, location: Location },
+    NonZeroExit {
+        exit_code: Option<i32>,
+        location: Location,
+    },
     #[error("could not parse tofu output JSON [{location}]")]
     JsonParse {
         #[location]
@@ -1450,7 +1485,10 @@ pub(crate) enum GetManagedOnpremOutputsError {
         source: BoxError,
     },
     #[error("tofu output exited with code {exit_code:?} [{location}]")]
-    NonZeroExit { exit_code: Option<i32>, location: Location },
+    NonZeroExit {
+        exit_code: Option<i32>,
+        location: Location,
+    },
     #[error("could not parse tofu output JSON [{location}]")]
     JsonParse {
         #[location]
@@ -1946,9 +1984,12 @@ async fn provision_nitro_enclave(
         .context("Failed to write user-data.sh")?;
 
     // Always use Caution's env credentials for init (S3 state backend access)
-    let data_dir = std::env::var("CAUTION_DATA_DIR").unwrap_or_else(|_| "/var/cache/caution".to_string());
+    let data_dir =
+        std::env::var("CAUTION_DATA_DIR").unwrap_or_else(|_| "/var/cache/caution".to_string());
     let lockfile_path = get_or_generate_lockfile(&data_dir).await;
-    run_tofu_init(work_dir, lockfile_path.as_deref(), None).await.context("Failed to run tofu init")?;
+    run_tofu_init(work_dir, lockfile_path.as_deref(), None)
+        .await
+        .context("Failed to run tofu init")?;
 
     // Pass user credentials as Terraform variables, not env vars
     // This keeps Caution's creds for S3 state but uses user's creds for AWS provider
@@ -2009,9 +2050,12 @@ async fn provision_managed_onprem(
     std::fs::write(work_dir.join("user-data.sh"), user_data_template)
         .context("Failed to write user-data.sh")?;
 
-    let data_dir = std::env::var("CAUTION_DATA_DIR").unwrap_or_else(|_| "/var/cache/caution".to_string());
+    let data_dir =
+        std::env::var("CAUTION_DATA_DIR").unwrap_or_else(|_| "/var/cache/caution".to_string());
     let lockfile_path = get_or_generate_lockfile(&data_dir).await;
-    run_tofu_init(work_dir, lockfile_path.as_deref(), None).await.context("Failed to run tofu init")?;
+    run_tofu_init(work_dir, lockfile_path.as_deref(), None)
+        .await
+        .context("Failed to run tofu init")?;
 
     run_tofu_apply_with_provider_creds(
         work_dir,
@@ -2102,7 +2146,11 @@ pub(crate) enum EnclaveSizingError {
     #[error(
         "Requested enclave resources ({cpu_count} vCPUs, {memory_mb} MiB) exceed the supported r6i.12xlarge host capacity [{location}]"
     )]
-    NoSupportedInstance { cpu_count: u32, memory_mb: u32, location: dterror::Location },
+    NoSupportedInstance {
+        cpu_count: u32,
+        memory_mb: u32,
+        location: dterror::Location,
+    },
 }
 
 #[tracing::instrument(skip_all, err)]
@@ -2121,9 +2169,12 @@ pub(crate) fn enclave_sizing(
         });
     }
 
-    let cpu_count_rounded = cpu_count.checked_add(cpu_count % 2).ok_or(EnclaveSizingError::Overflow {
-        location: std::panic::Location::caller(),
-    })?;
+    let cpu_count_rounded =
+        cpu_count
+            .checked_add(cpu_count % 2)
+            .ok_or(EnclaveSizingError::Overflow {
+                location: std::panic::Location::caller(),
+            })?;
     let total_vcpus_needed =
         cpu_count_rounded
             .checked_add(PARENT_VCPU_RESERVE)
@@ -2299,15 +2350,15 @@ async fn generate_nitro_deployment_main_tf(
                         hcl::Expression::Object(
                             vec![
                                 (
-                                    hcl::expr::ObjectKey::Identifier(
-                                        hcl::Identifier::unchecked("source"),
-                                    ),
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "source",
+                                    )),
                                     hcl::Expression::String("hashicorp/aws".into()),
                                 ),
                                 (
-                                    hcl::expr::ObjectKey::Identifier(
-                                        hcl::Identifier::unchecked("version"),
-                                    ),
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "version",
+                                    )),
                                     hcl::Expression::String("~> 5.0".into()),
                                 ),
                             ]
@@ -2353,11 +2404,9 @@ async fn generate_nitro_deployment_main_tf(
                 "region",
                 hcl::expr::Conditional::new(
                     hcl::expr::BinaryOp::new(
-                        hcl::expr::Traversal::builder(
-                            hcl::expr::Variable::unchecked("var"),
-                        )
-                        .attr("provider_region")
-                        .build(),
+                        hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("var"))
+                            .attr("provider_region")
+                            .build(),
                         hcl::expr::BinaryOperator::NotEq,
                         hcl::Expression::String(String::new()),
                     ),
@@ -2480,9 +2529,7 @@ async fn generate_nitro_deployment_main_tf(
                     .add_attribute(("name", "instance-type"))
                     .add_attribute((
                         "values",
-                        hcl::Expression::Array(vec![hcl::Expression::String(
-                            instance_type.into(),
-                        )]),
+                        hcl::Expression::Array(vec![hcl::Expression::String(instance_type.into())]),
                     ))
                     .build(),
             )
@@ -2925,9 +2972,9 @@ async fn generate_nitro_deployment_main_tf(
             .add_attribute((
                 "type",
                 hcl::expr::FuncCall::builder("list")
-                    .arg(hcl::Expression::from(
-                        hcl::expr::Variable::unchecked("number"),
-                    ))
+                    .arg(hcl::Expression::from(hcl::expr::Variable::unchecked(
+                        "number",
+                    )))
                     .build(),
             ))
             .add_attribute(("default", hcl::Expression::Array(vec![])))
@@ -3040,7 +3087,9 @@ async fn generate_nitro_deployment_main_tf(
                     ))
                     .add_attribute(hcl::Attribute::new(
                         "description",
-                        hcl::expr::TemplateExpr::from("Allow user port ${ingress.value}".to_string()),
+                        hcl::expr::TemplateExpr::from(
+                            "Allow user port ${ingress.value}".to_string(),
+                        ),
                     ))
                     .build(),
             )
@@ -3106,13 +3155,13 @@ async fn generate_nitro_deployment_main_tf(
         ))
         .add_attribute((
             "vpc_security_group_ids",
-            hcl::Expression::Array(vec![hcl::expr::Traversal::builder(
-                hcl::expr::Variable::unchecked("aws_security_group"),
-            )
-            .attr("enclave")
-            .attr("id")
-            .build()
-            .into()]),
+            hcl::Expression::Array(vec![
+                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("aws_security_group"))
+                    .attr("enclave")
+                    .attr("id")
+                    .build()
+                    .into(),
+            ]),
         ))
         .add_attribute((
             "subnet_id",
@@ -3196,19 +3245,23 @@ async fn generate_nitro_deployment_main_tf(
                                 hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
                                     "ports",
                                 )),
-                                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("var"))
-                                    .attr("ports")
-                                    .build()
-                                    .into(),
+                                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked(
+                                    "var",
+                                ))
+                                .attr("ports")
+                                .build()
+                                .into(),
                             ),
                             (
                                 hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
                                     "http_port",
                                 )),
-                                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("var"))
-                                    .attr("http_port")
-                                    .build()
-                                    .into(),
+                                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked(
+                                    "var",
+                                ))
+                                .attr("http_port")
+                                .build()
+                                .into(),
                             ),
                             (
                                 hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("e2e")),
@@ -3244,7 +3297,10 @@ async fn generate_nitro_deployment_main_tf(
                                 hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
                                     "ssh_keys",
                                 )),
-                                hcl::Expression::from(serde_json::from_str::<Vec<String>>(&ssh_keys_json).unwrap_or_default()),
+                                hcl::Expression::from(
+                                    serde_json::from_str::<Vec<String>>(&ssh_keys_json)
+                                        .unwrap_or_default(),
+                                ),
                             ),
                             (
                                 hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
@@ -3365,10 +3421,8 @@ async fn generate_nitro_deployment_main_tf(
             .build(),
     );
 
-    let content = dterror::ResultExt::with_context(
-        hcl::to_string(&body.build()),
-        Ctx::serialize(),
-    )?;
+    let content =
+        dterror::ResultExt::with_context(hcl::to_string(&body.build()), Ctx::serialize())?;
 
     dterror::ResultExt::with_context(
         fs::write(work_dir.join("main.tf"), &content).await,
@@ -3575,7 +3629,10 @@ async fn generate_managed_onprem_deployment_tf(
     body = body.add_block(
         hcl::Block::builder("provider")
             .add_label("aws")
-            .add_attribute(hcl::Attribute::new("region", region_conditional(&aws_region)))
+            .add_attribute(hcl::Attribute::new(
+                "region",
+                region_conditional(&aws_region),
+            ))
             .add_attribute(credential_conditional("access_key", "provider_access_key"))
             .add_attribute(credential_conditional("secret_key", "provider_secret_key"))
             .add_block(
@@ -3613,7 +3670,9 @@ async fn generate_managed_onprem_deployment_tf(
             .add_attribute((
                 "type",
                 hcl::expr::FuncCall::builder("list")
-                    .arg(hcl::Expression::from(hcl::expr::Variable::unchecked("number")))
+                    .arg(hcl::Expression::from(hcl::expr::Variable::unchecked(
+                        "number",
+                    )))
                     .build(),
             ))
             .add_attribute(("default", hcl::Expression::Array(vec![])))
@@ -3640,7 +3699,10 @@ async fn generate_managed_onprem_deployment_tf(
                 "scope_tag_key",
                 hcl::Expression::String("caution:deployment-id".into()),
             ))
-            .add_attribute(hcl::Attribute::new("aws_region", region_conditional(&aws_region)))
+            .add_attribute(hcl::Attribute::new(
+                "aws_region",
+                region_conditional(&aws_region),
+            ))
             .build(),
     );
 
@@ -4068,10 +4130,12 @@ async fn generate_managed_onprem_deployment_tf(
             .add_label("launch_template_id")
             .add_attribute((
                 "value",
-                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("aws_launch_template"))
-                    .attr("enclave")
-                    .attr("id")
-                    .build(),
+                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked(
+                    "aws_launch_template",
+                ))
+                .attr("enclave")
+                .attr("id")
+                .build(),
             ))
             .build(),
     );

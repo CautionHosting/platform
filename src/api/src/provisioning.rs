@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use crate::types;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use sqlx::PgPool;
 use uuid::Uuid;
 

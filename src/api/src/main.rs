@@ -420,9 +420,7 @@ mod deployment_health_tests {
 
     #[tokio::test]
     async fn health_check_rejects_error_responses() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
@@ -436,9 +434,7 @@ mod deployment_health_tests {
                 .unwrap();
         });
 
-        let error = wait_for_health(&address.to_string(), 0)
-            .await
-            .unwrap_err();
+        let error = wait_for_health(&address.to_string(), 0).await.unwrap_err();
         assert_eq!(
             error,
             "Health endpoint did not become healthy within 0 seconds"
@@ -1468,7 +1464,7 @@ async fn deploy_handler(
                     "UPDATE compute_resources
                      SET state = $1, deploy_attempt_id = NULL
                      WHERE id = $2 AND organization_id = $3 AND state = $4
-                       AND deploy_attempt_id = $5"
+                       AND deploy_attempt_id = $5",
                 )
                 .bind(types::ResourceState::Failed)
                 .bind(app_id_for_recovery)
@@ -1476,7 +1472,8 @@ async fn deploy_handler(
                 .bind(types::ResourceState::Pending)
                 .bind(deploy_attempt_id)
                 .execute(&db_for_recovery)
-                .await {
+                .await
+                {
                     tracing::error!("Failed to reset resource state after deploy error: {}", e);
                 }
 
@@ -1755,10 +1752,12 @@ mod deployment_target_tests {
         let with_provider = config::ConfigurationFile::from_str(
             "caution {\n provider {\n type = \"aws\"\n region = \"us-east-1\"\n }\n }\n\
              enclave \"main\" {\n unit \"default\" {\n command = \"/app\"\n }\n }",
-        ).unwrap();
+        )
+        .unwrap();
         let managed = config::ConfigurationFile::from_str(
             "enclave \"main\" {\n unit \"default\" {\n command = \"/app\"\n }\n }",
-        ).unwrap();
+        )
+        .unwrap();
         assert!(provider_requires_linked_byoc(&with_provider, false));
         assert!(!provider_requires_linked_byoc(&with_provider, true));
         assert!(!provider_requires_linked_byoc(&managed, false));
@@ -2403,7 +2402,7 @@ async fn deploy_logic(
         // Mark as Pending so concurrent pushes are rejected
         let updated = sqlx::query(
             "UPDATE compute_resources SET state = $1, deploy_attempt_id = $2
-             WHERE id = $3 AND organization_id = $4 AND state != $1 AND state <> 'terminating'"
+             WHERE id = $3 AND organization_id = $4 AND state != $1 AND state <> 'terminating'",
         )
         .bind(types::ResourceState::Pending)
         .bind(deploy_attempt_id)
@@ -2411,7 +2410,12 @@ async fn deploy_logic(
         .bind(req.org_id)
         .execute(&state.db)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to update resource state: {}", e)))?;
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to update resource state: {}", e),
+            )
+        })?;
 
         if updated.rows_affected() == 0 {
             return Err((
@@ -2515,13 +2519,8 @@ async fn deploy_logic(
         .map(|e| e.allow_plaintext_fallback())
         .unwrap_or(false);
 
-    let no_cache = ec_build
-        .and_then(|b| b.cache)
-        .map(|c| !c)
-        .unwrap_or(false);
-    let app_sources = ec_build
-        .map(|b| b.app_sources.clone())
-        .unwrap_or_default();
+    let no_cache = ec_build.and_then(|b| b.cache).map(|c| !c).unwrap_or(false);
+    let app_sources = ec_build.map(|b| b.app_sources.clone()).unwrap_or_default();
     let egress = ec_network.map(|n| n.egress_enabled()).unwrap_or(false);
 
     let ingress_ports: Vec<u16> = ec_network
