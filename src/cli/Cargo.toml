@@ -42,7 +42,7 @@ zeroize = "1"
 indicatif = "0.17"
 
 # Attestation verification
-bootproof-sdk = { git = "https://codeberg.org/caution/bootproof.git", rev = "b03721957e3850931f5b53627e7c3d1c302a06fe" }
+bootproof-sdk = { git = "https://codeberg.org/caution/bootproof.git", rev = "b346db17523ad9b13ef41eb9c14df3328bbd80d1" }
 coset = { version = "0.3", features = ["std"] }
 
 # Locksmith (shard sending)
