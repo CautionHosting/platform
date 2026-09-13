@@ -10,7 +10,10 @@ use crate::error::PatcherError;
 use crate::patcher::patch_hcl_value;
 
 #[derive(Parser)]
-#[command(name = "hcl-patcher", about = "Patch values in HCL files using XPath-like selectors")]
+#[command(
+    name = "hcl-patcher",
+    about = "Patch values in HCL files using XPath-like selectors"
+)]
 struct Args {
     /// Path to the HCL file
     file: String,

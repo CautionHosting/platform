@@ -1,6 +1,9 @@
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum XPathSegment {
-    Block { ident: String, label: Option<String> },
+    Block {
+        ident: String,
+        label: Option<String>,
+    },
     Attribute(String),
 }
 
@@ -62,11 +65,17 @@ mod tests {
         assert_eq!(segments.len(), 3);
         assert_eq!(
             segments[0],
-            XPathSegment::Block { ident: "caution".into(), label: None }
+            XPathSegment::Block {
+                ident: "caution".into(),
+                label: None
+            }
         );
         assert_eq!(
             segments[1],
-            XPathSegment::Block { ident: "provider".into(), label: None }
+            XPathSegment::Block {
+                ident: "provider".into(),
+                label: None
+            }
         );
         assert_eq!(segments[2], XPathSegment::Attribute("type".into()));
     }
@@ -77,7 +86,10 @@ mod tests {
         assert_eq!(segments.len(), 3);
         assert_eq!(
             segments[0],
-            XPathSegment::Block { ident: "caution".into(), label: None }
+            XPathSegment::Block {
+                ident: "caution".into(),
+                label: None
+            }
         );
     }
 
@@ -104,7 +116,10 @@ mod tests {
         );
         assert_eq!(
             segments[1],
-            XPathSegment::Block { ident: "resources".into(), label: None }
+            XPathSegment::Block {
+                ident: "resources".into(),
+                label: None
+            }
         );
         assert_eq!(segments[2], XPathSegment::Attribute("cpu".into()));
     }
