@@ -1064,7 +1064,7 @@ mod tests {
             Some("caution-builder-bbbb2222")
         );
         assert!(
-            instances[1].tags.get("org_id").is_none(),
+            !instances[1].tags.contains_key("org_id"),
             "tags from one instance must not bleed into another"
         );
     }
@@ -1266,7 +1266,7 @@ mod tests {
             ("Action".to_string(), "StopInstances".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
         ];
-        let instance_ids = vec!["i-abc123".to_string()];
+        let instance_ids = ["i-abc123".to_string()];
         for (i, id) in instance_ids.iter().enumerate() {
             params.push((format!("InstanceId.{}", i + 1), id.clone()));
         }
@@ -1282,7 +1282,7 @@ mod tests {
             ("Action".to_string(), "StopInstances".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
         ];
-        let instance_ids = vec![
+        let instance_ids = [
             "i-aaa111".to_string(),
             "i-bbb222".to_string(),
             "i-ccc333".to_string(),
@@ -1306,7 +1306,7 @@ mod tests {
             ("Action".to_string(), "StartInstances".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
         ];
-        let instance_ids = vec!["i-xyz789".to_string()];
+        let instance_ids = ["i-xyz789".to_string()];
         for (i, id) in instance_ids.iter().enumerate() {
             params.push((format!("InstanceId.{}", i + 1), id.clone()));
         }

@@ -146,9 +146,10 @@ pub async fn internal_auth_middleware(
     if let Some(user_id_str) = headers
         .get("x-authenticated-user-id")
         .and_then(|h| h.to_str().ok())
-        && let Ok(user_id) = Uuid::parse_str(user_id_str) {
-            request.extensions_mut().insert(AuthContext { user_id });
-        }
+        && let Ok(user_id) = Uuid::parse_str(user_id_str)
+    {
+        request.extensions_mut().insert(AuthContext { user_id });
+    }
 
     Ok(next.run(request).await)
 }
@@ -172,6 +173,7 @@ struct LegalAcceptanceRequiredBody {
     message: &'static str,
 }
 
+#[allow(clippy::result_large_err)]
 pub async fn legal_middleware(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,

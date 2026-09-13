@@ -82,9 +82,10 @@ impl Validate for UpdateUserRequest {
         }
 
         if let Some(email) = &self.email
-            && !email.trim().is_empty() {
-                validation::validate_email(email).map_err(|e| e.to_string())?;
-            }
+            && !email.trim().is_empty()
+        {
+            validation::validate_email(email).map_err(|e| e.to_string())?;
+        }
 
         Ok(())
     }
@@ -207,9 +208,10 @@ impl Validate for DeployRequest {
         validation::validate_branch_name(&self.branch)
             .map_err(|e| format!("Invalid branch name: {}", e))?;
         if let Some(commit_sha) = &self.commit_sha
-            && (commit_sha.len() != 40 || !commit_sha.bytes().all(|byte| byte.is_ascii_hexdigit())) {
-                return Err("Invalid commit_sha: must be 40 hex characters".to_string());
-            }
+            && (commit_sha.len() != 40 || !commit_sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            return Err("Invalid commit_sha: must be 40 hex characters".to_string());
+        }
         Ok(())
     }
 }
@@ -249,11 +251,6 @@ impl Validate for RenameResourceRequest {
 
         Ok(())
     }
-}
-
-#[derive(Debug, Serialize)]
-pub struct ErrorResponse {
-    pub error: String,
 }
 
 #[derive(Debug, Deserialize)]

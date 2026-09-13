@@ -63,6 +63,7 @@ pub async fn get_current_user(
     Ok(Json(user))
 }
 
+#[allow(clippy::result_large_err)]
 pub async fn update_current_user(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,

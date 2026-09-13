@@ -129,9 +129,10 @@ fn generate_invitation_token() -> (String, String) {
 fn public_organization_name(name: &str) -> String {
     let trimmed = name.trim();
     if let Some(user_id) = trimmed.strip_prefix(LEGACY_DEFAULT_ORG_PREFIX)
-        && Uuid::parse_str(user_id).is_ok() {
-            return "your organization".to_string();
-        }
+        && Uuid::parse_str(user_id).is_ok()
+    {
+        return "your organization".to_string();
+    }
     trimmed.to_string()
 }
 

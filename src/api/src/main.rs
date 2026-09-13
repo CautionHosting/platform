@@ -70,6 +70,26 @@ const DEFAULT_DEPLOYMENT_HEALTH_TIMEOUT_SECS: u64 = 600;
 const LIFECYCLE_RECONCILE_INTERVAL_SECS: u64 = 30;
 const TEARDOWN_CONCURRENCY: usize = 2;
 
+/// A `compute_resources` row as returned by the deploy lookup query.
+type ExistingResourceRow = (
+    Uuid,
+    Option<String>,
+    Option<serde_json::Value>,
+    Option<DateTime<Utc>>,
+    types::ResourceState,
+);
+
+/// A `subscriptions` entitlement row used to gate managed on-prem deploys.
+type SubscriptionEntitlementRow = (
+    Uuid,
+    i32,
+    Option<i32>,
+    String,
+    String,
+    bool,
+    Option<DateTime<Utc>>,
+);
+
 use caution_config::pricing::{
     CreditPackagePricing, PaddleCatalog, PricingConfig as SharedPricingConfig, TierPricing,
 };
@@ -425,7 +445,8 @@ mod deployment_health_tests {
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = [0; 1024];
-            socket.read(&mut request).await.unwrap();
+            let bytes_read = socket.read(&mut request).await.unwrap();
+            assert!(bytes_read > 0);
             socket
                 .write_all(
                     b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -539,12 +560,13 @@ fn select_deploy_commit_sha(
     let resolved_commit_sha = resolved_commit_sha.to_ascii_lowercase();
 
     if let Some(requested_commit_sha) = requested_commit_sha
-        && !requested_commit_sha.eq_ignore_ascii_case(&resolved_commit_sha) {
-            return Err(format!(
-                "commit_sha does not match refs/heads/{} (expected {}, got {})",
-                branch, resolved_commit_sha, requested_commit_sha
-            ));
-        }
+        && !requested_commit_sha.eq_ignore_ascii_case(&resolved_commit_sha)
+    {
+        return Err(format!(
+            "commit_sha does not match refs/heads/{} (expected {}, got {})",
+            branch, resolved_commit_sha, requested_commit_sha
+        ));
+    }
 
     Ok(resolved_commit_sha)
 }
@@ -1060,6 +1082,7 @@ fn dedicated_builder_failure_includes_one_prefix_and_build_id() {
     assert!(!message.contains("Build failed: Build failed:"));
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
 async fn recover_deploy_failure(
     state: &Arc<AppState>,
@@ -1210,13 +1233,12 @@ fn merge_provider_into_onprem(
     provider: &config::Provider,
     onprem: &mut deployment::ManagedOnPremConfig,
 ) {
-    if let config::Provider::Aws(aws) = provider {
-        if let Some(vpc_id) = &aws.vpc_id {
-            onprem.vpc_id = vpc_id.clone();
-        }
-        if let Some(subnet_ids) = &aws.subnet_ids {
-            onprem.subnet_ids = subnet_ids.clone();
-        }
+    let config::Provider::Aws(aws) = provider;
+    if let Some(vpc_id) = &aws.vpc_id {
+        onprem.vpc_id = vpc_id.clone();
+    }
+    if let Some(subnet_ids) = &aws.subnet_ids {
+        onprem.subnet_ids = subnet_ids.clone();
     }
 }
 
@@ -1774,7 +1796,6 @@ mod deployment_target_tests {
 #[cfg(test)]
 mod deploy_containerfile_tests {
     use super::{load_build_config_for_deploy, resolve_containerfile_for_deploy};
-    use crate::config;
     use std::{path::Path, process::Command};
     use tempfile::TempDir;
 
@@ -1934,6 +1955,8 @@ mod deploy_containerfile_tests {
             resolve_containerfile_for_deploy(git_dir.to_str().unwrap(), &commit_sha, &config_file)
                 .await
                 .unwrap();
+
+        assert_eq!(containerfile, "Dockerfile");
     }
 }
 
@@ -2111,13 +2134,7 @@ async fn deploy_logic(
             })?;
 
     tracing::info!("Looking up resource by id={}", req.app_id);
-    let existing_resource: Option<(
-        Uuid,
-        Option<String>,
-        Option<serde_json::Value>,
-        Option<DateTime<Utc>>,
-        types::ResourceState,
-    )> = sqlx::query_as(
+    let existing_resource: Option<ExistingResourceRow> = sqlx::query_as(
         "SELECT id, resource_name, configuration, destroyed_at, state FROM compute_resources
          WHERE id = $1 AND organization_id = $2",
     )
@@ -2183,15 +2200,7 @@ async fn deploy_logic(
                 )
             })?;
 
-        let sub: Option<(
-            Uuid,
-            i32,
-            Option<i32>,
-            String,
-            String,
-            bool,
-            Option<DateTime<Utc>>,
-        )> = sqlx::query_as(
+        let sub: Option<SubscriptionEntitlementRow> = sqlx::query_as(
             "SELECT id, max_apps, pending_max_apps, billing_source, status,
                     catalog_valid, enterprise_expires_at
              FROM subscriptions
@@ -2634,9 +2643,10 @@ async fn deploy_logic(
         .caution
         .as_ref()
         .and_then(|c| c.provider.as_ref())
-        && let Some(ref mut onprem) = managed_onprem_config {
-            merge_provider_into_onprem(provider, onprem);
-        }
+        && let Some(ref mut onprem) = managed_onprem_config
+    {
+        merge_provider_into_onprem(provider, onprem);
+    }
 
     let should_cleanup_on_failure = was_destroyed
         || !matches!(
@@ -2802,7 +2812,6 @@ async fn deploy_logic(
                 no_cache,
                 enclaveos_commit,
                 steve_commit,
-                builder_size: resolved_size.id.clone(),
                 builder_instance_type: resolved_size.instance_type.clone(),
                 app_sources,
             };
