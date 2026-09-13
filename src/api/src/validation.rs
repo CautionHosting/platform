@@ -74,7 +74,7 @@ fn get_email_regex() -> &'static Regex {
 pub fn validate_app_name(name: &str) -> Result<(), ValidationError> {
     let len = name.len();
 
-    if len < APP_NAME_MIN_LEN || len > APP_NAME_MAX_LEN {
+    if !(APP_NAME_MIN_LEN..=APP_NAME_MAX_LEN).contains(&len) {
         return Err(ValidationError::AppNameLength {
             min: APP_NAME_MIN_LEN,
             max: APP_NAME_MAX_LEN,
@@ -108,7 +108,7 @@ pub fn validate_app_name(name: &str) -> Result<(), ValidationError> {
 pub fn validate_branch_name(name: &str) -> Result<(), ValidationError> {
     let len = name.len();
 
-    if len < BRANCH_NAME_MIN_LEN || len > BRANCH_NAME_MAX_LEN {
+    if !(BRANCH_NAME_MIN_LEN..=BRANCH_NAME_MAX_LEN).contains(&len) {
         return Err(ValidationError::BranchNameLength {
             min: BRANCH_NAME_MIN_LEN,
             max: BRANCH_NAME_MAX_LEN,
@@ -131,7 +131,7 @@ pub fn validate_branch_name(name: &str) -> Result<(), ValidationError> {
 pub fn validate_org_name(name: &str) -> Result<(), ValidationError> {
     let len = name.len();
 
-    if len < ORG_NAME_MIN_LEN || len > ORG_NAME_MAX_LEN {
+    if !(ORG_NAME_MIN_LEN..=ORG_NAME_MAX_LEN).contains(&len) {
         return Err(ValidationError::OrgNameLength {
             min: ORG_NAME_MIN_LEN,
             max: ORG_NAME_MAX_LEN,
@@ -153,7 +153,7 @@ pub fn validate_org_name(name: &str) -> Result<(), ValidationError> {
 pub fn validate_username(username: &str) -> Result<(), ValidationError> {
     let len = username.len();
 
-    if len < USERNAME_MIN_LEN || len > USERNAME_MAX_LEN {
+    if !(USERNAME_MIN_LEN..=USERNAME_MAX_LEN).contains(&len) {
         return Err(ValidationError::UsernameLength {
             min: USERNAME_MIN_LEN,
             max: USERNAME_MAX_LEN,

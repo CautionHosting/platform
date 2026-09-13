@@ -513,7 +513,7 @@ async fn get_commit_sha(
     let ref_spec = format!("refs/heads/{}", branch);
 
     let output = Command::new("git")
-        .args(&["--git-dir", &repo_path, "rev-parse", &ref_spec])
+        .args(["--git-dir", &repo_path, "rev-parse", &ref_spec])
         .output()
         .await?;
 
@@ -538,14 +538,13 @@ fn select_deploy_commit_sha(
 ) -> Result<String, String> {
     let resolved_commit_sha = resolved_commit_sha.to_ascii_lowercase();
 
-    if let Some(requested_commit_sha) = requested_commit_sha {
-        if !requested_commit_sha.eq_ignore_ascii_case(&resolved_commit_sha) {
+    if let Some(requested_commit_sha) = requested_commit_sha
+        && !requested_commit_sha.eq_ignore_ascii_case(&resolved_commit_sha) {
             return Err(format!(
                 "commit_sha does not match refs/heads/{} (expected {}, got {})",
                 branch, resolved_commit_sha, requested_commit_sha
             ));
         }
-    }
 
     Ok(resolved_commit_sha)
 }
@@ -1580,7 +1579,7 @@ async fn load_build_config_for_deploy(
 
     // Try caution.hcl first
     let hcl_output = Command::new("git")
-        .args(&[
+        .args([
             "--git-dir",
             git_dir,
             "show",
@@ -1612,7 +1611,7 @@ async fn load_build_config_for_deploy(
 
     // Fall back to Procfile
     let procfile_output = Command::new("git")
-        .args(&[
+        .args([
             "--git-dir",
             git_dir,
             "show",
@@ -2099,7 +2098,7 @@ async fn deploy_logic(
     }
 
     tracing::info!("Fetching resource type for EC2Instance");
-    let resource_type_id: Uuid =
+    let _resource_type_id: Uuid =
         sqlx::query_scalar("SELECT id FROM resource_types WHERE type_code = $1 LIMIT 1")
             .bind(types::AWSResourceType::EC2Instance.as_str())
             .fetch_one(&state.db)
@@ -2631,15 +2630,13 @@ async fn deploy_logic(
 
     // Overlay inline provider config from caution.hcl onto DB credential defaults.
     // Fields specified in the provider block take precedence.
-    if let Some(ref provider) = config_file
+    if let Some(provider) = config_file
         .caution
         .as_ref()
         .and_then(|c| c.provider.as_ref())
-    {
-        if let Some(ref mut onprem) = managed_onprem_config {
+        && let Some(ref mut onprem) = managed_onprem_config {
             merge_provider_into_onprem(provider, onprem);
         }
-    }
 
     let should_cleanup_on_failure = was_destroyed
         || !matches!(

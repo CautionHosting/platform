@@ -399,7 +399,7 @@ pub async fn upload_source_archive(
 
     // git archive produces a tar.gz of the repo at the given commit
     let output = tokio::process::Command::new("git")
-        .args(&[
+        .args([
             "--git-dir",
             git_dir,
             "archive",
@@ -443,14 +443,13 @@ fn resolve_remote_builder_helper_path() -> Result<PathBuf> {
         );
     }
 
-    if let Ok(current_exe) = std::env::current_exe() {
-        if let Some(parent) = current_exe.parent() {
+    if let Ok(current_exe) = std::env::current_exe()
+        && let Some(parent) = current_exe.parent() {
             let sibling = parent.join(REMOTE_BUILDER_HELPER);
             if sibling.exists() {
                 return Ok(sibling);
             }
         }
-    }
 
     let default_path = PathBuf::from(format!("/usr/local/bin/{}", REMOTE_BUILDER_HELPER));
     if default_path.exists() {
@@ -701,7 +700,7 @@ pub async fn execute_remote_build(
     let mut terminate_attempts = 0;
     loop {
         terminate_attempts += 1;
-        match ec2.terminate_instances(&[instance_id.clone()]).await {
+        match ec2.terminate_instances(std::slice::from_ref(&instance_id)).await {
             Ok(_) => break,
             Err(e) => {
                 if terminate_attempts >= 3 {

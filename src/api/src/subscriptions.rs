@@ -707,20 +707,14 @@ async fn change_paddle_subscription(
             "caution_tier_id": new_tier_id,
         },
     });
-    if let Err(error) = paddle_json_request(
+    paddle_json_request(
         state,
         reqwest::Method::PATCH,
         &path,
         Some(&body),
         Some(intent_id),
     )
-    .await
-    {
-        // A transport error does not prove Paddle rejected the change. Keep the
-        // provider-pending projection so a delayed webhook can reconcile it and
-        // so a second, potentially duplicate paid change cannot be submitted.
-        return Err(error);
-    }
+    .await?;
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -1221,20 +1215,14 @@ pub async fn cancel_subscription(
 
         let path = format!("/subscriptions/{paddle_subscription_id}/cancel");
         let body = serde_json::json!({"effective_from": "next_billing_period"});
-        if let Err(error) = paddle_json_request(
+        paddle_json_request(
             &state,
             reqwest::Method::POST,
             &path,
             Some(&body),
             Some(intent_id),
         )
-        .await
-        {
-            // Cancellation may have reached Paddle despite a transport error.
-            // Keep provider-pending state until a webhook reconciles the source
-            // of truth rather than allowing a conflicting follow-up operation.
-            return Err(error);
-        }
+        .await?;
         return Ok(Json(serde_json::json!({
             "success": true,
             "intent_id": intent_id,

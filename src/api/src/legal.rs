@@ -594,7 +594,7 @@ pub async fn send_legal_notices(
             title: resolve_title(doc.title.as_deref(), &doc.document_type),
             version: doc.version.clone(),
             url: doc.url.clone(),
-            effective_at: doc.effective_at.clone(),
+            effective_at: doc.effective_at,
             requires_action: doc.requires_blocking_reacceptance || doc.requires_acknowledgment,
         })
         .collect();
@@ -754,14 +754,13 @@ async fn load_legal_notice_documents(
         ));
     }
 
-    if let Some(document_ids) = document_ids {
-        if documents.len() != document_ids.len() {
+    if let Some(document_ids) = document_ids
+        && documents.len() != document_ids.len() {
             return Err((
                 StatusCode::BAD_REQUEST,
                 "One or more document_ids were not found".to_string(),
             ));
         }
-    }
 
     Ok(documents)
 }

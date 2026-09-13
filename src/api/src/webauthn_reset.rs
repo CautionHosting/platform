@@ -149,7 +149,7 @@ pub async fn reset_webauthn_credentials(
     })?;
 
     // Send the reset email.
-    let token_hex = hex::encode(&token_bytes);
+    let token_hex = hex::encode(token_bytes);
     let frontend_url =
         std::env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:8000".to_string());
     let reset_url = format!("{}/reset#{}", frontend_url.trim_end_matches('/'), token_hex);
