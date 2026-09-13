@@ -1,9 +1,9 @@
+use hcl_edit::Number;
 use hcl_edit::expr::Expression;
 use hcl_edit::structure::Body;
-use hcl_edit::Number;
 
 use crate::error::PatcherError;
-use crate::xpath::{parse_xpath, XPathSegment};
+use crate::xpath::{XPathSegment, parse_xpath};
 
 pub(crate) fn patch_hcl_value(
     hcl: &str,
@@ -12,9 +12,9 @@ pub(crate) fn patch_hcl_value(
     type_name: &str,
 ) -> Result<String, PatcherError> {
     let segments = parse_xpath(xpath).map_err(PatcherError::XPathParse)?;
-    let mut body: Body = hcl.parse::<Body>().map_err(|e| {
-        PatcherError::ParseHcl(e.to_string())
-    })?;
+    let mut body: Body = hcl
+        .parse::<Body>()
+        .map_err(|e| PatcherError::ParseHcl(e.to_string()))?;
 
     let new_expr = build_expression(value, type_name)?;
     set_value(&mut body, &segments, new_expr)
@@ -23,11 +23,7 @@ pub(crate) fn patch_hcl_value(
     Ok(body.to_string())
 }
 
-fn set_value(
-    body: &mut Body,
-    segments: &[XPathSegment],
-    new_expr: Expression,
-) -> Option<()> {
+fn set_value(body: &mut Body, segments: &[XPathSegment], new_expr: Expression) -> Option<()> {
     let attr_segment = segments.last()?;
     let block_count = segments.len() - 1;
 
@@ -99,7 +95,6 @@ fn parse_number(s: &str) -> Option<Number> {
 mod tests {
     use super::*;
 
-
     #[test]
     fn test_build_expression_string() {
         let expr = build_expression("hello", "string").unwrap();
@@ -168,19 +163,27 @@ enclave "main" {
 
     #[test]
     fn test_patch_string_value() {
-        let result = patch_hcl_value(TEST_HCL, "/caution/managed_credentials", "new-creds.pgp", "string").unwrap();
+        let result = patch_hcl_value(
+            TEST_HCL,
+            "/caution/managed_credentials",
+            "new-creds.pgp",
+            "string",
+        )
+        .unwrap();
         assert!(result.contains(r#""new-creds.pgp""#));
     }
 
     #[test]
     fn test_patch_bool_value() {
-        let result = patch_hcl_value(TEST_HCL, "/enclave.main/build/cache", "true", "bool").unwrap();
+        let result =
+            patch_hcl_value(TEST_HCL, "/enclave.main/build/cache", "true", "bool").unwrap();
         assert!(result.contains("cache = true"));
     }
 
     #[test]
     fn test_patch_number_value() {
-        let result = patch_hcl_value(TEST_HCL, "/enclave.main/resources/cpu", "4", "number").unwrap();
+        let result =
+            patch_hcl_value(TEST_HCL, "/enclave.main/resources/cpu", "4", "number").unwrap();
         assert!(result.contains("cpu = 4"));
     }
 
@@ -197,7 +200,10 @@ baz = 1
     fn test_xpath_not_found() {
         let result = patch_hcl_value(TEST_HCL, "/caution/nonexistent", "val", "string");
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), PatcherError::XPathNotFound(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            PatcherError::XPathNotFound(_)
+        ));
     }
 
     #[test]
