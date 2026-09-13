@@ -14,10 +14,6 @@ const ORG_NAME_MIN_LEN: usize = 2;
 const ORG_NAME_MAX_LEN: usize = 100;
 const ORG_NAME_PATTERN: &str = r"^[a-zA-Z0-9][a-zA-Z0-9 _-]*[a-zA-Z0-9]$";
 
-const ORG_SLUG_MIN_LEN: usize = 3;
-const ORG_SLUG_MAX_LEN: usize = 63;
-const ORG_SLUG_PATTERN: &str = r"^[a-z0-9][a-z0-9-]*[a-z0-9]$";
-
 const USERNAME_MIN_LEN: usize = 3;
 const USERNAME_MAX_LEN: usize = 39;
 const USERNAME_PATTERN: &str = r"^[a-zA-Z0-9][a-zA-Z0-9_-]*[a-zA-Z0-9]$";
@@ -29,20 +25,8 @@ const BRANCH_NAME_MIN_LEN: usize = 1;
 const BRANCH_NAME_MAX_LEN: usize = 255;
 const BRANCH_NAME_PATTERN: &str = r"^[a-zA-Z0-9][a-zA-Z0-9/_.\-]*$";
 
-const ALLOWED_SSH_KEY_TYPES: &[&str] = &[
-    "ssh-ed25519",
-    "ecdsa-sha2-nistp256",
-    "ecdsa-sha2-nistp384",
-    "ecdsa-sha2-nistp521",
-    "ssh-rsa",
-];
-
-const SSH_KEY_MIN_LEN: usize = 50;
-const SSH_KEY_MAX_LEN: usize = 2000;
-
 static APP_NAME_REGEX: OnceLock<Regex> = OnceLock::new();
 static ORG_NAME_REGEX: OnceLock<Regex> = OnceLock::new();
-static ORG_SLUG_REGEX: OnceLock<Regex> = OnceLock::new();
 static USERNAME_REGEX: OnceLock<Regex> = OnceLock::new();
 static BRANCH_NAME_REGEX: OnceLock<Regex> = OnceLock::new();
 static EMAIL_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -53,10 +37,6 @@ fn get_app_name_regex() -> &'static Regex {
 
 fn get_org_name_regex() -> &'static Regex {
     ORG_NAME_REGEX.get_or_init(|| Regex::new(ORG_NAME_PATTERN).unwrap())
-}
-
-fn get_org_slug_regex() -> &'static Regex {
-    ORG_SLUG_REGEX.get_or_init(|| Regex::new(ORG_SLUG_PATTERN).unwrap())
 }
 
 fn get_username_regex() -> &'static Regex {
@@ -185,98 +165,10 @@ pub fn validate_email(email: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
-pub fn validate_ssh_public_key(public_key: &str) -> Result<(), ValidationError> {
-    let key = public_key.trim();
-    let len = key.len();
-
-    if len < SSH_KEY_MIN_LEN {
-        return Err(ValidationError::SshKeyTooShort {
-            min: SSH_KEY_MIN_LEN,
-            actual: len,
-        });
-    }
-
-    if len > SSH_KEY_MAX_LEN {
-        return Err(ValidationError::SshKeyTooLong {
-            max: SSH_KEY_MAX_LEN,
-            actual: len,
-        });
-    }
-
-    let parts: Vec<&str> = key.split_whitespace().collect();
-    if parts.len() < 2 {
-        return Err(ValidationError::SshKeyInvalidFormat {
-            expected: "<key-type> <base64-data> [comment]",
-        });
-    }
-
-    let key_type = parts[0];
-    let key_data = parts[1];
-
-    if !ALLOWED_SSH_KEY_TYPES.contains(&key_type) {
-        return Err(ValidationError::SshKeyUnsupportedType {
-            key_type: key_type.to_string(),
-        });
-    }
-
-    if !is_valid_base64(key_data) {
-        return Err(ValidationError::SshKeyInvalidBase64);
-    }
-
-    let min_data_len = match key_type {
-        "ssh-ed25519" => 68,
-        "ssh-rsa" => 200,
-        "ecdsa-sha2-nistp256" => 100,
-        "ecdsa-sha2-nistp384" => 120,
-        "ecdsa-sha2-nistp521" => 140,
-        _ => 50,
-    };
-
-    if key_data.len() < min_data_len {
-        return Err(ValidationError::SshKeyDataTooShort {
-            key_type: key_type.to_string(),
-        });
-    }
-
-    match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, key_data) {
-        Ok(decoded) => {
-            if decoded.is_empty() {
-                return Err(ValidationError::SshKeyEmptyData);
-            }
-        }
-        Err(_) => return Err(ValidationError::SshKeyInvalidBase64),
-    }
-
-    Ok(())
-}
-
-fn is_valid_base64(s: &str) -> bool {
-    s.chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
-        && !s.is_empty()
-}
-
 pub fn validate_role(role: &str) -> Result<UserRole, ValidationError> {
     UserRole::from_str(role).ok_or_else(|| ValidationError::InvalidRole {
         role: role.to_string(),
     })
-}
-
-pub fn sanitize_for_terraform(input: &str) -> String {
-    input
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
-        .replace('$', "\\$")
-}
-
-pub fn sanitize_for_shell(input: &str) -> String {
-    input
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_' || *c == '.' || *c == '/')
-        .collect()
 }
 
 #[cfg(test)]
@@ -455,90 +347,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ssh_key_valid() {
-        let ed25519_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl user@host";
-        assert!(validate_ssh_public_key(ed25519_key).is_ok());
-    }
-
-    #[test]
-    fn test_ssh_key_invalid() {
-        assert!(validate_ssh_public_key("invalid").is_err());
-        assert!(validate_ssh_public_key("ssh-ed25519").is_err());
-        assert!(validate_ssh_public_key("unknown-type AAAAC3Nza...").is_err());
-    }
-
-    #[test]
-    fn test_ssh_key_all_types() {
-        for key_type in ALLOWED_SSH_KEY_TYPES {
-            // Just verify the type is accepted (data validation will fail but type check passes)
-            let key = format!("{} {}", key_type, "A".repeat(300));
-            let result = validate_ssh_public_key(&key);
-            // Should not fail with "unsupported type"
-            if let Err(e) = &result {
-                assert!(
-                    !matches!(e, ValidationError::SshKeyUnsupportedType { .. }),
-                    "Key type {} should be supported",
-                    key_type
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_ssh_key_error_variants() {
-        match validate_ssh_public_key("short").unwrap_err() {
-            ValidationError::SshKeyTooShort { .. } => {}
-            e => panic!("Expected SshKeyTooShort, got {:?}", e),
-        }
-
-        let long_key = format!("ssh-ed25519 {}", "A".repeat(2000));
-        match validate_ssh_public_key(&long_key).unwrap_err() {
-            ValidationError::SshKeyTooLong { .. } => {}
-            e => panic!("Expected SshKeyTooLong, got {:?}", e),
-        }
-    }
-
-    #[test]
-    fn test_terraform_sanitization() {
-        assert_eq!(
-            sanitize_for_terraform("test\"value${}"),
-            "test\\\"value\\${}"
-        );
-        assert_eq!(sanitize_for_terraform("line1\nline2"), "line1\\nline2");
-    }
-
-    #[test]
-    fn test_terraform_sanitization_edge_cases() {
-        assert_eq!(sanitize_for_terraform(""), "");
-        assert_eq!(sanitize_for_terraform("plain"), "plain");
-        assert_eq!(sanitize_for_terraform("tab\there"), "tab\\there");
-        assert_eq!(sanitize_for_terraform("cr\rhere"), "cr\\rhere");
-        assert_eq!(sanitize_for_terraform("back\\slash"), "back\\\\slash");
-    }
-
-    #[test]
-    fn test_shell_sanitization() {
-        assert_eq!(
-            sanitize_for_shell("safe-file_name.txt"),
-            "safe-file_name.txt"
-        );
-        // '-', '/', and alphanumeric are preserved; '$', '(', ')', ' ' are stripped
-        assert_eq!(sanitize_for_shell("evil$(rm -rf /)name"), "evilrm-rf/name");
-    }
-
-    #[test]
-    fn test_shell_sanitization_edge_cases() {
-        assert_eq!(sanitize_for_shell(""), "");
-        assert_eq!(sanitize_for_shell("abc123"), "abc123");
-        assert_eq!(sanitize_for_shell("path/to/file"), "path/to/file");
-        assert_eq!(sanitize_for_shell("file.tar.gz"), "file.tar.gz");
-        // sanitize_for_shell allows: alphanumeric, '-', '_', '.', '/'
-        assert_eq!(sanitize_for_shell("a;b|c&d"), "abcd");
-        assert_eq!(sanitize_for_shell("`whoami`"), "whoami");
-        assert_eq!(sanitize_for_shell("hello-world_v2.0"), "hello-world_v2.0");
-    }
-
-    #[test]
     fn test_role_validation() {
         assert_eq!(validate_role("owner").unwrap(), UserRole::Owner);
         assert_eq!(validate_role("admin").unwrap(), UserRole::Admin);
@@ -583,8 +391,5 @@ mod tests {
 
         let err = ValidationError::EmailInvalidFormat;
         assert_eq!(err.code(), "email_invalid_format");
-
-        let err = ValidationError::SshKeyInvalidBase64;
-        assert_eq!(err.code(), "ssh_key_invalid_base64");
     }
 }

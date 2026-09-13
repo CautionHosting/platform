@@ -19,6 +19,13 @@ use crate::{AppState, AuthContext};
 
 pub(crate) const EMAIL_VERIFICATION_RESEND_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 
+/// A `users` row carrying the onboarding-completion signals.
+type UserStatusRow = (
+    Option<DateTime<Utc>>,
+    Option<DateTime<Utc>>,
+    Option<uuid::Uuid>,
+);
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum EmailVerificationThrottle {
     Allowed,
@@ -85,21 +92,11 @@ impl std::fmt::Debug for VerifyEmailQuery {
     }
 }
 
-#[derive(Debug, Serialize)]
-pub struct VerifyEmailResponse {
-    pub success: bool,
-    pub message: String,
-}
-
 pub async fn get_user_status(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<UserStatus>, StatusCode> {
-    let result: Option<(
-        Option<DateTime<Utc>>,
-        Option<DateTime<Utc>>,
-        Option<uuid::Uuid>,
-    )> = sqlx::query_as(
+    let result: Option<UserStatusRow> = sqlx::query_as(
         "SELECT email_verified_at, payment_method_added_at, beta_code_id
          FROM users
          WHERE id = $1",

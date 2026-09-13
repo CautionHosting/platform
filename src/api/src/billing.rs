@@ -16,6 +16,27 @@ use uuid::Uuid;
 
 use crate::{AppState, AuthContext, PricingConfig, get_user_primary_org};
 
+/// A `payment_methods` row returned to the payment-methods listing handler.
+type PaymentMethodRow = (
+    Uuid,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    bool,
+);
+
+/// A `credit_ledger` row with a running balance, returned to the ledger listing handler.
+type CreditLedgerRow = (
+    Uuid,
+    i64,
+    i64,
+    String,
+    String,
+    Option<String>,
+    DateTime<Utc>,
+);
+
 /// Base AWS on-demand rates by instance type (USD/hr, us-west-2).
 /// Used by both compute metering and builder billing.
 pub(crate) fn base_instance_rate(instance_type: &str) -> Option<f64> {
@@ -824,22 +845,23 @@ async fn sync_payment_methods_from_paddle(
 
     for row in &local_rows {
         if let Some(payment_method_id) = row.paddle_payment_method_id.as_deref()
-            && !remote_ids.contains(payment_method_id) {
-                sqlx::query(
-                    "UPDATE payment_methods
+            && !remote_ids.contains(payment_method_id)
+        {
+            sqlx::query(
+                "UPDATE payment_methods
                      SET is_active = false, is_primary = false
                      WHERE id = $1",
+            )
+            .bind(row.id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Database error: {}", e),
                 )
-                .bind(row.id)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Database error: {}", e),
-                    )
-                })?;
-            }
+            })?;
+        }
     }
 
     let active_primary_count: i64 = sqlx::query_scalar(
@@ -944,34 +966,26 @@ pub async fn get_payment_methods(
     if let (Some(customer_id), Some(api_key)) = (
         paddle_customer_id.as_deref(),
         state.paddle_api_key.as_deref(),
-    )
-        && !state.paddle_api_url.is_empty()
-            && should_sync_payment_methods(&state.db, org_id).await?
-            && let Err((status, err)) = sync_payment_methods_from_paddle(
-                &state.db,
-                &state.paddle_api_url,
-                api_key,
-                org_id,
-                customer_id,
-            )
-            .await
-            {
-                tracing::warn!(
-                    "Failed to sync Paddle payment methods for org {} (status {}): {}",
-                    org_id,
-                    status,
-                    err
-                );
-            }
+    ) && !state.paddle_api_url.is_empty()
+        && should_sync_payment_methods(&state.db, org_id).await?
+        && let Err((status, err)) = sync_payment_methods_from_paddle(
+            &state.db,
+            &state.paddle_api_url,
+            api_key,
+            org_id,
+            customer_id,
+        )
+        .await
+    {
+        tracing::warn!(
+            "Failed to sync Paddle payment methods for org {} (status {}): {}",
+            org_id,
+            status,
+            err
+        );
+    }
 
-    let rows: Vec<(
-        Uuid,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        bool,
-    )> = sqlx::query_as(
+    let rows: Vec<PaymentMethodRow> = sqlx::query_as(
         "SELECT id, payment_type, last4, card_brand, email, is_primary
          FROM payment_methods
          WHERE organization_id = $1 AND is_active = true
@@ -1762,9 +1776,10 @@ fn validate_credit_purchase_transaction(
     purchase: &ResolvedCreditPurchase,
 ) -> Result<(), String> {
     if let Some(expected_price_id) = purchase.price_id.as_deref()
-        && !transaction_contains_price_id(txn, expected_price_id) {
-            return Err("Transaction does not match the selected credit package".to_string());
-        }
+        && !transaction_contains_price_id(txn, expected_price_id)
+    {
+        return Err("Transaction does not match the selected credit package".to_string());
+    }
 
     let custom_data = txn["data"]["custom_data"]
         .as_object()
@@ -2400,37 +2415,38 @@ pub async fn purchase_credits(
     );
 
     if new_balance > 0
-        && let Ok(org_id) = get_user_primary_org(&state.db, auth.user_id).await {
-            let suspended: Option<chrono::DateTime<chrono::Utc>> =
-                sqlx::query_scalar("SELECT credit_suspended_at FROM organizations WHERE id = $1")
+        && let Ok(org_id) = get_user_primary_org(&state.db, auth.user_id).await
+    {
+        let suspended: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT credit_suspended_at FROM organizations WHERE id = $1")
+                .bind(org_id)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten()
+                .flatten();
+
+        if suspended.is_some() {
+            tracing::info!(
+                "Clearing credit suspension for org {} after credit purchase",
+                org_id
+            );
+            if let Err(e) =
+                sqlx::query("UPDATE organizations SET credit_suspended_at = NULL WHERE id = $1")
                     .bind(org_id)
-                    .fetch_optional(&state.db)
+                    .execute(&state.db)
                     .await
-                    .ok()
-                    .flatten()
-                    .flatten();
-
-            if suspended.is_some() {
-                tracing::info!(
-                    "Clearing credit suspension for org {} after credit purchase",
-                    org_id
+            {
+                tracing::error!(
+                    "Failed to clear credit suspension for org {}: {}",
+                    org_id,
+                    e
                 );
-                if let Err(e) =
-                    sqlx::query("UPDATE organizations SET credit_suspended_at = NULL WHERE id = $1")
-                        .bind(org_id)
-                        .execute(&state.db)
-                        .await
-                {
-                    tracing::error!(
-                        "Failed to clear credit suspension for org {}: {}",
-                        org_id,
-                        e
-                    );
-                }
-
-                let _ = call_internal_unsuspend(&state, org_id).await;
             }
+
+            let _ = call_internal_unsuspend(&state, org_id).await;
         }
+    }
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -2447,7 +2463,7 @@ pub async fn get_credit_ledger(
         .await
         .map_err(|e| (e, "Failed to get organization".to_string()))?;
 
-    let rows: Vec<(Uuid, i64, i64, String, String, Option<String>, DateTime<Utc>)> = sqlx::query_as(
+    let rows: Vec<CreditLedgerRow> = sqlx::query_as(
         "SELECT id, delta_cents,
                 (SUM(delta_cents) OVER (PARTITION BY organization_id ORDER BY created_at, id))::bigint AS balance_after,
                 entry_type, description, paddle_transaction_id, created_at

@@ -405,7 +405,9 @@ pub async fn deploy_nitro_enclave(request: NitroDeploymentRequest) -> Result<Dep
         request.resource_name
     );
 
-    let aws_region = request
+    // A deployment region must be configured for this resource. The concrete
+    // value is resolved downstream by the Terraform module.
+    request
         .credentials
         .as_ref()
         .map(|c| c.region.clone())
@@ -416,7 +418,6 @@ pub async fn deploy_nitro_enclave(request: NitroDeploymentRequest) -> Result<Dep
         module_path: PathBuf::from("terraform/modules/aws/nitro-enclave"),
         s3_bucket: std::env::var("TERRAFORM_STATE_BUCKET")
             .unwrap_or_else(|_| "caution-terraform-state".to_string()),
-        aws_region: aws_region.clone(),
     };
 
     if let Some(ref managed_onprem) = request.managed_onprem {
@@ -471,10 +472,6 @@ pub async fn deploy_nitro_enclave(request: NitroDeploymentRequest) -> Result<Dep
         .context("Failed to upload EIF to S3")?;
         provision_nitro_enclave(&request, &eif_s3_path, &config).await
     }
-}
-
-pub async fn destroy_app(org_id: Uuid, resource_id: Uuid, resource_name: String) -> Result<()> {
-    destroy_app_with_credentials(org_id, resource_id, resource_name, None, None).await
 }
 
 pub async fn destroy_app_with_credentials(
@@ -1016,7 +1013,6 @@ mod tests {
 struct TerraformConfig {
     module_path: PathBuf,
     s3_bucket: String,
-    aws_region: String,
 }
 
 impl Default for TerraformConfig {
@@ -1025,7 +1021,6 @@ impl Default for TerraformConfig {
             module_path: PathBuf::from("terraform/modules/aws/nitro-enclave"),
             s3_bucket: std::env::var("TERRAFORM_STATE_BUCKET")
                 .unwrap_or_else(|_| "caution-terraform-state".to_string()),
-            aws_region: std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()),
         }
     }
 }
@@ -1468,7 +1463,6 @@ fn get_tofu_outputs(work_dir: &Path) -> std::result::Result<DeploymentResult, Ge
 #[derive(Debug)]
 struct ManagedOnPremTerraformOutputs {
     launch_template_id: String,
-    launch_template_version: String,
     eip_allocation_id: String,
     public_ip: String,
     url: String,
@@ -1536,13 +1530,6 @@ fn get_managed_onprem_tofu_outputs(
             .as_str()
             .ok_or_else(|| GetManagedOnpremOutputsError::MissingField {
                 field: "launch_template_id".to_string(),
-                location: std::panic::Location::caller(),
-            })?
-            .to_string(),
-        launch_template_version: outputs["launch_template_version"]["value"]
-            .as_str()
-            .ok_or_else(|| GetManagedOnpremOutputsError::MissingField {
-                field: "launch_template_version".to_string(),
                 location: std::panic::Location::caller(),
             })?
             .to_string(),

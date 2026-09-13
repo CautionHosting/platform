@@ -755,12 +755,13 @@ async fn load_legal_notice_documents(
     }
 
     if let Some(document_ids) = document_ids
-        && documents.len() != document_ids.len() {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "One or more document_ids were not found".to_string(),
-            ));
-        }
+        && documents.len() != document_ids.len()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "One or more document_ids were not found".to_string(),
+        ));
+    }
 
     Ok(documents)
 }

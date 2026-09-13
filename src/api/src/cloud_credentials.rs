@@ -484,33 +484,6 @@ pub async fn set_default_credential(
     Ok(result.rows_affected() > 0)
 }
 
-pub async fn get_default_credential_for_platform(
-    pool: &PgPool,
-    org_id: Uuid,
-    platform: CloudPlatform,
-) -> Result<Option<CloudCredential>, (StatusCode, String)> {
-    let row = sqlx::query_as::<_, CloudCredential>(
-        "SELECT id, organization_id, resource_id, platform, managed_on_prem, identifier,
-                config, is_default, is_active, last_validated_at, validation_error,
-                created_at, updated_at
-         FROM cloud_credentials
-         WHERE organization_id = $1 AND platform = $2 AND is_default = true AND is_active = true",
-    )
-    .bind(org_id)
-    .bind(platform)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| {
-        tracing::error!("Database error: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Internal database error".to_string(),
-        )
-    })?;
-
-    Ok(row)
-}
-
 #[derive(Clone, Serialize)]
 pub struct ManagedOnPremCredentialData {
     pub deployment_id: String,
@@ -624,32 +597,6 @@ pub async fn get_managed_onprem_credential(
         ))?;
 
     Ok(Some(managed_onprem_credential_data(&cred, &secrets)))
-}
-
-pub async fn list_managed_onprem_credentials(
-    pool: &PgPool,
-    org_id: Uuid,
-) -> Result<Vec<CloudCredential>, (StatusCode, String)> {
-    let rows = sqlx::query_as::<_, CloudCredential>(
-        "SELECT id, organization_id, resource_id, platform, managed_on_prem, identifier,
-                config, is_default, is_active, last_validated_at, validation_error,
-                created_at, updated_at
-         FROM cloud_credentials
-         WHERE organization_id = $1 AND managed_on_prem = true
-         ORDER BY created_at",
-    )
-    .bind(org_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| {
-        tracing::error!("Database error: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Internal database error".to_string(),
-        )
-    })?;
-
-    Ok(rows)
 }
 
 #[tracing::instrument(skip_all, err(Debug))]

@@ -8,6 +8,17 @@ use uuid::Uuid;
 
 use crate::{AppState, cloud_credentials, deployment, ec2, metering};
 
+/// A stopped `compute_resources` row used when unsuspending an org.
+type StoppedResourceRow = (
+    Uuid,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<serde_json::Value>,
+    bool,
+);
+
 /// Helper: call the internal unsuspend endpoint after a credit purchase.
 pub async fn call_internal_unsuspend(state: &AppState, org_id: Uuid) -> Result<(), String> {
     let secret = state.internal_service_secret.as_deref().unwrap_or_default();
@@ -254,15 +265,7 @@ pub async fn unsuspend_org_resources(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     tracing::info!("Unsuspending resources for org {}", org_id);
 
-    let resources: Vec<(
-        Uuid,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<serde_json::Value>,
-        bool,
-    )> = sqlx::query_as(
+    let resources: Vec<StoppedResourceRow> = sqlx::query_as(
         "SELECT cr.id, cr.resource_name, cr.provider_resource_id, cr.region, cr.public_ip,
                 cr.configuration,
                 EXISTS (SELECT 1 FROM cloud_credentials cc
@@ -523,32 +526,28 @@ pub async fn get_aws_credentials_for_resource(
     if let Some(encryptor) = state.encryptor.as_ref()
         && let Ok(Some(credential)) =
             cloud_credentials::get_credential_by_resource(&state.db, org_id, resource_id).await
-            && credential.managed_on_prem
-                && let Ok(Some(secrets)) = cloud_credentials::get_credential_secrets(
-                    &state.db,
-                    encryptor,
-                    org_id,
-                    credential.id,
-                )
+        && credential.managed_on_prem
+        && let Ok(Some(secrets)) =
+            cloud_credentials::get_credential_secrets(&state.db, encryptor, org_id, credential.id)
                 .await
-                {
-                    let region = credential.config["aws_region"]
-                        .as_str()
-                        .map(|s| s.to_string())
-                        .or_else(|| std::env::var("AWS_REGION").ok())
-                        .unwrap_or_else(|| "us-west-2".to_string());
-                    return Some(deployment::AwsCredentials {
-                        access_key_id: secrets["aws_access_key_id"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string(),
-                        secret_access_key: secrets["aws_secret_access_key"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string(),
-                        region,
-                    });
-                }
+    {
+        let region = credential.config["aws_region"]
+            .as_str()
+            .map(|s| s.to_string())
+            .or_else(|| std::env::var("AWS_REGION").ok())
+            .unwrap_or_else(|| "us-west-2".to_string());
+        return Some(deployment::AwsCredentials {
+            access_key_id: secrets["aws_access_key_id"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
+            secret_access_key: secrets["aws_secret_access_key"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
+            region,
+        });
+    }
 
     // Fall back to platform credentials for fully managed resources.
     let access_key_id = std::env::var("AWS_ACCESS_KEY_ID").ok()?;

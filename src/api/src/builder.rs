@@ -13,7 +13,6 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::Duration;
 use uuid::Uuid;
 
 use crate::{
@@ -138,9 +137,6 @@ impl BuilderConfig {
 #[derive(Debug, Clone)]
 pub struct BuildResult {
     pub eif_s3_key: String,
-    pub eif_sha256: String,
-    pub eif_size_bytes: i64,
-    pub pcrs: serde_json::Value,
 }
 
 #[derive(Debug, Clone)]
@@ -178,7 +174,6 @@ pub struct BuildRequest {
     pub no_cache: bool,
     pub enclaveos_commit: String,
     pub steve_commit: String,
-    pub builder_size: String,
     pub builder_instance_type: String,
     pub app_sources: Vec<String>,
 }
@@ -275,6 +270,7 @@ pub async fn resolve_managed_onprem_builder_config(
 }
 
 /// Compute a cache key from all inputs that affect the EIF output.
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all)]
 pub fn compute_cache_key(
     commit_sha: &str,
@@ -348,8 +344,8 @@ pub async fn check_build_cache(
     app_id_scope: Option<Uuid>,
 ) -> Result<Option<BuildResult>> {
     let row = if let Some(app_id) = app_id_scope {
-        sqlx::query_as::<_, (String, String, i64, serde_json::Value)>(
-            "SELECT eif_s3_key, eif_sha256, eif_size_bytes, pcrs
+        sqlx::query_as::<_, (String,)>(
+            "SELECT eif_s3_key
              FROM eif_builds
              WHERE organization_id = $1 AND app_id = $2 AND cache_key = $3 AND status = 'completed'
              LIMIT 1",
@@ -361,8 +357,8 @@ pub async fn check_build_cache(
         .await
         .context("Failed to query resource-scoped eif_builds cache")?
     } else {
-        sqlx::query_as::<_, (String, String, i64, serde_json::Value)>(
-            "SELECT eif_s3_key, eif_sha256, eif_size_bytes, pcrs
+        sqlx::query_as::<_, (String,)>(
+            "SELECT eif_s3_key
              FROM eif_builds
              WHERE organization_id = $1 AND cache_key = $2 AND status = 'completed'
              LIMIT 1",
@@ -374,14 +370,7 @@ pub async fn check_build_cache(
         .context("Failed to query eif_builds cache")?
     };
 
-    Ok(row.map(
-        |(eif_s3_key, eif_sha256, eif_size_bytes, pcrs)| BuildResult {
-            eif_s3_key,
-            eif_sha256,
-            eif_size_bytes,
-            pcrs,
-        },
-    ))
+    Ok(row.map(|(eif_s3_key,)| BuildResult { eif_s3_key }))
 }
 
 /// Archive the source at a given commit and upload to S3 for the builder.
@@ -444,12 +433,13 @@ fn resolve_remote_builder_helper_path() -> Result<PathBuf> {
     }
 
     if let Ok(current_exe) = std::env::current_exe()
-        && let Some(parent) = current_exe.parent() {
-            let sibling = parent.join(REMOTE_BUILDER_HELPER);
-            if sibling.exists() {
-                return Ok(sibling);
-            }
+        && let Some(parent) = current_exe.parent()
+    {
+        let sibling = parent.join(REMOTE_BUILDER_HELPER);
+        if sibling.exists() {
+            return Ok(sibling);
         }
+    }
 
     let default_path = PathBuf::from(format!("/usr/local/bin/{}", REMOTE_BUILDER_HELPER));
     if default_path.exists() {
@@ -524,6 +514,7 @@ async fn ensure_managed_onprem_builder_security_group(
 /// 3. Poll S3 for status updates until completion or timeout
 /// 4. Record results in DB
 /// 5. Terminate builder instance
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all, err)]
 pub async fn execute_remote_build(
     db: &PgPool,
@@ -700,7 +691,10 @@ pub async fn execute_remote_build(
     let mut terminate_attempts = 0;
     loop {
         terminate_attempts += 1;
-        match ec2.terminate_instances(std::slice::from_ref(&instance_id)).await {
+        match ec2
+            .terminate_instances(std::slice::from_ref(&instance_id))
+            .await
+        {
             Ok(_) => break,
             Err(e) => {
                 if terminate_attempts >= 3 {
@@ -731,9 +725,6 @@ pub async fn execute_remote_build(
         Ok(status) => {
             let build_result = BuildResult {
                 eif_s3_key: eif_s3_key.clone(),
-                eif_sha256: status.eif_sha256.clone(),
-                eif_size_bytes: status.eif_size_bytes,
-                pcrs: status.pcrs.clone(),
             };
 
             if let Err(e) = sqlx::query(
@@ -822,9 +813,7 @@ const BUILD_PHASES: &[&str] = &[
 
 /// A status message emitted by the state machine.
 struct StatusMessage {
-    phase: &'static str,
     milestone: Option<&'static str>,
-    elapsed_since_update: Option<Duration>,
 }
 
 /// Linear state machine tracking build phases to catch skipped statuses
@@ -833,20 +822,14 @@ struct StatusMessage {
 struct BuildPhaseStateMachine {
     /// Index into BUILD_PHASES of the next un-emitted phase (0 = not started).
     current_index: usize,
-    /// Timestamp from S3 status.json when we last saw an update (for first message in batch).
-    last_timestamp: Option<DateTime<Utc>>,
 }
 
 impl BuildPhaseStateMachine {
     fn new() -> Self {
-        Self {
-            current_index: 0,
-            last_timestamp: None,
-        }
+        Self { current_index: 0 }
     }
 
     /// Returns all milestone messages for phases traversed since the last call.
-    /// For the first message in a batch, includes elapsed time from S3 timestamp.
     fn increment(&mut self, latest_status: &BuildStatus) -> Result<Vec<StatusMessage>> {
         // "failed" is terminal and has no progress milestone — emit nothing.
         if latest_status.phase == "failed" {
@@ -869,31 +852,14 @@ impl BuildPhaseStateMachine {
             );
         }
 
-        let mut messages = Vec::new();
-
-        for i in self.current_index..=target_idx {
-            // Only the first message in this batch carries elapsed time.
-            let elapsed = if messages.is_empty() && self.last_timestamp.is_some() {
-                Some(
-                    latest_status
-                        .timestamp
-                        .signed_duration_since(self.last_timestamp.expect("checked above"))
-                        .to_std()
-                        .unwrap_or(Duration::ZERO),
-                )
-            } else {
-                None
-            };
-
-            messages.push(StatusMessage {
-                phase: BUILD_PHASES[i],
-                milestone: build_phase_milestone(BUILD_PHASES[i]),
-                elapsed_since_update: elapsed,
-            });
-        }
+        let messages = BUILD_PHASES[self.current_index..=target_idx]
+            .iter()
+            .map(|&phase| StatusMessage {
+                milestone: build_phase_milestone(phase),
+            })
+            .collect();
 
         self.current_index = target_idx + 1; // Move past the latest phase.
-        self.last_timestamp = Some(latest_status.timestamp);
 
         Ok(messages)
     }
@@ -1274,6 +1240,7 @@ echo "Build complete: $EIF_SHA256 ($EIF_SIZE bytes)"
 /// Called periodically from a background task.
 /// Bill a user for builder instance time. Used as a fallback by the orphan reaper
 /// when real-time metering via tracked_resources was not active for the build.
+#[allow(clippy::too_many_arguments)]
 async fn bill_builder_usage(
     db: &PgPool,
     build_id: Uuid,
@@ -1715,52 +1682,64 @@ mod tests {
         let messages = sm.increment(&status).unwrap();
 
         assert_eq!(messages.len(), 4);
-        assert_eq!(messages[0].phase, "launching-builder");
-        assert_eq!(messages[1].phase, "downloading-source");
-        assert_eq!(messages[2].phase, "building-application");
-        assert_eq!(messages[3].phase, "building-enclave");
-        // First ever poll: no previous timestamp, so first message has no elapsed time.
-        assert!(messages[0].elapsed_since_update.is_none());
-        assert!(messages[1].elapsed_since_update.is_none());
-        assert!(messages[2].elapsed_since_update.is_none());
+        assert_eq!(
+            messages[0].milestone,
+            Some("Builder instance booting and installing dependencies...")
+        );
+        assert_eq!(
+            messages[1].milestone,
+            Some("Downloading source and build dependencies...")
+        );
+        assert_eq!(
+            messages[2].milestone,
+            Some("Building application Docker image...")
+        );
+        assert_eq!(
+            messages[3].milestone,
+            Some("Docker image built, building EIF...")
+        );
     }
 
     #[test]
-    fn state_machine_single_step_no_elapsed_on_first() {
+    fn state_machine_single_step_emits_one_milestone() {
         let ts = Utc::now();
         let mut sm = BuildPhaseStateMachine::new();
 
-        // First poll: builder reports "launching-builder". No previous timestamp, so no elapsed.
+        // First poll: builder reports "launching-builder".
         let status = make_status("launching-builder", ts);
         let messages = sm.increment(&status).unwrap();
 
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].phase, "launching-builder");
-        assert!(messages[0].elapsed_since_update.is_none());
+        assert_eq!(
+            messages[0].milestone,
+            Some("Builder instance booting and installing dependencies...")
+        );
     }
 
     #[test]
-    fn state_machine_elapsed_time_on_subsequent_polls() {
+    fn state_machine_subsequent_poll_emits_new_phases() {
         let ts1 = Utc::now();
         let mut sm = BuildPhaseStateMachine::new();
 
-        // First poll: launching-builder (no elapsed since no prior timestamp)
+        // First poll: launching-builder.
         let status1 = make_status("launching-builder", ts1);
         let messages1 = sm.increment(&status1).unwrap();
-        assert!(messages1[0].elapsed_since_update.is_none());
+        assert_eq!(messages1.len(), 1);
 
-        // Second poll 5 seconds later: building-application (skipped downloading-source)
+        // Second poll: building-application (skipped downloading-source).
         let ts2 = ts1 + TimeDelta::seconds(5);
         let status2 = make_status("building-application", ts2);
         let messages2 = sm.increment(&status2).unwrap();
 
         assert_eq!(messages2.len(), 2); // launching-builder already emitted, so downloading-source + building-application
-        assert_eq!(messages2[0].phase, "downloading-source");
-        assert_eq!(messages2[1].phase, "building-application");
-        // First message in batch has elapsed time.
-        assert!(messages2[0].elapsed_since_update.is_some());
-        let elapsed = messages2[0].elapsed_since_update.unwrap();
-        assert!(elapsed >= Duration::from_secs(5));
+        assert_eq!(
+            messages2[0].milestone,
+            Some("Downloading source and build dependencies...")
+        );
+        assert_eq!(
+            messages2[1].milestone,
+            Some("Building application Docker image...")
+        );
     }
 
     #[test]
@@ -1818,7 +1797,6 @@ mod tests {
         let messages = sm.increment(&status).unwrap();
 
         assert_eq!(messages.len(), 6); // All phases including "completed"
-        assert_eq!(messages[5].phase, "completed");
         assert_eq!(messages[5].milestone, Some("Cleaning up builder..."));
     }
 
@@ -2461,7 +2439,6 @@ mod tests {
             no_cache: true,
             enclaveos_commit: "enclave-abc".to_string(),
             steve_commit: "steve-from-cache-key".to_string(),
-            builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
             app_sources: vec![],
         };
@@ -2672,7 +2649,6 @@ mod tests {
             no_cache: false,
             enclaveos_commit: "abc".to_string(),
             steve_commit: "steve-test".to_string(),
-            builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
             app_sources: vec![],
         };
@@ -2732,7 +2708,6 @@ mod tests {
             no_cache: false,
             enclaveos_commit: "abc".to_string(),
             steve_commit: "steve-test".to_string(),
-            builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
             app_sources: vec![],
         };
@@ -2790,7 +2765,6 @@ mod tests {
             no_cache: false,
             enclaveos_commit: "abc".to_string(),
             steve_commit: "steve-test".to_string(),
-            builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
             app_sources: vec![],
         };
@@ -2856,7 +2830,6 @@ mod tests {
             no_cache: false,
             enclaveos_commit: "abc".to_string(),
             steve_commit: "steve-test".to_string(),
-            builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
             app_sources: vec![],
         };
@@ -2918,7 +2891,6 @@ mod tests {
             no_cache: false,
             enclaveos_commit: "abc".to_string(),
             steve_commit: "steve-test".to_string(),
-            builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
             app_sources: vec![],
         };
@@ -2977,7 +2949,6 @@ mod tests {
             no_cache: false,
             enclaveos_commit: "abc".to_string(),
             steve_commit: "steve-test".to_string(),
-            builder_size: "small".to_string(),
             builder_instance_type: "c5.xlarge".to_string(),
             app_sources: vec![],
         }

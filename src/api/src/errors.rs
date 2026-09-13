@@ -20,14 +20,6 @@ impl Span {
     pub fn new(start: usize, end: usize) -> Self {
         Self { start, end }
     }
-
-    pub fn len(&self) -> usize {
-        self.end.saturating_sub(self.start)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 }
 
 impl From<(usize, usize)> for Span {
@@ -46,9 +38,6 @@ pub enum ValidationError {
     },
     AppNameInvalidChars {
         invalid_char: char,
-        span: Span,
-    },
-    AppNameConsecutiveHyphens {
         span: Span,
     },
 
@@ -72,26 +61,6 @@ pub enum ValidationError {
         actual: usize,
     },
     EmailInvalidFormat,
-
-    SshKeyTooShort {
-        min: usize,
-        actual: usize,
-    },
-    SshKeyTooLong {
-        max: usize,
-        actual: usize,
-    },
-    SshKeyInvalidFormat {
-        expected: &'static str,
-    },
-    SshKeyUnsupportedType {
-        key_type: String,
-    },
-    SshKeyInvalidBase64,
-    SshKeyDataTooShort {
-        key_type: String,
-    },
-    SshKeyEmptyData,
 
     InvalidRole {
         role: String,
@@ -119,9 +88,6 @@ impl fmt::Display for ValidationError {
             }
             Self::AppNameInvalidChars { invalid_char, .. } => {
                 write!(f, "app name contains invalid character '{}'", invalid_char)
-            }
-            Self::AppNameConsecutiveHyphens { .. } => {
-                write!(f, "app name cannot contain consecutive hyphens")
             }
 
             Self::OrgNameLength { min, max, actual } => {
@@ -159,36 +125,6 @@ impl fmt::Display for ValidationError {
                 write!(f, "invalid email address format")
             }
 
-            Self::SshKeyTooShort { min, actual } => {
-                write!(
-                    f,
-                    "SSH public key is too short (minimum {} characters, got {})",
-                    min, actual
-                )
-            }
-            Self::SshKeyTooLong { max, actual } => {
-                write!(
-                    f,
-                    "SSH public key is too long (maximum {} characters, got {})",
-                    max, actual
-                )
-            }
-            Self::SshKeyInvalidFormat { expected } => {
-                write!(f, "SSH public key must have format: {}", expected)
-            }
-            Self::SshKeyUnsupportedType { key_type } => {
-                write!(f, "unsupported SSH key type '{}'", key_type)
-            }
-            Self::SshKeyInvalidBase64 => {
-                write!(f, "SSH key data is not valid base64")
-            }
-            Self::SshKeyDataTooShort { key_type } => {
-                write!(f, "SSH key data is too short for key type '{}'", key_type)
-            }
-            Self::SshKeyEmptyData => {
-                write!(f, "SSH public key decoded to empty data")
-            }
-
             Self::InvalidRole { role } => {
                 write!(f, "invalid role '{}'", role)
             }
@@ -214,7 +150,6 @@ impl ValidationError {
         match self {
             Self::AppNameLength { span, .. } => Some(*span),
             Self::AppNameInvalidChars { span, .. } => Some(*span),
-            Self::AppNameConsecutiveHyphens { span } => Some(*span),
             _ => None,
         }
     }
@@ -223,7 +158,6 @@ impl ValidationError {
         match self {
             Self::AppNameLength { .. } => "app_name_length",
             Self::AppNameInvalidChars { .. } => "app_name_invalid_chars",
-            Self::AppNameConsecutiveHyphens { .. } => "app_name_consecutive_hyphens",
 
             Self::OrgNameLength { .. } => "org_name_length",
             Self::OrgNameInvalidChars => "org_name_invalid_chars",
@@ -234,14 +168,6 @@ impl ValidationError {
 
             Self::EmailTooLong { .. } => "email_too_long",
             Self::EmailInvalidFormat => "email_invalid_format",
-
-            Self::SshKeyTooShort { .. } => "ssh_key_too_short",
-            Self::SshKeyTooLong { .. } => "ssh_key_too_long",
-            Self::SshKeyInvalidFormat { .. } => "ssh_key_invalid_format",
-            Self::SshKeyUnsupportedType { .. } => "ssh_key_unsupported_type",
-            Self::SshKeyInvalidBase64 => "ssh_key_invalid_base64",
-            Self::SshKeyDataTooShort { .. } => "ssh_key_data_too_short",
-            Self::SshKeyEmptyData => "ssh_key_empty_data",
 
             Self::InvalidRole { .. } => "invalid_role",
 
@@ -256,9 +182,6 @@ impl ValidationError {
             Self::AppNameInvalidChars { .. } => Some(
                 "Use only letters, numbers, hyphens, and underscores. Must start and end with alphanumeric.",
             ),
-            Self::AppNameConsecutiveHyphens { .. } => {
-                Some("Use single hyphens to separate words: my-app (not my--app)")
-            }
 
             Self::OrgNameInvalidChars => {
                 Some("Use only letters, numbers, spaces, hyphens, and underscores")
@@ -267,10 +190,6 @@ impl ValidationError {
             Self::UsernameInvalidChars => {
                 Some("Use only letters, numbers, hyphens, and underscores")
             }
-
-            Self::SshKeyUnsupportedType { .. } => Some(
-                "Supported types: ssh-ed25519, ssh-rsa, ecdsa-sha2-nistp256, ecdsa-sha2-nistp384, ecdsa-sha2-nistp521",
-            ),
 
             Self::InvalidRole { .. } => Some("Valid roles: owner, admin, member, viewer"),
 
