@@ -2911,7 +2911,6 @@ dependencies = [
 name = "enclave-builder"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "base64 0.22.1",
  "bollard",
@@ -4801,7 +4800,6 @@ checksum = "c797b9d6bb23aab2fc369c65f871be49214f5c759af65bde26ffaaa2b646b492"
 name = "metering"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "aws-config",
  "aws-sdk-cloudwatch",
  "aws-sdk-costexplorer",

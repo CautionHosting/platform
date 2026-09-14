@@ -1777,12 +1777,14 @@ mod tests {
         )
     }
 
-    async fn stage_test_manifest(key_exchange: &str) -> anyhow::Result<EnclaveManifest> {
-        let work_dir = tempfile::tempdir()?;
+    async fn stage_test_manifest(key_exchange: &str) -> EnclaveManifest {
+        let work_dir = tempfile::tempdir().expect("test temp dir");
         let user_dir = work_dir.path().join("user");
         let enclave_dir = work_dir.path().join("enclave");
-        fs::create_dir_all(&user_dir).await?;
-        fs::create_dir_all(&enclave_dir).await?;
+        fs::create_dir_all(&user_dir).await.expect("create user dir");
+        fs::create_dir_all(&enclave_dir)
+            .await
+            .expect("create enclave dir");
 
         let stage_dir = stage_eif_components(
             &user_dir,
@@ -1803,9 +1805,12 @@ mod tests {
             false,
             None,
         )
-        .await?;
+        .await
+        .expect("stage EIF components");
 
-        Ok(EnclaveManifest::read_from_file(&stage_dir.join("manifest.json")).await?)
+        EnclaveManifest::read_from_file(&stage_dir.join("manifest.json"))
+            .await
+            .expect("read staged manifest")
     }
 
     fn run_template_file() -> tempfile::NamedTempFile {
@@ -1864,9 +1869,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stage_manifest_records_non_default_key_exchange() {
-        let manifest = stage_test_manifest(XWING_DRAFT10_KEY_EXCHANGE)
-            .await
-            .unwrap();
+        let manifest = stage_test_manifest(XWING_DRAFT10_KEY_EXCHANGE).await;
 
         assert_eq!(
             manifest.steve_key_exchange.as_deref(),
@@ -1876,7 +1879,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_stage_manifest_omits_default_key_exchange() {
-        let manifest = stage_test_manifest(DEFAULT_KEY_EXCHANGE).await.unwrap();
+        let manifest = stage_test_manifest(DEFAULT_KEY_EXCHANGE).await;
 
         assert!(manifest.steve_key_exchange.is_none());
     }
