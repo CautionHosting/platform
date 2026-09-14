@@ -108,6 +108,11 @@ pub enum LoginError {
         #[source]
         source: anyhow::Error,
     },
+    #[error("could not record passkey use")]
+    DbRecordCredentialUse {
+        #[source]
+        source: db::RecordCredentialUseError,
+    },
     #[error("could not create auth session for user {user_id}")]
     DbCreateAuthSession {
         user_id: Uuid,
@@ -1789,6 +1794,10 @@ pub async fn finish_login_handler(
         return Err(LoginError::PinRequired);
     }
 
+    db::record_credential_use(&state.db, user_id, &credential_id_bytes)
+        .await
+        .map_err(|source| LoginError::DbRecordCredentialUse { source })?;
+
     if auth_result.needs_update() {
         let update_result = seckey.update_credential(&auth_result);
 
@@ -2631,6 +2640,10 @@ pub async fn qr_login_authenticate_finish_handler(
     if requires_pin && !auth_result.user_verified() {
         return Err(LoginError::PinRequired);
     }
+
+    db::record_credential_use(&state.db, user_id, &credential_id_bytes)
+        .await
+        .map_err(|source| LoginError::DbRecordCredentialUse { source })?;
 
     if auth_result.needs_update() {
         let update_result = seckey.update_credential(&auth_result);

@@ -1101,6 +1101,17 @@ pub async fn fido2_sign_middleware(
             .into_response()
     })?;
 
+    db::record_credential_use(&state.db, pending.user_id, &credential_id_bytes)
+        .await
+        .map_err(|error| {
+            tracing::error!(?error, "Failed to persist verified passkey use");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to record signed request",
+            )
+                .into_response()
+        })?;
+
     tracing::info!(
         audit_id = %audit_id,
         user_id = %pending.user_id,

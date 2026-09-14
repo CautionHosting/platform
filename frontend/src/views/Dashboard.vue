@@ -1264,8 +1264,8 @@ make build-cli
 
                 <div class="passkey-meta">
                   <span>Added {{ formatDate(passkey.created_at) }}</span>
-                  <span v-if="passkey.last_used_at">Last used {{ formatLastUsed(passkey.last_used_at) }}</span>
-                  <span v-else>Not used recently</span>
+                  <span v-if="passkey.last_used_at">{{ formatLastUsed(passkey.last_used_at) }}</span>
+                  <span v-else>Usage unknown</span>
                   <span v-if="formatPasskeyTransports(passkey.transports)">
                     {{ formatPasskeyTransports(passkey.transports) }}
                   </span>
