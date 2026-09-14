@@ -756,6 +756,10 @@ pub async fn finish_login_handler(
         });
     }
 
+    db::record_credential_use(&state.db, user_id, &credential_id_bytes)
+        .await
+        .with_context(Ctx::db_record_credential_use(user_id))?;
+
     if auth_result.needs_update() {
         let update_result = seckey.update_credential(&auth_result);
 

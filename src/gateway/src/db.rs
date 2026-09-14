@@ -782,11 +782,9 @@ pub async fn list_user_credentials(
             c.uv_verified,
             c.transport,
             c.created_at,
-            MAX(s.last_used_at) AS last_used_at
+            c.last_used_at
         FROM fido2_credentials c
-        LEFT JOIN auth_sessions s ON s.credential_id = c.credential_id
         WHERE c.user_id = $1
-        GROUP BY c.id, c.name, c.credential_id, c.transport, c.created_at
         ORDER BY c.created_at DESC
         "#,
     )
@@ -815,11 +813,9 @@ pub async fn get_user_credential_by_credential_id(
             c.uv_verified,
             c.transport,
             c.created_at,
-            MAX(s.last_used_at) AS last_used_at
+            c.last_used_at
         FROM fido2_credentials c
-        LEFT JOIN auth_sessions s ON s.credential_id = c.credential_id
         WHERE c.user_id = $1 AND c.credential_id = $2
-        GROUP BY c.id, c.name, c.credential_id, c.transport, c.created_at
         "#,
     )
     .bind(user_id)
@@ -850,6 +846,38 @@ pub async fn delete_user_credential(
         ))?;
 
     Ok(result.rows_affected())
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("failed to record passkey use for user {user_id} [{location}]")]
+pub struct RecordCredentialUseError {
+    user_id: Uuid,
+    #[location]
+    location: Location,
+    #[source]
+    source: BoxError,
+}
+
+/// Record accepted passkey verification, independently of session activity.
+pub async fn record_credential_use(
+    pool: &PgPool,
+    user_id: Uuid,
+    credential_id: &[u8],
+) -> Result<(), RecordCredentialUseError> {
+    // RETURNING also fails closed if the credential was removed concurrently.
+    // GREATEST prevents an older concurrent statement from regressing usage.
+    sqlx::query_scalar::<_, Uuid>(
+        "UPDATE fido2_credentials
+         SET last_used_at = GREATEST(last_used_at, NOW())
+         WHERE user_id = $1 AND credential_id = $2
+         RETURNING id",
+    )
+    .bind(user_id)
+    .bind(credential_id)
+    .fetch_one(pool)
+    .await
+    .with_context(RecordCredentialUseErrorCtx::new(user_id))?;
+    Ok(())
 }
 
 pub async fn update_fido2_credential(
@@ -1918,3 +1946,7 @@ mod credential_uv_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "db/passkey_usage_tests.rs"]
+mod passkey_usage_tests;

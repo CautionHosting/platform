@@ -1117,6 +1117,14 @@ pub enum Fido2SignError {
         #[source]
         source: Box<dyn Error + Send + Sync + 'static>,
     },
+
+    #[error("failed to persist verified passkey use [{location}]")]
+    RecordCredentialUse {
+        #[location]
+        location: &'static Location<'static>,
+        #[source]
+        source: Box<dyn Error + Send + Sync + 'static>,
+    },
 }
 
 impl IntoResponse for Fido2SignError {
@@ -1183,7 +1191,9 @@ impl IntoResponse for Fido2SignError {
                 tracing::warn!(?self, "Signed request: signature verification failed");
                 (StatusCode::UNAUTHORIZED, "Invalid signature").into_response()
             }
-            Self::SerializeAuthState { .. } | Self::AuditRecord { .. } => {
+            Self::SerializeAuthState { .. }
+            | Self::AuditRecord { .. }
+            | Self::RecordCredentialUse { .. } => {
                 tracing::error!(?self, "Signed request: audit recording failure");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -1404,6 +1414,10 @@ async fn fido2_sign_flow(
     )
     .await
     .with_context(Ctx::audit_record())?;
+
+    db::record_credential_use(&state.db, pending.user_id, &credential_id_bytes)
+        .await
+        .with_context(Ctx::record_credential_use())?;
 
     tracing::info!(
         audit_id = %audit_id,

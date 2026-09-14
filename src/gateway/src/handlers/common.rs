@@ -133,6 +133,17 @@ pub enum LoginError {
         source: BoxError,
     },
 
+    #[error("could not record passkey use for user {user_id} [{location}]")]
+    DbRecordCredentialUse {
+        user_id: Uuid,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
     #[error("could not create auth session for user {user_id} [{location}]")]
     DbCreateAuthSession {
         user_id: Uuid,
