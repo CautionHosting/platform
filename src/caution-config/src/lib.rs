@@ -87,6 +87,7 @@ pub struct TrafficRule {
     pub cidr_ipv4: String,
     #[serde(flatten)]
     pub port_spec: Option<PortSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ip_protocol: Option<String>,
 }
 
@@ -314,9 +315,38 @@ impl UnitConfig {
 pub struct NetworkConfig {
     #[serde(deserialize_with = "single_or_vec", default)]
     pub ingress: Vec<TrafficRule>,
-    #[serde(deserialize_with = "single_or_vec", default)]
+    #[serde(deserialize_with = "deserialize_egress", default)]
     pub egress: Vec<TrafficRule>,
     pub http: Option<HttpConfig>,
+}
+
+fn deserialize_egress<'de, D>(deserializer: D) -> Result<Vec<TrafficRule>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct UnrestrictedEgress {
+        cidr_ipv4: String,
+    }
+
+    const MESSAGE: &str = "Restricted egress is not supported. Remove egress blocks to disable outbound access, or use only egress { cidr_ipv4 = \"0.0.0.0/0\" } to explicitly allow unrestricted outbound access.";
+
+    let rules = single_or_vec::<D, UnrestrictedEgress>(deserializer)
+        .map_err(|_| serde::de::Error::custom(MESSAGE))?;
+    rules
+        .into_iter()
+        .map(|rule| {
+            if rule.cidr_ipv4 != "0.0.0.0/0" {
+                return Err(serde::de::Error::custom(MESSAGE));
+            }
+            Ok(TrafficRule {
+                cidr_ipv4: rule.cidr_ipv4,
+                port_spec: None,
+                ip_protocol: None,
+            })
+        })
+        .collect()
 }
 
 impl NetworkConfig {

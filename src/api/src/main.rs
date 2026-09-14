@@ -1602,9 +1602,13 @@ async fn load_build_config_for_deploy(
         let raw_content = String::from_utf8_lossy(&hcl_output.stdout).to_string();
         let config_file = config::ConfigurationFile::from_str(&raw_content).map_err(|e| {
             tracing::error!("Failed to parse caution.hcl: {}", e);
+            let detail = match &e {
+                config::FromStrError::HclParse(source) => source.to_string(),
+                _ => e.to_string(),
+            };
             (
                 StatusCode::BAD_REQUEST,
-                format!("Invalid caution.hcl: {}", e),
+                ["Invalid caution.hcl: ", &detail].concat(),
             )
         })?;
 
@@ -1826,6 +1830,30 @@ mod deploy_containerfile_tests {
         let commit_sha = String::from_utf8(output.stdout).unwrap().trim().to_string();
 
         (repo_dir, commit_sha)
+    }
+
+    #[tokio::test]
+    async fn deploy_path_rejects_restricted_egress_without_procfile_fallback() {
+        let (repo_dir, commit_sha) = commit_test_repo(&[
+            (
+                "caution.hcl",
+                r#"enclave "main" {
+                    network {
+                        egress { cidr_ipv4 = "192.0.2.1/32" }
+                    }
+                }"#,
+            ),
+            ("Procfile", "run: /app\n"),
+        ]);
+        let git_dir = repo_dir.path().join(".git");
+        let (status, message) =
+            load_build_config_for_deploy(git_dir.to_str().unwrap(), &commit_sha)
+                .await
+                .unwrap_err();
+
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(message.starts_with("Invalid caution.hcl:"));
+        assert!(message.contains("Restricted egress is not supported"));
     }
 
     #[tokio::test]

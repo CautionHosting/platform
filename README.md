@@ -161,6 +161,19 @@ start the real stack with `make up`, generate an access code with
    or plain `init`; BYOC apps must also not run `teardown --byoc` as part of
    this redeploy sequence.
 
+#### Outbound access
+
+Egress currently supports only on/off access. Omit all `egress` blocks to disable
+the outbound network tunnel, or use `egress { cidr_ipv4 = "0.0.0.0/0" }` to enable
+unrestricted outbound IPv4 access with DNS provided by the parent host. Granular
+egress filtering is not implemented: restricted CIDRs, port/protocol fields, and
+unknown egress fields are rejected, including when mixed with an allow-all rule.
+
+Previously accepted restrictive manifests now fail validation; they never enforced
+those restrictions. Do not replace them with allow-all unless unrestricted access
+is intended. This validation change does not alter running deployments; the API
+must be updated to enforce rejection on future deployments.
+
 #### Enclave-terminated HTTPS (TLS mode, implemented by Caddy)
 
 To terminate standard HTTPS inside the enclave without changing clients, select
