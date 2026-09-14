@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{bail, ensure, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use bootproof_sdk::{
     format::nitro::{Nitro, NitroPcrs},
@@ -37,18 +36,16 @@ struct TlsMetadata {
     certfp: String,
 }
 
-fn observed_pcrs(document: &[u8]) -> Result<NitroPcrs> {
+fn observed_pcrs(document: &[u8]) -> NitroPcrs {
     let cose = CoseSign1::from_slice(document)
-        .map_err(|error| anyhow::anyhow!("invalid COSE_Sign1 document: {error:?}"))?;
-    let payload = cose
-        .payload
-        .context("attestation document has no payload")?;
-    let payload: CborValue = serde_cbor::from_slice(&payload).context("invalid Nitro payload")?;
+        .unwrap_or_else(|error| panic!("invalid COSE_Sign1 document: {error:?}"));
+    let payload = cose.payload.expect("attestation document has no payload");
+    let payload: CborValue = serde_cbor::from_slice(&payload).expect("invalid Nitro payload");
     let CborValue::Map(payload) = payload else {
-        bail!("Nitro payload is not a CBOR map");
+        panic!("Nitro payload is not a CBOR map");
     };
     let Some(CborValue::Map(pcrs)) = payload.get(&CborValue::Text("pcrs".into())) else {
-        bail!("Nitro payload has no PCR map");
+        panic!("Nitro payload has no PCR map");
     };
 
     [0u8, 1, 2]
@@ -56,44 +53,44 @@ fn observed_pcrs(document: &[u8]) -> Result<NitroPcrs> {
         .map(|index| {
             let Some(CborValue::Bytes(value)) = pcrs.get(&CborValue::Integer(i128::from(index)))
             else {
-                bail!("Nitro payload has no PCR{index}");
+                panic!("Nitro payload has no PCR{index}");
             };
-            ensure!(value.len() == 48, "PCR{index} is not a SHA-384 value");
-            ensure!(
+            assert_eq!(value.len(), 48, "PCR{index} is not a SHA-384 value");
+            assert!(
                 value.iter().any(|byte| *byte != 0),
                 "PCR{index} is zero: enclave is in debug mode"
             );
-            Ok((index, value.clone()))
+            (index, value.clone())
         })
         .collect()
 }
 
-fn verified_user_data(payload: &CborValue) -> Result<Option<UserData>> {
+fn verified_user_data(payload: &CborValue) -> Option<UserData> {
     let CborValue::Map(payload) = payload else {
-        bail!("verified Nitro payload is not a CBOR map");
+        panic!("verified Nitro payload is not a CBOR map");
     };
-    let Some(value) = payload.get(&CborValue::Text("user_data".into())) else {
-        return Ok(None);
-    };
+    let value = payload.get(&CborValue::Text("user_data".into()))?;
     let CborValue::Bytes(value) = value else {
-        bail!("verified Nitro user_data is not bytes");
+        panic!("verified Nitro user_data is not bytes");
     };
-    Ok(Some(serde_json::from_slice(value).context(
-        "verified Nitro user_data is not valid Caddy JSON",
-    )?))
+    Some(
+        serde_json::from_slice(value)
+            .expect("verified Nitro user_data is not valid Caddy JSON"),
+    )
 }
 
-async fn live_leaf_fingerprint(client: &Client, base_url: &Url) -> Result<String> {
+async fn live_leaf_fingerprint(client: &Client, base_url: &Url) -> String {
     let health_url = base_url
         .join("/.well-known/caution/health")
-        .context("could not build health URL")?;
+        .expect("could not build health URL");
     let response = client
         .get(health_url)
         .send()
         .await
-        .context("verified HTTPS health request failed")?;
-    ensure!(
-        response.status() == StatusCode::OK,
+        .expect("verified HTTPS health request failed");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
         "HTTPS health returned {}",
         response.status()
     );
@@ -101,24 +98,24 @@ async fn live_leaf_fingerprint(client: &Client, base_url: &Url) -> Result<String
         .extensions()
         .get::<TlsInfo>()
         .and_then(TlsInfo::peer_certificate)
-        .context("HTTPS response did not expose its peer certificate")?;
-    Ok(hex::encode(Sha256::digest(cert)))
+        .expect("HTTPS response did not expose its peer certificate");
+    hex::encode(Sha256::digest(cert))
 }
 
-async fn attest(client: &Client, base_url: &Url, live_certfp: &str) -> Result<bool> {
+async fn attest(client: &Client, base_url: &Url, live_certfp: &str) -> bool {
     let mut nonce = vec![0u8; 32];
     rand::thread_rng().fill_bytes(&mut nonce);
     let response = client
         .post(
             base_url
                 .join("/attestation")
-                .context("could not build attestation URL")?,
+                .expect("could not build attestation URL"),
         )
         .json(&serde_json::json!({"nonce": general_purpose::STANDARD.encode(&nonce)}))
         .send()
         .await
-        .context("attestation request failed")?;
-    ensure!(
+        .expect("attestation request failed");
+    assert!(
         response.status().is_success(),
         "attestation returned {}",
         response.status()
@@ -126,33 +123,33 @@ async fn attest(client: &Client, base_url: &Url, live_certfp: &str) -> Result<bo
     let response: AttestationResponse = response
         .json()
         .await
-        .context("invalid attestation response")?;
+        .expect("invalid attestation response");
     let document = general_purpose::STANDARD
         .decode(response.attestation_document)
-        .context("attestation document is not base64")?;
+        .expect("attestation document is not base64");
 
     // Feeding the signed document's observed PCRs back to the SDK verifies genuine
     // Nitro attestation without claiming that this URL-only test knows workload identity.
-    let nitro = Nitro::new(document.clone(), observed_pcrs(&document)?)
-        .context("could not construct Nitro verifier")?;
+    let nitro = Nitro::new(document.clone(), observed_pcrs(&document))
+        .expect("could not construct Nitro verifier");
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .context("system clock is before the Unix epoch")?;
+        .expect("system clock is before the Unix epoch");
     let payload = nitro
         .verify(now, &nonce)
-        .context("Nitro certificate, COSE signature, nonce, or PCR verification failed")?;
-    let Some(user_data) = verified_user_data(&payload)? else {
+        .expect("Nitro certificate, COSE signature, nonce, or PCR verification failed");
+    let Some(user_data) = verified_user_data(&payload) else {
         eprintln!("verified attestation has no user_data yet");
-        return Ok(false);
+        return false;
     };
 
-    let domain = base_url.host_str().context("CADDY_E2E_URL has no host")?;
-    ensure!(user_data.tls.mode == "tls", "attested TLS mode is not tls");
-    ensure!(
-        user_data.tls.domain == domain,
+    let domain = base_url.host_str().expect("CADDY_E2E_URL has no host");
+    assert_eq!(user_data.tls.mode, "tls", "attested TLS mode is not tls");
+    assert_eq!(
+        user_data.tls.domain, domain,
         "attested domain does not match {domain}"
     );
-    ensure!(
+    assert!(
         user_data.tls.certfp.len() == 64
             && user_data
                 .tls
@@ -167,14 +164,14 @@ async fn attest(client: &Client, base_url: &Url, live_certfp: &str) -> Result<bo
             "verified certfp {} does not yet match live certfp {live_certfp}",
             user_data.tls.certfp
         );
-        return Ok(false);
+        return false;
     }
 
     println!("verified live leaf certfp: {live_certfp}");
-    Ok(true)
+    true
 }
 
-async fn check_http_paths(client: &Client, base_url: &Url) -> Result<()> {
+async fn check_http_paths(client: &Client, base_url: &Url) {
     let mut app_url = base_url.clone();
     app_url.set_path("/");
     app_url.set_query(None);
@@ -183,8 +180,8 @@ async fn check_http_paths(client: &Client, base_url: &Url) -> Result<()> {
         .get(app_url)
         .send()
         .await
-        .context("HTTPS application request failed")?;
-    ensure!(
+        .expect("HTTPS application request failed");
+    assert!(
         !response.status().is_server_error(),
         "HTTPS application request returned {}",
         response.status()
@@ -193,10 +190,10 @@ async fn check_http_paths(client: &Client, base_url: &Url) -> Result<()> {
     let mut redirect_url = base_url.clone();
     redirect_url
         .set_scheme("http")
-        .map_err(|_| anyhow::anyhow!("could not build HTTP redirect URL"))?;
+        .expect("could not build HTTP redirect URL");
     redirect_url
         .set_port(None)
-        .map_err(|_| anyhow::anyhow!("could not clear HTTP redirect port"))?;
+        .expect("could not clear HTTP redirect port");
     redirect_url.set_path("/__caution_caddy_e2e__");
     redirect_url.set_query(Some("probe=1"));
     redirect_url.set_fragment(None);
@@ -205,16 +202,17 @@ async fn check_http_paths(client: &Client, base_url: &Url) -> Result<()> {
         .get(redirect_url)
         .send()
         .await
-        .context("HTTP redirect request failed")?;
-    ensure!(
-        response.status() == StatusCode::PERMANENT_REDIRECT,
+        .expect("HTTP redirect request failed");
+    assert_eq!(
+        response.status(),
+        StatusCode::PERMANENT_REDIRECT,
         "HTTP request returned {}, expected 308",
         response.status()
     );
     let expected = base_url
         .join("/__caution_caddy_e2e__?probe=1")
-        .context("could not build expected redirect URL")?;
-    ensure!(
+        .expect("could not build expected redirect URL");
+    assert!(
         response
             .headers()
             .get(reqwest::header::LOCATION)
@@ -222,17 +220,17 @@ async fn check_http_paths(client: &Client, base_url: &Url) -> Result<()> {
             == Some(expected.as_str()),
         "HTTP redirect Location does not match {expected}"
     );
-    Ok(())
 }
 
 #[tokio::test]
 #[ignore = "requires CADDY_E2E_URL pointing to a live production-mode Nitro enclave"]
-async fn caddy_nitro_live() -> Result<()> {
-    let base_url =
-        Url::parse(&std::env::var("CADDY_E2E_URL").context("CADDY_E2E_URL is required")?)
-            .context("CADDY_E2E_URL is invalid")?;
-    ensure!(base_url.scheme() == "https", "CADDY_E2E_URL must use HTTPS");
-    ensure!(
+async fn caddy_nitro_live() {
+    let base_url = Url::parse(
+        &std::env::var("CADDY_E2E_URL").expect("CADDY_E2E_URL is required"),
+    )
+    .expect("CADDY_E2E_URL is invalid");
+    assert_eq!(base_url.scheme(), "https", "CADDY_E2E_URL must use HTTPS");
+    assert!(
         base_url.host_str().is_some(),
         "CADDY_E2E_URL must have a host"
     );
@@ -242,14 +240,14 @@ async fn caddy_nitro_live() -> Result<()> {
         .tls_info(true)
         .timeout(Duration::from_secs(30))
         .build()
-        .context("could not build HTTP client")?;
+        .expect("could not build HTTP client");
 
-    check_http_paths(&client, &base_url).await?;
+    check_http_paths(&client, &base_url).await;
     for attempt in 0..2 {
-        let live_certfp = live_leaf_fingerprint(&client, &base_url).await?;
-        if attest(&client, &base_url, &live_certfp).await? {
+        let live_certfp = live_leaf_fingerprint(&client, &base_url).await;
+        if attest(&client, &base_url, &live_certfp).await {
             println!("Caddy live Nitro binding PASSED");
-            return Ok(());
+            return;
         }
         if attempt == 0 {
             eprintln!("waiting for the certificate publisher polling window...");
@@ -257,5 +255,5 @@ async fn caddy_nitro_live() -> Result<()> {
         }
     }
 
-    bail!("attested certfp did not match the live leaf after the publisher polling window")
+    panic!("attested certfp did not match the live leaf after the publisher polling window")
 }

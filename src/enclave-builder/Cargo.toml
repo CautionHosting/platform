@@ -8,7 +8,6 @@ edition = "2021"
 
 [dependencies]
 # Error handling
-anyhow = { workspace = true }
 thiserror = { workspace = true }
 dterror = { workspace = true }
 

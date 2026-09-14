@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use crate::types::{Provider, ResourceType, ResourceUsage};
-use anyhow::Context;
+use dterror::{BoxError, CtxError, Location, ResultExt as _};
 
 pub struct CostCalculator {
     pricing: PricingRules,
@@ -320,17 +320,39 @@ impl CostCalculator {
     }
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum LoadPricingRulesError {
+    #[error(
+        "could not read prices.json; configure explicit pricing before starting metering [{location}]"
+    )]
+    ReadFile {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error(
+        "could not parse prices.json for metering pricing; ensure compute_margin_percent is explicitly set [{location}]"
+    )]
+    Parse {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
 impl PricingRules {
-    pub fn load() -> anyhow::Result<Self> {
+    pub(crate) fn load() -> Result<Self, LoadPricingRulesError> {
+        use LoadPricingRulesErrorCtx as Ctx;
+
         let mut rules = Self::default();
 
-        let contents = std::fs::read_to_string("prices.json").context(
-            "prices.json not found. Configure explicit pricing before starting metering.",
-        )?;
+        let contents = std::fs::read_to_string("prices.json").with_context(Ctx::read_file())?;
         let paddle_enabled = std::env::var("BYOC_PADDLE_SUBSCRIPTIONS_ENABLED")
             .is_ok_and(|value| value.eq_ignore_ascii_case("true"));
         let config = caution_config::pricing::PricingConfig::parse(&contents, paddle_enabled)
-            .context("Failed to parse prices.json for metering pricing. Ensure compute_margin_percent is explicitly set.")?;
+            .with_context(Ctx::parse())?;
         rules.margin_percent = config.compute_margin_percent;
         tracing::info!("Loaded metering pricing config from prices.json");
         Ok(rules)

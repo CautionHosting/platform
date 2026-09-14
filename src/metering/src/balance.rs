@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::Result;
+use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use sqlx::Row;
 
 use crate::credits::get_ledger_balance_cents;
@@ -10,10 +10,34 @@ use crate::AppState;
 
 const LOW_BALANCE_WARNING_CENTS: i64 = 2_500;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum CheckBalanceThresholdsErrorKind {
+    GetBalance,
+    ReadBillingConfig,
+    ReadSuspendedAt,
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("could not check balance thresholds ({kind:?}) [{location}]")]
+pub(crate) struct CheckBalanceThresholdsError {
+    kind: CheckBalanceThresholdsErrorKind,
+    #[location]
+    location: Location,
+    #[source]
+    source: BoxError,
+}
+
 /// After deducting credits, check if the org's balance requires action.
 #[tracing::instrument(skip_all, fields(org_id = %org_id), err)]
-pub(crate) async fn check_balance_thresholds(state: &AppState, org_id: uuid::Uuid) -> Result<()> {
-    let balance_cents = get_ledger_balance_cents(&state.pool, org_id).await?;
+pub(crate) async fn check_balance_thresholds(
+    state: &AppState,
+    org_id: uuid::Uuid,
+) -> Result<(), CheckBalanceThresholdsError> {
+    use CheckBalanceThresholdsErrorCtx as Ctx;
+
+    let balance_cents = get_ledger_balance_cents(&state.pool, org_id)
+        .await
+        .with_context(Ctx::new(CheckBalanceThresholdsErrorKind::GetBalance))?;
 
     // Read billing config for warning cooldown state.
     let config = sqlx::query(
@@ -22,7 +46,8 @@ pub(crate) async fn check_balance_thresholds(state: &AppState, org_id: uuid::Uui
     )
     .bind(org_id)
     .fetch_optional(&state.pool)
-    .await?;
+    .await
+    .with_context(Ctx::new(CheckBalanceThresholdsErrorKind::ReadBillingConfig))?;
     let low_balance_warned_at: Option<chrono::DateTime<chrono::Utc>> =
         config.as_ref().and_then(|r| r.get("low_balance_warned_at"));
 
@@ -34,7 +59,8 @@ pub(crate) async fn check_balance_thresholds(state: &AppState, org_id: uuid::Uui
             sqlx::query_scalar("SELECT credit_suspended_at FROM organizations WHERE id = $1")
                 .bind(org_id)
                 .fetch_optional(&state.pool)
-                .await?
+                .await
+                .with_context(Ctx::new(CheckBalanceThresholdsErrorKind::ReadSuspendedAt))?
                 .flatten();
 
         if already_suspended.is_none() {

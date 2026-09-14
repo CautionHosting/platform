@@ -1,10 +1,99 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use enclave_builder::{EnclaveBuilder, EnclaveManifest, EnclaveSource, FrameworkSource, UserImage};
+
+#[derive(Debug, thiserror::Error, CtxError)]
+enum RemoteBuildError {
+    #[error("environment variable '{name}' is required [{location}]")]
+    EnvVar {
+        #[context(borrow = str)]
+        name: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("unsupported CAUTION_KEY_EXCHANGE '{value}' [{location}]")]
+    KeyExchange {
+        #[context(borrow = str)]
+        value: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("manifest enclave_source.urls is empty [{location}]")]
+    EmptyEnclaveUrls { location: Location },
+    #[error("failed to create work dir {} [{location}]", path.display())]
+    CreateWorkDir {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("failed to create output dir {} [{location}]", path.display())]
+    CreateOutputDir {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("failed to read manifest {} [{location}]", path.display())]
+    ReadManifest {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("failed to initialize enclave builder [{location}]")]
+    NewBuilder {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("enclave build failed [{location}]")]
+    Build {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("expected PCR output at {} [{location}]", path.display())]
+    MissingPcrs {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        location: Location,
+    },
+    #[error("failed to copy EIF to {} [{location}]", path.display())]
+    CopyEif {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("failed to copy PCRs to {} [{location}]", path.display())]
+    CopyPcrs {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
 
 fn env_flag(name: &str) -> bool {
     std::env::var(name)
@@ -12,8 +101,9 @@ fn env_flag(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn env_required(name: &str) -> Result<String> {
-    std::env::var(name).with_context(|| format!("{name} is required"))
+fn env_required(name: &str) -> Result<String, RemoteBuildError> {
+    use RemoteBuildErrorCtx as Ctx;
+    std::env::var(name).with_context(Ctx::env_var(name))
 }
 
 fn ports_from_env() -> Vec<u16> {
@@ -46,21 +136,22 @@ fn http_port_from_env() -> Option<u16> {
     })
 }
 
-fn key_exchange_from_env() -> Result<String> {
+fn key_exchange_from_env() -> Result<String, RemoteBuildError> {
+    use RemoteBuildErrorCtx as Ctx;
     let value = std::env::var("CAUTION_KEY_EXCHANGE")
         .unwrap_or_else(|_| enclave_builder::build::DEFAULT_KEY_EXCHANGE.to_string());
-    enclave_builder::build::validate_key_exchange(&value)
-        .with_context(|| format!("unsupported CAUTION_KEY_EXCHANGE: {value}"))?;
+    enclave_builder::build::validate_key_exchange(&value).with_context(Ctx::key_exchange(&value))?;
     Ok(value)
 }
 
-fn enclave_source_from_manifest(manifest: &EnclaveManifest) -> Result<(String, String)> {
+fn enclave_source_from_manifest(
+    manifest: &EnclaveManifest,
+) -> Result<(String, String), RemoteBuildError> {
     match &manifest.enclave_source {
         EnclaveSource::GitArchive { urls, commit } => {
-            let url = urls
-                .first()
-                .cloned()
-                .context("manifest enclave_source.urls is empty")?;
+            let url = urls.first().cloned().ok_or_else(|| RemoteBuildError::EmptyEnclaveUrls {
+                location: std::panic::Location::caller(),
+            })?;
             let pinned_url = commit
                 .as_deref()
                 .map(|commit| enclave_builder::pin_archive_url_to_commit(&url, commit))
@@ -90,7 +181,9 @@ fn framework_source_from_manifest(manifest: &EnclaveManifest) -> String {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), RemoteBuildError> {
+    use RemoteBuildErrorCtx as Ctx;
+
     let manifest_path = PathBuf::from(env_required("CAUTION_MANIFEST_PATH")?);
     let image_ref = env_required("CAUTION_IMAGE_REF")?;
     let work_dir = PathBuf::from(env_required("CAUTION_WORK_DIR")?);
@@ -122,16 +215,16 @@ async fn main() -> Result<()> {
 
     tokio::fs::create_dir_all(&work_dir)
         .await
-        .with_context(|| format!("Failed to create work dir {}", work_dir.display()))?;
+        .with_context(Ctx::create_work_dir(&work_dir))?;
     if let Some(parent) = output_eif.parent() {
         tokio::fs::create_dir_all(parent)
             .await
-            .with_context(|| format!("Failed to create output dir {}", parent.display()))?;
+            .with_context(Ctx::create_output_dir(parent))?;
     }
 
     let manifest = EnclaveManifest::read_from_file(&manifest_path)
         .await
-        .with_context(|| format!("Failed to read manifest {}", manifest_path.display()))?;
+        .with_context(Ctx::read_manifest(&manifest_path))?;
 
     let (enclave_source, enclave_version) = enclave_source_from_manifest(&manifest)?;
     let framework_source = framework_source_from_manifest(&manifest);
@@ -151,9 +244,9 @@ async fn main() -> Result<()> {
     let run_command = manifest.run_command.clone();
     let metadata = manifest.metadata.clone();
 
-    let builder =
-        EnclaveBuilder::new(enclave_source, enclave_version, framework_source, &work_dir)?
-            .with_no_cache(no_cache);
+    let builder = EnclaveBuilder::new(enclave_source, enclave_version, framework_source, &work_dir)
+        .with_context(Ctx::new_builder())?
+        .with_no_cache(no_cache);
 
     let user_image = UserImage {
         reference: image_ref,
@@ -181,7 +274,8 @@ async fn main() -> Result<()> {
                 e2e_cors_origins,
                 egress,
             )
-            .await?
+            .await
+            .with_context(Ctx::build())?
     } else {
         builder
             .build_enclave(
@@ -205,20 +299,24 @@ async fn main() -> Result<()> {
                 e2e_cors_origins,
                 egress,
             )
-            .await?
+            .await
+            .with_context(Ctx::build())?
     };
 
     let generated_pcrs = deployment.eif.path.with_extension("pcrs");
     if !generated_pcrs.exists() {
-        bail!("Expected PCR output at {}", generated_pcrs.display());
+        return Err(RemoteBuildError::MissingPcrs {
+            path: generated_pcrs,
+            location: std::panic::Location::caller(),
+        });
     }
 
     tokio::fs::copy(&deployment.eif.path, &output_eif)
         .await
-        .with_context(|| format!("Failed to copy EIF to {}", output_eif.display()))?;
+        .with_context(Ctx::copy_eif(&output_eif))?;
     tokio::fs::copy(&generated_pcrs, &output_pcrs)
         .await
-        .with_context(|| format!("Failed to copy PCRs to {}", output_pcrs.display()))?;
+        .with_context(Ctx::copy_pcrs(&output_pcrs))?;
 
     println!("EIF written to {}", output_eif.display());
     println!("PCRs written to {}", output_pcrs.display());
