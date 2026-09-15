@@ -110,7 +110,10 @@ The shared models and loader are pinned to the Locksmith revision recorded in
 `Cargo.toml` and `Cargo.lock`. All Bootproof SDK consumers use the historical
 verification revision `821b5c63e80f082f6d67ba3695c11416933489ec`, including the existing
 ES384 encoding fix. No old-remote patch or local path dependency is required.
-Runtime pins and legacy bundle fallback are unchanged.
+The default Locksmith daemon revision is also `07041e40c0fa808015cbd1f706e3f82f682e7139`,
+matching the API/CLI loader. `LOCKSMITH_COMMIT` still overrides this default.
+Existing deployed images require a rebuild/redeployment to use it. Legacy
+bundle fallback remains unimplemented.
 
 Stored bundle proofs now validate certificate validity at the signed generation
 timestamp, then check the expected PCRs, deterministic nonce and canonical bundle
@@ -135,7 +138,57 @@ for live shard transport.
   recryption transport. CLI shard submission rejects WebAuthn/mixed bundles instead
   of reaching the upstream unimplemented path. Creation does not deliver unlocking.
 
-Deployment preflight and runtime integration remain separate Platform work.
+Artifact preflight and live deployment validation remain separate Platform work.
+
+### Trying PGP recovery
+
+First publish the referenced Bootproof and Locksmith commits before using a
+remote/container builder; a host Cargo cache does not make them available inside
+the build. Rebuild the Platform API for hosted builds, or rebuild the CLI for
+local `caution apps build`. Remove any stale `LOCKSMITH_COMMIT` override from
+the builder environment. Neither the runtime pin nor `env::vault` installs the
+application's bundle or policy automatically.
+
+In an initialized application repository, with two holders' eligible PGP keys
+registered in the dashboard and a real Keymaker configured on Platform:
+
+```sh
+# Replace USER1 and USER2 with organization-member UUIDs.
+caution secret init --from-org-users USER1,USER2 --threshold 2 \
+  --keymaker-pcr-policy /absolute/path/to/verified-keymaker-policy.json
+printf 'TEST_SECRET=quorum-smoke-test\n' > .env.quorum-test
+caution secret encrypt TEST_SECRET --env-file .env.quorum-test
+```
+
+This writes the proofed bundle, policy and encrypted secret under `.caution/`.
+Include them in the application's final container image:
+
+```dockerfile
+COPY .caution/quorum-bundle.json /etc/caution/bundle.json
+COPY .caution/keymaker-pcr-policy.json /etc/caution/keymaker-pcr-policy.json
+COPY .caution/secrets/ /etc/caution/secrets/
+```
+
+Keep these files in the application's reproducible source inputs and normalize
+their file modes in its build stage. Do not use `build.binary`, which discards
+the other application files. Add `TEST_SECRET = env::vault("TEST_SECRET")` to
+the default unit's HCL `env` map. Keep plaintext and private keyrings out of Git.
+
+After rebuilding and deploying that application in non-debug Nitro mode:
+
+```sh
+caution verify --save-pcrs
+caution secret send-shard --keyring /absolute/path/to/alice.private.asc
+# With a 2-of-2 quorum, the application must remain locked here.
+caution secret send-shard --keyring /absolute/path/to/bob.private.asc
+# The application should now start with TEST_SECRET available.
+```
+
+Each holder uses their own keyring (omit `--keyring` for a supported smart card).
+Restart the enclave and repeat to exercise recovery. These are manual test
+instructions, not a claim of completed Nitro validation. For the existing local
+creation/encryption test with synthetic proofs, run `make test-quorum-mock` from
+the Platform repository; it does not exercise shard recovery.
 
 ### Historical-proof validation
 
