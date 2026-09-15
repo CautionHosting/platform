@@ -235,12 +235,12 @@ fn validate_keyring(keyring: &[Key]) -> Result<(), OrgQuorumError> {
                 "duplicate effective OpenPGP holder",
             ));
         }
-        let policy = StandardPolicy::new();
+        let mut policy = StandardPolicy::new();
+        policy.good_critical_notations(&["organization-id@caution.co", "bundle-id@caution.co"]);
         for key in cert
             .keys()
             .with_policy(&policy, None)
             .supported()
-            .alive()
             .revoked(false)
             .for_storage_encryption()
         {
@@ -552,7 +552,7 @@ pub async fn generate_org_quorum_bundle(
         crate::cryptographic_bundles::CreateBundleRequest {
             data,
             name: request.name,
-            labels: Some(request.labels),
+            labels: (!request.labels.is_null()).then_some(request.labels),
         },
     )
     .await

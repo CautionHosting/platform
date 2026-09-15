@@ -254,3 +254,43 @@ async fn busy_and_timeout_do_not_retry_generation() {
 
 #[path = "database.rs"]
 mod database;
+
+mod recipients {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/quorum_certificates.rs"
+    ));
+}
+
+#[test]
+fn rejects_shared_recipients_including_notations_and_expired_keys() {
+    for notation in [
+        None,
+        Some("organization-id@caution.co"),
+        Some("bundle-id@caution.co"),
+    ] {
+        for expired in [false, true] {
+            let certs = recipients::shared_recipient(notation, expired);
+            for cert in &certs {
+                assert!(eligible_certificate(cert).is_ok());
+            }
+            let keys: Vec<_> = certs
+                .into_iter()
+                .map(|cert| Key::OpenPGP { cert })
+                .collect();
+            let error = validate_keyring(&keys).unwrap_err();
+            assert!(error.message.contains("share an encryption key"));
+        }
+    }
+    assert!(
+        validate_keyring(&[
+            Key::OpenPGP {
+                cert: certificate()
+            },
+            Key::OpenPGP {
+                cert: certificate()
+            }
+        ])
+        .is_ok()
+    );
+}

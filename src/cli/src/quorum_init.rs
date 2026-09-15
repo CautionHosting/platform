@@ -163,7 +163,8 @@ fn public_certificates(text: &str) -> Result<Vec<String>, InitError> {
                 "use public PGP certificates, not a private keyring",
             ));
         }
-        let policy = StandardPolicy::new();
+        let mut policy = StandardPolicy::new();
+        policy.good_critical_notations(&["organization-id@caution.co", "bundle-id@caution.co"]);
         let keys = || {
             cert.keys()
                 .with_policy(&policy, None)
@@ -209,12 +210,12 @@ fn unique_certificates(certificates: &[String]) -> Result<(), InitError> {
         if !seen.insert(cert.fingerprint()) {
             return Err(InitError::invalid("duplicate effective PGP holder"));
         }
-        let policy = StandardPolicy::new();
+        let mut policy = StandardPolicy::new();
+        policy.good_critical_notations(&["organization-id@caution.co", "bundle-id@caution.co"]);
         for key in cert
             .keys()
             .with_policy(&policy, None)
             .supported()
-            .alive()
             .revoked(false)
             .for_storage_encryption()
         {

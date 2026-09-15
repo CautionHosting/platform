@@ -261,6 +261,7 @@ async fn storage_roundtrip(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid
     .await
     .unwrap();
     assert_eq!(created.data, envelope);
+    assert_eq!(created.labels, json!({}));
     let listed = storage::list_quorum_bundles(pool, org).await.unwrap();
     assert_eq!(
         listed.iter().find(|b| b.id == created.id).unwrap().data,

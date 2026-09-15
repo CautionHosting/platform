@@ -192,3 +192,32 @@ fn local_keyring_keeps_all_holders_and_rejects_duplicates() {
     assert!(unique_certificates(&certs).is_ok());
     assert!(unique_certificates(&[first.clone(), first]).is_err());
 }
+
+mod recipients {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/quorum_certificates.rs"
+    ));
+}
+
+#[test]
+fn rejects_shared_recipients_including_notations_and_expired_keys() {
+    for notation in [
+        None,
+        Some("organization-id@caution.co"),
+        Some("bundle-id@caution.co"),
+    ] {
+        for expired in [false, true] {
+            let certs = recipients::shared_recipient(notation, expired);
+            for cert in &certs {
+                assert!(public_certificates(cert).is_ok());
+            }
+            assert!(
+                unique_certificates(&certs)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("share an encryption key")
+            );
+        }
+    }
+}

@@ -34,7 +34,14 @@ other cases require an interactive custody choice or explicit noninteractive
 selection. `--caution-backed` explicitly selects WebAuthn for users without PGP
 overrides. The CLI presents custody and threshold for confirmation when interactive.
 The threshold defaults to one; `--max`, if supplied, must equal the holder count.
-Labels use repeated `--label KEY=VALUE`.
+Labels use repeated `--label KEY=VALUE`. Omitted or null API labels are stored as
+`{}`; supplied objects are preserved.
+
+API and direct CLI creation reject duplicate primary identities and shared storage
+encryption subkeys, including expired recipients that Keyfork can still select.
+Eligibility still requires live signing, authentication and storage-encryption
+keys. Both checks recognize the critical `organization-id@caution.co` and
+`bundle-id@caution.co` notations.
 
 `--keymaker-url` takes precedence over `KEYMAKER_URL`. Either selects direct mode,
 which accepts local and registered PGP certificates only. WebAuthn/mixed direct
