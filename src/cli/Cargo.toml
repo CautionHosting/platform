@@ -60,3 +60,6 @@ hcl-rs = { version = "0.19.7", features = ["perf"] }
 [build-dependencies]
 caution-environment-heuristics = { version = "0.1.0", path = "../environment-heuristics" }
 serde_json.workspace = true
+
+[features]
+e2e-testing-unsafe = ["locksmith/unsafe-e2e"]

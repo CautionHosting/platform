@@ -106,7 +106,8 @@ completed remotely; investigate before submitting another creation request.
 
 ## Dependency and validation boundary
 
-This change pins the shared models and loader from Locksmith PR #15, with its
+This change pins the shared models and loader from Locksmith PR #15 at
+`2e0600cde1c70d9f220f648d857ccefe14c3b6bf`, with its
 Bootproof dependencies resolved to Platform's reviewed `b346db1` revision. It does not
 change runtime pins or introduce a legacy bundle fallback. Local orchestration and
 negative verification tests do not establish production Nitro readiness.
@@ -203,3 +204,40 @@ canonical writes with 403 and literal/encoded dot-segment aliases with 400 acros
 generation, upload and PATCH. `cargo check -p cli -p gateway --locked` and
 `git diff --check` passed. These are local tests, not full-stack or Nitro validation.
 
+## Successful mock integration
+
+`make test-quorum-mock` builds native API, gateway and CLI test binaries under
+`target/quorum-e2e`, and runs Keymaker's existing non-default test mode. It requires
+Docker, Python 3, curl and the native Rust dependencies (on macOS, the pkg-config
+paths shown above). API port 8080 must be free; the runner refuses to stop another
+stack. PostgreSQL, keys, policies and data are temporary and removed on exit.
+The runner uses example configuration and an empty service environment, not the
+operator's configuration. Native services read the temporary policy by host path;
+container-based tests can use the `KEYMAKER_POLICY_DIR` read-only mount above.
+
+The shared `unsafe-e2e` feature is forwarded only through API/CLI
+`e2e-testing-unsafe`. Acceptance additionally requires
+`CAUTION_UNSAFE_KEY_SERVICE_E2E=1`, one non-expiring policy set with exactly PCRs
+0/1/2 each equal to `ab` repeated 48 times, and a proof equal to the nonce
+recomputed from the canonical bundle hash. Never use these values or binaries
+in production. Ordinary build targets do not enable this feature.
+
+Coverage includes actual gateway challenge signing with a software passkey,
+signed API creation/upload, download, unsigned DELETE's signature-specific 403,
+signed DELETE, omitted/null/object labels, missing/invalid policy failures with
+unrelated reads still working, altered-bundle rejection, direct CLI creation and
+CLI encryption with both direct and downloaded bundles. The existing
+`make test-quorum-db` HTTP mock retains controlled failure/timeout coverage.
+
+These are synthetic-proof integration tests. Real Nitro validation and production
+policy provisioning remain release dependencies. V0 fallback/upgrade remains
+with Locksmith PR #15 and #11; WebAuthn recryption remains with #12. This work does
+not close those tickets or bypass the certificate-service verification blocker.
+
+
+Validation on 2026-09-15 against the published pin: `make test-quorum-mock`
+passed, including software-passkey signatures and CLI consumption, with no local
+Cargo overrides. Normal-build CLI tests (131) and API quorum tests (11) passed.
+The synthetic-proof gate was also tested with and without `unsafe-e2e`, including
+absent, disabled and enabled runtime flags. These results do not establish Nitro
+attestation or WebAuthn recryption readiness.

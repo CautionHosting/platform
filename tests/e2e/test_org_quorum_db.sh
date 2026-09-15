@@ -20,10 +20,10 @@ CONTAINER=$(docker run -d -p 127.0.0.1::5432 \
     -v "$ROOT/src/api/migrations:/migrations:ro" \
     -v "$ROOT/utils/makefile-run-migrations.sh:/migrate.sh:ro" postgres:16-alpine)
 for _ in $(seq 1 60); do
-    if docker exec "$CONTAINER" pg_isready -U postgres >/dev/null 2>&1; then break; fi
+    if docker exec "$CONTAINER" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; then break; fi
     sleep 1
 done
-docker exec "$CONTAINER" pg_isready -U postgres >/dev/null
+docker exec "$CONTAINER" pg_isready -h 127.0.0.1 -U postgres >/dev/null
 # Use the same ordered migration runner as make migrate-test.
 docker exec -e MIGRATION_DB_HOST=127.0.0.1 -e MIGRATION_DB_NAME=caution_quorum_test \
     -e PGPASSWORD=postgres "$CONTAINER" sh /migrate.sh > "$WORK/migrations.log" 2>&1 \

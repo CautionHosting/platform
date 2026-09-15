@@ -915,6 +915,10 @@ test-e2e-webauthn-browser:
 	$(MAKE) down-test; \
 	exit $$status
 
+.PHONY: test-quorum-mock
+test-quorum-mock:
+	@bash tests/e2e/test_quorum_mock.sh
+
 .PHONY: test-quorum-db
 test-quorum-db:
 	@bash tests/e2e/test_org_quorum_db.sh

@@ -71,4 +71,4 @@ hcl-rs = { version = "0.19", features = ["perf"] }
 indexmap = { version = "2", features = ["serde"] }
 
 [features]
-e2e-testing-unsafe = []
+e2e-testing-unsafe = ["locksmith/unsafe-e2e"]
