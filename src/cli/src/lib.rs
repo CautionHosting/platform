@@ -29,6 +29,7 @@ mod byoc;
 mod cache;
 mod credentials;
 mod pgp_keys;
+mod quorum_init;
 mod secrets;
 mod ssh_keys;
 mod verify;
@@ -736,43 +737,11 @@ enum SecretCommands {
         #[arg(long, help = "Acknowledge unsafe plaintext private keyring generation")]
         shoot_self_in_foot: bool,
     },
-    #[command(about = "Generate a new cryptographic quorum")]
-    New {
-        #[arg(help = "Path to armored PGP keyring file (omit when using --from-org-users)")]
-        keyring: Option<PathBuf>,
-        #[arg(long, help = "Minimum shares needed to reconstruct")]
-        threshold: Option<u8>,
-        #[arg(
-            long,
-            requires = "threshold",
-            help = "Total shares to generate (defaults to the eligible cert count)"
-        )]
-        max: Option<u8>,
-        #[arg(long, help = "Skip uploading bundle to Caution")]
-        no_upload: bool,
-        #[arg(long, help = "Name for the quorum bundle")]
-        name: Option<String>,
-        #[arg(
-            long = "label",
-            help = "Label in key=value format (can be repeated)",
-            value_name = "KEY=VALUE"
-        )]
-        labels: Vec<String>,
-        #[arg(
-            long,
-            value_delimiter = ',',
-            value_name = "USER_ID[,USER_ID...]",
-            conflicts_with = "keyring",
-            help = "Generate from organization users instead of a local keyring"
-        )]
-        from_org_users: Vec<uuid::Uuid>,
-        #[arg(
-            long,
-            requires = "from_org_users",
-            help = "Use Caution-backed public certificates for all --from-org-users participants"
-        )]
-        caution_backed: bool,
-    },
+    #[command(
+        visible_alias = "new",
+        about = "Initialize a cryptographic quorum bundle"
+    )]
+    Init(quorum_init::Options),
     #[command(about = "Encrypt env file values into .caution/secrets/*.asc")]
     Encrypt {
         #[arg(help = "Env keys to encrypt (defaults to every key in the env file)")]
@@ -3164,6 +3133,22 @@ enclave "default" {{
             .with_context(Ctx::signed_request())
     }
 
+    // Construct only after approval. reqwest's request timeout also covers body reads.
+    fn signed_operation_request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+    ) -> reqwest::RequestBuilder {
+        let request = self
+            .client
+            .request(method.clone(), [&self.base_url, path].concat());
+        if method == reqwest::Method::POST && path == "/api/quorum-bundles/from-org-users" {
+            request.timeout(Duration::from_secs(125))
+        } else {
+            request
+        }
+    }
+
     async fn signed_request(
         &self,
         session_id: &str,
@@ -3181,17 +3166,6 @@ enclave "default" {{
 
         let body_json = body;
 
-        if std::env::var_os("CAUTION_E2E_UNSIGNED_REQUESTS").is_some() {
-            return self
-                .client
-                .request(method, format!("{}{}", self.base_url, path))
-                .header("X-Session-ID", session_id)
-                .header("Content-Type", "application/json")
-                .body(body_json)
-                .send()
-                .await
-                .context("failed to send e2e unsigned request");
-        }
         let body_hash = hex::encode(Sha256::digest(&body_json));
         let method_name = method.as_str();
 
@@ -3252,8 +3226,7 @@ enclave "default" {{
         output::verbose(self.verbose, "Sending FIDO2-signed request");
 
         let response = self
-            .client
-            .request(method, format!("{}{}", self.base_url, path))
+            .signed_operation_request(method, path)
             .header("X-Fido2-Challenge-Id", &sign_resp.challenge_id)
             .header("X-Fido2-Response", &fido_response_b64)
             .header("Content-Type", "application/json")
@@ -3849,17 +3822,8 @@ pub async fn run() -> Result<(), RunError> {
                 )
                 .with_context(Ctx::command_dispatch())?;
             }
-            SecretCommands::New {
-                keyring,
-                threshold,
-                max,
-                no_upload,
-                name,
-                labels,
-                from_org_users,
-                caution_backed,
-            } => {
-                secrets::new(&client, keyring, threshold, max, !no_upload, name, labels)
+            SecretCommands::Init(options) => {
+                quorum_init::run(&client, options)
                     .await
                     .with_context(Ctx::command_dispatch())?;
             }
@@ -4415,6 +4379,58 @@ enclave "main" {{
             qr: false,
             workdir: None,
         }
+    }
+
+    #[test]
+    fn hosted_generation_timeout_is_scoped_to_the_operation_request() {
+        let client = test_api_client();
+        let request = client
+            .signed_operation_request(reqwest::Method::POST, "/api/quorum-bundles/from-org-users")
+            .build()
+            .unwrap();
+        assert_eq!(
+            request.timeout(),
+            Some(&std::time::Duration::from_secs(125))
+        );
+        for path in [
+            "/auth/qr-sign/begin",
+            "/auth/qr-sign/status",
+            "/api/quorum-bundles",
+        ] {
+            let request = client
+                .signed_operation_request(reqwest::Method::POST, path)
+                .build()
+                .unwrap();
+            assert_eq!(request.timeout(), None, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn hosted_generation_deadline_starts_on_send_and_covers_body() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n")
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        let mut client = test_api_client();
+        client.base_url = ["http://", &address.to_string()].concat();
+        let mut request = client
+            .signed_operation_request(reqwest::Method::POST, "/api/quorum-bundles/from-org-users")
+            .build()
+            .unwrap();
+        // Shorten only the test deadline; exercise reqwest's actual send/body timer.
+        *request.timeout_mut() = Some(std::time::Duration::from_millis(100));
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let response = client.client.execute(request).await.unwrap();
+        assert!(response.bytes().await.unwrap_err().is_timeout());
+        server.abort();
     }
 
     async fn serve_preflight_responses(

@@ -2189,8 +2189,7 @@ pub(crate) async fn signed_request_qr(
 
     // Step 4: Send the actual request with the FIDO2 assertion from the phone
     let response = client
-        .client
-        .request(method, format!("{}{}", client.base_url, path))
+        .signed_operation_request(method, path)
         .header("X-Fido2-Challenge-Id", &challenge_id)
         .header("X-Fido2-Response", &fido2_response)
         .header("Content-Type", "application/json")

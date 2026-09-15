@@ -85,8 +85,23 @@ dirs = "5"
 # OpenPGP — force RustCrypto backend across all crates (locksmith defaults to Nettle)
 sequoia-openpgp = { version = "1" }
 
+# Shared quorum contracts and verification from Locksmith PR #15.
+[workspace.dependencies.locksmith]
+git = "https://codeberg.org/caution/locksmith.git"
+rev = "2e0600cde1c70d9f220f648d857ccefe14c3b6bf"
+
+[workspace.dependencies.keymaker-models]
+git = "https://codeberg.org/caution/locksmith.git"
+rev = "2e0600cde1c70d9f220f648d857ccefe14c3b6bf"
+
 # The generated EC2 SDK exhausts LLVM memory when release-optimized as one
 # codegen unit. The drift detector is network-bound, so optimize its code but
 # compile the SDK itself without LLVM optimization.
 [profile.release.package.aws-sdk-ec2]
 opt-level = 0
+
+# Locksmith PR #15 still names the old Bootproof remote. Reuse Platform's
+# reviewed SDK revision (including ES384 signature verification fixes).
+[patch."https://git.distrust.co/public/bootproof"]
+bootproof = { git = "https://codeberg.org/caution/bootproof.git", rev = "b346db17523ad9b13ef41eb9c14df3328bbd80d1" }
+bootproof-sdk = { git = "https://codeberg.org/caution/bootproof.git", rev = "b346db17523ad9b13ef41eb9c14df3328bbd80d1" }

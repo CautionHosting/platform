@@ -1182,7 +1182,7 @@ mod tests {
             db,
             webauthn,
             relying_party_id: "example.com".to_string(),
-            api_service_url: String::new(),
+            api_service_url: "http://localhost:3000".to_string(),
             metering_service_url: String::new(),
             http_client: reqwest::Client::new(),
             reg_states: Arc::new(RwLock::new(HashMap::new())),
@@ -1195,6 +1195,63 @@ mod tests {
             login_allow_broadcast: true,
             scoped_begin_limiter: crate::rate_limit::RateLimiter::new(1000, 60),
             username_begin_limiter: crate::rate_limit::RateLimiter::new(username_limiter_max, 60),
+        }
+    }
+
+    #[tokio::test]
+    async fn quorum_writes_reject_unsigned_requests() {
+        use axum::{
+            body::Body,
+            http::{Method, Request, StatusCode},
+            middleware,
+            routing::{patch, post},
+            Router,
+        };
+        use tower::Service;
+        let app = Router::new()
+            .route("/quorum-bundles", post(|| async { "unexpected dispatch" }))
+            .route(
+                "/quorum-bundles/from-org-users",
+                post(|| async { "unexpected dispatch" }),
+            )
+            .route(
+                "/quorum-bundles/id",
+                patch(|| async { "unexpected dispatch" }),
+            )
+            .fallback(|| async { "unexpected proxy dispatch" })
+            .layer(middleware::from_fn_with_state(
+                test_app_state(100),
+                crate::auth_middleware::fido2_sign_middleware,
+            ));
+        for (method, endpoint) in [
+            (Method::POST, "/quorum-bundles"),
+            (Method::POST, "/quorum-bundles/from-org-users"),
+            (Method::PATCH, "/quorum-bundles/id"),
+            (Method::DELETE, "/quorum-bundles/id"),
+        ] {
+            for prefix in ["", "/x/..", "/x/%2e%2e", "/x/%2E%2E", "/."] {
+                let request = Request::builder()
+                    .method(method.clone())
+                    .uri([prefix, endpoint].concat())
+                    .header("X-Fido2-Signed", "true")
+                    .header("X-Authenticated-User-ID", uuid::Uuid::new_v4().to_string())
+                    .body(Body::from("{}"))
+                    .unwrap();
+                let response = app.clone().call(request).await.unwrap();
+                let (status, message) = if prefix.is_empty() {
+                    (
+                        StatusCode::FORBIDDEN,
+                        "This operation requires signature verification",
+                    )
+                } else {
+                    (StatusCode::BAD_REQUEST, "Noncanonical request path")
+                };
+                assert_eq!(response.status(), status, "{prefix}{endpoint}");
+                let body = axum::body::to_bytes(response.into_body(), 1024)
+                    .await
+                    .unwrap();
+                assert_eq!(body.as_ref(), message.as_bytes());
+            }
         }
     }
 

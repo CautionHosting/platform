@@ -1148,56 +1148,26 @@ async fn list_quorum_bundles(
     Ok(Json(items))
 }
 
-/// Failure modes for [`create_quorum_bundle`] (leaf error: no underlying source).
-#[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum CreateQuorumBundleError {
-    #[error("could not look up the primary organization [{location}]")]
-    PrimaryOrgLookup {
-        #[location]
-        location: Location,
-        #[source]
-        source: BoxError,
-    },
-
-    #[error("failed to create quorum bundle [{location}]")]
-    Create {
-        #[location]
-        location: Location,
-        #[source]
-        source: BoxError,
-    },
-}
-
-impl IntoResponse for CreateQuorumBundleError {
-    fn into_response(self) -> Response {
-        let (status, body) = match &self {
-            CreateQuorumBundleError::PrimaryOrgLookup { .. } => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to get organization",
-            ),
-            CreateQuorumBundleError::Create { .. } => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
-            }
-        };
-        (status, body).into_response()
-    }
-}
-
 #[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 async fn create_quorum_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Json(req): Json<cryptographic_bundles::CreateBundleRequest>,
-) -> Result<Json<cryptographic_bundles::QuorumBundle>, CreateQuorumBundleError> {
-    use CreateQuorumBundleErrorCtx as Ctx;
-
+) -> Result<Json<cryptographic_bundles::QuorumBundle>, org_quorum::OrgQuorumError> {
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .with_context(Ctx::primary_org_lookup())?;
+        .with_context(org_quorum::OrgQuorumErrorCtx::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unable to resolve organization",
+        ))?;
 
+    org_quorum::verify_upload(&req.data)?;
     let bundle = cryptographic_bundles::create_quorum_bundle(&state.db, org_id, auth.user_id, req)
         .await
-        .with_context(Ctx::create())?;
+        .with_context(org_quorum::OrgQuorumErrorCtx::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unable to store quorum bundle",
+        ))?;
     Ok(Json(bundle))
 }
 
@@ -1205,14 +1175,31 @@ async fn create_org_user_quorum_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Json(req): Json<org_quorum::GenerateOrgQuorumBundleRequest>,
-) -> Result<Json<cryptographic_bundles::QuorumBundle>, (StatusCode, String)> {
+) -> Result<Json<cryptographic_bundles::QuorumBundle>, org_quorum::OrgQuorumError> {
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+        .with_context(org_quorum::OrgQuorumErrorCtx::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unable to resolve organization",
+        ))?;
+    Ok(Json(
+        org_quorum::generate_org_quorum_bundle(&state.db, org_id, auth.user_id, req).await?,
+    ))
+}
 
-    let bundle =
-        org_quorum::generate_org_quorum_bundle(&state.db, org_id, auth.user_id, req).await?;
-    Ok(Json(bundle))
+async fn list_org_quorum_participants(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<Vec<org_quorum::OrgQuorumMember>>, org_quorum::OrgQuorumError> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .with_context(org_quorum::OrgQuorumErrorCtx::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unable to resolve organization",
+        ))?;
+    Ok(Json(
+        org_quorum::list_participants(&state.db, org_id).await?,
+    ))
 }
 
 /// Failure modes for [`get_quorum_bundle`] (leaf error: no underlying source).
@@ -1279,66 +1266,31 @@ async fn get_quorum_bundle(
     Ok(Json(bundle))
 }
 
-/// Failure modes for [`update_quorum_bundle`] (leaf error: no underlying source).
-#[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum UpdateQuorumBundleError {
-    #[error("could not look up the primary organization [{location}]")]
-    PrimaryOrgLookup {
-        #[location]
-        location: Location,
-        #[source]
-        source: BoxError,
-    },
-
-    #[error("quorum bundle {bundle_id} not found [{location}]")]
-    NotFound { bundle_id: Uuid, location: Location },
-
-    #[error("failed to update quorum bundle [{location}]")]
-    Update {
-        #[location]
-        location: Location,
-        #[source]
-        source: BoxError,
-    },
-}
-
-impl IntoResponse for UpdateQuorumBundleError {
-    fn into_response(self) -> Response {
-        let (status, body) = match &self {
-            UpdateQuorumBundleError::PrimaryOrgLookup { .. } => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to get organization",
-            ),
-            UpdateQuorumBundleError::NotFound { .. } => {
-                (StatusCode::NOT_FOUND, "Quorum bundle not found")
-            }
-            UpdateQuorumBundleError::Update { .. } => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
-            }
-        };
-        (status, body).into_response()
-    }
-}
-
 #[tracing::instrument(skip_all, err, fields(bundle_id = %id))]
 async fn update_quorum_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
     Json(req): Json<cryptographic_bundles::UpdateBundleRequest>,
-) -> Result<Json<cryptographic_bundles::QuorumBundle>, UpdateQuorumBundleError> {
-    use UpdateQuorumBundleErrorCtx as Ctx;
-
+) -> Result<Json<cryptographic_bundles::QuorumBundle>, org_quorum::OrgQuorumError> {
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .with_context(Ctx::primary_org_lookup())?;
+        .with_context(org_quorum::OrgQuorumErrorCtx::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unable to resolve organization",
+        ))?;
 
+    if let Some(data) = &req.data {
+        org_quorum::verify_upload(data)?;
+    }
     let bundle = cryptographic_bundles::update_quorum_bundle(&state.db, org_id, id, req)
         .await
-        .with_context(Ctx::update())?
-        .ok_or_else(|| UpdateQuorumBundleError::NotFound {
-            bundle_id: id,
-            location: std::panic::Location::caller(),
+        .with_context(org_quorum::OrgQuorumErrorCtx::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unable to update quorum bundle",
+        ))?
+        .ok_or_else(|| {
+            org_quorum::OrgQuorumError::new(StatusCode::NOT_FOUND, "quorum bundle not found")
         })?;
 
     Ok(Json(bundle))
@@ -5198,6 +5150,10 @@ async fn main() -> Result<(), MainError> {
         .route(
             "/quorum-bundles/from-org-users",
             post(create_org_user_quorum_bundle),
+        )
+        .route(
+            "/quorum-bundles/participants",
+            get(list_org_quorum_participants),
         )
         .route("/quorum-bundles/{id}", get(get_quorum_bundle))
         .route("/quorum-bundles/{id}", patch(update_quorum_bundle))

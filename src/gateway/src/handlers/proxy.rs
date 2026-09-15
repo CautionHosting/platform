@@ -23,7 +23,7 @@ pub struct BuildTargetUrlError {
 }
 
 #[tracing::instrument(skip_all, err)]
-fn build_api_target_url(
+pub(crate) fn build_api_target_url(
     api_service_url: &str,
     path: &str,
     query: Option<&str>,

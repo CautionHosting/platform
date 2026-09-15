@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use dterror::{BoxError, CtxError, FromContext, Location, ResultExt};
-use keymaker_models::generate_quorum::v0::GenerateQuorumResponse;
 use openpgp::cert::{CertParser, prelude::CertBuilder};
 use openpgp::parse::Parse;
 use openpgp::policy::StandardPolicy as OpenPgpPolicy;
@@ -101,7 +100,7 @@ fn parse_env_assignments(content: &str) -> Vec<EnvAssignment> {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum ParseQuorumBundlePublicKeyError {
-    #[error("Failed to parse quorum bundle JSON [{location:?}]")]
+    #[error("Failed to verify proofed quorum bundle [{location:?}]")]
     ParseJson {
         #[location]
         location: Location,
@@ -116,8 +115,9 @@ fn parse_quorum_bundle_public_key(
 ) -> Result<String, ParseQuorumBundlePublicKeyError> {
     use ParseQuorumBundlePublicKeyErrorCtx as Ctx;
 
-    let bundle: GenerateQuorumResponse =
-        serde_json::from_str(bundle_text).with_context(Ctx::parse_json())?;
+    let bundle = crate::quorum_init::load_bundle(bundle_text)
+        .with_context(Ctx::parse_json())?
+        .to_latest();
 
     Ok(bundle.public_key)
 }
@@ -665,94 +665,6 @@ fn keymaker_eligible_cert_count(
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-pub enum NormalizeKeyringError {
-    #[error("Failed to parse keyring as OpenPGP public certificates [{location:?}]")]
-    ParseKeyring {
-        #[location]
-        location: Location,
-
-        #[source]
-        source: BoxError,
-    },
-
-    #[error("Failed to create armor writer [{location:?}]")]
-    CreateWriter {
-        #[location]
-        location: Location,
-
-        #[source]
-        source: BoxError,
-    },
-
-    #[error("Failed to parse OpenPGP public certificate [{location:?}]")]
-    ParseCert {
-        #[location]
-        location: Location,
-
-        #[source]
-        source: BoxError,
-    },
-
-    #[error("Failed to serialize OpenPGP public certificate [{location:?}]")]
-    SerializeCert {
-        #[location]
-        location: Location,
-
-        #[source]
-        source: BoxError,
-    },
-
-    #[error("Failed to finalize armor [{location:?}]")]
-    FinalizeArmor {
-        #[location]
-        location: Location,
-
-        #[source]
-        source: BoxError,
-    },
-
-    #[error("Normalized keyring is not valid UTF-8 [{location:?}]")]
-    Utf8 {
-        #[location]
-        location: Location,
-
-        #[source]
-        source: BoxError,
-    },
-}
-
-/// Re-serialize all certificates into a single ASCII-armored block.
-///
-/// Keyrings assembled by concatenating armored files (`cat alice.asc bob.asc`)
-/// contain multiple armor blocks. Sequoia and GnuPG read all of them, but the
-/// rpgp-based Locksmith/Keymaker stack only parses the first block and
-/// silently drops the remaining certificates, which later breaks send-shard
-/// for the dropped holders.
-fn normalize_keyring(armored_keyring: &str) -> Result<String, NormalizeKeyringError> {
-    use NormalizeKeyringErrorCtx as Ctx;
-
-    let cert_parser = CertParser::from_bytes(armored_keyring).with_context(Ctx::parse_keyring())?;
-
-    let mut writer = openpgp::armor::Writer::new(Vec::new(), openpgp::armor::Kind::PublicKey)
-        .with_context(Ctx::create_writer())?;
-    for parseable_cert in cert_parser {
-        let cert = parseable_cert.with_context(Ctx::parse_cert())?;
-        cert.serialize(&mut writer)
-            .with_context(Ctx::serialize_cert())?;
-    }
-    let bytes = writer.finalize().with_context(Ctx::finalize_armor())?;
-
-    String::from_utf8(bytes)
-        .with_context(Ctx::utf8())
-        .map(|mut keyring| {
-            if !keyring.ends_with('\n') {
-                keyring.push('\n');
-            }
-            keyring
-        })
-}
-
-#[derive(Debug, thiserror::Error, CtxError)]
 pub enum ResolveQuorumParametersError {
     #[error(
         "keyring contains no Keymaker-eligible public certificates \
@@ -803,7 +715,7 @@ pub enum ResolveQuorumParametersError {
     },
 }
 
-fn resolve_quorum_parameters(
+pub(crate) fn resolve_quorum_parameters(
     threshold: Option<u8>,
     max: Option<u8>,
     eligible_certs: usize,
@@ -994,371 +906,6 @@ fn write_keyring(
     if sensitive {
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))
             .with_context(Ctx::new(path, KindCtx::set_permissions()))?;
-    }
-
-    Ok(())
-}
-
-#[derive(Debug, thiserror::Error, CtxError)]
-pub enum NewSecretError {
-    #[error("KEYMAKER_URL environment variable is required [{location:?}]")]
-    KeymakerUrlMissing {
-        #[location]
-        location: Location,
-
-        #[source]
-        source: BoxError,
-    },
-
-    #[error("Failed to read keyring file: {keyring} [{location:?}]")]
-    ReadKeyring {
-        #[context(borrow = Path)]
-        keyring: PathBuf,
-
-        #[location]
-        location: Location,
-
-        #[source]
-        source: BoxError,
-    },
-
-    #[error("Failed to inspect keyring file: {keyring} [{location:?}]")]
-    InspectKeyring {
-        #[context(borrow = Path)]
-        keyring: PathBuf,
-
-        #[location]
-        location: Location,
-
-        #[source]
-        source: BoxError,
-    },
-
-    #[error(
-        "No Keymaker-eligible certificates in {keyring}. Fix: generate a compatible key with \
-         `caution secret keygen` (non-prod), or derive one offline with keyfork: \
-         https://git.distrust.co/public/keyfork [{location:?}]"
-    )]
-    NoEligibleCerts {
-        keyring: PathBuf,
-
-        #[location]
-        location: Location,
-    },
-
-    #[error("Failed to resolve quorum parameters [{location:?}]")]
-    ResolveQuorum {
-        #[location]
-        location: Location,
-
-        #[source]
-        source: BoxError,
-    },
-
-    #[error("Failed to normalize keyring file: {keyring} [{location:?}]")]
-    NormalizeKeyring {
-        #[context(borrow = Path)]
-        keyring: PathBuf,
-
-        #[location]
-        location: Location,
-
-        #[source]
-        source: BoxError,
-    },
-
-    #[error("Failed to connect to Keymaker service [{location:?}]")]
-    ConnectKeymaker {
-        #[location]
-        location: Location,
-
-        #[source]
-        source: BoxError,
-    },
-
-    #[error("Failed to read Keymaker error response [{location:?}]")]
-    ReadKeymakerErrorBody {
-        #[location]
-        location: Location,
-
-        #[source]
-        source: BoxError,
-    },
-
-    #[error("Keymaker error ({status}): {message} [{location:?}]")]
-    KeymakerFailure {
-        status: reqwest::StatusCode,
-
-        message: String,
-
-        #[location]
-        location: Location,
-    },
-
-    #[error("Failed to parse Keymaker response [{location:?}]")]
-    ParseKeymakerResponse {
-        #[location]
-        location: Location,
-
-        #[source]
-        source: BoxError,
-    },
-
-    #[error("Failed to serialize quorum bundle [{location:?}]")]
-    SerializeBundle {
-        #[location]
-        location: Location,
-
-        #[source]
-        source: BoxError,
-    },
-
-    #[error("Failed to write secret to {secret_path} [{location:?}]")]
-    WriteBundle {
-        #[context(borrow = Path)]
-        secret_path: PathBuf,
-
-        #[location]
-        location: Location,
-
-        #[source]
-        source: BoxError,
-    },
-
-    #[error("Failed to write bundle to stdout [{location:?}]")]
-    OutputData {
-        #[location]
-        location: Location,
-
-        #[source]
-        source: BoxError,
-    },
-
-    #[error("Failed to authenticate with Caution [{location:?}]")]
-    EnsureAuthenticated {
-        #[location]
-        location: Location,
-
-        #[source]
-        source: BoxError,
-    },
-
-    #[error("Failed to upload quorum bundle to Caution [{location:?}]")]
-    UploadBundle {
-        #[location]
-        location: Location,
-
-        #[source]
-        source: BoxError,
-    },
-
-    #[error("Failed to parse upload response [{location:?}]")]
-    ParseUploadResponse {
-        #[location]
-        location: Location,
-
-        #[source]
-        source: BoxError,
-    },
-
-    #[error("Failed to store quorum bundle ({status}): {message} [{location:?}]")]
-    StoreFailure {
-        status: reqwest::StatusCode,
-
-        message: String,
-
-        #[location]
-        location: Location,
-    },
-}
-
-/// Generate a new cryptographic quorum from a Keymaker-compatible keyring.
-pub async fn new(
-    client: &ApiClient,
-    keyring: PathBuf,
-    threshold: Option<u8>,
-    max: Option<u8>,
-    upload: bool,
-    name: Option<String>,
-    labels: Vec<String>,
-) -> Result<(), NewSecretError> {
-    use NewSecretErrorCtx as Ctx;
-
-    let keymaker_url = std::env::var("KEYMAKER_URL").with_context(Ctx::keymaker_url_missing())?;
-
-    let keyring_data = fs::read_to_string(&keyring).with_context(Ctx::read_keyring(&keyring))?;
-
-    let eligibility =
-        keymaker_cert_eligibility(&keyring_data).with_context(Ctx::inspect_keyring(&keyring))?;
-    let eligible_certs = eligibility.iter().filter(|cert| cert.is_eligible()).count();
-
-    if eligible_certs == 0 {
-        output::warning(
-            "Keyring has no Keymaker-eligible certificates (each needs signing + \
-             authentication + storage-encryption subkeys):",
-        );
-        if eligibility.is_empty() {
-            output::warning("  (no certificates found in keyring)");
-        }
-        for cert in &eligibility {
-            output::warning(format!(
-                "  - {} — missing: {}",
-                cert.user_id,
-                cert.missing().join(", ")
-            ));
-        }
-        return Err(NewSecretError::NoEligibleCerts {
-            keyring,
-            location: std::panic::Location::caller(),
-        });
-    }
-
-    // Warn about any certs that lack required subkeys and will be silently excluded.
-    let ineligible: Vec<&CertEligibility> = eligibility
-        .iter()
-        .filter(|cert| !cert.is_eligible())
-        .collect();
-    if !ineligible.is_empty() {
-        output::warning(format!(
-            "Warning: {} certificate(s) in the keyring lack required subkeys and will be \
-             excluded from the quorum:",
-            ineligible.len()
-        ));
-        for cert in ineligible {
-            output::warning(format!(
-                "  - {} — missing: {}",
-                cert.user_id,
-                cert.missing().join(", ")
-            ));
-        }
-    }
-
-    let (threshold, max) = resolve_quorum_parameters(threshold, max, eligible_certs)
-        .with_context(Ctx::resolve_quorum())?;
-
-    let keyring_data =
-        normalize_keyring(&keyring_data).with_context(Ctx::normalize_keyring(&keyring))?;
-
-    let request_body = serde_json::json!({
-        "threshold": threshold,
-        "max": max,
-        "keyring": keyring_data,
-        "label": {},
-    });
-
-    output::status(format!(
-        "Generating quorum (threshold={}, max={})...",
-        threshold, max
-    ));
-
-    let response = client
-        .client
-        .post(format!("{}/generate_quorum", keymaker_url))
-        .json(&request_body)
-        .send()
-        .await
-        .with_context(Ctx::connect_keymaker())?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let error = response
-            .text()
-            .await
-            .with_context(Ctx::read_keymaker_error_body())?;
-        return Err(NewSecretError::KeymakerFailure {
-            status,
-            message: error,
-            location: std::panic::Location::caller(),
-        });
-    }
-
-    let quorum_response: GenerateQuorumResponse = response
-        .json()
-        .await
-        .with_context(Ctx::parse_keymaker_response())?;
-
-    let json =
-        serde_json::to_string_pretty(&quorum_response).with_context(Ctx::serialize_bundle())?;
-
-    let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
-    let in_caution_repo =
-        PathBuf::from("Procfile").exists() || PathBuf::from(".caution/deployment.json").exists();
-
-    // Always save to file when in a caution repo
-    if in_caution_repo {
-        let secret_path = PathBuf::from(".caution/quorum-bundle.json");
-        fs::write(&secret_path, &json).with_context(Ctx::write_bundle(&secret_path))?;
-        output::status(format!("Saved to: {}", secret_path.display()));
-    }
-
-    // When not uploading (no QR, not in caution repo), output to stdout
-    if !client.qr && (!is_tty || !in_caution_repo) {
-        if !in_caution_repo {
-            output::warning("Warning: not in a Caution repository, outputting bundle to stdout");
-        }
-        output::data(&json).with_context(Ctx::output_data())?;
-        return Ok(());
-    }
-
-    if upload || client.qr {
-        if client.qr {
-            output::status(
-                "\nUploading public key material bundle to Caution via QR code signing...",
-            );
-        } else {
-            output::status("\nTo back up public key material bundle to Caution, tap your key.");
-        }
-        if in_caution_repo {
-            output::status(
-                "The key material bundle is also accessible at .caution/quorum-bundle.json",
-            );
-        }
-        output::status("Press Ctrl+C to cancel.");
-
-        let config = client
-            .ensure_authenticated()
-            .await
-            .with_context(Ctx::ensure_authenticated())?;
-
-        let label_map: serde_json::Map<String, serde_json::Value> = labels
-            .iter()
-            .filter_map(|l| l.split_once('='))
-            .map(|(k, v)| (k.to_string(), serde_json::Value::String(v.to_string())))
-            .collect();
-
-        let upload_body = serde_json::json!({
-            "data": quorum_response,
-            "name": name,
-            "labels": label_map,
-        });
-
-        let response = client
-            .signed_post(&config.session_id, "/api/quorum-bundles", &upload_body)
-            .await
-            .with_context(Ctx::upload_bundle())?;
-
-        if response.status().is_success() {
-            let result: serde_json::Value = response
-                .json()
-                .await
-                .with_context(Ctx::parse_upload_response())?;
-            if let Some(id) = result.get("id") {
-                output::success(format!(
-                    "\nQuorum bundle stored successfully (bundle ID: {})",
-                    id
-                ));
-            } else {
-                output::success("\nQuorum bundle stored successfully.");
-            }
-        } else {
-            let status = response.status();
-            let error = client.api_error_message(response).await;
-            return Err(NewSecretError::StoreFailure {
-                status,
-                message: error,
-                location: std::panic::Location::caller(),
-            });
-        }
     }
 
     Ok(())
@@ -1664,11 +1211,12 @@ pub async fn rename(client: &ApiClient, id: String, name: String) -> Result<(), 
     });
 
     let response = client
-        .client
-        .patch(format!("{}/api/quorum-bundles/{}", client.base_url, id))
-        .header("X-Session-ID", &config.session_id)
-        .json(&body)
-        .send()
+        .signed_request(
+            &config.session_id,
+            &["/api/quorum-bundles/", &id].concat(),
+            reqwest::Method::PATCH,
+            serde_json::to_vec(&body).with_context(Ctx::connect_patch())?,
+        )
         .await
         .with_context(Ctx::connect_patch())?;
 
@@ -1780,11 +1328,12 @@ pub async fn label_set(
     let body = serde_json::json!({ "labels": current_labels });
 
     let response = client
-        .client
-        .patch(format!("{}/api/quorum-bundles/{}", client.base_url, id))
-        .header("X-Session-ID", &config.session_id)
-        .json(&body)
-        .send()
+        .signed_request(
+            &config.session_id,
+            &["/api/quorum-bundles/", &id].concat(),
+            reqwest::Method::PATCH,
+            serde_json::to_vec(&body).with_context(Ctx::connect_patch())?,
+        )
         .await
         .with_context(Ctx::connect_patch())?;
 
@@ -1881,11 +1430,12 @@ pub async fn label_remove(
     let body = serde_json::json!({ "labels": current_labels });
 
     let response = client
-        .client
-        .patch(format!("{}/api/quorum-bundles/{}", client.base_url, id))
-        .header("X-Session-ID", &config.session_id)
-        .json(&body)
-        .send()
+        .signed_request(
+            &config.session_id,
+            &["/api/quorum-bundles/", &id].concat(),
+            reqwest::Method::PATCH,
+            serde_json::to_vec(&body).with_context(Ctx::connect_patch())?,
+        )
         .await
         .with_context(Ctx::connect_patch())?;
 
@@ -1906,6 +1456,13 @@ pub async fn label_remove(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum SendShardError {
+    #[error(
+        "WebAuthn and mixed bundle unlocking requires the pending Locksmith WebAuthn transport (issue #12) [{location:?}]"
+    )]
+    WebAuthnTransportUnavailable {
+        #[location]
+        location: Location,
+    },
     #[error("Failed to fetch app [{location:?}]")]
     FetchApp {
         #[location]
@@ -2235,8 +1792,17 @@ pub async fn send_shard(
     // Parse the quorum bundle
     let bundle_text =
         fs::read_to_string(&bundle_file).with_context(Ctx::read_bundle_file(&bundle_file))?;
-    let bundle: GenerateQuorumResponse =
-        serde_json::from_str(&bundle_text).with_context(Ctx::parse_bundle())?;
+    let bundle = crate::quorum_init::load_bundle(&bundle_text).with_context(Ctx::parse_bundle())?;
+    if bundle.clone().to_latest().keyring.iter().any(|key| {
+        matches!(
+            key,
+            keymaker_models::generate_quorum::v1::Key::WebAuthn { .. }
+        )
+    }) {
+        return Err(SendShardError::WebAuthnTransportUnavailable {
+            location: std::panic::Location::caller(),
+        });
+    }
 
     let address_str = format!("{}:49504", public_ip);
     output::status(format!("Sending shard to enclave at {}...", address_str));
@@ -2271,13 +1837,11 @@ mod tests {
     use super::openpgp;
     use super::{
         encrypt_env_file, encrypt_secret_value, keymaker_cert_eligibility, load_recipient_cert,
-        normalize_keyring, parse_env_assignments, resolve_quorum_parameters,
+        parse_env_assignments, resolve_quorum_parameters,
     };
-    use keymaker_models::generate_quorum::v0::GenerateQuorumResponse;
     use openpgp::cert::prelude::*;
     use openpgp::parse::Parse;
     use openpgp::serialize::SerializeInto;
-    use std::collections::HashMap;
     use tempfile::tempdir;
 
     fn test_public_key() -> String {
@@ -2288,23 +1852,6 @@ mod tests {
             .unwrap();
 
         String::from_utf8(cert.armored().to_vec().unwrap()).unwrap()
-    }
-
-    #[test]
-    fn normalize_keyring_merges_concatenated_armor_blocks() {
-        // Simulate `cat alice.asc bob.asc > keyring.asc`
-        let concatenated = format!("{}{}", test_public_key(), test_public_key());
-        assert_eq!(concatenated.matches("BEGIN PGP").count(), 2);
-
-        let normalized = normalize_keyring(&concatenated).unwrap();
-        assert_eq!(normalized.matches("BEGIN PGP").count(), 1);
-
-        // Both certificates survive normalization.
-        let certs: Vec<_> = openpgp::cert::CertParser::from_bytes(normalized.as_bytes())
-            .unwrap()
-            .collect::<openpgp::Result<Vec<_>>>()
-            .unwrap();
-        assert_eq!(certs.len(), 2);
     }
 
     #[test]
@@ -2355,7 +1902,7 @@ export MISSING_EQUALS\n",
     }
 
     #[test]
-    fn encrypt_env_file_writes_requested_secret_files() {
+    fn encrypt_env_file_rejects_unverified_bundle() {
         let work_dir = tempdir().unwrap();
         let caution_dir = work_dir.path().join(".caution");
         let env_file = work_dir.path().join(".env");
@@ -2373,37 +1920,17 @@ UNREQUESTED=nope\n",
         )
         .unwrap();
 
-        let bundle = GenerateQuorumResponse {
-            label: HashMap::new(),
-            keyring: String::new(),
-            keyring_hash: Vec::new(),
-            shardfile: String::new(),
-            public_key: test_public_key(),
-            necroproof: Vec::new(),
-        };
-        std::fs::write(&bundle_file, serde_json::to_string(&bundle).unwrap()).unwrap();
-
-        let count = encrypt_env_file(
-            &env_file,
-            &bundle_file,
-            &secrets_dir,
-            &["FOO".to_string(), "QUOTED".to_string()],
-        )
-        .unwrap();
-
-        assert_eq!(count, 2);
+        std::fs::write(&bundle_file, r#"{"data":{},"necroproof":[]}"#).unwrap();
         assert!(
-            std::fs::read_to_string(secrets_dir.join("FOO.asc"))
-                .unwrap()
-                .starts_with("-----BEGIN PGP MESSAGE-----")
+            encrypt_env_file(
+                &env_file,
+                &bundle_file,
+                &secrets_dir,
+                &["FOO".to_string(), "QUOTED".to_string()],
+            )
+            .is_err()
         );
-        assert!(
-            std::fs::read_to_string(secrets_dir.join("QUOTED.asc"))
-                .unwrap()
-                .starts_with("-----BEGIN PGP MESSAGE-----")
-        );
-        assert!(!secrets_dir.join("EMPTY.asc").exists());
-        assert!(!secrets_dir.join("UNREQUESTED.asc").exists());
+        assert!(!secrets_dir.join("FOO.asc").exists());
     }
 
     #[test]
