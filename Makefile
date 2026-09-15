@@ -477,6 +477,7 @@ migrate: postgres
 run-api: guard-direct-api network postgres
 	@docker rm -f api 2>/dev/null || true
 	@mkdir -p $(CAUTION_DATA_DIR)/git-repos $(CAUTION_DATA_DIR)/build $(CAUTION_DATA_DIR)/terraform
+	@mkdir -p "$(KEYMAKER_POLICY_DIR)"
 	@docker run -d \
 		--name api \
 		--network $(NETWORK) \
@@ -487,6 +488,7 @@ run-api: guard-direct-api network postgres
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-e TF_PLUGIN_CACHE_DIR=$(CONTAINER_DATA_DIR)/terraform \
 		--env-file $(HOME)/.config/caution/.env \
+		-v "$(KEYMAKER_POLICY_DIR):/run/config:ro" \
 		-v "$(PRICES_FILE):/app/prices.json:ro" \
 		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
 		-v $(PWD)/terraform:/app/terraform:ro \
@@ -647,6 +649,7 @@ TEST_DB_VOLUME := caution-test-postgres-data
 TEST_DB_HOST := postgres-test
 TEST_DATABASE_URL := postgresql://postgres:postgres@$(TEST_DB_HOST):5432/$(TEST_DB_NAME)
 PRICES_FILE ?= $(HOME)/.config/caution/prices.json
+KEYMAKER_POLICY_DIR ?= $(HOME)/.config/caution/policies
 E2E_LOCK_FILE ?= /tmp/caution-platform-e2e.lock
 ONPREM_PROVISIONER_DIR ?= ../bring-your-own-compute-setup
 ONPREM_PROVISIONER_IMAGE ?= codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest
@@ -687,6 +690,7 @@ migrate-test: postgres-test
 run-api-test: network
 	@docker rm -f api 2>/dev/null || true
 	@mkdir -p $(CAUTION_DATA_DIR)/git-repos $(CAUTION_DATA_DIR)/build $(CAUTION_DATA_DIR)/terraform
+	@mkdir -p "$(KEYMAKER_POLICY_DIR)"
 	@docker run -d \
 		--name api \
 		--network $(NETWORK) \
@@ -707,6 +711,7 @@ run-api-test: network
 		-v $(PWD)/terraform:/app/terraform:ro \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
+		-v "$(KEYMAKER_POLICY_DIR):/run/config:ro" \
 		-v "$(PRICES_FILE):/app/prices.json:ro" \
 		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
 		caution-api

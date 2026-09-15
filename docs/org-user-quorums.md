@@ -66,6 +66,22 @@ certificate-verification dependency is resolved, WebAuthn creation will also req
 does not require certificate-service configuration. The certificate endpoint is
 `/v1/public-certificates`; Keymaker uses `/generate_quorum`.
 
+Place the independently verified Keymaker policy at
+`~/.config/caution/policies/keymaker-pcr-policy.json`. The Makefile and user
+systemd API launchers create that dedicated directory if needed and mount it
+read-only at `/run/config`. Set the existing API environment variable:
+
+```env
+KEYMAKER_PCR_POLICY_PATH=/run/config/keymaker-pcr-policy.json
+```
+
+This is a **container path**. A CLI running on the host needs the host file path.
+The operator supplies the file; there is no automatic measurement discovery.
+An empty mount directory is allowed: missing or invalid policy fails affected
+quorum requests closed, without blocking unrelated API operations or startup.
+For isolated tests, use `make run-api-test KEYMAKER_POLICY_DIR=/absolute/temp/policies`
+with a temporary `keymaker-pcr-policy.json` in that directory.
+
 PCR policy JSON follows Locksmith's shared contract:
 
 ```json
@@ -186,3 +202,4 @@ test passed with and without `--features e2e-testing-unsafe`, rejecting unsigned
 canonical writes with 403 and literal/encoded dot-segment aliases with 400 across
 generation, upload and PATCH. `cargo check -p cli -p gateway --locked` and
 `git diff --check` passed. These are local tests, not full-stack or Nitro validation.
+

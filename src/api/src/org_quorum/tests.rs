@@ -294,3 +294,35 @@ fn rejects_shared_recipients_including_notations_and_expired_keys() {
         .is_ok()
     );
 }
+
+#[test]
+fn policy_files_fail_closed_when_missing_or_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("keymaker-pcr-policy.json");
+    assert_eq!(
+        load_policy(&path).unwrap_err().status,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    for json in [
+        "not JSON",
+        r#"{"sets":[]}"#,
+        r#"{"sets":[{"pcrs":{"0":"ab"}}]}"#,
+    ] {
+        std::fs::write(&path, json).unwrap();
+        assert_eq!(
+            load_policy(&path).unwrap_err().status,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+    for byte in ["00", "ab"] {
+        std::fs::write(
+            &path,
+            serde_json::json!({"sets":[{"pcrs":{
+                "0":byte.repeat(48), "1":byte.repeat(48), "2":byte.repeat(48)
+            }}]})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(load_policy(&path).is_ok(), byte == "ab");
+    }
+}
