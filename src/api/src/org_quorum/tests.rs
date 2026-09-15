@@ -203,7 +203,7 @@ async fn webauthn_derivation_remains_explicitly_blocked() {
     .await
     .unwrap_err();
     assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(error.message.contains("shared verifier"));
+    assert!(error.message.contains("certificate-service proof verification"));
 }
 
 #[tokio::test]

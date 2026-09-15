@@ -3,10 +3,9 @@
 
 use super::*;
 
-/// The pinned certificate service emits `Nitro.generate(Some(hash), None)`.
-/// Bootproof's shared verifier requires a nonce of at least 12 bytes. Until
-/// upstream supplies a compatible verification API, do not request derivation
-/// or submit unverified certificates to Keymaker.
+/// Bootproof supports the service's nonce-less historical proofs, but certificate
+/// proof verification and Caution CA/context checks are not yet integrated here.
+/// Do not request derivation or submit unverified certificates to Keymaker.
 pub(super) async fn derive(
     _client: &reqwest::Client,
     _org_id: Uuid,
@@ -14,6 +13,6 @@ pub(super) async fn derive(
 ) -> Result<([u8; 16], Vec<String>), OrgQuorumError> {
     Err(OrgQuorumError::new(
         StatusCode::SERVICE_UNAVAILABLE,
-        "WebAuthn quorum creation is blocked: the certificate service emits nonce-less proofs, but the shared verifier requires a nonce; upstream certificate proof verification is required",
+        "WebAuthn quorum creation is blocked: certificate-service proof verification and Caution CA/context checks are not integrated",
     ))
 }

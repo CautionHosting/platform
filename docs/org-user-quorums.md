@@ -1,12 +1,12 @@
 # Quorum creation
 
 `caution secret init` (`new` is a visible alias) creates v1 bundles. **WebAuthn/mixed
-creation is currently blocked**: the certificate service emits nonce-less proofs,
-but Bootproof's shared verification API requires a nonce. See the pinned
-[proof generation](https://codeberg.org/caution/locksmith/src/commit/707bcdcad9204569ec95b82a1cf2401e5489b9d9/crates/public-cert-service/src/derivation.rs#L285)
-and [verification contract](https://codeberg.org/caution/bootproof/src/commit/b346db17523ad9b13ef41eb9c14df3328bbd80d1/crates/bootproof-sdk/src/format/nitro.rs#L285). Platform returns HTTP
-503 before derivation or Keymaker generation rather than bypassing verification.
-The selection and assembly contracts below describe the intended integration.
+creation is currently blocked** pending integration of certificate-service proof
+verification and Caution CA/context checks. Bootproof now supports the service's
+nonce-less historical proofs, but Platform has not wired that verifier into
+certificate derivation. Platform still returns HTTP 503 before derivation or
+Keymaker generation. The selection and assembly contracts below describe the
+intended integration.
 
 Hosted creation is the default: CLI → Platform → Keymaker. Platform snapshots
 all registered credentials of each WebAuthn holder in credential-ID order. After
@@ -106,11 +106,18 @@ completed remotely; investigate before submitting another creation request.
 
 ## Dependency and validation boundary
 
-This change pins the shared models and loader from Locksmith PR #15 at
-`2e0600cde1c70d9f220f648d857ccefe14c3b6bf`, with its
-Bootproof dependencies resolved to Platform's reviewed `b346db1` revision. It does not
-change runtime pins or introduce a legacy bundle fallback. Local orchestration and
-negative verification tests do not establish production Nitro readiness.
+The shared models and loader are pinned to the Locksmith revision recorded in
+`Cargo.toml` and `Cargo.lock`. All Bootproof SDK consumers use the historical
+verification revision `821b5c63e80f082f6d67ba3695c11416933489ec`, including the existing
+ES384 encoding fix. No old-remote patch or local path dependency is required.
+Runtime pins and legacy bundle fallback are unchanged.
+
+Stored bundle proofs now validate certificate validity at the signed generation
+timestamp, then check the expected PCRs, deterministic nonce and canonical bundle
+hash. PCR-policy expiry is a cutoff on generation time, not the current time.
+This follows [the timestamp policy in #7](https://codeberg.org/caution/locksmith/issues/7#issuecomment-19223141).
+Historical provenance does not establish fresh authorization or replay protection
+for live shard transport.
 
 - [Locksmith #10](https://codeberg.org/caution/locksmith/issues/10): structured v1
   generation/validation. The response has no threshold field; Platform validates
@@ -118,12 +125,10 @@ negative verification tests do not establish production Nitro readiness.
   independently compare the generated threshold using this contract.
 - [Locksmith #11](https://codeberg.org/caution/locksmith/issues/11) and
   [PR #15](https://codeberg.org/caution/locksmith/pulls/15): durable proof loading.
-  The pinned verifier's certificate-validation time still needs the upstream fix;
-  historical proof acceptance is not a completed production guarantee.
-  The pinned shard-submission client also concatenates separate PGP armor blocks,
-  while its parser reads only the first. Non-first PGP holders cannot submit;
-  multi-holder PGP unlocking remains blocked pending an upstream reconstruction
-  fix and a Platform repin. Do not rewrite the proofed envelope to work around it.
+  Historical certificate verification is implemented. The shared PGP keyring
+  reconstruction fix also retains every holder for sender/receiver verification.
+  These fixes do not establish successful multi-holder Nitro unlocking. V0
+  fallback/upgrade remains deferred under #11 and PR #15.
 - [Locksmith #2](https://codeberg.org/caution/locksmith/issues/2): Keymaker
   serialization/reset lifecycle; no Platform queue or semaphore is added.
 - [Locksmith #12](https://codeberg.org/caution/locksmith/issues/12): WebAuthn
@@ -131,6 +136,21 @@ negative verification tests do not establish production Nitro readiness.
   of reaching the upstream unimplemented path. Creation does not deliver unlocking.
 
 Deployment preflight and runtime integration remain separate Platform work.
+
+### Historical-proof validation
+
+The historical verifier was checked against the existing signed AWS fixture and
+locally signed nonce-less test evidence. Bootproof's 16 SDK tests passed; the
+test root is accepted only by private test code. Locksmith's default and unsafe
+test suites passed, including generation-time policy cutoffs and default-build
+rejection of synthetic proofs.
+
+Platform's CLI tests (131), API quorum tests (11, with one dedicated DB test
+ignored), builder unit tests (94), and successful mock quorum E2E passed against
+the exact dependency revisions above. The mock exercises API creation, upload,
+download, deletion and CLI consumption using synthetic proofs. These runs use
+local Git objects for the pinned revisions; they do not establish remote
+availability, live Nitro unlocking or deployment readiness.
 
 ## Pre-commit validation
 
