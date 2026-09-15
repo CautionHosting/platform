@@ -4472,10 +4472,12 @@ export default {
 
     const saveBundleName = async (bundleId) => {
       try {
+        const body = JSON.stringify({ name: editBundleNameValue.value });
+        const signedHeaders = await buildSignedHeaders("PATCH", `/quorum-bundles/${bundleId}`, body);
         const response = await authFetch(`/api/quorum-bundles/${bundleId}`, {
           method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: editBundleNameValue.value }),
+          headers: { "Content-Type": "application/json", ...signedHeaders },
+          body,
         });
 
         if (response.ok) {
@@ -4516,10 +4518,12 @@ export default {
       const labels = { ...(bundle.labels || {}), [newLabelKey.value.trim()]: newLabelValue.value.trim() };
 
       try {
+        const body = JSON.stringify({ labels });
+        const signedHeaders = await buildSignedHeaders("PATCH", `/quorum-bundles/${bundleId}`, body);
         const response = await authFetch(`/api/quorum-bundles/${bundleId}`, {
           method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ labels }),
+          headers: { "Content-Type": "application/json", ...signedHeaders },
+          body,
         });
 
         if (response.ok) {
@@ -4543,10 +4547,12 @@ export default {
       delete labels[key];
 
       try {
+        const body = JSON.stringify({ labels });
+        const signedHeaders = await buildSignedHeaders("PATCH", `/quorum-bundles/${bundleId}`, body);
         const response = await authFetch(`/api/quorum-bundles/${bundleId}`, {
           method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ labels }),
+          headers: { "Content-Type": "application/json", ...signedHeaders },
+          body,
         });
 
         if (response.ok) {

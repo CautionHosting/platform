@@ -655,13 +655,22 @@ async fn create_quorum_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Json(req): Json<cryptographic_bundles::CreateBundleRequest>,
-) -> Result<Json<cryptographic_bundles::QuorumBundle>, (StatusCode, String)> {
+) -> Result<Json<cryptographic_bundles::QuorumBundle>, org_quorum::OrgQuorumError> {
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+        .map_err(|status| {
+            org_quorum::OrgQuorumError::new(status, "unable to resolve organization")
+        })?;
 
-    let bundle =
-        cryptographic_bundles::create_quorum_bundle(&state.db, org_id, auth.user_id, req).await?;
+    org_quorum::verify_upload(&req.data)?;
+    let bundle = cryptographic_bundles::create_quorum_bundle(&state.db, org_id, auth.user_id, req)
+        .await
+        .map_err(|_| {
+            org_quorum::OrgQuorumError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "unable to store quorum bundle",
+            )
+        })?;
     Ok(Json(bundle))
 }
 
@@ -669,14 +678,29 @@ async fn create_org_user_quorum_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Json(req): Json<org_quorum::GenerateOrgQuorumBundleRequest>,
-) -> Result<Json<cryptographic_bundles::QuorumBundle>, (StatusCode, String)> {
+) -> Result<Json<cryptographic_bundles::QuorumBundle>, org_quorum::OrgQuorumError> {
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+        .map_err(|status| {
+            org_quorum::OrgQuorumError::new(status, "unable to resolve organization")
+        })?;
+    Ok(Json(
+        org_quorum::generate_org_quorum_bundle(&state.db, org_id, auth.user_id, req).await?,
+    ))
+}
 
-    let bundle =
-        org_quorum::generate_org_quorum_bundle(&state.db, org_id, auth.user_id, req).await?;
-    Ok(Json(bundle))
+async fn list_org_quorum_participants(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<Vec<org_quorum::OrgQuorumMember>>, org_quorum::OrgQuorumError> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .map_err(|status| {
+            org_quorum::OrgQuorumError::new(status, "unable to resolve organization")
+        })?;
+    Ok(Json(
+        org_quorum::list_participants(&state.db, org_id).await?,
+    ))
 }
 
 async fn get_quorum_bundle(
@@ -700,14 +724,27 @@ async fn update_quorum_bundle(
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
     Json(req): Json<cryptographic_bundles::UpdateBundleRequest>,
-) -> Result<Json<cryptographic_bundles::QuorumBundle>, (StatusCode, String)> {
+) -> Result<Json<cryptographic_bundles::QuorumBundle>, org_quorum::OrgQuorumError> {
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+        .map_err(|status| {
+            org_quorum::OrgQuorumError::new(status, "unable to resolve organization")
+        })?;
 
+    if let Some(data) = &req.data {
+        org_quorum::verify_upload(data)?;
+    }
     let bundle = cryptographic_bundles::update_quorum_bundle(&state.db, org_id, id, req)
-        .await?
-        .ok_or((StatusCode::NOT_FOUND, "Quorum bundle not found".to_string()))?;
+        .await
+        .map_err(|_| {
+            org_quorum::OrgQuorumError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "unable to update quorum bundle",
+            )
+        })?
+        .ok_or_else(|| {
+            org_quorum::OrgQuorumError::new(StatusCode::NOT_FOUND, "quorum bundle not found")
+        })?;
 
     Ok(Json(bundle))
 }
@@ -3587,6 +3624,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/quorum-bundles/from-org-users",
             post(create_org_user_quorum_bundle),
+        )
+        .route(
+            "/quorum-bundles/participants",
+            get(list_org_quorum_participants),
         )
         .route("/quorum-bundles/{id}", get(get_quorum_bundle))
         .route("/quorum-bundles/{id}", patch(update_quorum_bundle))

@@ -2,12 +2,11 @@
 # SPDX-FileCopyrightText: 2025 Caution SEZC
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Caution-Commercial
 #
-# Opt-in e2e test for org-user quorum generation.
+# Opt-in authorization/discovery test. Does not prove cryptographic generation.
 #
 # This intentionally does not run as part of default make test-e2e. It requires:
 #   RUN_ORG_USER_QUORUM_E2E=1
 #   a running e2e gateway/API stack
-#   the API container started with KEYMAKER_URL and PUBLIC_CERTIFICATE_SERVICE_URL
 #
 # Example:
 #   RUN_ORG_USER_QUORUM_E2E=1 bash tests/e2e/test_org_user_quorum.sh
@@ -30,8 +29,6 @@ fi
 
 GATEWAY_URL="${GATEWAY_URL:-http://127.0.0.1:8000}"
 API_URL="${API_URL:-http://127.0.0.1:8080}"
-CAUTION_BIN="${CAUTION_BIN:-$REPO_ROOT/target/debug/caution}"
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/caution-cli"
 WORK_DIR=$(mktemp -d)
 LOG_DIR="tests/e2e/logs"
 LOG_FILE="$LOG_DIR/org-user-quorum-$(date +%Y%m%d-%H%M%S).log"
@@ -84,14 +81,9 @@ require_cmd() {
 require_cmd curl
 require_cmd jq
 
-if [ ! -x "$CAUTION_BIN" ]; then
-    log "Building CLI..."
-    cargo build --manifest-path "$REPO_ROOT/Cargo.toml" -p cli >/dev/null
-    CAUTION_BIN="$REPO_ROOT/target/debug/caution"
-fi
 
 STEP_NUM=1
-log "Checking gateway/API readiness and API key-service configuration..."
+log "Checking gateway/API readiness..."
 for _ in $(seq 1 30); do
     if curl -sf "$GATEWAY_URL/health" >/dev/null && curl -sf "$API_URL/health" >/dev/null; then
         break
@@ -100,37 +92,24 @@ for _ in $(seq 1 30); do
 done
 curl -sf "$GATEWAY_URL/health" >/dev/null || step_fail "Gateway health check"
 curl -sf "$API_URL/health" >/dev/null || step_fail "API health check"
-if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' | grep -qx api; then
-    docker exec api sh -c 'test -n "${KEYMAKER_URL:-}" && test -n "${PUBLIC_CERTIFICATE_SERVICE_URL:-}"' \
-        || step_fail "API container has KEYMAKER_URL and PUBLIC_CERTIFICATE_SERVICE_URL"
-fi
-step_pass "Gateway/API reachable with key-service configuration"
+step_pass "Gateway/API reachable"
 
 STEP_NUM=2
 log "Creating e2e user/session..."
 LOGIN_RESPONSE=$(curl -sf -X POST "$GATEWAY_URL/auth/e2e-login" -H "Content-Type: application/json")
 SESSION_ID=$(echo "$LOGIN_RESPONSE" | jq -r '.session_id')
 USER_ID=$(echo "$LOGIN_RESPONSE" | jq -r '.user_id')
-EXPIRES_AT=$(echo "$LOGIN_RESPONSE" | jq -r '.expires_at')
 
 if [ -z "$SESSION_ID" ] || [ "$SESSION_ID" = "null" ] || [ -z "$USER_ID" ] || [ "$USER_ID" = "null" ]; then
     step_fail "E2E login returned session and user"
 fi
 
-mkdir -p "$CONFIG_DIR"
-cat > "$CONFIG_DIR/config.json" <<EOF
-{
-  "session_id": "$SESSION_ID",
-  "expires_at": "$EXPIRES_AT",
-  "server_url": "$GATEWAY_URL"
-}
-EOF
 step_pass "E2E login (user: $USER_ID)"
 
 STEP_NUM=3
 log "Marking user onboarded and provisioning organization membership..."
 docker exec postgres-test psql -U postgres -d caution_test -c "
-UPDATE users SET email_verified_at = NOW(), payment_method_added_at = NOW() WHERE id = '$USER_ID';
+UPDATE users SET email_verified_at = NOW(), payment_method_added_at = NOW(), username_is_placeholder = false WHERE id = '$USER_ID';
 " >/dev/null 2>&1 || step_fail "Mark e2e user onboarded"
 
 curl -sf "$API_URL/resources" -H "X-Session-ID: $SESSION_ID" >/dev/null 2>&1 || true
@@ -149,47 +128,29 @@ fi
 step_pass "Organization membership provisioned"
 
 STEP_NUM=4
-log "Generating org-user quorum from Caution-backed public certificate service and Keymaker..."
-REPO_DIR="$WORK_DIR/test-repo"
-mkdir -p "$REPO_DIR/.caution"
-printf 'enclave "default" {\n  unit "default" {\n    command = "/bin/true"\n  }\n}\n' > "$REPO_DIR/caution.hcl"
-
-set +e
-OUTPUT=$(cd "$REPO_DIR" && CAUTION_E2E_UNSIGNED_REQUESTS=1 "$CAUTION_BIN" -u "$GATEWAY_URL" secret new \
-    --from-org-users "$USER_ID" \
-    --caution-backed \
-    --threshold 1 \
-    --name e2e-org-user-quorum \
-    --label e2e=org-user-quorum 2>&1)
-STATUS=$?
-set -e
-
-if [ $STATUS -ne 0 ]; then
-    echo "$OUTPUT"
-    docker logs api 2>&1 | tail -80 || true
-    step_fail "CLI generated org-user quorum"
-fi
-
-if [ ! -f "$REPO_DIR/.caution/quorum-bundle.json" ]; then
-    echo "$OUTPUT"
-    step_fail "CLI saved .caution/quorum-bundle.json"
-fi
-
-jq -e '.version == "V1" and .shardfile and .public_key and (.keyring | length == 1)' \
-    "$REPO_DIR/.caution/quorum-bundle.json" >/dev/null || step_fail "Saved quorum bundle has Keymaker V1 shape"
-step_pass "CLI generated and saved Keymaker V1 org-user quorum bundle"
+log "Verifying authenticated discovery contains the expected organization member..."
+curl -sf "$GATEWAY_URL/api/quorum-bundles/participants" -H "X-Session-ID: $SESSION_ID" > "$WORK_DIR/participants.json" \
+    || step_fail "Authenticated discovery succeeds before signature checks"
+jq -e --arg user "$USER_ID" '
+    type == "array" and
+    ([.[] | select(.user_id == $user)] | length == 1) and
+    any(.[]; .user_id == $user and .webauthn_credentials >= 1) and
+    all(.[]; (keys | sort) == (["user_id", "username", "pgp_keys", "webauthn_credentials"] | sort))
+' "$WORK_DIR/participants.json" >/dev/null || step_fail "Discovery returns expected member and only public selection metadata"
+step_pass "Authenticated discovery contains the expected member and no credential bindings"
 
 STEP_NUM=5
-log "Verifying server persisted the quorum bundle..."
-BUNDLE_COUNT=$(curl -sf "$API_URL/quorum-bundles" -H "X-Session-ID: $SESSION_ID" \
-    | jq '[.[] | select(.name == "e2e-org-user-quorum")] | length')
-if [ "$BUNDLE_COUNT" -lt 1 ]; then
-    step_fail "Server persisted org-user quorum bundle"
-fi
-step_pass "Server persisted org-user quorum bundle"
-
-if [ "$STEPS_FAILED" -ne 0 ]; then
-    exit 1
-fi
-
-log "Org-user quorum e2e completed successfully"
+log "Verifying unsigned generation, upload and updates require signature verification..."
+for operation in "POST quorum-bundles" "POST quorum-bundles/from-org-users" "PATCH quorum-bundles/$USER_ID"; do
+    read -r METHOD ROUTE <<< "$operation"
+    STATUS=$(curl -sS -o "$WORK_DIR/response" -w '%{http_code}' \
+        -X "$METHOD" "$GATEWAY_URL/api/$ROUTE" \
+        -H "X-Session-ID: $SESSION_ID" -H "Content-Type: application/json" \
+        -H "X-Fido2-Signed: true" -H "X-Authenticated-User-ID: $USER_ID" \
+        --data '{}')
+    [ "$STATUS" = "403" ] || step_fail "Unsigned $METHOD $ROUTE returns 403 (received $STATUS)"
+    [ "$(cat "$WORK_DIR/response")" = "This operation requires signature verification" ] \
+        || step_fail "Rejection came from signature verification, not another gate"
+done
+step_pass "Unsigned generation, upload and updates rejected by the signature requirement"
+log "Authorization/discovery checks passed; no cryptographic generation was tested"

@@ -29,6 +29,7 @@ mod byoc;
 mod cache;
 mod credentials;
 mod pgp_keys;
+mod quorum_init;
 mod secrets;
 mod ssh_keys;
 mod verify;
@@ -311,10 +312,7 @@ async fn check_gateway_connectivity(
 ) -> Result<(), CheckGatewayConnectivityError> {
     use CheckGatewayConnectivityErrorCtx as Ctx;
 
-    output::verbose(
-        verbose,
-        format!("Testing connectivity to gateway: {}", url),
-    );
+    output::verbose(verbose, format!("Testing connectivity to gateway: {}", url));
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -739,43 +737,11 @@ enum SecretCommands {
         #[arg(long, help = "Acknowledge unsafe plaintext private keyring generation")]
         shoot_self_in_foot: bool,
     },
-    #[command(about = "Generate a new cryptographic quorum")]
-    New {
-        #[arg(help = "Path to armored PGP keyring file (omit when using --from-org-users)")]
-        keyring: Option<PathBuf>,
-        #[arg(long, help = "Minimum shares needed to reconstruct")]
-        threshold: Option<u8>,
-        #[arg(
-            long,
-            requires = "threshold",
-            help = "Total shares to generate (defaults to the eligible cert count)"
-        )]
-        max: Option<u8>,
-        #[arg(long, help = "Skip uploading bundle to Caution")]
-        no_upload: bool,
-        #[arg(long, help = "Name for the quorum bundle")]
-        name: Option<String>,
-        #[arg(
-            long = "label",
-            help = "Label in key=value format (can be repeated)",
-            value_name = "KEY=VALUE"
-        )]
-        labels: Vec<String>,
-        #[arg(
-            long,
-            value_delimiter = ',',
-            value_name = "USER_ID[,USER_ID...]",
-            conflicts_with = "keyring",
-            help = "Generate from organization users instead of a local keyring"
-        )]
-        from_org_users: Vec<uuid::Uuid>,
-        #[arg(
-            long,
-            requires = "from_org_users",
-            help = "Use Caution-backed public certificates for all --from-org-users participants"
-        )]
-        caution_backed: bool,
-    },
+    #[command(
+        visible_alias = "new",
+        about = "Initialize a cryptographic quorum bundle"
+    )]
+    Init(quorum_init::Options),
     #[command(about = "Encrypt env file values into .caution/secrets/*.asc")]
     Encrypt {
         #[arg(help = "Env keys to encrypt (defaults to every key in the env file)")]
@@ -2069,14 +2035,16 @@ impl ApiClient {
         let config_dir = base_config.join("caution-cli");
 
         // Migrate from the old api-cli directory name if present
-        if legacy_dir.exists() && !config_dir.exists()
-            && let Err(e) = fs::rename(&legacy_dir, &config_dir) {
-                output::warning(format!(
-                    "Warning: could not migrate config from {} to {}: {e}. You may need to log in again.",
-                    legacy_dir.display(),
-                    config_dir.display()
-                ));
-            }
+        if legacy_dir.exists()
+            && !config_dir.exists()
+            && let Err(e) = fs::rename(&legacy_dir, &config_dir)
+        {
+            output::warning(format!(
+                "Warning: could not migrate config from {} to {}: {e}. You may need to log in again.",
+                legacy_dir.display(),
+                config_dir.display()
+            ));
+        }
 
         output::verbose(verbose, format!("Config directory: {:?}", config_dir));
 
@@ -2211,15 +2179,17 @@ impl ApiClient {
     fn format_api_error(&self, status: reqwest::StatusCode, body: &str) -> String {
         if status == reqwest::StatusCode::FORBIDDEN
             && let Ok(payload) = serde_json::from_str::<LegalAcceptanceRequiredError>(body)
-                && payload.code == "legal_acceptance_required" {
-                    let mut message = self.legal_acceptance_message(&payload.document_type);
-                    if let Some(server_message) = payload.message
-                        && !server_message.trim().is_empty() {
-                            message.push_str("\n\n");
-                            message.push_str(server_message.trim());
-                        }
-                    return message;
-                }
+            && payload.code == "legal_acceptance_required"
+        {
+            let mut message = self.legal_acceptance_message(&payload.document_type);
+            if let Some(server_message) = payload.message
+                && !server_message.trim().is_empty()
+            {
+                message.push_str("\n\n");
+                message.push_str(server_message.trim());
+            }
+            return message;
+        }
 
         if body.trim().is_empty() {
             format!("HTTP {}", status)
@@ -2498,19 +2468,22 @@ impl ApiClient {
                     return Some(Self::expand_identity_path(value));
                 }
             } else if let Some(value) = arg.strip_prefix("-i")
-                && !value.is_empty() {
-                    return Some(Self::expand_identity_path(value));
-                }
+                && !value.is_empty()
+            {
+                return Some(Self::expand_identity_path(value));
+            }
 
             if arg == "-o" {
                 if let Some(value) = iter.next()
-                    && let Some(identity) = Self::identity_from_ssh_option(value) {
-                        return Some(identity);
-                    }
-            } else if let Some(value) = arg.strip_prefix("-o")
-                && let Some(identity) = Self::identity_from_ssh_option(value) {
+                    && let Some(identity) = Self::identity_from_ssh_option(value)
+                {
                     return Some(identity);
                 }
+            } else if let Some(value) = arg.strip_prefix("-o")
+                && let Some(identity) = Self::identity_from_ssh_option(value)
+            {
+                return Some(identity);
+            }
         }
         None
     }
@@ -2526,9 +2499,10 @@ impl ApiClient {
 
     fn expand_identity_path(path: &str) -> PathBuf {
         if let Some(rest) = path.strip_prefix("~/")
-            && let Some(home) = dirs::home_dir() {
-                return home.join(rest);
-            }
+            && let Some(home) = dirs::home_dir()
+        {
+            return home.join(rest);
+        }
         PathBuf::from(path)
     }
 
@@ -2553,20 +2527,23 @@ impl ApiClient {
 
         if let Ok(command) = std::env::var("GIT_SSH_COMMAND")
             && let Some(path) = Self::identity_from_ssh_command(&command)
-                && path.exists() {
-                    return Some(path);
-                }
+            && path.exists()
+        {
+            return Some(path);
+        }
 
         if let Ok(output) = Command::new("git")
             .args(["config", "--get", "core.sshCommand"])
             .output()
-            && output.status.success() {
-                let command = String::from_utf8_lossy(&output.stdout);
-                if let Some(path) = Self::identity_from_ssh_command(command.trim())
-                    && path.exists() {
-                        return Some(path);
-                    }
+            && output.status.success()
+        {
+            let command = String::from_utf8_lossy(&output.stdout);
+            if let Some(path) = Self::identity_from_ssh_command(command.trim())
+                && path.exists()
+            {
+                return Some(path);
             }
+        }
 
         if self.read_caution_git_remote().is_some() {
             for name in ["id_ed25519", "id_ecdsa", "id_rsa"] {
@@ -3156,6 +3133,22 @@ enclave "default" {{
             .with_context(Ctx::signed_request())
     }
 
+    // Construct only after approval. reqwest's request timeout also covers body reads.
+    fn signed_operation_request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+    ) -> reqwest::RequestBuilder {
+        let request = self
+            .client
+            .request(method.clone(), [&self.base_url, path].concat());
+        if method == reqwest::Method::POST && path == "/api/quorum-bundles/from-org-users" {
+            request.timeout(Duration::from_secs(125))
+        } else {
+            request
+        }
+    }
+
     async fn signed_request(
         &self,
         session_id: &str,
@@ -3173,17 +3166,6 @@ enclave "default" {{
 
         let body_json = body;
 
-        if std::env::var_os("CAUTION_E2E_UNSIGNED_REQUESTS").is_some() {
-            return self
-                .client
-                .request(method, format!("{}{}", self.base_url, path))
-                .header("X-Session-ID", session_id)
-                .header("Content-Type", "application/json")
-                .body(body_json)
-                .send()
-                .await
-                .context("failed to send e2e unsigned request");
-        }
         let body_hash = hex::encode(Sha256::digest(&body_json));
         let method_name = method.as_str();
 
@@ -3244,8 +3226,7 @@ enclave "default" {{
         output::verbose(self.verbose, "Sending FIDO2-signed request");
 
         let response = self
-            .client
-            .request(method, format!("{}{}", self.base_url, path))
+            .signed_operation_request(method, path)
             .header("X-Fido2-Challenge-Id", &sign_resp.challenge_id)
             .header("X-Fido2-Response", &fido_response_b64)
             .header("Content-Type", "application/json")
@@ -3438,27 +3419,24 @@ fn resolve_procfile_build_command(
         }
     }
 
-    let containerfile =
-        if !has_explicit_build_command(build_command.as_deref()) {
-            match containerfile.as_deref() {
-                Some(containerfile) => {
-                    let containerfile =
-                        validate_explicit_containerfile_path(containerfile).with_context(
-                            Ctx::invalid_containerfile(),
-                        )?;
-                    if !work_dir.join(&containerfile).is_file() {
-                        return Err(ResolveProcfileBuildCommandError::MissingContainerfile {
-                            path: containerfile,
-                            location: std::panic::Location::caller(),
-                        });
-                    }
-                    Some(containerfile)
+    let containerfile = if !has_explicit_build_command(build_command.as_deref()) {
+        match containerfile.as_deref() {
+            Some(containerfile) => {
+                let containerfile = validate_explicit_containerfile_path(containerfile)
+                    .with_context(Ctx::invalid_containerfile())?;
+                if !work_dir.join(&containerfile).is_file() {
+                    return Err(ResolveProcfileBuildCommandError::MissingContainerfile {
+                        path: containerfile,
+                        location: std::panic::Location::caller(),
+                    });
                 }
-                None => None,
+                Some(containerfile)
             }
-        } else {
-            None
-        };
+            None => None,
+        }
+    } else {
+        None
+    };
 
     Ok(resolve_build_command_in_dir(
         build_command.as_deref(),
@@ -3844,17 +3822,8 @@ pub async fn run() -> Result<(), RunError> {
                 )
                 .with_context(Ctx::command_dispatch())?;
             }
-            SecretCommands::New {
-                keyring,
-                threshold,
-                max,
-                no_upload,
-                name,
-                labels,
-                from_org_users,
-                caution_backed,
-            } => {
-                secrets::new(&client, keyring, threshold, max, !no_upload, name, labels)
+            SecretCommands::Init(options) => {
+                quorum_init::run(&client, options)
                     .await
                     .with_context(Ctx::command_dispatch())?;
             }
@@ -4410,6 +4379,58 @@ enclave "main" {{
             qr: false,
             workdir: None,
         }
+    }
+
+    #[test]
+    fn hosted_generation_timeout_is_scoped_to_the_operation_request() {
+        let client = test_api_client();
+        let request = client
+            .signed_operation_request(reqwest::Method::POST, "/api/quorum-bundles/from-org-users")
+            .build()
+            .unwrap();
+        assert_eq!(
+            request.timeout(),
+            Some(&std::time::Duration::from_secs(125))
+        );
+        for path in [
+            "/auth/qr-sign/begin",
+            "/auth/qr-sign/status",
+            "/api/quorum-bundles",
+        ] {
+            let request = client
+                .signed_operation_request(reqwest::Method::POST, path)
+                .build()
+                .unwrap();
+            assert_eq!(request.timeout(), None, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn hosted_generation_deadline_starts_on_send_and_covers_body() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n")
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        let mut client = test_api_client();
+        client.base_url = ["http://", &address.to_string()].concat();
+        let mut request = client
+            .signed_operation_request(reqwest::Method::POST, "/api/quorum-bundles/from-org-users")
+            .build()
+            .unwrap();
+        // Shorten only the test deadline; exercise reqwest's actual send/body timer.
+        *request.timeout_mut() = Some(std::time::Duration::from_millis(100));
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let response = client.client.execute(request).await.unwrap();
+        assert!(response.bytes().await.unwrap_err().is_timeout());
+        server.abort();
     }
 
     async fn serve_preflight_responses(

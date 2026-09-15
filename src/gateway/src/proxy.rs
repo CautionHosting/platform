@@ -18,7 +18,7 @@ const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB
 #[error("failed to construct backend URL")]
 pub struct BuildTargetUrlError(#[from] url::ParseError);
 
-fn build_api_target_url(
+pub(crate) fn build_api_target_url(
     api_service_url: &str,
     path: &str,
     query: Option<&str>,

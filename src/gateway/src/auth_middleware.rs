@@ -878,9 +878,12 @@ fn incomplete_ssh_headers_error(req: &Request) -> VerifySshSignedRequestError {
 }
 
 fn requires_fido2_signature(method: &Method, path: &str) -> bool {
-    (path.contains("/organizations/")
-        && path.ends_with("/settings")
-        && matches!(*method, Method::PATCH | Method::PUT))
+    (*method == Method::PATCH && path.starts_with("/quorum-bundles/"))
+        || (matches!(path, "/quorum-bundles" | "/quorum-bundles/from-org-users")
+            && *method == Method::POST)
+        || (path.contains("/organizations/")
+            && path.ends_with("/settings")
+            && matches!(*method, Method::PATCH | Method::PUT))
         || (path.starts_with("/ssh-keys") && matches!(*method, Method::POST | Method::DELETE))
         || (path == "/pgp-keys" && *method == Method::POST)
         || (path.starts_with("/pgp-keys/") && *method == Method::DELETE)
@@ -899,6 +902,18 @@ pub async fn fido2_sign_middleware(
     req.headers_mut().remove("X-Fido2-Signed");
     req.headers_mut().remove(SSH_AUTHENTICATED_HEADER);
 
+    // Apply authorization only to paths that the backend will receive unchanged.
+    // In particular, URL parsing removes literal and percent-encoded dot segments.
+    let target = crate::proxy::build_api_target_url(
+        &state.api_service_url,
+        req.uri().path(),
+        req.uri().query(),
+    )
+    .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid request path").into_response())?;
+    if target.path() != req.uri().path() {
+        return Err((StatusCode::BAD_REQUEST, "Noncanonical request path").into_response());
+    }
+
     if is_ssh_signed_resource_request(req.method(), req.uri().path()) {
         match ssh_signature_header_state(&req) {
             SshSignatureHeaderState::Complete => {
@@ -916,11 +931,15 @@ pub async fn fido2_sign_middleware(
         }
     }
 
-    // In e2e test mode, skip all FIDO2 signing requirements.
-    // Requests will still be authenticated by fido2_auth_middleware (session check).
+    // Keep quorum writes signed even in E2E mode so tests exercise this boundary.
+    // Other E2E routes retain their existing session-only behavior.
     #[cfg(feature = "e2e-testing-unsafe")]
     {
-        return Ok(next.run(req).await);
+        if !(req.uri().path().starts_with("/quorum-bundles")
+            && matches!(*req.method(), Method::POST | Method::PATCH))
+        {
+            return Ok(next.run(req).await);
+        }
     }
 
     // Paths that require signature for write operations
@@ -1227,6 +1246,14 @@ mod tests {
 
     #[test]
     fn pgp_key_changes_require_fido2_signature() {
+        assert!(requires_fido2_signature(
+            &Method::PATCH,
+            "/quorum-bundles/bundle-id"
+        ));
+        for path in ["/quorum-bundles", "/quorum-bundles/from-org-users"] {
+            assert!(requires_fido2_signature(&Method::POST, path));
+            assert!(!requires_fido2_signature(&Method::GET, path));
+        }
         assert!(requires_fido2_signature(&Method::POST, "/pgp-keys"));
         assert!(requires_fido2_signature(
             &Method::DELETE,

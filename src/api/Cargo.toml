@@ -37,6 +37,11 @@ futures = "0.3"
 reqwest = { version = "0.11", features = ["json"] }
 url = { workspace = true }
 
+# Quorum integration: reuse upstream formats and proof verification.
+locksmith.workspace = true
+keymaker-models.workspace = true
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+
 # Enclave dependencies
 sha2 = { workspace = true }
 enclave-builder = { path = "../enclave-builder" }

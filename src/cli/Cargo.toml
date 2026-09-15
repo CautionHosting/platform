@@ -46,8 +46,8 @@ bootproof-sdk = { git = "https://codeberg.org/caution/bootproof.git", rev = "b34
 coset = { version = "0.3", features = ["std"] }
 
 # Locksmith (shard sending)
-locksmith = { git = "https://codeberg.org/caution/locksmith.git", rev = "2db332a5315242ae84385571b2af9e2b499a369c" }
-keymaker-models = { git = "https://codeberg.org/caution/locksmith.git", rev = "2db332a5315242ae84385571b2af9e2b499a369c" }
+locksmith.workspace = true
+keymaker-models.workspace = true
 sequoia-openpgp = { workspace = true }
 
 # Archive handling

@@ -910,23 +910,22 @@ test-e2e-webauthn-browser:
 	$(MAKE) down-test; \
 	exit $$status
 
+.PHONY: test-quorum-db
+test-quorum-db:
+	@bash tests/e2e/test_org_quorum_db.sh
+
 test-e2e-org-user-quorum:
 	@flock "$(E2E_LOCK_FILE)" /bin/bash -lc '\
 		set -euo pipefail; \
-		cleanup() { docker rm -f keymaker-mock public-cert-mock >/dev/null 2>&1 || true; $(MAKE) down-test >/dev/null; }; \
+		cleanup() { $(MAKE) down-test >/dev/null; }; \
 		trap cleanup EXIT; \
 		trap "exit 130" INT; \
 		trap "exit 143" TERM; \
 		$(MAKE) down-test; \
-		$(MAKE) build-cli; \
 		$(MAKE) migrate-test; \
 		$(MAKE) build-api-e2e build-email-dev build-gateway-e2e; \
-		docker rm -f keymaker-mock public-cert-mock >/dev/null 2>&1 || true; \
-		docker run -d --name public-cert-mock --network $(NETWORK) -e MOCK_SERVICE=public-cert -e PORT=8080 -v "$(PWD)/tests/e2e/mock_org_quorum_services.py:/mock.py:ro" python:3-alpine python /mock.py >/dev/null; \
-		docker run -d --name keymaker-mock --network $(NETWORK) -e MOCK_SERVICE=keymaker -e PORT=8080 -v "$(PWD)/tests/e2e/mock_org_quorum_services.py:/mock.py:ro" python:3-alpine python /mock.py >/dev/null; \
-		KEYMAKER_URL=http://keymaker-mock:8080 PUBLIC_CERTIFICATE_SERVICE_URL=http://public-cert-mock:8080 $(MAKE) run-email-test run-api-test; \
+		$(MAKE) run-email-test run-api-test; \
 		$(MAKE) run-gateway-test; \
-		export CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)"; \
 		export RUN_ORG_USER_QUORUM_E2E=1; \
 		bash tests/e2e/test_org_user_quorum.sh \
 	'
