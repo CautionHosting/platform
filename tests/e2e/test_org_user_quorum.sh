@@ -140,8 +140,8 @@ jq -e --arg user "$USER_ID" '
 step_pass "Authenticated discovery contains the expected member and no credential bindings"
 
 STEP_NUM=5
-log "Verifying unsigned generation, upload and updates require signature verification..."
-for operation in "POST quorum-bundles" "POST quorum-bundles/from-org-users" "PATCH quorum-bundles/$USER_ID"; do
+log "Verifying unsigned generation, upload, updates and deletion require signature verification..."
+for operation in "POST quorum-bundles" "POST quorum-bundles/from-org-users" "PATCH quorum-bundles/$USER_ID" "DELETE quorum-bundles/$USER_ID"; do
     read -r METHOD ROUTE <<< "$operation"
     STATUS=$(curl -sS -o "$WORK_DIR/response" -w '%{http_code}' \
         -X "$METHOD" "$GATEWAY_URL/api/$ROUTE" \
@@ -152,5 +152,5 @@ for operation in "POST quorum-bundles" "POST quorum-bundles/from-org-users" "PAT
     [ "$(cat "$WORK_DIR/response")" = "This operation requires signature verification" ] \
         || step_fail "Rejection came from signature verification, not another gate"
 done
-step_pass "Unsigned generation, upload and updates rejected by the signature requirement"
+step_pass "Unsigned generation, upload, updates and deletion rejected by the signature requirement"
 log "Authorization/discovery checks passed; no cryptographic generation was tested"

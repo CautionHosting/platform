@@ -51,9 +51,11 @@ counts, never credential bindings. Completed v1 bundles contain public bindings.
 
 Hosted creation stores the complete `{data, necroproof}` envelope. `--no-upload`
 is direct-only. Direct creation uploads by default using signed authorization;
-the API must also trust that Keymaker's PCRs to accept an upload. Both hosted
-creation, upload and bundle updates require signed requests at the gateway.
-CLI and dashboard renaming/label edits use the existing signing flow. Downloads and local
+the API must also trust that Keymaker's PCRs to accept an upload. Hosted
+creation, upload, updates and deletion require fresh FIDO2 signed requests at the
+gateway, including in E2E builds. Dashboard deletion signs the canonical
+`/quorum-bundles/{id}` path with an empty body; cancelling the passkey prompt
+sends no deletion. CLI and dashboard renaming/label edits use the existing signing flow. Downloads and local
 files retain the proof envelope. Readers verify before using the public key.
 
 ## Trust and service configuration

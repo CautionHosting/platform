@@ -4431,7 +4431,10 @@ export default {
       deletingBundle.value = id;
 
       try {
-        const response = await authFetch(`/api/quorum-bundles/${id}`, {
+        const path = `/quorum-bundles/${id}`;
+        const headers = await buildSignedHeaders("DELETE", path, "");
+        const response = await authFetch(`/api${path}`, {
+          headers,
           method: "DELETE",
         });
 
@@ -4443,7 +4446,7 @@ export default {
           showToast(data.error || "Failed to delete quorum bundle", 'error');
         }
       } catch (err) {
-        showToast("Failed to connect to server", 'error');
+        showToast(err.message || "Failed to delete quorum bundle", 'error');
       } finally {
         deletingBundle.value = null;
       }

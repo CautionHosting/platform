@@ -3268,6 +3268,7 @@ mod login_begin_tests {
             (Method::POST, "/quorum-bundles"),
             (Method::POST, "/quorum-bundles/from-org-users"),
             (Method::PATCH, "/quorum-bundles/id"),
+            (Method::DELETE, "/quorum-bundles/id"),
         ] {
             for prefix in ["", "/x/..", "/x/%2e%2e", "/x/%2E%2E", "/."] {
                 let request = Request::builder()

@@ -878,7 +878,7 @@ fn incomplete_ssh_headers_error(req: &Request) -> VerifySshSignedRequestError {
 }
 
 fn requires_fido2_signature(method: &Method, path: &str) -> bool {
-    (*method == Method::PATCH && path.starts_with("/quorum-bundles/"))
+    (matches!(*method, Method::PATCH | Method::DELETE) && path.starts_with("/quorum-bundles/"))
         || (matches!(path, "/quorum-bundles" | "/quorum-bundles/from-org-users")
             && *method == Method::POST)
         || (path.contains("/organizations/")
@@ -936,7 +936,7 @@ pub async fn fido2_sign_middleware(
     #[cfg(feature = "e2e-testing-unsafe")]
     {
         if !(req.uri().path().starts_with("/quorum-bundles")
-            && matches!(*req.method(), Method::POST | Method::PATCH))
+            && matches!(*req.method(), Method::POST | Method::PATCH | Method::DELETE))
         {
             return Ok(next.run(req).await);
         }
@@ -1246,6 +1246,10 @@ mod tests {
 
     #[test]
     fn pgp_key_changes_require_fido2_signature() {
+        assert!(requires_fido2_signature(
+            &Method::DELETE,
+            "/quorum-bundles/bundle-id"
+        ));
         assert!(requires_fido2_signature(
             &Method::PATCH,
             "/quorum-bundles/bundle-id"
