@@ -32,6 +32,15 @@ print(pathlib.Path(p["manifest_path"]).parents[2])')
 cargo build --locked --manifest-path "$LOCKSMITH_SOURCE/Cargo.toml" \
     -p keymaker --no-default-features --features unsafe-e2e
 cargo build --locked --manifest-path tests/e2e/soft-authenticator/Cargo.toml
+# Build from the repository so Cargo sees its private-registry configuration;
+# run the resulting test binary later from the isolated fixture directory.
+RECOVERY_TEST=$(cargo test -p cli --lib --locked --features e2e-testing-unsafe \
+    --no-run --message-format=json | python3 -c '
+import json,sys
+for line in sys.stdin:
+    item=json.loads(line)
+    if item.get("reason")=="compiler-artifact" and item.get("executable"):
+        print(item["executable"])')
 mkdir -p "$WORK/policies" "$WORK/data"
 cp prices.json.example "$WORK/prices.json"
 cp config.json.example "$WORK/config.json"
@@ -39,8 +48,9 @@ python3 - "$WORK" <<'PY'
 import json,pathlib,socket,sys
 w=pathlib.Path(sys.argv[1])
 (w/'policies/keymaker-pcr-policy.json').write_text(json.dumps({'sets':[{'pcrs':{str(i):'ab'*48 for i in range(3)}}]}))
+(w/'policies/certificate-pcr-policy.json').write_bytes((w/'policies/keymaker-pcr-policy.json').read_bytes())
 sockets=[]
-for name in ['gateway','keymaker','ssh']:
+for name in ['gateway','keymaker','proxy','ssh','certificate']:
     s=socket.socket(); s.bind(('127.0.0.1',0)); sockets.append(s)
     (w/(name+'.port')).write_text(str(s.getsockname()[1]))
 PY
@@ -57,12 +67,55 @@ docker exec -e MIGRATION_DB_HOST=127.0.0.1 -e MIGRATION_DB_NAME=caution_quorum_t
     || { cat "$WORK/migrations.log"; exit 1; }
 DB_PORT=$(docker port "$CONTAINER" 5432/tcp | sed 's/.*://')
 GATEWAY_URL="http://localhost:$(cat "$WORK/gateway.port")"
-KEYMAKER_URL="http://127.0.0.1:$(cat "$WORK/keymaker.port")"
+KEYMAKER_BACKEND_URL="http://127.0.0.1:$(cat "$WORK/keymaker.port")"
+KEYMAKER_URL="http://127.0.0.1:$(cat "$WORK/proxy.port")"
+PUBLIC_CERTIFICATE_SERVICE_URL="http://127.0.0.1:$(cat "$WORK/certificate.port")"
+"$CARGO_TARGET_DIR/debug/certificate-mock" "$WORK" > "$WORK/certificate.log" 2>&1 &
+PIDS="$PIDS $!"
+# Test-only intermediary: change the request before the actual local Keymaker sees it.
+python3 - "$WORK" "$KEYMAKER_BACKEND_URL" <<'PYPROXY' &
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
+import json, sys
+work, backend = Path(sys.argv[1]), sys.argv[2]
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args): pass
+    def do_GET(self): self.forward(None)
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        with (work / 'keymaker-requests.jsonl').open('a') as log: log.write(json.dumps(body) + '\n')
+        if (work / 'downgrade-threshold').exists(): body['threshold'] = 1
+        self.forward(json.dumps(body).encode())
+    def forward(self, body):
+        request = Request(backend + self.path, data=body,
+                          headers={'Content-Type': 'application/json'})
+        try: response = urlopen(request, timeout=60)
+        except HTTPError as error: response = error
+        except URLError:
+            self.send_error(503, 'Keymaker is not ready')
+            return
+        with response:
+            payload = response.read()
+            if body is not None and (work / 'downgrade-threshold').exists():
+                (work / 'downgraded-bundle.json').write_bytes(payload)
+            self.send_response(response.status)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+ThreadingHTTPServer(('127.0.0.1', int((work / 'proxy.port').read_text())), Handler).serve_forever()
+PYPROXY
+PIDS="$PIDS $!"
 # Empty environment and disposable cwd avoid loading operator credentials/config.
 COMMON=(env -i "PATH=$PATH" "ENVIRONMENT=test" "AWS_EC2_METADATA_DISABLED=true" "AWS_REGION=quorum-test"
     "DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:$DB_PORT/caution_quorum_test"
     "CAUTION_DATA_DIR=$WORK/data" "CAUTION_UNSAFE_KEY_SERVICE_E2E=1"
-    "KEYMAKER_URL=$KEYMAKER_URL" "KEYMAKER_PCR_POLICY_PATH=$WORK/policies/keymaker-pcr-policy.json")
+    "KEYMAKER_URL=$KEYMAKER_URL" "KEYMAKER_PCR_POLICY_PATH=$WORK/policies/keymaker-pcr-policy.json"
+    "PUBLIC_CERTIFICATE_SERVICE_URL=$PUBLIC_CERTIFICATE_SERVICE_URL"
+    "PUBLIC_CERTIFICATE_PCR_POLICY_PATH=$WORK/policies/certificate-pcr-policy.json"
+    "CAUTION_CA_CERT_PATH=$WORK/policies/caution-ca.asc")
 cd "$WORK"
 "${COMMON[@]}" KEYMAKER_LISTEN_ADDR="127.0.0.1:$(cat keymaker.port)" \
     "$CARGO_TARGET_DIR/debug/keymaker" > keymaker.log 2>&1 &
@@ -77,7 +130,7 @@ PIDS="$PIDS $!"
     SSH_HOST_KEY_PATH="$WORK/ssh_host_key" CSRF_SECRET=quorum-test-only \
     "$CARGO_TARGET_DIR/debug/gateway" > gateway.log 2>&1 &
 PIDS="$PIDS $!"
-for url in "$KEYMAKER_URL" http://127.0.0.1:8080 "$GATEWAY_URL"; do
+for url in "$PUBLIC_CERTIFICATE_SERVICE_URL" "$KEYMAKER_URL" http://127.0.0.1:8080 "$GATEWAY_URL"; do
     for _ in $(seq 1 60); do curl -fsS "$url/health" >/dev/null 2>&1 && break; sleep 1; done
     curl -fsS "$url/health" >/dev/null || { cat ./*.log; exit 1; }
 done
@@ -86,5 +139,14 @@ docker exec "$CONTAINER" psql -U postgres -d caution_quorum_test -c \
 "${COMMON[@]}" GATEWAY_URL="$GATEWAY_URL" RP_ORIGIN="$GATEWAY_URL" \
     ALPHA_CODE=quorum-mock-test USERNAME=quorummock \
     QUORUM_E2E_DIR="$WORK" \
+    QUORUM_DB_CONTAINER="$CONTAINER" \
     QUORUM_CLI="$CARGO_TARGET_DIR/debug/caution" \
     "$CARGO_TARGET_DIR/debug/soft-authenticator" || { cat ./*.log; exit 1; }
+# Invoke the actual CLI send-shard implementation with isolated client config.
+# The certificate mock supplies app metadata only; recovery must stop before transport.
+CAUTION_UNSAFE_KEY_SERVICE_E2E=1 \
+KEYMAKER_PCR_POLICY_PATH="$WORK/policies/keymaker-pcr-policy.json" \
+PUBLIC_CERTIFICATE_SERVICE_URL="$PUBLIC_CERTIFICATE_SERVICE_URL" \
+QUORUM_RECOVERY_TEST_DIR="$WORK" \
+    "$RECOVERY_TEST" --ignored --exact \
+    quorum_init::tests::downloaded_caution_bundles_reject_recovery --nocapture

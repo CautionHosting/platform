@@ -181,6 +181,7 @@ dependencies = [
  "aws-sdk-s3",
  "axum",
  "base64 0.22.1",
+ "bootproof-sdk",
  "bytes",
  "caution-config",
  "chrono",
@@ -194,11 +195,13 @@ dependencies = [
  "indexmap 2.14.0",
  "keymaker-models",
  "locksmith",
+ "public-certificate-models",
  "rand 0.8.7",
  "regex",
  "reqwest 0.11.27",
  "sequoia-openpgp",
  "serde",
+ "serde_cbor",
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
@@ -1411,7 +1414,7 @@ dependencies = [
 [[package]]
 name = "bootproof"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/bootproof.git?rev=b346db17523ad9b13ef41eb9c14df3328bbd80d1#b346db17523ad9b13ef41eb9c14df3328bbd80d1"
+source = "git+https://codeberg.org/caution/bootproof.git?rev=821b5c63e80f082f6d67ba3695c11416933489ec#821b5c63e80f082f6d67ba3695c11416933489ec"
 dependencies = [
  "aws-nitro-enclaves-nsm-api",
  "serde_bytes",
@@ -1422,7 +1425,7 @@ dependencies = [
 [[package]]
 name = "bootproof-sdk"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/bootproof.git?rev=b346db17523ad9b13ef41eb9c14df3328bbd80d1#b346db17523ad9b13ef41eb9c14df3328bbd80d1"
+source = "git+https://codeberg.org/caution/bootproof.git?rev=821b5c63e80f082f6d67ba3695c11416933489ec#821b5c63e80f082f6d67ba3695c11416933489ec"
 dependencies = [
  "coset 0.4.2",
  "ring",
@@ -4466,7 +4469,7 @@ dependencies = [
 [[package]]
 name = "keymaker-models"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=2e0600cde1c70d9f220f648d857ccefe14c3b6bf#2e0600cde1c70d9f220f648d857ccefe14c3b6bf"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=93229565410d212a525e91fc2e3d7f3df249ef58#93229565410d212a525e91fc2e3d7f3df249ef58"
 dependencies = [
  "serde",
  "serde_cbor",
@@ -4658,7 +4661,7 @@ dependencies = [
 [[package]]
 name = "locksmith"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=2e0600cde1c70d9f220f648d857ccefe14c3b6bf#2e0600cde1c70d9f220f648d857ccefe14c3b6bf"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=93229565410d212a525e91fc2e3d7f3df249ef58#93229565410d212a525e91fc2e3d7f3df249ef58"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
@@ -5894,6 +5897,14 @@ name = "psl-types"
 version = "2.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
+
+[[package]]
+name = "public-certificate-models"
+version = "0.1.0"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=93229565410d212a525e91fc2e3d7f3df249ef58#93229565410d212a525e91fc2e3d7f3df249ef58"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "publicsuffix"

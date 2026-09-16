@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::IsTerminal,
+    io::{IsTerminal, Write},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -60,15 +60,17 @@ pub(crate) struct Options {
     pub name: Option<String>,
     #[arg(long = "label", value_name = "KEY=VALUE")]
     pub labels: Vec<String>,
-    #[arg(long, value_delimiter = ',')]
-    pub from_org_users: Vec<Uuid>,
+    /// Organization holders, selected by UUID or username.
+    #[arg(long, value_delimiter = ',', value_name = "USER")]
+    pub from_org_users: Vec<UserSelector>,
     /// Use WebAuthn for listed users without a --pgp-key override.
     #[arg(long, requires = "from_org_users")]
     pub caution_backed: bool,
+    /// Select a registered PGP key for a holder UUID or username.
     #[arg(
         long = "pgp-key",
         requires = "from_org_users",
-        value_name = "USER_ID=KEY_ID"
+        value_name = "USER=KEY_UUID"
     )]
     pub pgp_keys: Vec<PgpSelection>,
     /// Call this Keymaker directly (PGP-only); overrides KEYMAKER_URL.
@@ -79,22 +81,65 @@ pub(crate) struct Options {
     pub keymaker_pcr_policy: Option<PathBuf>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum UserSelector {
+    Id(Uuid),
+    Username(String),
+}
+
+impl std::str::FromStr for UserSelector {
+    type Err = InitError;
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(InitError::invalid("holder requires a UUID or username"));
+        }
+        Ok(match Uuid::parse_str(text) {
+            Ok(id) => Self::Id(id),
+            Err(_) => Self::Username(text.to_lowercase()),
+        })
+    }
+}
+
+impl UserSelector {
+    fn resolve<'a>(&self, members: &'a [Member]) -> Result<&'a Member, InitError> {
+        let mut matches = members.iter().filter(|member| match self {
+            Self::Id(id) => member.user_id == *id,
+            Self::Username(name) => member.username.to_lowercase() == *name,
+        });
+        let label = match self {
+            Self::Id(id) => id.to_string(),
+            Self::Username(name) => name.clone(),
+        };
+        match (matches.next(), matches.next()) {
+            (Some(member), None) => Ok(member),
+            (None, _) => Err(InitError::invalid(format!(
+                "unknown active organization holder '{label}'"
+            ))),
+            _ => Err(InitError::invalid(format!(
+                "ambiguous organization holder '{label}'; use a UUID"
+            ))),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct PgpSelection {
-    user: Uuid,
+    user: UserSelector,
     key: Uuid,
 }
 impl std::str::FromStr for PgpSelection {
     type Err = InitError;
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let (user, key) = text
-            .split_once('=')
-            .ok_or_else(|| InitError::invalid("--pgp-key requires USER_ID=KEY_ID"))?;
+        let (user, key) = text.split_once('=').ok_or_else(|| {
+            InitError::invalid("--pgp-key requires USER=KEY_UUID (holder UUID or username)")
+        })?;
         Ok(Self {
-            user: user
+            user: user.parse()?,
+            key: key
+                .trim()
                 .parse()
-                .with_context(Ctx::new("invalid PGP holder user UUID"))?,
-            key: key.parse().with_context(Ctx::new("invalid PGP key UUID"))?,
+                .with_context(Ctx::new("invalid PGP key UUID"))?,
         })
     }
 }
@@ -132,6 +177,7 @@ fn endpoint(
     explicit: Option<&str>,
     environment: Option<&str>,
 ) -> Result<Option<String>, InitError> {
+    let environment = environment.filter(|value| !value.trim().is_empty());
     explicit.or(environment).map(|value| {
         let url = reqwest::Url::parse(value).with_context(Ctx::new("invalid Keymaker URL"))?;
         if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
@@ -260,6 +306,19 @@ fn parse_policy(text: &str) -> Result<KeymakerPcrPolicy, InitError> {
     Ok(policy)
 }
 
+fn check_quorum_parameters(
+    bundle: &v1::GenerateQuorumResponse,
+    threshold: u8,
+    count: usize,
+) -> Result<(), InitError> {
+    if bundle.threshold != threshold || usize::from(bundle.max) != count {
+        return Err(InitError::invalid(
+            "Keymaker response does not match the requested quorum",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn load_bundle(text: &str) -> Result<GenerateQuorumBundle, InitError> {
     let policy = load_policy(&policy_path(None))?;
     locksmith::bundle::load_json(text, &policy)
@@ -270,33 +329,48 @@ fn select_participants(
     options: &Options,
     members: &[Member],
     interactive: bool,
+    direct: bool,
 ) -> Result<(Vec<Participant>, Vec<String>), InitError> {
+    let selected = options
+        .from_org_users
+        .iter()
+        .map(|user| user.resolve(members))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut seen = HashSet::new();
+    for member in &selected {
+        if !seen.insert(member.user_id) {
+            return Err(InitError::invalid("duplicate organization holder"));
+        }
+    }
     let mut overrides = HashMap::new();
     for selection in &options.pgp_keys {
-        if !options.from_org_users.contains(&selection.user)
-            || overrides.insert(selection.user, selection.key).is_some()
-        {
+        let user_id = selection.user.resolve(members)?.user_id;
+        if !seen.contains(&user_id) || overrides.insert(user_id, selection.key).is_some() {
             return Err(InitError::invalid(
                 "PGP overrides must name distinct selected users",
             ));
         }
     }
+    if direct
+        && options.caution_backed
+        && selected
+            .iter()
+            .any(|member| !overrides.contains_key(&member.user_id))
+    {
+        return Err(InitError::invalid(DIRECT_WEBAUTHN_ERROR));
+    }
     let mut participants = Vec::new();
     let mut certs = Vec::new();
-    let mut seen = HashSet::new();
-    for user_id in &options.from_org_users {
-        if !seen.insert(user_id) {
-            return Err(InitError::invalid("duplicate organization holder"));
-        }
-        let member = members
-            .iter()
-            .find(|m| m.user_id == *user_id)
-            .ok_or_else(|| {
-                InitError::invalid("selected user is not an active organization member")
-            })?;
+    for member in selected {
+        let user_id = &member.user_id;
         let mut key_id = overrides.get(user_id).copied();
         let mut webauthn = options.caution_backed && key_id.is_none();
         if key_id.is_none() && !webauthn {
+            if member.pgp_keys.is_empty() && member.webauthn_credentials == 0 {
+                return Err(InitError::invalid(
+                    "no usable custody: selected member has no registered PGP keys or passkeys",
+                ));
+            }
             if member.pgp_keys.len() == 1 {
                 key_id = Some(member.pgp_keys[0].id);
             } else if interactive {
@@ -325,7 +399,7 @@ fn select_participants(
                 }
             } else {
                 return Err(InitError::invalid(
-                    "ambiguous custody: specify --pgp-key USER_ID=KEY_ID or explicitly select --caution-backed",
+                    "ambiguous custody: specify --pgp-key USER=KEY_UUID or explicitly select --caution-backed",
                 ));
             }
         }
@@ -383,19 +457,55 @@ async fn checked_response(
         .with_context(Ctx::new("invalid quorum response"))
 }
 
+fn check_name_label(name: Option<&str>, labels: &HashMap<String, String>) -> Result<(), InitError> {
+    if let (Some(name), Some(label)) = (name, labels.get("name")) {
+        if name != label {
+            return Err(InitError::invalid("--name and label 'name' must match"));
+        }
+    }
+    Ok(())
+}
+
+fn check_saved_policy(path: &Path, selected: &KeymakerPcrPolicy) -> Result<(), InitError> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        result => result.with_context(Ctx::new("unable to read saved repository PCR policy"))?,
+    };
+    let saved = parse_policy(&text).with_context(Ctx::new(
+        "saved repository PCR policy is invalid; explicitly repair it before generating a quorum",
+    ))?;
+    if saved != *selected {
+        return Err(InitError::invalid(
+            "selected PCR policy differs from the saved repository policy; explicitly replace the saved policy before generating a quorum",
+        ));
+    }
+    Ok(())
+}
+
+fn save_policy_if_absent(
+    path: &Path,
+    text: &str,
+    policy: &KeymakerPcrPolicy,
+) -> Result<(), InitError> {
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut file) => file
+            .write_all(text.as_bytes())
+            .with_context(Ctx::new("unable to save accepted PCR policy")),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            check_saved_policy(path, policy)
+        }
+        Err(error) => Err(error).with_context(Ctx::new("unable to create accepted PCR policy")),
+    }
+}
+
 pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), InitError> {
     let environment = std::env::var("KEYMAKER_URL").ok();
     let endpoint = endpoint(options.keymaker_url.as_deref(), environment.as_deref())?;
-    // Reject the explicit mixed/WebAuthn override before requesting credentials or generation.
-    if endpoint.is_some()
-        && options.caution_backed
-        && options
-            .from_org_users
-            .iter()
-            .any(|id| !options.pgp_keys.iter().any(|p| p.user == *id))
-    {
-        return Err(InitError::invalid(DIRECT_WEBAUTHN_ERROR));
-    }
     if endpoint.is_none() && options.no_upload {
         return Err(InitError::invalid(
             "--no-upload is only supported with a direct PGP-only Keymaker",
@@ -424,7 +534,8 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
             .await
             .with_context(Ctx::new("unable to discover organization holders"))?
     };
-    let (participants, registered) = select_participants(&options, &members, interactive)?;
+    let (participants, registered) =
+        select_participants(&options, &members, interactive, endpoint.is_some())?;
     validate_direct(endpoint.is_some(), &participants)?;
     let local = if let Some(path) = &options.keyring {
         public_certificates(
@@ -447,10 +558,18 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
             .ok_or_else(|| InitError::invalid("labels require KEY=VALUE"))?;
         labels.insert(key.to_owned(), value.to_owned());
     }
+    check_name_label(options.name.as_deref(), &labels)?;
     let policy_file = policy_path(options.keymaker_pcr_policy.as_deref());
     let policy_text = fs::read_to_string(&policy_file)
         .with_context(Ctx::new("unable to read Keymaker PCR policy"))?;
     let policy = parse_policy(&policy_text)?;
+    let in_repo = Path::new("caution.hcl").exists()
+        || Path::new("Procfile").exists()
+        || Path::new(".caution/deployment.json").exists();
+    let saved_policy_path = Path::new(".caution/keymaker-pcr-policy.json");
+    if in_repo {
+        check_saved_policy(saved_policy_path, &policy)?;
+    }
     eprintln!(
         "Initialize quorum: {threshold} of {count}; {}",
         endpoint.as_deref().unwrap_or("Platform-hosted Keymaker")
@@ -461,13 +580,26 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
         eprintln!("  Local PGP {}", cert.fingerprint());
     }
     for p in &participants {
+        let member = members
+            .iter()
+            .find(|m| m.user_id == p.user_id)
+            .expect("resolved participant");
         eprintln!(
-            "  {}: {}{}",
+            "  {} ({}): {}{}",
+            member.username,
             p.user_id,
             p.key_source,
             p.pgp_key_id
                 .map(|id| [" ", &id.to_string()].concat())
                 .unwrap_or_default()
+        );
+    }
+    if participants
+        .iter()
+        .any(|p| p.key_source == "caution_backed_pgp")
+    {
+        eprintln!(
+            "Warning: WebAuthn/mixed bundle creation is supported, but recovery is not yet available (Locksmith #12). Do not use this quorum for secrets you need to recover now."
         );
     }
     if interactive
@@ -550,6 +682,7 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
     let bundle = locksmith::bundle::load_response(response.clone(), &policy)
         .with_context(Ctx::new("Keymaker proof verification failed"))?
         .to_latest();
+    check_quorum_parameters(&bundle, threshold, count)?;
     if bundle.keyring.len() != count {
         return Err(InitError::invalid(
             "returned quorum holder count differs from selection",
@@ -597,15 +730,11 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
     }
     let json = serde_json::to_string_pretty(&response)
         .with_context(Ctx::new("unable to encode proofed bundle"))?;
-    let in_repo = Path::new("caution.hcl").exists()
-        || Path::new("Procfile").exists()
-        || Path::new(".caution/deployment.json").exists();
     if in_repo {
         fs::create_dir_all(".caution")
             .with_context(Ctx::new("unable to create .caution directory"))?;
         // Save the accepted policy before the bundle; readers never trust policy from a response.
-        fs::write(".caution/keymaker-pcr-policy.json", policy_text)
-            .with_context(Ctx::new("unable to save accepted PCR policy"))?;
+        save_policy_if_absent(saved_policy_path, &policy_text, &policy)?;
         fs::write(".caution/quorum-bundle.json", &json)
             .with_context(Ctx::new("unable to save proofed bundle"))?;
         output::status("Saved .caution/quorum-bundle.json and .caution/keymaker-pcr-policy.json");

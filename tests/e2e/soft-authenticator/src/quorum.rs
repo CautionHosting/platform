@@ -1,5 +1,7 @@
 //! Opt-in PGP quorum integration; signatures use the registered software passkey.
 use super::*;
+#[path = "quorum_caution.rs"]
+mod caution;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use reqwest::{
     blocking::{Client, Response},
@@ -33,6 +35,9 @@ struct Session<'a> {
 }
 impl Session<'_> {
     fn signed(&mut self, method: Method, path: &str, body: &str) -> Result<Response> {
+        self.signed_at(method, path, body, "/api")
+    }
+    fn signed_at(&mut self, method: Method, path: &str, body: &str, prefix: &str) -> Result<Response> {
         let hash = Sha256::digest(body.as_bytes());
         let body_hash: String = hash.iter().map(|b| format!("{b:02x}")).collect();
         let challenge: Value = checked(
@@ -52,7 +57,7 @@ impl Session<'_> {
             .map_err(|e| anyhow::anyhow!("request signing failed: {e:?}"))?;
         Ok(self
             .http
-            .request(method, [self.base, "/api", path].concat())
+            .request(method, [self.base, prefix, path].concat())
             .header("X-Session-ID", self.id)
             .header(
                 "X-Fido2-Challenge-Id",
@@ -224,6 +229,146 @@ pub fn run(
     let direct: Value =
         serde_json::from_slice(&fs::read(work.join(".caution/quorum-bundle.json"))?)?;
     assert_eq!(direct["data"]["keyring"][0]["OpenPGP"]["cert"], cert);
+    // Resolve a real organization username and PGP override through participant discovery.
+    let registered: Value = checked(session.signed_at(
+        Method::POST,
+        "/pgp-keys",
+        &json!({"public_key": cert, "name": "username selection test"}).to_string(),
+        "",
+    )?)?
+    .json()?;
+    let key_id = registered["id"].as_str().context("registered key ID")?;
+    let members: Value = checked(session.get("/quorum-bundles/participants")?)?.json()?;
+    let member = members
+        .as_array()
+        .context("participant list")?
+        .iter()
+        .find(|m| {
+            m["pgp_keys"]
+                .as_array()
+                .is_some_and(|keys| keys.iter().any(|k| k["id"] == key_id))
+        })
+        .context("registered participant")?;
+    let username = member["username"].as_str().context("username")?;
+    let home = work.join("username-cli-home");
+    // dirs::config_dir uses Library/Application Support on macOS and XDG on Linux.
+    for directory in [
+        home.join("Library/Application Support/caution-cli"),
+        home.join(".config/caution-cli"),
+    ] {
+        fs::create_dir_all(&directory)?;
+        fs::write(
+            directory.join("config.json"),
+            json!({
+                "session_id": id, "expires_at": "2099-01-01T00:00:00Z", "server_url": base
+            })
+            .to_string(),
+        )?;
+    }
+    let result = Command::new(&cli)
+        .current_dir(work)
+        .stdin(Stdio::null())
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .args([
+            "--url",
+            base,
+            "secret",
+            "init",
+            "--from-org-users",
+            username,
+            "--pgp-key",
+            &format!("{username}={key_id}"),
+            "--threshold",
+            "1",
+            "--no-upload",
+            "--keymaker-url",
+            &std::env::var("KEYMAKER_URL")?,
+            "--keymaker-pcr-policy",
+            "policies/keymaker-pcr-policy.json",
+        ])
+        .output()?;
+    anyhow::ensure!(
+        result.status.success(),
+        "username CLI: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8_lossy(&result.stderr).contains(&format!(
+        "{} ({})",
+        username,
+        member["user_id"].as_str().unwrap()
+    )));
+    let named: Value =
+        serde_json::from_slice(&fs::read(work.join(".caution/quorum-bundle.json"))?)?;
+    assert_eq!(
+        named["data"]["keyring"][0]["OpenPGP"]["cert"],
+        member["pgp_keys"][0]["public_key"]
+    );
+    checked(session.signed_at(Method::DELETE, &format!("/pgp-keys/{key_id}"), "", "")?)?;
+    // The CLI must reject conflicting local inputs before contacting even an unavailable Keymaker.
+    let saved_policy_path = work.join(".caution/keymaker-pcr-policy.json");
+    let saved_policy = fs::read(&saved_policy_path)?;
+    let saved_bundle = fs::read(work.join(".caution/quorum-bundle.json"))?;
+    let mut different: Value = serde_json::from_slice(&saved_policy)?;
+    different["sets"][0]["pcrs"]["0"] = json!("cd".repeat(48));
+    for contents in [serde_json::to_vec(&different)?, b"malformed".to_vec()] {
+        fs::write(&saved_policy_path, &contents)?;
+        let rejected = Command::new(&cli)
+            .current_dir(work)
+            .stdin(Stdio::null())
+            .args([
+                "secret",
+                "init",
+                "holder.asc",
+                "--threshold",
+                "1",
+                "--no-upload",
+                "--keymaker-url",
+                "http://127.0.0.1:9",
+                "--keymaker-pcr-policy",
+                "policies/keymaker-pcr-policy.json",
+            ])
+            .output()?;
+        assert!(!rejected.status.success());
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains("saved repository PCR policy")
+                || String::from_utf8_lossy(&rejected.stderr).contains("saved repository policy")
+        );
+        assert_eq!(fs::read(&saved_policy_path)?, contents);
+        assert_eq!(
+            fs::read(work.join(".caution/quorum-bundle.json"))?,
+            saved_bundle
+        );
+    }
+    fs::write(&saved_policy_path, saved_policy)?;
+    let rejected = Command::new(&cli)
+        .current_dir(work)
+        .stdin(Stdio::null())
+        .args([
+            "secret",
+            "init",
+            "holder.asc",
+            "--threshold",
+            "1",
+            "--no-upload",
+            "--keymaker-url",
+            "http://127.0.0.1:9",
+            "--keymaker-pcr-policy",
+            "policies/keymaker-pcr-policy.json",
+            "--name",
+            "prod",
+            "--label",
+            "name=staging",
+        ])
+        .output()?;
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("--name and label 'name' must match")
+    );
+    assert_eq!(
+        fs::read(work.join(".caution/quorum-bundle.json"))?,
+        saved_bundle
+    );
     fs::write(
         work.join("secrets.env"),
         "QUORUM_TEST_SECRET=temporary-secret\n",
@@ -251,6 +396,91 @@ pub fn run(
             encrypted.contains("BEGIN PGP MESSAGE") && !encrypted.contains("temporary-secret")
         );
     }
-    println!("PASS: signed API create/upload/download/delete, labels, direct CLI and downloaded-bundle encryption (mock proofs only)");
+    // Real local generation behind a request-altering intermediary, with synthetic proofs.
+    let mut holders = vec![cert.clone()];
+    for _ in 1..5 {
+        let (holder, _) = CertBuilder::new()
+            .add_userid("temporary downgrade-test holder")
+            .add_signing_subkey()
+            .add_authentication_subkey()
+            .add_storage_encryption_subkey()
+            .generate()?;
+        let mut bytes = Vec::new();
+        holder.armored().serialize(&mut bytes)?;
+        holders.push(String::from_utf8(bytes)?);
+    }
+    fs::write(work.join("five-holders.asc"), holders.concat())?;
+    let request = json!({"threshold":3, "pgp_certificates":holders, "participants":[]}).to_string();
+    let created: Value =
+        checked(session.signed(Method::POST, "/quorum-bundles/from-org-users", &request)?)?
+            .json()?;
+    assert_eq!(created["data"]["data"]["threshold"], 3);
+    assert_eq!(created["data"]["data"]["max"], 5);
+    checked(session.signed(
+        Method::DELETE,
+        &format!("/quorum-bundles/{}", created["id"].as_str().unwrap()),
+        "",
+    )?)?;
+
+    fs::write(work.join("downgrade-threshold"), "")?;
+    let rejected = session.signed(Method::POST, "/quorum-bundles/from-org-users", &request)?;
+    assert_eq!(rejected.status().as_u16(), 502);
+    assert!(rejected
+        .text()?
+        .contains("Keymaker response does not match the requested quorum"));
+    assert_eq!(
+        checked(session.get("/quorum-bundles")?)?.json::<Value>()?,
+        json!([])
+    );
+    let saved = fs::read(work.join(".caution/quorum-bundle.json"))?;
+    let rejected = Command::new(&cli)
+        .current_dir(work)
+        .stdin(Stdio::null())
+        .args([
+            "secret",
+            "init",
+            "five-holders.asc",
+            "--threshold",
+            "3",
+            "--no-upload",
+            "--keymaker-url",
+            &std::env::var("KEYMAKER_URL")?,
+            "--keymaker-pcr-policy",
+            "policies/keymaker-pcr-policy.json",
+        ])
+        .output()?;
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr)
+        .contains("Keymaker response does not match the requested quorum"));
+    assert_eq!(fs::read(work.join(".caution/quorum-bundle.json"))?, saved);
+    assert_eq!(
+        checked(session.get("/quorum-bundles")?)?.json::<Value>()?,
+        json!([])
+    );
+    let downgraded: Value =
+        serde_json::from_slice(&fs::read(work.join("downgraded-bundle.json"))?)?;
+    assert_eq!(downgraded["data"]["threshold"], 1);
+    assert_eq!(downgraded["data"]["max"], 5);
+    // The response itself has a valid synthetic proof; rejection was the request mismatch.
+    let accepted = Command::new(&cli)
+        .current_dir(work)
+        .stdin(Stdio::null())
+        .args([
+            "secret",
+            "encrypt",
+            "--bundle",
+            "downgraded-bundle.json",
+            "--env-file",
+            "secrets.env",
+        ])
+        .output()?;
+    anyhow::ensure!(
+        accepted.status.success(),
+        "downgraded proof: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    fs::remove_file(work.join("downgrade-threshold"))?;
+    caution::run(&mut session, work, &cert)?;
+    println!("PASS: signed API create/upload/download/delete, direct CLI, request-threshold downgrade rejection and downloaded-bundle encryption (mock proofs only)");
     Ok(())
 }

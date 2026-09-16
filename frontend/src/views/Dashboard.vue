@@ -4492,7 +4492,7 @@ export default {
           showToast(data.error || "Failed to rename bundle", 'error');
         }
       } catch (err) {
-        showToast("Failed to connect to server", 'error');
+        showToast(err.message || "Failed to rename bundle", 'error');
       }
     };
 
@@ -4538,7 +4538,7 @@ export default {
           showToast(data.error || "Failed to add label", 'error');
         }
       } catch (err) {
-        showToast("Failed to connect to server", 'error');
+        showToast(err.message || "Failed to add label", 'error');
       }
     };
 
@@ -4566,7 +4566,7 @@ export default {
           showToast(data.error || "Failed to remove label", 'error');
         }
       } catch (err) {
-        showToast("Failed to connect to server", 'error');
+        showToast(err.message || "Failed to remove label", 'error');
       }
     };
 

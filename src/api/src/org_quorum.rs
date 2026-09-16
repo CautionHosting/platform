@@ -182,6 +182,11 @@ fn validate_request(request: &GenerateOrgQuorumBundleRequest) -> Result<(), OrgQ
     if !request.labels.is_null() && !request.labels.is_object() {
         return Err(OrgQuorumError::invalid("labels must be an object"));
     }
+    if let (Some(name), Some(label)) = (&request.name, request.labels.get("name")) {
+        if label.as_str() != Some(name.as_str()) {
+            return Err(OrgQuorumError::invalid("name and label 'name' must match"));
+        }
+    }
     Ok(())
 }
 
@@ -479,7 +484,9 @@ fn check_response(
 ) -> Result<(), OrgQuorumError> {
     let request = request.clone().to_latest();
     let bundle = response.data.clone().to_latest();
-    if bundle.bundle_id != request.bundle_id
+    if bundle.threshold != request.threshold
+        || bundle.max != request.max
+        || bundle.bundle_id != request.bundle_id
         || bundle.keyring != request.keyring
         || bundle.label != request.label
     {

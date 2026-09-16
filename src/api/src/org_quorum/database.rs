@@ -209,11 +209,15 @@ async fn credentials(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid) {
         .await
         .unwrap_err();
     assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(error.message.contains("shared verifier"));
+    assert!(
+        error
+            .message
+            .contains("required key-service endpoint or trust policy is not configured")
+    );
     assert_eq!(
         request_log().len(),
         before,
-        "blocked derivation reached Keymaker"
+        "unconfigured derivation reached Keymaker"
     );
     sqlx::query(
         "UPDATE fido2_credentials SET public_key = $1 WHERE user_id = $2 AND credential_id = $3",
@@ -236,6 +240,8 @@ async fn storage_roundtrip(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid
     let envelope = serde_json::to_value(keymaker_models::Proofed {
         data: keymaker_models::generate_quorum::GenerateQuorumBundle::V1(
             v1::GenerateQuorumResponse {
+                threshold: 1,
+                max: 1,
                 bundle_id: [7; 16],
                 label: HashMap::from([("test".into(), "storage".into())]),
                 keyring: vec![Key::OpenPGP {
