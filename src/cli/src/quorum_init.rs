@@ -261,6 +261,19 @@ fn parse_policy(text: &str) -> Result<KeymakerPcrPolicy, InitError> {
     Ok(policy)
 }
 
+fn check_quorum_parameters(
+    bundle: &v1::GenerateQuorumResponse,
+    threshold: u8,
+    count: usize,
+) -> Result<(), InitError> {
+    if bundle.threshold != threshold || usize::from(bundle.max) != count {
+        return Err(InitError::invalid(
+            "Keymaker response does not match the requested quorum",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn load_bundle(text: &str) -> Result<GenerateQuorumBundle, InitError> {
     let policy = load_policy(&policy_path(None))?;
     locksmith::bundle::load_json(text, &policy)
@@ -556,6 +569,7 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
     let bundle = locksmith::bundle::load_response(response.clone(), &policy)
         .with_context(Ctx::new("Keymaker proof verification failed"))?
         .to_latest();
+    check_quorum_parameters(&bundle, threshold, count)?;
     if bundle.keyring.len() != count {
         return Err(InitError::invalid(
             "returned quorum holder count differs from selection",

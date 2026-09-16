@@ -135,10 +135,18 @@ The shared models and loader are pinned to the Locksmith revision recorded in
 `Cargo.toml` and `Cargo.lock`. All Bootproof SDK consumers use the historical
 verification revision `821b5c63e80f082f6d67ba3695c11416933489ec`, including the existing
 ES384 encoding fix. No old-remote patch or local path dependency is required.
-The default Locksmith daemon revision is also `07041e40c0fa808015cbd1f706e3f82f682e7139`,
+The default Locksmith daemon revision is also `0e705350590e1a0923947a6c28d6ace2d045a129`,
 matching the API/CLI loader. `LOCKSMITH_COMMIT` still overrides this default.
 Existing deployed images require a rebuild/redeployment to use it. Legacy
 bundle fallback remains unimplemented.
+
+The required `threshold`/`max` fields intentionally break the previous V1 response
+contract while retaining the V1 tag. Updated API/CLI/runtime readers reject old
+bundles missing either field; old readers reject the new fields. There is no
+fallback or automatic migration. Adding metadata to an existing bundle invalidates
+its proof. Coordinate the Keymaker, API/CLI and runtime upgrade, rebuild Keymaker,
+and independently verify its new PCR policy before production use. Existing
+keys and encrypted material are not migrated by this change.
 
 Stored bundle proofs now validate certificate validity at the signed generation
 timestamp, then check the expected PCRs, deterministic nonce and canonical bundle
@@ -148,9 +156,11 @@ Historical provenance does not establish fresh authorization or replay protectio
 for live shard transport.
 
 - [Locksmith #10](https://codeberg.org/caution/locksmith/issues/10): structured v1
-  generation/validation. The response has no threshold field; Platform validates
-  the request and compares returned ID, ordered keyring and labels, but cannot
-  independently compare the generated threshold using this contract.
+  generation/validation. The proof-bound response requires `threshold` and `max`,
+  taken from the same values used for shard generation. Platform compares both
+  with its request before storage; the CLI checks them against the original
+  selection after proof verification in hosted and direct modes. This still
+  trusts the measured Keymaker implementation to generate shares correctly.
 - [Locksmith #11](https://codeberg.org/caution/locksmith/issues/11) and
   [PR #15](https://codeberg.org/caution/locksmith/pulls/15): durable proof loading.
   Historical certificate verification is implemented. The shared PGP keyring
@@ -324,6 +334,14 @@ The shared `unsafe-e2e` feature is forwarded only through API/CLI
 0/1/2 each equal to `ab` repeated 48 times, and a proof equal to the nonce
 recomputed from the canonical bundle hash. Never use these values or binaries
 in production. Ordinary build targets do not enable this feature.
+
+The harness also places a loopback proxy before Keymaker, changing a requested
+3-of-5 into 1-of-5 before generation. The API rejects the resulting valid synthetic
+proof before storage, and the direct CLI rejects it without overwriting its saved
+bundle. CLI unit tests cover the common parameter check used by both creation
+modes. Locksmith's generation test decrypts all five shares, checks the encrypted
+threshold against the response, rejects every pair and reconstructs with every
+triple. This is local validation, not a reproduced production/Nitro exploit.
 
 Coverage includes actual gateway challenge signing with a software passkey,
 signed API creation/upload, download, unsigned DELETE's signature-specific 403,

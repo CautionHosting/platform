@@ -186,6 +186,8 @@ fn trust_policy_is_required_and_fake_proofs_are_rejected() {
     let policy = parse_policy(&policy_json).unwrap();
     let response = keymaker_models::Proofed {
         data: GenerateQuorumBundle::V1(v1::GenerateQuorumResponse {
+            threshold: 1,
+            max: 1,
             bundle_id: [1; 16],
             label: HashMap::new(),
             keyring: vec![],
@@ -246,4 +248,24 @@ fn rejects_shared_recipients_including_notations_and_expired_keys() {
             );
         }
     }
+}
+
+#[test]
+fn quorum_parameters_match_original_selection() {
+    // Both hosted and direct creation call this check after proof verification.
+    let mut bundle = v1::GenerateQuorumResponse {
+        bundle_id: [1; 16],
+        label: HashMap::new(),
+        keyring: vec![],
+        public_key: String::new(),
+        shardfile: String::new(),
+        threshold: 3,
+        max: 5,
+    };
+    assert!(check_quorum_parameters(&bundle, 3, 5).is_ok());
+    bundle.threshold = 1;
+    assert!(check_quorum_parameters(&bundle, 3, 5).is_err());
+    bundle.threshold = 3;
+    bundle.max = 4;
+    assert!(check_quorum_parameters(&bundle, 3, 5).is_err());
 }

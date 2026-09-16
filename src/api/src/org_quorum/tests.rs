@@ -148,13 +148,17 @@ fn rejects_duplicate_effective_certificates_and_bad_derived_counts() {
 }
 
 #[test]
-fn matches_available_response_fields_and_preserves_envelope() {
+fn matches_response_fields_and_preserves_envelope() {
     use keymaker_models::{Proofed, generate_quorum::GenerateQuorumBundle};
     let cert = certificate();
-    let req =
-        assemble_request(&request(), [1; 16], vec![Holder::Pgp(cert.clone())], vec![]).unwrap();
+    let mut selection = request();
+    selection.threshold = 3;
+    let holders = (0..5).map(|_| Holder::Pgp(certificate())).collect();
+    let req = assemble_request(&selection, [1; 16], holders, vec![]).unwrap();
     let expected = req.clone().to_latest();
     let mut bundle = v1::GenerateQuorumResponse {
+        threshold: expected.threshold,
+        max: expected.max,
         bundle_id: expected.bundle_id,
         label: expected.label,
         keyring: expected.keyring,
@@ -171,9 +175,11 @@ fn matches_available_response_fields_and_preserves_envelope() {
     let roundtrip: GenerateQuorumResponse = serde_json::from_value(stored["data"].clone()).unwrap();
     assert_eq!(roundtrip.necroproof, vec![1, 2, 3]);
     assert_eq!(roundtrip.data, response.data);
-    for field in ["id", "labels", "keyring"] {
+    for field in ["id", "labels", "keyring", "threshold", "max"] {
         bundle = response.data.clone().to_latest();
         match field {
+            "threshold" => bundle.threshold = 1,
+            "max" => bundle.max += 1,
             "id" => bundle.bundle_id = [2; 16],
             "labels" => {
                 bundle.label.insert("wrong".into(), "value".into());

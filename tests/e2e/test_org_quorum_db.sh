@@ -47,6 +47,7 @@ class Handler(BaseHTTPRequestHandler):
         status = int(mode) if mode in ("429", "503") else 200
         # Deliberately invalid proof: must never reach successful API storage.
         response = {"data": {"version": "V1", "bundle_id": request["bundle_id"],
+            "threshold": request["threshold"], "max": request["max"],
             "label": request["label"], "keyring": request["keyring"],
             "public_key": request["keyring"][0]["OpenPGP"]["cert"], "shardfile": "synthetic"}, "necroproof": [1, 2, 3]}
         body = json.dumps(response).encode()

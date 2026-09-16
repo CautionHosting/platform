@@ -4461,7 +4461,7 @@ dependencies = [
 [[package]]
 name = "keymaker-models"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=07041e40c0fa808015cbd1f706e3f82f682e7139#07041e40c0fa808015cbd1f706e3f82f682e7139"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=0e705350590e1a0923947a6c28d6ace2d045a129#0e705350590e1a0923947a6c28d6ace2d045a129"
 dependencies = [
  "serde",
  "serde_cbor",
@@ -4653,7 +4653,7 @@ dependencies = [
 [[package]]
 name = "locksmith"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=07041e40c0fa808015cbd1f706e3f82f682e7139#07041e40c0fa808015cbd1f706e3f82f682e7139"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=0e705350590e1a0923947a6c28d6ace2d045a129#0e705350590e1a0923947a6c28d6ace2d045a129"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
@@ -4663,7 +4663,6 @@ dependencies = [
  "card-backend",
  "card-backend-pcsc",
  "cfg-if",
- "coset 0.4.2",
  "daemonize",
  "dterror 0.1.0",
  "ed25519-dalek 2.2.0",

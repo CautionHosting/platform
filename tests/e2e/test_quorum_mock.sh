@@ -40,7 +40,7 @@ import json,pathlib,socket,sys
 w=pathlib.Path(sys.argv[1])
 (w/'policies/keymaker-pcr-policy.json').write_text(json.dumps({'sets':[{'pcrs':{str(i):'ab'*48 for i in range(3)}}]}))
 sockets=[]
-for name in ['gateway','keymaker','ssh']:
+for name in ['gateway','keymaker','proxy','ssh']:
     s=socket.socket(); s.bind(('127.0.0.1',0)); sockets.append(s)
     (w/(name+'.port')).write_text(str(s.getsockname()[1]))
 PY
@@ -57,7 +57,43 @@ docker exec -e MIGRATION_DB_HOST=127.0.0.1 -e MIGRATION_DB_NAME=caution_quorum_t
     || { cat "$WORK/migrations.log"; exit 1; }
 DB_PORT=$(docker port "$CONTAINER" 5432/tcp | sed 's/.*://')
 GATEWAY_URL="http://localhost:$(cat "$WORK/gateway.port")"
-KEYMAKER_URL="http://127.0.0.1:$(cat "$WORK/keymaker.port")"
+KEYMAKER_BACKEND_URL="http://127.0.0.1:$(cat "$WORK/keymaker.port")"
+KEYMAKER_URL="http://127.0.0.1:$(cat "$WORK/proxy.port")"
+# Test-only intermediary: change the request before the actual local Keymaker sees it.
+python3 - "$WORK" "$KEYMAKER_BACKEND_URL" <<'PYPROXY' &
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
+import json, sys
+work, backend = Path(sys.argv[1]), sys.argv[2]
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args): pass
+    def do_GET(self): self.forward(None)
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        if (work / 'downgrade-threshold').exists(): body['threshold'] = 1
+        self.forward(json.dumps(body).encode())
+    def forward(self, body):
+        request = Request(backend + self.path, data=body,
+                          headers={'Content-Type': 'application/json'})
+        try: response = urlopen(request, timeout=60)
+        except HTTPError as error: response = error
+        except URLError:
+            self.send_error(503, 'Keymaker is not ready')
+            return
+        with response:
+            payload = response.read()
+            if body is not None and (work / 'downgrade-threshold').exists():
+                (work / 'downgraded-bundle.json').write_bytes(payload)
+            self.send_response(response.status)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+ThreadingHTTPServer(('127.0.0.1', int((work / 'proxy.port').read_text())), Handler).serve_forever()
+PYPROXY
+PIDS="$PIDS $!"
 # Empty environment and disposable cwd avoid loading operator credentials/config.
 COMMON=(env -i "PATH=$PATH" "ENVIRONMENT=test" "AWS_EC2_METADATA_DISABLED=true" "AWS_REGION=quorum-test"
     "DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:$DB_PORT/caution_quorum_test"

@@ -238,6 +238,8 @@ async fn storage_roundtrip(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid
     let envelope = serde_json::to_value(keymaker_models::Proofed {
         data: keymaker_models::generate_quorum::GenerateQuorumBundle::V1(
             v1::GenerateQuorumResponse {
+                threshold: 1,
+                max: 1,
                 bundle_id: [7; 16],
                 label: HashMap::from([("test".into(), "storage".into())]),
                 keyring: vec![Key::OpenPGP {

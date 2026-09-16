@@ -251,6 +251,90 @@ pub fn run(
             encrypted.contains("BEGIN PGP MESSAGE") && !encrypted.contains("temporary-secret")
         );
     }
-    println!("PASS: signed API create/upload/download/delete, labels, direct CLI and downloaded-bundle encryption (mock proofs only)");
+    // Real local generation behind a request-altering intermediary, with synthetic proofs.
+    let mut holders = vec![cert.clone()];
+    for _ in 1..5 {
+        let (holder, _) = CertBuilder::new()
+            .add_userid("temporary downgrade-test holder")
+            .add_signing_subkey()
+            .add_authentication_subkey()
+            .add_storage_encryption_subkey()
+            .generate()?;
+        let mut bytes = Vec::new();
+        holder.armored().serialize(&mut bytes)?;
+        holders.push(String::from_utf8(bytes)?);
+    }
+    fs::write(work.join("five-holders.asc"), holders.concat())?;
+    let request = json!({"threshold":3, "pgp_certificates":holders, "participants":[]}).to_string();
+    let created: Value =
+        checked(session.signed(Method::POST, "/quorum-bundles/from-org-users", &request)?)?
+            .json()?;
+    assert_eq!(created["data"]["data"]["threshold"], 3);
+    assert_eq!(created["data"]["data"]["max"], 5);
+    checked(session.signed(
+        Method::DELETE,
+        &format!("/quorum-bundles/{}", created["id"].as_str().unwrap()),
+        "",
+    )?)?;
+
+    fs::write(work.join("downgrade-threshold"), "")?;
+    let rejected = session.signed(Method::POST, "/quorum-bundles/from-org-users", &request)?;
+    assert_eq!(rejected.status().as_u16(), 502);
+    assert!(rejected
+        .text()?
+        .contains("Keymaker response does not match the requested quorum"));
+    assert_eq!(
+        checked(session.get("/quorum-bundles")?)?.json::<Value>()?,
+        json!([])
+    );
+    let saved = fs::read(work.join(".caution/quorum-bundle.json"))?;
+    let rejected = Command::new(&cli)
+        .current_dir(work)
+        .stdin(Stdio::null())
+        .args([
+            "secret",
+            "init",
+            "five-holders.asc",
+            "--threshold",
+            "3",
+            "--no-upload",
+            "--keymaker-url",
+            &std::env::var("KEYMAKER_URL")?,
+            "--keymaker-pcr-policy",
+            "policies/keymaker-pcr-policy.json",
+        ])
+        .output()?;
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr)
+        .contains("Keymaker response does not match the requested quorum"));
+    assert_eq!(fs::read(work.join(".caution/quorum-bundle.json"))?, saved);
+    assert_eq!(
+        checked(session.get("/quorum-bundles")?)?.json::<Value>()?,
+        json!([])
+    );
+    let downgraded: Value =
+        serde_json::from_slice(&fs::read(work.join("downgraded-bundle.json"))?)?;
+    assert_eq!(downgraded["data"]["threshold"], 1);
+    assert_eq!(downgraded["data"]["max"], 5);
+    // The response itself has a valid synthetic proof; rejection was the request mismatch.
+    let accepted = Command::new(&cli)
+        .current_dir(work)
+        .stdin(Stdio::null())
+        .args([
+            "secret",
+            "encrypt",
+            "--bundle",
+            "downgraded-bundle.json",
+            "--env-file",
+            "secrets.env",
+        ])
+        .output()?;
+    anyhow::ensure!(
+        accepted.status.success(),
+        "downgraded proof: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    fs::remove_file(work.join("downgrade-threshold"))?;
+    println!("PASS: signed API create/upload/download/delete, direct CLI, request-threshold downgrade rejection and downloaded-bundle encryption (mock proofs only)");
     Ok(())
 }

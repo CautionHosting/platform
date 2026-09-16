@@ -479,7 +479,9 @@ fn check_response(
 ) -> Result<(), OrgQuorumError> {
     let request = request.clone().to_latest();
     let bundle = response.data.clone().to_latest();
-    if bundle.bundle_id != request.bundle_id
+    if bundle.threshold != request.threshold
+        || bundle.max != request.max
+        || bundle.bundle_id != request.bundle_id
         || bundle.keyring != request.keyring
         || bundle.label != request.label
     {
