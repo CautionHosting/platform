@@ -652,6 +652,12 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
 name = "half"
+version = "1.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b43ede17f21864e81be2fa654110bf1e793774238d86ef8555c37e6519c0403"
+
+[[package]]
+name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
@@ -1312,6 +1318,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "public-certificate-models"
+version = "0.1.0"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=93229565410d212a525e91fc2e3d7f3df249ef58#93229565410d212a525e91fc2e3d7f3df249ef58"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1549,12 +1563,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_cbor"
+version = "0.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bef2ebfde456fb76bbcf9f59315333decc4fda0b2b44b420243c11e0f5ec1f5"
+dependencies = [
+ "half 1.8.3",
+ "serde",
+]
+
+[[package]]
 name = "serde_cbor_2"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34aec2709de9078e077090abd848e967abab63c9fb3fdb5d4799ad359d8d482c"
 dependencies = [
- "half",
+ "half 2.7.1",
  "serde",
 ]
 
@@ -1676,11 +1700,15 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "hex",
+ "public-certificate-models",
  "reqwest",
  "sequoia-openpgp",
+ "serde_cbor",
  "serde_json",
  "sha2",
  "url",
+ "uuid",
  "webauthn-authenticator-rs",
  "webauthn-rs-proto",
 ]

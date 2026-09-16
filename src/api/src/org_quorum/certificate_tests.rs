@@ -213,3 +213,70 @@ fn rejects_missing_or_malformed_proofs() {
         );
     }
 }
+
+#[test]
+fn synthetic_proof_gate() {
+    const CHILD: &str = "CAUTION_CERTIFICATE_GATE_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let data = data(vec![]);
+        let mut response = PublicCertificateResponse {
+            necroproof: bundle_hash(&data).unwrap(),
+            data,
+        };
+        let mut policy = KeymakerPcrPolicy {
+            sets: vec![locksmith::bundle::KeymakerPcrSet {
+                pcrs: (0..=2).map(|i| (i, vec![0xab; 48])).collect(),
+                expires_at_unix_seconds: None,
+            }],
+        };
+        let enabled = cfg!(feature = "e2e-testing-unsafe")
+            && std::env::var("CAUTION_UNSAFE_KEY_SERVICE_E2E").as_deref() == Ok("1");
+        assert_eq!(verify_proof(&response, &policy).is_ok(), enabled);
+        response.necroproof[0] ^= 1;
+        assert!(verify_proof(&response, &policy).is_err());
+        response.necroproof[0] ^= 1;
+        response.data = super::tests::data(vec!["altered".into()]);
+        assert!(verify_proof(&response, &policy).is_err());
+        response.data = super::tests::data(vec![]);
+        for invalid in ["expiry", "missing", "extra", "wrong", "empty", "multiple"] {
+            let mut bad = policy.clone();
+            match invalid {
+                "expiry" => bad.sets[0].expires_at_unix_seconds = Some(u64::MAX / 10),
+                "missing" => {
+                    bad.sets[0].pcrs.remove(&2);
+                }
+                "extra" => {
+                    bad.sets[0].pcrs.insert(3, vec![0xab; 48]);
+                }
+                "wrong" => bad.sets[0].pcrs.get_mut(&0).unwrap()[0] ^= 1,
+                "multiple" => bad.sets.push(bad.sets[0].clone()),
+                _ => bad.sets.clear(),
+            }
+            assert!(verify_proof(&response, &bad).is_err(), "{invalid}");
+        }
+        policy.sets.clear();
+        assert!(verify_proof(&response, &policy).is_err());
+        return;
+    }
+    for flag in [None, Some(""), Some("0"), Some("true"), Some("1")] {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "--exact",
+                "org_quorum::certificates::tests::synthetic_proof_gate",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env_remove("CAUTION_UNSAFE_KEY_SERVICE_E2E");
+        if let Some(flag) = flag {
+            child.env("CAUTION_UNSAFE_KEY_SERVICE_E2E", flag);
+        }
+        let output = child.output().unwrap();
+        assert!(
+            output.status.success(),
+            "flag {flag:?}: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}

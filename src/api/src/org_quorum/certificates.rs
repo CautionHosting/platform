@@ -70,6 +70,23 @@ fn verify_proof(
     policy: &KeymakerPcrPolicy,
 ) -> Result<SystemTime, OrgQuorumError> {
     let hash = bundle_hash(&response.data)?;
+    #[cfg(feature = "e2e-testing-unsafe")]
+    if std::env::var("CAUTION_UNSAFE_KEY_SERVICE_E2E").as_deref() == Ok("1")
+        && policy.sets.len() == 1
+        && policy.sets[0].expires_at_unix_seconds.is_none()
+        && policy.sets[0].pcrs.len() == 3
+        && (0..=2).all(|index| {
+            policy.sets[0]
+                .pcrs
+                .get(&index)
+                .is_some_and(|pcr| pcr == &[0xab; 48])
+        })
+        && response.necroproof == hash
+    {
+        tracing::warn!("UNSAFE E2E: accepting synthetic certificate-service proof");
+        return Ok(SystemTime::now());
+    }
+
     for set in &policy.sets {
         let nitro =
             Nitro::new(response.necroproof.as_slice(), set.pcrs.clone()).with_context(Ctx::new(

@@ -306,3 +306,51 @@ fn saved_policy_is_preserved_and_replacement_is_rejected() {
     assert_eq!(fs::read_to_string(&path).unwrap(), "broken");
     fs::remove_dir_all(dir).unwrap();
 }
+
+/// Uses downloaded envelopes from the mock stack and a loopback app lookup.
+/// No enclave connection or real share release is attempted.
+#[cfg(feature = "e2e-testing-unsafe")]
+#[tokio::test]
+#[ignore = "run make test-quorum-mock"]
+async fn downloaded_caution_bundles_reject_recovery() {
+    let work = PathBuf::from(std::env::var("QUORUM_RECOVERY_TEST_DIR").unwrap());
+    let base_url = std::env::var("PUBLIC_CERTIFICATE_SERVICE_URL").unwrap();
+    let config_path = work.join("recovery-client.json");
+    fs::write(&config_path, serde_json::to_vec(&serde_json::json!({
+        "session_id":"mock-recovery", "expires_at":"2099-01-01T00:00:00Z", "server_url":base_url,
+    })).unwrap()).unwrap();
+    fs::write(
+        work.join(".caution/trusted_hashes.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "pcr0":"ab".repeat(48), "pcr1":"ab".repeat(48), "pcr2":"ab".repeat(48),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let client = ApiClient {
+        base_url,
+        client: reqwest::Client::new(),
+        config_path,
+        deployment_path: None,
+        verbose: false,
+        qr: false,
+        workdir: Some(work.clone()),
+    };
+    for name in ["webauthn.json", "mixed.json"] {
+        let error = crate::secrets::send_shard(
+            &client,
+            Some("quorum-test".into()),
+            Some(work.join(name)),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                crate::secrets::SendShardError::WebAuthnTransportUnavailable { .. }
+            ),
+            "{name}: {error}"
+        );
+    }
+}

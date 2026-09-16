@@ -1,5 +1,7 @@
 //! Opt-in PGP quorum integration; signatures use the registered software passkey.
 use super::*;
+#[path = "quorum_caution.rs"]
+mod caution;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use reqwest::{
     blocking::{Client, Response},
@@ -33,6 +35,9 @@ struct Session<'a> {
 }
 impl Session<'_> {
     fn signed(&mut self, method: Method, path: &str, body: &str) -> Result<Response> {
+        self.signed_at(method, path, body, "/api")
+    }
+    fn signed_at(&mut self, method: Method, path: &str, body: &str, prefix: &str) -> Result<Response> {
         let hash = Sha256::digest(body.as_bytes());
         let body_hash: String = hash.iter().map(|b| format!("{b:02x}")).collect();
         let challenge: Value = checked(
@@ -52,7 +57,7 @@ impl Session<'_> {
             .map_err(|e| anyhow::anyhow!("request signing failed: {e:?}"))?;
         Ok(self
             .http
-            .request(method, [self.base, "/api", path].concat())
+            .request(method, [self.base, prefix, path].concat())
             .header("X-Session-ID", self.id)
             .header(
                 "X-Fido2-Challenge-Id",
@@ -399,6 +404,7 @@ pub fn run(
         String::from_utf8_lossy(&accepted.stderr)
     );
     fs::remove_file(work.join("downgrade-threshold"))?;
+    caution::run(&mut session, work, &cert)?;
     println!("PASS: signed API create/upload/download/delete, direct CLI, request-threshold downgrade rejection and downloaded-bundle encryption (mock proofs only)");
     Ok(())
 }

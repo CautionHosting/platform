@@ -365,6 +365,24 @@ The shared `unsafe-e2e` feature is forwarded only through API/CLI
 recomputed from the canonical bundle hash. Never use these values or binaries
 in production. Ordinary build targets do not enable this feature.
 
+Certificate-service mock proofs use the same feature/flag/exact-policy gates in
+the API, but their bytes equal SHA-256 of the service's CBOR-serialized data, not
+a nonce. The test-only path uses the current time for certificate checks because
+the synthetic proof has no authenticated timestamp. CA signatures, certificate
+eligibility and organization/bundle/index checks are never bypassed. Production
+builds reject both synthetic formats, even when the runtime flag is set.
+
+The certificate HTTP mock generates temporary CA-signed PGP certificates; it does
+not run the real derivation service or test the custody root. The creator registers
+a second software passkey through the gateway; a second holder uses a disposable
+public-credential database fixture. WebAuthn-only and mixed creation must preserve
+certificate order, compact indices, bundle ID, threshold and both holders' bindings.
+The creator's two passkeys remain one share. Wrong CA, signature, context, count,
+order, eligibility or proof must result in no Keymaker call and no stored bundle.
+Downloaded bundles are consumed by CLI encryption. An isolated CLI test invokes
+`send_shard` with these exact files and mock application metadata, requiring the
+WebAuthn/mixed recovery-unavailable error before any enclave connection.
+
 The harness also places a loopback proxy before Keymaker, changing a requested
 3-of-5 into 1-of-5 before generation. The API rejects the resulting valid synthetic
 proof before storage, and the direct CLI rejects it without overwriting its saved
@@ -399,3 +417,12 @@ and `make test-quorum-db` passed, including missing certificate configuration
 preventing Keymaker calls and existing HTTP failure/timeout cases. Certificate
 checks use locally signed test certificates; no genuine Nitro certificate-service
 response or WebAuthn recovery was exercised.
+
+Mock custody validation (2026-09-16): all 15 API quorum tests passed in both
+default and `e2e-testing-unsafe` builds, including subprocess-isolated runtime-flag
+and policy/proof rejection cases. `make test-quorum-mock` passed the existing PGP
+flow, new WebAuthn/mixed creation, negative certificate responses and the CLI
+recovery-unavailable check. No local dependency overrides, deployment, genuine
+certificate-service derivation, real Nitro evidence or recryptor were used.
+Default-feature API/CLI build checks and full locked/offline metadata resolution
+for Platform and the standalone test helper also passed.
