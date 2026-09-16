@@ -200,19 +200,6 @@ fn matches_response_fields_and_preserves_envelope() {
 }
 
 #[tokio::test]
-async fn webauthn_derivation_remains_explicitly_blocked() {
-    let error = certificates::derive(
-        &reqwest::Client::new(),
-        Uuid::new_v4(),
-        std::num::NonZeroU8::new(1).unwrap(),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(error.message.contains("certificate-service proof verification"));
-}
-
-#[tokio::test]
 async fn busy_and_timeout_do_not_retry_generation() {
     use std::{
         io::{Read, Write},

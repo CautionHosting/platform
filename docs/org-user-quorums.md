@@ -1,20 +1,16 @@
 # Quorum creation
 
-`caution secret init` (`new` is a visible alias) creates v1 bundles. **WebAuthn/mixed
-creation is currently blocked** pending integration of certificate-service proof
-verification and Caution CA/context checks. Bootproof now supports the service's
-nonce-less historical proofs, but Platform has not wired that verifier into
-certificate derivation. Platform still returns HTTP 503 before derivation or
-Keymaker generation. The selection and assembly contracts below describe the
-intended integration.
+`caution secret init` (`new` is a visible alias) creates proofed V1 bundles.
+Hosted creation supports PGP, WebAuthn and mixed holders when the corresponding
+services and independent trust files are configured. **WebAuthn/mixed recovery
+is not yet supported** (Locksmith #12); the CLI warns before creation. Do not use
+these quorums for secrets you need to recover now.
 
-Hosted creation is the default: CLI → Platform → Keymaker. Platform snapshots
-all registered credentials of each WebAuthn holder in credential-ID order. After
-the verification blocker is resolved, derivation must provide one certificate
-per holder. Multiple passkeys belonging
-to one holder still represent one share. Mixed keyrings retain participant order,
-the derivation bundle ID and compact certificate indices; local PGP holders come
-first.
+Hosted creation is CLI → Platform → certificate service (Caution holders only)
+→ Keymaker. Platform snapshots registered credentials in credential-ID order and
+obtains one verified derived certificate per Caution holder. Multiple passkeys
+still represent one share. Mixed keyrings retain participant order, the service's
+bundle ID and compact certificate indices; local PGP holders come first.
 
 ```sh
 caution secret init --from-org-users USER1,USER2 --caution-backed --threshold 2 \
@@ -35,7 +31,7 @@ selection. `--caution-backed` explicitly selects WebAuthn for users without PGP
 overrides. The CLI presents custody and threshold for confirmation when interactive.
 Automatic custody selection rejects members with neither registered PGP keys nor
 passkeys with a "no usable custody" error before prompting. Register a PGP key
-before selecting such a member; WebAuthn creation remains blocked as described above.
+before selecting such a member.
 The threshold defaults to one; `--max`, if supplied, must equal the holder count.
 Labels use repeated `--label KEY=VALUE`. Omitted or null API labels are stored as
 `{}`; supplied objects are preserved. An explicit name and a `name` label must
@@ -68,10 +64,26 @@ files retain the proof envelope. Readers verify before using the public key.
 
 ## Trust and service configuration
 
-Platform requires `KEYMAKER_URL` and `KEYMAKER_PCR_POLICY_PATH`. Once the
-certificate-verification dependency is resolved, WebAuthn creation will also require `PUBLIC_CERTIFICATE_SERVICE_URL`,
+Platform requires `KEYMAKER_URL` and `KEYMAKER_PCR_POLICY_PATH`. WebAuthn/mixed creation additionally requires `PUBLIC_CERTIFICATE_SERVICE_URL`,
 `PUBLIC_CERTIFICATE_PCR_POLICY_PATH` and `CAUTION_CA_CERT_PATH`. PGP-only creation
-does not require certificate-service configuration. The certificate endpoint is
+does not require certificate-service configuration.
+Store `certificate-pcr-policy.json` and the public `caution-ca.asc` alongside the
+Keymaker policy in `~/.config/caution/policies/`; the existing `/run/config`
+read-only mount exposes them to the API. Set the three certificate-service
+variables in `env.example`. Obtain both the service PCRs and Caution CA independently;
+neither is learned from a service response. Missing configuration only fails
+Caution-backed creation; PGP creation and unrelated operations remain available.
+
+Platform verifies the AWS proof at its signed timestamp with an absent/null nonce,
+checks the generation-time PCR cutoff and binds `user_data` to SHA-256 of the
+service's exact CBOR-serialized response data. This serialization differs from
+Keymaker's canonical-map hash. It checks organization/count, then each certificate's
+CA-certified `Caution public certificate index=N` user ID and exactly one hashed
+organization/bundle notation. The index is in the user ID, not a separate notation.
+It also checks certificate eligibility and duplicate recipients before Keymaker.
+Historical proof verification establishes provenance, not fresh holder approval or
+live recryptor authorization. No certificate request is automatically retried.
+ The certificate endpoint is
 `/v1/public-certificates`; Keymaker uses `/generate_quorum`.
 
 Place the independently verified Keymaker policy at
@@ -371,7 +383,7 @@ CLI encryption with both direct and downloaded bundles. The existing
 These are synthetic-proof integration tests. Real Nitro validation and production
 policy provisioning remain release dependencies. V0 fallback/upgrade remains
 with Locksmith PR #15 and #11; WebAuthn recryption remains with #12. This work does
-not close those tickets or bypass the certificate-service verification blocker.
+not close those tickets or establish WebAuthn recovery.
 
 
 Validation on 2026-09-15 against the published pin: `make test-quorum-mock`
@@ -380,3 +392,10 @@ Cargo overrides. Normal-build CLI tests (131) and API quorum tests (11) passed.
 The synthetic-proof gate was also tested with and without `unsafe-e2e`, including
 absent, disabled and enabled runtime flags. These results do not establish Nitro
 attestation or WebAuthn recryption readiness.
+
+Certificate integration validation (2026-09-16): the API quorum suite passed
+14 tests (the database test runs separately), the CLI suite passed 135 tests,
+and `make test-quorum-db` passed, including missing certificate configuration
+preventing Keymaker calls and existing HTTP failure/timeout cases. Certificate
+checks use locally signed test certificates; no genuine Nitro certificate-service
+response or WebAuthn recovery was exercised.

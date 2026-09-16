@@ -1,18 +1,212 @@
-// SPDX-FileCopyrightText: 2025 Caution SEZC
+// SPDX-FileCopyrightText: 2026 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Caution-Commercial
 
 use super::*;
+use bootproof_sdk::format::nitro::Nitro;
+use public_certificate_models::{
+    PublicCertificateBundle, PublicCertificateRequest, PublicCertificateResponse,
+};
+use sequoia_openpgp::packet::signature::subpacket::SubpacketValue;
+use serde_cbor::Value;
+use sha2::{Digest, Sha256};
+use std::{num::NonZeroU8, time::SystemTime};
 
-/// Bootproof supports the service's nonce-less historical proofs, but certificate
-/// proof verification and Caution CA/context checks are not yet integrated here.
-/// Do not request derivation or submit unverified certificates to Keymaker.
-pub(super) async fn derive(
-    _client: &reqwest::Client,
-    _org_id: Uuid,
-    _count: std::num::NonZeroU8,
-) -> Result<([u8; 16], Vec<String>), OrgQuorumError> {
-    Err(OrgQuorumError::new(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "WebAuthn quorum creation is blocked: certificate-service proof verification and Caution CA/context checks are not integrated",
-    ))
+const ORG_NOTATION: &str = "organization-id@caution.co";
+const BUNDLE_NOTATION: &str = "bundle-id@caution.co";
+
+fn rejected(message: &'static str) -> OrgQuorumError {
+    OrgQuorumError::new(StatusCode::BAD_GATEWAY, message)
 }
+
+pub(super) async fn derive(
+    client: &reqwest::Client,
+    org_id: Uuid,
+    count: NonZeroU8,
+) -> Result<([u8; 16], Vec<String>), OrgQuorumError> {
+    let url = configured("PUBLIC_CERTIFICATE_SERVICE_URL")?;
+    let policy = load_policy(Path::new(&configured(
+        "PUBLIC_CERTIFICATE_PCR_POLICY_PATH",
+    )?))?;
+    let ca_bytes = std::fs::read(configured("CAUTION_CA_CERT_PATH")?).with_context(Ctx::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "unable to read Caution CA certificate",
+    ))?;
+    let ca = Cert::from_bytes(&ca_bytes).with_context(Ctx::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "invalid Caution CA certificate",
+    ))?;
+    if ca.is_tsk() {
+        return Err(OrgQuorumError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Caution CA configuration must contain only a public certificate",
+        ));
+    }
+    let request =
+        PublicCertificateRequest::V1(public_certificate_models::v1::PublicCertificateRequest {
+            organization_id: *org_id.as_bytes(),
+            certificate_count: count,
+        });
+    let response: PublicCertificateResponse = post(
+        client,
+        &[url.trim_end_matches('/'), "/v1/public-certificates"].concat(),
+        &request,
+    )
+    .await?;
+    let at = verify_proof(&response, &policy)?;
+    verify_certificates(response.data, *org_id.as_bytes(), count, &ca, at)
+}
+
+// The service hashes the serialized struct, NOT Keymaker's canonical Value map.
+fn bundle_hash(data: &PublicCertificateBundle) -> Result<Vec<u8>, OrgQuorumError> {
+    let bytes = serde_cbor::to_vec(data).with_context(Ctx::new(
+        StatusCode::BAD_GATEWAY,
+        "unable to hash certificate-service response",
+    ))?;
+    Ok(Sha256::digest(bytes).to_vec())
+}
+
+fn verify_proof(
+    response: &PublicCertificateResponse,
+    policy: &KeymakerPcrPolicy,
+) -> Result<SystemTime, OrgQuorumError> {
+    let hash = bundle_hash(&response.data)?;
+    for set in &policy.sets {
+        let nitro =
+            Nitro::new(response.necroproof.as_slice(), set.pcrs.clone()).with_context(Ctx::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "invalid certificate-service PCR policy",
+            ))?;
+        // Only Bootproof parses/verifies the untrusted COSE evidence. No data is
+        // consumed until AWS chain, signature, nonce absence and PCR checks pass.
+        if let Ok(document) = nitro.verify_at_attestation_time(None) {
+            let at = verify_payload(document, &hash)?;
+            if valid_at(set, at) {
+                return Ok(at);
+            }
+        }
+    }
+    Err(rejected("certificate-service proof verification failed"))
+}
+
+fn valid_at(set: &locksmith::bundle::KeymakerPcrSet, at: SystemTime) -> bool {
+    match set.expires_at_unix_seconds {
+        None => true,
+        Some(seconds) => SystemTime::UNIX_EPOCH
+            .checked_add(Duration::from_secs(seconds))
+            .is_some_and(|expiry| at < expiry),
+    }
+}
+
+// Input must be the authenticated payload returned by Bootproof.
+fn verify_payload(document: Value, expected_hash: &[u8]) -> Result<SystemTime, OrgQuorumError> {
+    let Value::Map(map) = document else {
+        return Err(rejected("invalid certificate proof payload"));
+    };
+    if !matches!(map.get(&Value::Text("user_data".into())), Some(Value::Bytes(bytes)) if bytes == expected_hash)
+    {
+        return Err(rejected(
+            "certificate proof does not bind the returned bundle",
+        ));
+    }
+    let Some(Value::Integer(timestamp)) = map.get(&Value::Text("timestamp".into())) else {
+        return Err(rejected("missing certificate proof timestamp"));
+    };
+    u64::try_from(*timestamp)
+        .ok()
+        .and_then(|millis| SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(millis)))
+        .ok_or_else(|| rejected("invalid certificate proof timestamp"))
+}
+
+fn verify_certificates(
+    data: PublicCertificateBundle,
+    organization_id: [u8; 16],
+    count: NonZeroU8,
+    ca: &Cert,
+    at: SystemTime,
+) -> Result<([u8; 16], Vec<String>), OrgQuorumError> {
+    let bundle = data.to_latest();
+    if bundle.organization_id != organization_id
+        || bundle.certificates.len() != usize::from(count.get())
+    {
+        return Err(rejected(
+            "certificate response does not match the requested organization and count",
+        ));
+    }
+    let mut policy = StandardPolicy::new();
+    policy.good_critical_notations(&[ORG_NOTATION, BUNDLE_NOTATION]);
+    if !ca
+        .keys()
+        .with_policy(&policy, at)
+        .supported()
+        .alive()
+        .revoked(false)
+        .for_certification()
+        .any(|key| key.fingerprint() == ca.fingerprint())
+    {
+        return Err(rejected(
+            "Caution CA is not valid at certificate generation time",
+        ));
+    }
+    let org = hex::encode(organization_id);
+    let id = hex::encode(bundle.bundle_id);
+    for (index, armored) in bundle.certificates.iter().enumerate() {
+        let cert = eligible_certificate(armored).with_context(Ctx::new(
+            StatusCode::BAD_GATEWAY,
+            "ineligible derived holder certificate",
+        ))?;
+        let valid = cert.with_policy(&policy, at).with_context(Ctx::new(
+            StatusCode::BAD_GATEWAY,
+            "derived certificate was not valid at generation time",
+        ))?;
+        let expected_uid = format!("Caution public certificate index={index}");
+        let uid = valid
+            .userids()
+            .revoked(false)
+            .find(|uid| uid.userid().value() == expected_uid.as_bytes())
+            .ok_or_else(|| rejected("derived certificate index does not match its position"))?;
+        let certifications: Vec<_> = uid
+            .valid_certifications_by_key(&policy, at, ca.primary_key().key())
+            .collect();
+        if certifications.is_empty() {
+            return Err(rejected(
+                "derived certificate lacks a valid Caution CA certification",
+            ));
+        }
+        for signature in certifications {
+            // Reject context in the unhashed area, even when the hashed value is
+            // correct: there must be exactly one authenticated value per name.
+            if signature.unhashed_area().iter().any(|packet| matches!(packet.value(),
+                SubpacketValue::NotationData(n) if [ORG_NOTATION, BUNDLE_NOTATION].contains(&n.name()))) {
+                return Err(rejected("certificate context must be hashed"));
+            }
+            for (name, expected) in [
+                (ORG_NOTATION, org.as_bytes()),
+                (BUNDLE_NOTATION, id.as_bytes()),
+            ] {
+                let values: Vec<_> = signature
+                    .notation_data()
+                    .filter(|n| n.name() == name)
+                    .collect();
+                if values.len() != 1 || values[0].value() != expected {
+                    return Err(rejected(
+                        "Caution CA certification has missing, duplicate or mismatched context",
+                    ));
+                }
+            }
+        }
+    }
+    let keys: Vec<_> = bundle
+        .certificates
+        .iter()
+        .map(|cert| Key::OpenPGP { cert: cert.clone() })
+        .collect();
+    validate_keyring(&keys).with_context(Ctx::new(
+        StatusCode::BAD_GATEWAY,
+        "duplicate derived recipients",
+    ))?;
+    Ok((bundle.bundle_id, bundle.certificates))
+}
+
+#[cfg(test)]
+#[path = "certificate_tests.rs"]
+mod tests;

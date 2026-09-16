@@ -209,13 +209,15 @@ async fn credentials(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid) {
         .await
         .unwrap_err();
     assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(error.message.contains(
-        "certificate-service proof verification and Caution CA/context checks are not integrated"
-    ));
+    assert!(
+        error
+            .message
+            .contains("required key-service endpoint or trust policy is not configured")
+    );
     assert_eq!(
         request_log().len(),
         before,
-        "blocked derivation reached Keymaker"
+        "unconfigured derivation reached Keymaker"
     );
     sqlx::query(
         "UPDATE fido2_credentials SET public_key = $1 WHERE user_id = $2 AND credential_id = $3",

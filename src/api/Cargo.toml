@@ -40,6 +40,9 @@ url = { workspace = true }
 # Quorum integration: reuse upstream formats and proof verification.
 locksmith.workspace = true
 keymaker-models.workspace = true
+public-certificate-models.workspace = true
+bootproof-sdk = { git = "https://codeberg.org/caution/bootproof.git", rev = "821b5c63e80f082f6d67ba3695c11416933489ec" }
+serde_cbor = "0.11"
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
 
 # Enclave dependencies

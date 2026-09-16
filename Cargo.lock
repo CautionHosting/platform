@@ -182,6 +182,7 @@ dependencies = [
  "aws-sdk-s3",
  "axum",
  "base64 0.22.1",
+ "bootproof-sdk",
  "bytes",
  "caution-config",
  "chrono",
@@ -195,11 +196,13 @@ dependencies = [
  "indexmap 2.14.0",
  "keymaker-models",
  "locksmith",
+ "public-certificate-models",
  "rand 0.8.7",
  "regex",
  "reqwest 0.11.27",
  "sequoia-openpgp",
  "serde",
+ "serde_cbor",
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
@@ -5884,6 +5887,14 @@ name = "psl-types"
 version = "2.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
+
+[[package]]
+name = "public-certificate-models"
+version = "0.1.0"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=93229565410d212a525e91fc2e3d7f3df249ef58#93229565410d212a525e91fc2e3d7f3df249ef58"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "publicsuffix"

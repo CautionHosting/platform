@@ -543,6 +543,9 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
                 .unwrap_or_default()
         );
     }
+    if participants.iter().any(|p| p.key_source == "caution_backed_pgp") {
+        eprintln!("Warning: WebAuthn/mixed bundle creation is supported, but recovery is not yet available (Locksmith #12). Do not use this quorum for secrets you need to recover now.");
+    }
     if interactive
         && !prompt::confirm("Create this quorum? [y/N] ")
             .with_context(Ctx::new("unable to confirm quorum"))?
