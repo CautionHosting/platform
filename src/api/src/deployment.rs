@@ -878,6 +878,22 @@ mod tests {
             norm(&main_tf).contains(r#"value = "https://${aws_eip.enclave.public_ip}""#),
             "url output falls back to the EIP public IP when no domain is configured"
         );
+        assert!(
+            norm(&main_tf).contains("type = string"),
+            "variable type constraints must render as the bare `string` keyword"
+        );
+        assert!(
+            norm(&main_tf).contains("type = list(number)"),
+            "the ports variable must render the bare list(number) type constraint"
+        );
+        assert!(
+            norm(&main_tf).contains("type = number"),
+            "the http_port variable must render the bare number type constraint"
+        );
+        assert!(
+            !main_tf.contains(r#"type = "string""#) && !main_tf.contains(r#"type = "number""#),
+            "a quoted type constraint is a value, not a type constraint, and OpenTofu rejects it"
+        );
     }
 
     #[tokio::test]
@@ -1079,6 +1095,19 @@ mod tests {
         assert!(norm.contains("var.provider_region != \"\" ? var.provider_region : \"eu-west-1\""));
         assert!(norm.contains("var.provider_access_key != \"\" ? var.provider_access_key : null"));
         assert!(norm.contains("var.provider_secret_key != \"\" ? var.provider_secret_key : null"));
+    }
+
+    #[test]
+    fn test_destroy_tf_body_type_constraints_are_bare_not_quoted() {
+        let content = hcl::to_string(&build_destroy_tf_body(true, "us-west-2")).unwrap();
+        assert!(
+            content.contains("type = string"),
+            "variable type constraints must render as the bare `string` keyword"
+        );
+        assert!(
+            !content.contains(r#"type = "string""#),
+            "a quoted type constraint is a value, not a type constraint, and OpenTofu rejects it"
+        );
     }
 
     #[test]
@@ -2757,29 +2786,9 @@ async fn generate_nitro_deployment_main_tf(
     // provider section
     if request.credentials.is_some() {
         body = body
-            .add_block(
-                hcl::Block::builder("variable")
-                    .add_label("provider_access_key")
-                    .add_attribute(("type", "string"))
-                    .add_attribute(("sensitive", true))
-                    .add_attribute(("default", ""))
-                    .build(),
-            )
-            .add_block(
-                hcl::Block::builder("variable")
-                    .add_label("provider_secret_key")
-                    .add_attribute(("type", "string"))
-                    .add_attribute(("sensitive", true))
-                    .add_attribute(("default", ""))
-                    .build(),
-            )
-            .add_block(
-                hcl::Block::builder("variable")
-                    .add_label("provider_region")
-                    .add_attribute(("type", "string"))
-                    .add_attribute(("default", ""))
-                    .build(),
-            );
+            .add_block(provider_credential_variable("provider_access_key", true))
+            .add_block(provider_credential_variable("provider_secret_key", true))
+            .add_block(provider_credential_variable("provider_region", false));
 
         let provider_block = hcl::Block::builder("provider")
             .add_label("aws")
@@ -3368,7 +3377,10 @@ async fn generate_nitro_deployment_main_tf(
     body = body.add_block(
         hcl::Block::builder("variable")
             .add_label("http_port")
-            .add_attribute(("type", "number"))
+            .add_attribute(hcl::Attribute::new(
+                "type",
+                hcl::Expression::from(hcl::expr::Variable::unchecked("number")),
+            ))
             .add_attribute(("default", 0u64))
             .build(),
     );
@@ -3886,11 +3898,18 @@ fn cidr_ingress_block(port: u64, description: &str) -> hcl::Block {
         .build()
 }
 
-/// A `variable` block of type `string` (optionally sensitive) with an empty default.
+/// A `variable` block whose constraint is the bare type keyword `type = <constraint>`
+/// (optionally sensitive) with an empty default.
+///
+/// The constraint is rendered as an identifier expression: a quoted `"string"` would
+/// evaluate to a plain value rather than a type constraint, which OpenTofu rejects.
 fn provider_credential_variable(name: &str, sensitive: bool) -> hcl::Block {
     let mut builder = hcl::Block::builder("variable")
         .add_label(name)
-        .add_attribute(("type", "string"));
+        .add_attribute(hcl::Attribute::new(
+            "type",
+            hcl::Expression::from(hcl::expr::Variable::unchecked("string")),
+        ));
     if sensitive {
         builder = builder.add_attribute(("sensitive", true));
     }
@@ -4003,7 +4022,10 @@ async fn generate_managed_onprem_deployment_tf(
     body = body.add_block(
         hcl::Block::builder("variable")
             .add_label("asg_name")
-            .add_attribute(("type", "string"))
+            .add_attribute(hcl::Attribute::new(
+                "type",
+                hcl::Expression::from(hcl::expr::Variable::unchecked("string")),
+            ))
             .add_attribute(("default", onprem.asg_name.clone()))
             .build(),
     );
@@ -4066,7 +4088,10 @@ async fn generate_managed_onprem_deployment_tf(
     body = body.add_block(
         hcl::Block::builder("variable")
             .add_label("http_port")
-            .add_attribute(("type", "number"))
+            .add_attribute(hcl::Attribute::new(
+                "type",
+                hcl::Expression::from(hcl::expr::Variable::unchecked("number")),
+            ))
             .add_attribute(("default", 0u64))
             .build(),
     );
