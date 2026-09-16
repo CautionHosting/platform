@@ -50,6 +50,9 @@ Automatic custody selection rejects members with neither registered PGP keys nor
 passkeys with a "no usable custody" error before prompting. Register a PGP key
 before selecting such a member.
 The threshold defaults to one; `--max`, if supplied, must equal the holder count.
+API and CLI creation support 1–254 holders in total, including local certificates
+and organization selections. Larger selections fail before key-service requests;
+bundle uploads enforce the same holder limit.
 Labels use repeated `--label KEY=VALUE`. Omitted or null API labels are stored as
 `{}`; supplied objects are preserved. An explicit name and a `name` label must
 match; conflicting values are rejected before generation in both API and CLI.
@@ -134,6 +137,18 @@ when no saved policy exists. Before generation, a differing or malformed saved
 policy causes an error: explicitly repair or replace that file to change trust.
 Equivalent parsed policies preserve the existing file, including its formatting.
 Every PCR value must decode to exactly 48 bytes.
+
+When stdout is redirected, `secret init`/`new` emits the proofed bundle JSON even
+inside a project, in addition to saving `.caution/quorum-bundle.json`. Outside a
+project it always emits the JSON. Status messages go to stderr.
+
+Uploads of existing proofed V1 bundles validate holder certificate eligibility at
+the authenticated generation timestamp; new bundles require eligibility today.
+For example, a January bundle can still be restored after one holder's key expires
+in June, provided that key was eligible in January. This preserves the original
+proof-bound certificates; it does not renew expired keys or guarantee recovery.
+The explicitly gated synthetic test proofs have no authenticated timestamp and
+retain current-time holder validation.
 
 For existing proofed V1 bundles, `secret encrypt` and `secret send-shard` require
 an independently provisioned policy too. These commands have no

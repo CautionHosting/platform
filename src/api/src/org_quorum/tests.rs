@@ -47,12 +47,53 @@ fn missing_and_malformed_credentials_fail() {
 
 #[test]
 fn rejects_invalid_pgp_and_participant_limits() {
-    assert!(eligible_certificate("not a certificate").is_err());
+    assert!(eligible_certificate("not a certificate", None).is_err());
     let mut r = request();
     r.participants.clear();
     assert!(validate_request(&r).is_err());
-    r.pgp_certificates = vec![String::new(); 256];
-    assert!(validate_request(&r).is_err());
+    for count in [254, 255, 256] {
+        r.pgp_certificates = vec![String::new(); count];
+        assert_eq!(validate_request(&r).is_ok(), count == 254);
+        // The limit applies to the combined local and organization selection.
+        r.pgp_certificates.pop();
+        r.participants = request().participants;
+        assert_eq!(validate_request(&r).is_ok(), count == 254);
+        r.participants.clear();
+    }
+}
+
+#[test]
+fn holder_eligibility_uses_generation_time_for_historical_bundles() {
+    use sequoia_openpgp::{cert::CertBuilder, serialize::SerializeInto, types::KeyFlags};
+
+    let created = SystemTime::now() - Duration::from_secs(86400);
+    let generated = created + Duration::from_secs(60);
+    let expired = created + Duration::from_secs(7200);
+    let (cert, _) = CertBuilder::new()
+        .set_creation_time(created)
+        .add_signing_subkey()
+        .add_authentication_subkey()
+        .add_subkey(
+            KeyFlags::empty().set_storage_encryption(),
+            Some(Duration::from_secs(3600)),
+            None,
+        )
+        .generate()
+        .unwrap();
+    let cert = String::from_utf8(cert.armored().to_vec().unwrap()).unwrap();
+    for key in [
+        Key::OpenPGP { cert: cert.clone() },
+        Key::WebAuthn {
+            cert,
+            credential: vec!["test".into()],
+        },
+    ] {
+        let keys = [key];
+        assert!(validate_keyring(&keys, Some(generated)).is_ok());
+        assert!(validate_keyring(&keys, Some(expired)).is_err());
+        assert!(validate_keyring(&keys, Some(created - Duration::from_secs(1))).is_err());
+        assert!(validate_keyring(&keys, None).is_err());
+    }
 }
 
 fn certificate() -> String {
@@ -118,13 +159,16 @@ fn assembled_combinations_preserve_id_and_compact_derived_order() {
 fn rejects_duplicate_effective_certificates_and_bad_derived_counts() {
     let cert = certificate();
     assert!(
-        validate_keyring(&[
-            Key::OpenPGP { cert: cert.clone() },
-            Key::WebAuthn {
-                cert: cert.clone(),
-                credential: vec!["a".into()]
-            }
-        ])
+        validate_keyring(
+            &[
+                Key::OpenPGP { cert: cert.clone() },
+                Key::WebAuthn {
+                    cert: cert.clone(),
+                    credential: vec!["a".into()]
+                }
+            ],
+            None
+        )
         .is_err()
     );
     assert!(
@@ -265,25 +309,30 @@ fn rejects_shared_recipients_including_notations_and_expired_keys() {
         for expired in [false, true] {
             let certs = recipients::shared_recipient(notation, expired);
             for cert in &certs {
-                assert!(eligible_certificate(cert).is_ok());
+                assert!(eligible_certificate(cert, None).is_ok());
             }
             let keys: Vec<_> = certs
                 .into_iter()
                 .map(|cert| Key::OpenPGP { cert })
                 .collect();
-            let error = validate_keyring(&keys).unwrap_err();
-            assert!(error.message.contains("share an encryption key"));
+            for at in [None, Some(SystemTime::now())] {
+                let error = validate_keyring(&keys, at).unwrap_err();
+                assert!(error.message.contains("share an encryption key"));
+            }
         }
     }
     assert!(
-        validate_keyring(&[
-            Key::OpenPGP {
-                cert: certificate()
-            },
-            Key::OpenPGP {
-                cert: certificate()
-            }
-        ])
+        validate_keyring(
+            &[
+                Key::OpenPGP {
+                    cert: certificate()
+                },
+                Key::OpenPGP {
+                    cert: certificate()
+                }
+            ],
+            None
+        )
         .is_ok()
     );
 }

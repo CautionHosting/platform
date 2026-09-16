@@ -738,7 +738,8 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
         fs::write(".caution/quorum-bundle.json", &json)
             .with_context(Ctx::new("unable to save proofed bundle"))?;
         output::status("Saved .caution/quorum-bundle.json and .caution/keymaker-pcr-policy.json");
-    } else {
+    }
+    if !in_repo || !output::is_tty_stdout() {
         output::data(&json).with_context(Ctx::new("unable to output bundle"))?;
     }
     if !uploaded && !options.no_upload {
