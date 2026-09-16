@@ -224,6 +224,70 @@ pub fn run(
     let direct: Value =
         serde_json::from_slice(&fs::read(work.join(".caution/quorum-bundle.json"))?)?;
     assert_eq!(direct["data"]["keyring"][0]["OpenPGP"]["cert"], cert);
+    // The CLI must reject conflicting local inputs before contacting even an unavailable Keymaker.
+    let saved_policy_path = work.join(".caution/keymaker-pcr-policy.json");
+    let saved_policy = fs::read(&saved_policy_path)?;
+    let saved_bundle = fs::read(work.join(".caution/quorum-bundle.json"))?;
+    let mut different: Value = serde_json::from_slice(&saved_policy)?;
+    different["sets"][0]["pcrs"]["0"] = json!("cd".repeat(48));
+    for contents in [serde_json::to_vec(&different)?, b"malformed".to_vec()] {
+        fs::write(&saved_policy_path, &contents)?;
+        let rejected = Command::new(&cli)
+            .current_dir(work)
+            .stdin(Stdio::null())
+            .args([
+                "secret",
+                "init",
+                "holder.asc",
+                "--threshold",
+                "1",
+                "--no-upload",
+                "--keymaker-url",
+                "http://127.0.0.1:9",
+                "--keymaker-pcr-policy",
+                "policies/keymaker-pcr-policy.json",
+            ])
+            .output()?;
+        assert!(!rejected.status.success());
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains("saved repository PCR policy")
+                || String::from_utf8_lossy(&rejected.stderr).contains("saved repository policy")
+        );
+        assert_eq!(fs::read(&saved_policy_path)?, contents);
+        assert_eq!(
+            fs::read(work.join(".caution/quorum-bundle.json"))?,
+            saved_bundle
+        );
+    }
+    fs::write(&saved_policy_path, saved_policy)?;
+    let rejected = Command::new(&cli)
+        .current_dir(work)
+        .stdin(Stdio::null())
+        .args([
+            "secret",
+            "init",
+            "holder.asc",
+            "--threshold",
+            "1",
+            "--no-upload",
+            "--keymaker-url",
+            "http://127.0.0.1:9",
+            "--keymaker-pcr-policy",
+            "policies/keymaker-pcr-policy.json",
+            "--name",
+            "prod",
+            "--label",
+            "name=staging",
+        ])
+        .output()?;
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("--name and label 'name' must match")
+    );
+    assert_eq!(
+        fs::read(work.join(".caution/quorum-bundle.json"))?,
+        saved_bundle
+    );
     fs::write(
         work.join("secrets.env"),
         "QUORUM_TEST_SECRET=temporary-secret\n",

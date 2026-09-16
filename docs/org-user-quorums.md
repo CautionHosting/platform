@@ -38,7 +38,8 @@ passkeys with a "no usable custody" error before prompting. Register a PGP key
 before selecting such a member; WebAuthn creation remains blocked as described above.
 The threshold defaults to one; `--max`, if supplied, must equal the holder count.
 Labels use repeated `--label KEY=VALUE`. Omitted or null API labels are stored as
-`{}`; supplied objects are preserved.
+`{}`; supplied objects are preserved. An explicit name and a `name` label must
+match; conflicting values are rejected before generation in both API and CLI.
 
 API and direct CLI creation reject duplicate primary identities and shared storage
 encryption subkeys, including expired recipients that Keyfork can still select.
@@ -61,7 +62,8 @@ the API must also trust that Keymaker's PCRs to accept an upload. Hosted
 creation, upload, updates and deletion require fresh FIDO2 signed requests at the
 gateway, including in E2E builds. Dashboard deletion signs the canonical
 `/quorum-bundles/{id}` path with an empty body; cancelling the passkey prompt
-sends no deletion. CLI and dashboard renaming/label edits use the existing signing flow. Downloads and local
+sends no deletion. CLI and dashboard renaming/label edits use the existing signing flow. Dashboard
+metadata edits display passkey cancellation errors without sending an update. Downloads and local
 files retain the proof envelope. Readers verify before using the public key.
 
 ## Trust and service configuration
@@ -98,7 +100,11 @@ Obtain measurements independently from the operator's reviewed build. Missing,
 incomplete and debug policies fail closed. Never populate policy from the service
 response. For `secret init`, policy precedence is `--keymaker-pcr-policy`, then
 `KEYMAKER_PCR_POLICY_PATH`, then `.caution/keymaker-pcr-policy.json`. In a project,
-initialization saves the accepted policy beside `.caution/quorum-bundle.json`.
+initialization saves the accepted policy beside `.caution/quorum-bundle.json` only
+when no saved policy exists. Before generation, a differing or malformed saved
+policy causes an error: explicitly repair or replace that file to change trust.
+Equivalent parsed policies preserve the existing file, including its formatting.
+Every PCR value must decode to exactly 48 bytes.
 
 For existing proofed V1 bundles, `secret encrypt` and `secret send-shard` require
 an independently provisioned policy too. These commands have no
@@ -135,7 +141,7 @@ The shared models and loader are pinned to the Locksmith revision recorded in
 `Cargo.toml` and `Cargo.lock`. All Bootproof SDK consumers use the historical
 verification revision `821b5c63e80f082f6d67ba3695c11416933489ec`, including the existing
 ES384 encoding fix. No old-remote patch or local path dependency is required.
-The default Locksmith daemon revision is also `0e705350590e1a0923947a6c28d6ace2d045a129`,
+The default Locksmith daemon revision is also `93229565410d212a525e91fc2e3d7f3df249ef58`,
 matching the API/CLI loader. `LOCKSMITH_COMMIT` still overrides this default.
 Existing deployed images require a rebuild/redeployment to use it. Legacy
 bundle fallback remains unimplemented.
@@ -154,6 +160,18 @@ hash. PCR-policy expiry is a cutoff on generation time, not the current time.
 This follows [the timestamp policy in #7](https://codeberg.org/caution/locksmith/issues/7#issuecomment-19223141).
 Historical provenance does not establish fresh authorization or replay protection
 for live shard transport.
+
+The updated Locksmith receiver takes its threshold from the verified bundle,
+requires distinct authenticated holders and share coordinates, and rejects
+conflicting client thresholds and malformed contributions without counting them.
+Before serving a seed it checks the recovered OpenPGP primary key fingerprint
+against the bundle public key. Incorrect recovery fails closed; this does not
+prevent denial of recovery by an authorized holder. Unsupported WebAuthn/mixed
+keyrings fail before the receiver starts listening. Keymaker rejects invalid
+requests before consuming its reboot permit; valid requests retain the existing
+one-shot lifecycle. These changes require a rebuilt runtime and Keymaker plus
+independently verified measurements; local tests do not establish Nitro readiness.
+
 
 - [Locksmith #10](https://codeberg.org/caution/locksmith/issues/10): structured v1
   generation/validation. The proof-bound response requires `threshold` and `max`,

@@ -182,6 +182,11 @@ fn validate_request(request: &GenerateOrgQuorumBundleRequest) -> Result<(), OrgQ
     if !request.labels.is_null() && !request.labels.is_object() {
         return Err(OrgQuorumError::invalid("labels must be an object"));
     }
+    if let (Some(name), Some(label)) = (&request.name, request.labels.get("name")) {
+        if label.as_str() != Some(name.as_str()) {
+            return Err(OrgQuorumError::invalid("name and label 'name' must match"));
+        }
+    }
     Ok(())
 }
 

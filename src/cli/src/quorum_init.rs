@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::IsTerminal,
+    io::{IsTerminal, Write},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -402,6 +402,52 @@ async fn checked_response(
         .with_context(Ctx::new("invalid quorum response"))
 }
 
+fn check_name_label(name: Option<&str>, labels: &HashMap<String, String>) -> Result<(), InitError> {
+    if let (Some(name), Some(label)) = (name, labels.get("name")) {
+        if name != label {
+            return Err(InitError::invalid("--name and label 'name' must match"));
+        }
+    }
+    Ok(())
+}
+
+fn check_saved_policy(path: &Path, selected: &KeymakerPcrPolicy) -> Result<(), InitError> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        result => result.with_context(Ctx::new("unable to read saved repository PCR policy"))?,
+    };
+    let saved = parse_policy(&text).with_context(Ctx::new(
+        "saved repository PCR policy is invalid; explicitly repair it before generating a quorum",
+    ))?;
+    if saved != *selected {
+        return Err(InitError::invalid(
+            "selected PCR policy differs from the saved repository policy; explicitly replace the saved policy before generating a quorum",
+        ));
+    }
+    Ok(())
+}
+
+fn save_policy_if_absent(
+    path: &Path,
+    text: &str,
+    policy: &KeymakerPcrPolicy,
+) -> Result<(), InitError> {
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut file) => file
+            .write_all(text.as_bytes())
+            .with_context(Ctx::new("unable to save accepted PCR policy")),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            check_saved_policy(path, policy)
+        }
+        Err(error) => Err(error).with_context(Ctx::new("unable to create accepted PCR policy")),
+    }
+}
+
 pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), InitError> {
     let environment = std::env::var("KEYMAKER_URL").ok();
     let endpoint = endpoint(options.keymaker_url.as_deref(), environment.as_deref())?;
@@ -466,10 +512,18 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
             .ok_or_else(|| InitError::invalid("labels require KEY=VALUE"))?;
         labels.insert(key.to_owned(), value.to_owned());
     }
+    check_name_label(options.name.as_deref(), &labels)?;
     let policy_file = policy_path(options.keymaker_pcr_policy.as_deref());
     let policy_text = fs::read_to_string(&policy_file)
         .with_context(Ctx::new("unable to read Keymaker PCR policy"))?;
     let policy = parse_policy(&policy_text)?;
+    let in_repo = Path::new("caution.hcl").exists()
+        || Path::new("Procfile").exists()
+        || Path::new(".caution/deployment.json").exists();
+    let saved_policy_path = Path::new(".caution/keymaker-pcr-policy.json");
+    if in_repo {
+        check_saved_policy(saved_policy_path, &policy)?;
+    }
     eprintln!(
         "Initialize quorum: {threshold} of {count}; {}",
         endpoint.as_deref().unwrap_or("Platform-hosted Keymaker")
@@ -617,15 +671,11 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
     }
     let json = serde_json::to_string_pretty(&response)
         .with_context(Ctx::new("unable to encode proofed bundle"))?;
-    let in_repo = Path::new("caution.hcl").exists()
-        || Path::new("Procfile").exists()
-        || Path::new(".caution/deployment.json").exists();
     if in_repo {
         fs::create_dir_all(".caution")
             .with_context(Ctx::new("unable to create .caution directory"))?;
         // Save the accepted policy before the bundle; readers never trust policy from a response.
-        fs::write(".caution/keymaker-pcr-policy.json", policy_text)
-            .with_context(Ctx::new("unable to save accepted PCR policy"))?;
+        save_policy_if_absent(saved_policy_path, &policy_text, &policy)?;
         fs::write(".caution/quorum-bundle.json", &json)
             .with_context(Ctx::new("unable to save proofed bundle"))?;
         output::status("Saved .caution/quorum-bundle.json and .caution/keymaker-pcr-policy.json");

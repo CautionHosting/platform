@@ -269,3 +269,40 @@ fn quorum_parameters_match_original_selection() {
     bundle.max = 4;
     assert!(check_quorum_parameters(&bundle, 3, 5).is_err());
 }
+
+#[test]
+fn name_label_must_match_explicit_name() {
+    let labels = HashMap::from([("name".into(), "prod".into())]);
+    assert!(check_name_label(Some("staging"), &labels).is_err());
+    assert!(check_name_label(Some("prod"), &labels).is_ok());
+    assert!(check_name_label(None, &labels).is_ok());
+    assert!(check_name_label(Some("prod"), &HashMap::new()).is_ok());
+}
+
+#[test]
+fn saved_policy_is_preserved_and_replacement_is_rejected() {
+    let dir = std::env::temp_dir().join(format!("quorum-policy-{}", Uuid::new_v4()));
+    fs::create_dir(&dir).unwrap();
+    let path = dir.join("policy.json");
+    let value = serde_json::json!({"sets":[{"pcrs":{
+        "0":"ab".repeat(48), "1":"cd".repeat(48), "2":"ef".repeat(48)
+    }}]});
+    let text = value.to_string();
+    let policy = parse_policy(&text).unwrap();
+    assert!(check_saved_policy(&path, &policy).is_ok());
+    save_policy_if_absent(&path, &text, &policy).unwrap();
+    let formatted = serde_json::to_string_pretty(&value).unwrap();
+    fs::write(&path, &formatted).unwrap();
+    check_saved_policy(&path, &policy).unwrap();
+    save_policy_if_absent(&path, &text, &policy).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), formatted);
+    let other = parse_policy(&text.replace("abab", "acac")).unwrap();
+    assert!(check_saved_policy(&path, &other).is_err());
+    assert!(save_policy_if_absent(&path, "unused", &other).is_err());
+    assert_eq!(fs::read_to_string(&path).unwrap(), formatted);
+    fs::write(&path, "broken").unwrap();
+    assert!(check_saved_policy(&path, &policy).is_err());
+    assert!(save_policy_if_absent(&path, &text, &policy).is_err());
+    assert_eq!(fs::read_to_string(&path).unwrap(), "broken");
+    fs::remove_dir_all(dir).unwrap();
+}

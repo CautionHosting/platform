@@ -332,3 +332,21 @@ fn policy_files_fail_closed_when_missing_or_invalid() {
         assert_eq!(load_policy(&path).is_ok(), byte == "ab");
     }
 }
+
+#[test]
+fn conflicting_name_labels_are_rejected() {
+    let mut r = request();
+    r.name = Some("prod".into());
+    for label in [
+        serde_json::json!("staging"),
+        serde_json::json!(3),
+        serde_json::Value::Null,
+    ] {
+        r.labels = serde_json::json!({"name": label});
+        assert!(validate_request(&r).is_err());
+    }
+    r.labels = serde_json::json!({"name": "prod"});
+    assert!(validate_request(&r).is_ok());
+    r.name = None;
+    assert!(validate_request(&r).is_ok());
+}

@@ -4461,7 +4461,7 @@ dependencies = [
 [[package]]
 name = "keymaker-models"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=0e705350590e1a0923947a6c28d6ace2d045a129#0e705350590e1a0923947a6c28d6ace2d045a129"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=93229565410d212a525e91fc2e3d7f3df249ef58#93229565410d212a525e91fc2e3d7f3df249ef58"
 dependencies = [
  "serde",
  "serde_cbor",
@@ -4653,7 +4653,7 @@ dependencies = [
 [[package]]
 name = "locksmith"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=0e705350590e1a0923947a6c28d6ace2d045a129#0e705350590e1a0923947a6c28d6ace2d045a129"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=93229565410d212a525e91fc2e3d7f3df249ef58#93229565410d212a525e91fc2e3d7f3df249ef58"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
