@@ -48,6 +48,12 @@ pub enum ValidationError {
         invalid_char: char,
         span: Span,
     },
+    /// First or last character is not alphanumeric. Distinct from
+    /// `AppNameInvalidChars`: '_' and '-' are legal mid-name but not at the edge.
+    AppNameInvalidBoundary {
+        invalid_char: char,
+        span: Span,
+    },
     AppNameConsecutiveHyphens {
         span: Span,
     },
@@ -119,6 +125,13 @@ impl fmt::Display for ValidationError {
             }
             Self::AppNameInvalidChars { invalid_char, .. } => {
                 write!(f, "app name contains invalid character '{}'", invalid_char)
+            }
+            Self::AppNameInvalidBoundary { invalid_char, .. } => {
+                write!(
+                    f,
+                    "app name must start and end with a letter or digit (found '{}')",
+                    invalid_char
+                )
             }
             Self::AppNameConsecutiveHyphens { .. } => {
                 write!(f, "app name cannot contain consecutive hyphens")
@@ -214,6 +227,7 @@ impl ValidationError {
         match self {
             Self::AppNameLength { span, .. } => Some(*span),
             Self::AppNameInvalidChars { span, .. } => Some(*span),
+            Self::AppNameInvalidBoundary { span, .. } => Some(*span),
             Self::AppNameConsecutiveHyphens { span } => Some(*span),
             _ => None,
         }
@@ -223,6 +237,7 @@ impl ValidationError {
         match self {
             Self::AppNameLength { .. } => "app_name_length",
             Self::AppNameInvalidChars { .. } => "app_name_invalid_chars",
+            Self::AppNameInvalidBoundary { .. } => "app_name_invalid_boundary",
             Self::AppNameConsecutiveHyphens { .. } => "app_name_consecutive_hyphens",
 
             Self::OrgNameLength { .. } => "org_name_length",
@@ -255,6 +270,9 @@ impl ValidationError {
             Self::AppNameLength { .. } => Some("Choose a name with 3-63 characters"),
             Self::AppNameInvalidChars { .. } => {
                 Some("Use only letters, numbers, hyphens, and underscores. Must start and end with alphanumeric.")
+            }
+            Self::AppNameInvalidBoundary { .. } => {
+                Some("Start and end with a letter or digit: my_app (not _my_app)")
             }
             Self::AppNameConsecutiveHyphens { .. } => {
                 Some("Use single hyphens to separate words: my-app (not my--app)")

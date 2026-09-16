@@ -3,12 +3,9 @@
 
 use crate::errors::{Span, ValidationError};
 use crate::types::UserRole;
+use caution_config::app_name;
 use regex::Regex;
 use std::sync::OnceLock;
-
-const APP_NAME_MIN_LEN: usize = 3;
-const APP_NAME_MAX_LEN: usize = 63;
-const APP_NAME_PATTERN: &str = r"^[a-zA-Z0-9]([a-zA-Z0-9_-]*[a-zA-Z0-9])?$";
 
 const ORG_NAME_MIN_LEN: usize = 2;
 const ORG_NAME_MAX_LEN: usize = 100;
@@ -40,16 +37,11 @@ const ALLOWED_SSH_KEY_TYPES: &[&str] = &[
 const SSH_KEY_MIN_LEN: usize = 50;
 const SSH_KEY_MAX_LEN: usize = 2000;
 
-static APP_NAME_REGEX: OnceLock<Regex> = OnceLock::new();
 static ORG_NAME_REGEX: OnceLock<Regex> = OnceLock::new();
 static ORG_SLUG_REGEX: OnceLock<Regex> = OnceLock::new();
 static USERNAME_REGEX: OnceLock<Regex> = OnceLock::new();
 static BRANCH_NAME_REGEX: OnceLock<Regex> = OnceLock::new();
 static EMAIL_REGEX: OnceLock<Regex> = OnceLock::new();
-
-fn get_app_name_regex() -> &'static Regex {
-    APP_NAME_REGEX.get_or_init(|| Regex::new(APP_NAME_PATTERN).unwrap())
-}
 
 fn get_org_name_regex() -> &'static Regex {
     ORG_NAME_REGEX.get_or_init(|| Regex::new(ORG_NAME_PATTERN).unwrap())
@@ -71,38 +63,26 @@ fn get_email_regex() -> &'static Regex {
     EMAIL_REGEX.get_or_init(|| Regex::new(EMAIL_PATTERN).unwrap())
 }
 
+/// Thin wrapper over the shared rule in `caution-config`, which the CLI applies
+/// too, so a name the CLI accepts is never rejected here.
 pub fn validate_app_name(name: &str) -> Result<(), ValidationError> {
-    let len = name.len();
-
-    if len < APP_NAME_MIN_LEN || len > APP_NAME_MAX_LEN {
-        return Err(ValidationError::AppNameLength {
-            min: APP_NAME_MIN_LEN,
-            max: APP_NAME_MAX_LEN,
-            actual: len,
-            span: Span::new(0, len),
-        });
-    }
-
-    if !get_app_name_regex().is_match(name) {
-        let last = len - 1;
-        let invalid_char = name
-            .char_indices()
-            .find(|&(i, c)| {
-                if i == 0 || i == last {
-                    !c.is_ascii_alphanumeric()
-                } else {
-                    !c.is_ascii_alphanumeric() && c != '-' && c != '_'
-                }
-            })
-            .map(|(_, c)| c)
-            .unwrap_or('?');
-        return Err(ValidationError::AppNameInvalidChars {
-            invalid_char,
-            span: Span::new(0, len),
-        });
-    }
-
-    Ok(())
+    let span = Span::new(0, name.len());
+    app_name::validate(name).map_err(|e| match e {
+        app_name::AppNameError::Length { actual } => ValidationError::AppNameLength {
+            min: app_name::MIN_LEN,
+            max: app_name::MAX_LEN,
+            actual,
+            span,
+        },
+        app_name::AppNameError::Boundary { ch } => ValidationError::AppNameInvalidBoundary {
+            invalid_char: ch,
+            span,
+        },
+        app_name::AppNameError::InvalidChar { ch } => ValidationError::AppNameInvalidChars {
+            invalid_char: ch,
+            span,
+        },
+    })
 }
 
 pub fn validate_branch_name(name: &str) -> Result<(), ValidationError> {
@@ -334,10 +314,18 @@ mod tests {
         }
 
         match validate_app_name("-app").unwrap_err() {
-            ValidationError::AppNameInvalidChars { invalid_char, .. } => {
+            ValidationError::AppNameInvalidBoundary { invalid_char, .. } => {
                 assert_eq!(invalid_char, '-');
             }
-            e => panic!("Expected AppNameInvalidChars, got {:?}", e),
+            e => panic!("Expected AppNameInvalidBoundary, got {:?}", e),
+        }
+
+        // '_' is legal mid-name, so a leading one is a boundary violation.
+        match validate_app_name("_app").unwrap_err() {
+            ValidationError::AppNameInvalidBoundary { invalid_char, .. } => {
+                assert_eq!(invalid_char, '_');
+            }
+            e => panic!("Expected AppNameInvalidBoundary, got {:?}", e),
         }
 
         match validate_app_name("app.name").unwrap_err() {

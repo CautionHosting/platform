@@ -2,6 +2,7 @@ use hcl::expr::Expression;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+pub mod app_name;
 pub mod pricing;
 
 #[derive(Deserialize)]
