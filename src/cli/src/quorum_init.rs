@@ -60,15 +60,17 @@ pub(crate) struct Options {
     pub name: Option<String>,
     #[arg(long = "label", value_name = "KEY=VALUE")]
     pub labels: Vec<String>,
-    #[arg(long, value_delimiter = ',')]
-    pub from_org_users: Vec<Uuid>,
+    /// Organization holders, selected by UUID or username.
+    #[arg(long, value_delimiter = ',', value_name = "USER")]
+    pub from_org_users: Vec<UserSelector>,
     /// Use WebAuthn for listed users without a --pgp-key override.
     #[arg(long, requires = "from_org_users")]
     pub caution_backed: bool,
+    /// Select a registered PGP key for a holder UUID or username.
     #[arg(
         long = "pgp-key",
         requires = "from_org_users",
-        value_name = "USER_ID=KEY_ID"
+        value_name = "USER=KEY_UUID"
     )]
     pub pgp_keys: Vec<PgpSelection>,
     /// Call this Keymaker directly (PGP-only); overrides KEYMAKER_URL.
@@ -79,22 +81,65 @@ pub(crate) struct Options {
     pub keymaker_pcr_policy: Option<PathBuf>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum UserSelector {
+    Id(Uuid),
+    Username(String),
+}
+
+impl std::str::FromStr for UserSelector {
+    type Err = InitError;
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(InitError::invalid("holder requires a UUID or username"));
+        }
+        Ok(match Uuid::parse_str(text) {
+            Ok(id) => Self::Id(id),
+            Err(_) => Self::Username(text.to_lowercase()),
+        })
+    }
+}
+
+impl UserSelector {
+    fn resolve<'a>(&self, members: &'a [Member]) -> Result<&'a Member, InitError> {
+        let mut matches = members.iter().filter(|member| match self {
+            Self::Id(id) => member.user_id == *id,
+            Self::Username(name) => member.username.to_lowercase() == *name,
+        });
+        let label = match self {
+            Self::Id(id) => id.to_string(),
+            Self::Username(name) => name.clone(),
+        };
+        match (matches.next(), matches.next()) {
+            (Some(member), None) => Ok(member),
+            (None, _) => Err(InitError::invalid(format!(
+                "unknown active organization holder '{label}'"
+            ))),
+            _ => Err(InitError::invalid(format!(
+                "ambiguous organization holder '{label}'; use a UUID"
+            ))),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct PgpSelection {
-    user: Uuid,
+    user: UserSelector,
     key: Uuid,
 }
 impl std::str::FromStr for PgpSelection {
     type Err = InitError;
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let (user, key) = text
-            .split_once('=')
-            .ok_or_else(|| InitError::invalid("--pgp-key requires USER_ID=KEY_ID"))?;
+        let (user, key) = text.split_once('=').ok_or_else(|| {
+            InitError::invalid("--pgp-key requires USER=KEY_UUID (holder UUID or username)")
+        })?;
         Ok(Self {
-            user: user
+            user: user.parse()?,
+            key: key
+                .trim()
                 .parse()
-                .with_context(Ctx::new("invalid PGP holder user UUID"))?,
-            key: key.parse().with_context(Ctx::new("invalid PGP key UUID"))?,
+                .with_context(Ctx::new("invalid PGP key UUID"))?,
         })
     }
 }
@@ -284,30 +329,40 @@ fn select_participants(
     options: &Options,
     members: &[Member],
     interactive: bool,
+    direct: bool,
 ) -> Result<(Vec<Participant>, Vec<String>), InitError> {
+    let selected = options
+        .from_org_users
+        .iter()
+        .map(|user| user.resolve(members))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut seen = HashSet::new();
+    for member in &selected {
+        if !seen.insert(member.user_id) {
+            return Err(InitError::invalid("duplicate organization holder"));
+        }
+    }
     let mut overrides = HashMap::new();
     for selection in &options.pgp_keys {
-        if !options.from_org_users.contains(&selection.user)
-            || overrides.insert(selection.user, selection.key).is_some()
-        {
+        let user_id = selection.user.resolve(members)?.user_id;
+        if !seen.contains(&user_id) || overrides.insert(user_id, selection.key).is_some() {
             return Err(InitError::invalid(
                 "PGP overrides must name distinct selected users",
             ));
         }
     }
+    if direct
+        && options.caution_backed
+        && selected
+            .iter()
+            .any(|member| !overrides.contains_key(&member.user_id))
+    {
+        return Err(InitError::invalid(DIRECT_WEBAUTHN_ERROR));
+    }
     let mut participants = Vec::new();
     let mut certs = Vec::new();
-    let mut seen = HashSet::new();
-    for user_id in &options.from_org_users {
-        if !seen.insert(user_id) {
-            return Err(InitError::invalid("duplicate organization holder"));
-        }
-        let member = members
-            .iter()
-            .find(|m| m.user_id == *user_id)
-            .ok_or_else(|| {
-                InitError::invalid("selected user is not an active organization member")
-            })?;
+    for member in selected {
+        let user_id = &member.user_id;
         let mut key_id = overrides.get(user_id).copied();
         let mut webauthn = options.caution_backed && key_id.is_none();
         if key_id.is_none() && !webauthn {
@@ -344,7 +399,7 @@ fn select_participants(
                 }
             } else {
                 return Err(InitError::invalid(
-                    "ambiguous custody: specify --pgp-key USER_ID=KEY_ID or explicitly select --caution-backed",
+                    "ambiguous custody: specify --pgp-key USER=KEY_UUID or explicitly select --caution-backed",
                 ));
             }
         }
@@ -451,16 +506,6 @@ fn save_policy_if_absent(
 pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), InitError> {
     let environment = std::env::var("KEYMAKER_URL").ok();
     let endpoint = endpoint(options.keymaker_url.as_deref(), environment.as_deref())?;
-    // Reject the explicit mixed/WebAuthn override before requesting credentials or generation.
-    if endpoint.is_some()
-        && options.caution_backed
-        && options
-            .from_org_users
-            .iter()
-            .any(|id| !options.pgp_keys.iter().any(|p| p.user == *id))
-    {
-        return Err(InitError::invalid(DIRECT_WEBAUTHN_ERROR));
-    }
     if endpoint.is_none() && options.no_upload {
         return Err(InitError::invalid(
             "--no-upload is only supported with a direct PGP-only Keymaker",
@@ -489,7 +534,8 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
             .await
             .with_context(Ctx::new("unable to discover organization holders"))?
     };
-    let (participants, registered) = select_participants(&options, &members, interactive)?;
+    let (participants, registered) =
+        select_participants(&options, &members, interactive, endpoint.is_some())?;
     validate_direct(endpoint.is_some(), &participants)?;
     let local = if let Some(path) = &options.keyring {
         public_certificates(
@@ -534,8 +580,13 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
         eprintln!("  Local PGP {}", cert.fingerprint());
     }
     for p in &participants {
+        let member = members
+            .iter()
+            .find(|m| m.user_id == p.user_id)
+            .expect("resolved participant");
         eprintln!(
-            "  {}: {}{}",
+            "  {} ({}): {}{}",
+            member.username,
             p.user_id,
             p.key_source,
             p.pgp_key_id

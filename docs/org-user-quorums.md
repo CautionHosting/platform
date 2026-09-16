@@ -24,7 +24,24 @@ caution secret init public-keyring.asc --threshold 2 \
   --keymaker-pcr-policy operator-policy.json
 ```
 
-Replace USER/KEY placeholders with UUIDs. Repeated `--pgp-key` selects registered
+Holder selectors in `--from-org-users` and the left side of `--pgp-key` accept
+UUIDs or usernames; KEY placeholders remain key UUIDs. For example:
+
+```sh
+caution secret init --from-org-users alice,bob --threshold 2 \
+  --pgp-key alice=KEY_UUID --keymaker-pcr-policy keymaker-policy.json
+```
+
+Selectors are trimmed; usernames match in full, case-insensitively. UUID-shaped
+selectors are always treated as UUIDs, never as usernames. Unknown or ambiguous
+names fail; use a UUID to disambiguate. Duplicates are rejected after resolution,
+including a username and UUID for the same holder or repeated PGP overrides.
+The CLI resolves against the active organization participant list and sends UUIDs
+to the API, preserving selection order. Confirmation shows username and UUID.
+Username/UUID resolution precedes custody prompts and generation; direct-mode
+organization selections require authenticated participant discovery too.
+
+Repeated `--pgp-key` selects registered
 PGP certificates. Without an override, a sole registered PGP certificate is selected;
 other cases require an interactive custody choice or explicit noninteractive
 selection. `--caution-backed` explicitly selects WebAuthn for users without PGP

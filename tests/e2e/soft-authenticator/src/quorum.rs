@@ -229,6 +229,82 @@ pub fn run(
     let direct: Value =
         serde_json::from_slice(&fs::read(work.join(".caution/quorum-bundle.json"))?)?;
     assert_eq!(direct["data"]["keyring"][0]["OpenPGP"]["cert"], cert);
+    // Resolve a real organization username and PGP override through participant discovery.
+    let registered: Value = checked(session.signed_at(
+        Method::POST,
+        "/pgp-keys",
+        &json!({"public_key": cert, "name": "username selection test"}).to_string(),
+        "",
+    )?)?
+    .json()?;
+    let key_id = registered["id"].as_str().context("registered key ID")?;
+    let members: Value = checked(session.get("/quorum-bundles/participants")?)?.json()?;
+    let member = members
+        .as_array()
+        .context("participant list")?
+        .iter()
+        .find(|m| {
+            m["pgp_keys"]
+                .as_array()
+                .is_some_and(|keys| keys.iter().any(|k| k["id"] == key_id))
+        })
+        .context("registered participant")?;
+    let username = member["username"].as_str().context("username")?;
+    let home = work.join("username-cli-home");
+    // dirs::config_dir uses Library/Application Support on macOS and XDG on Linux.
+    for directory in [
+        home.join("Library/Application Support/caution-cli"),
+        home.join(".config/caution-cli"),
+    ] {
+        fs::create_dir_all(&directory)?;
+        fs::write(
+            directory.join("config.json"),
+            json!({
+                "session_id": id, "expires_at": "2099-01-01T00:00:00Z", "server_url": base
+            })
+            .to_string(),
+        )?;
+    }
+    let result = Command::new(&cli)
+        .current_dir(work)
+        .stdin(Stdio::null())
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .args([
+            "--url",
+            base,
+            "secret",
+            "init",
+            "--from-org-users",
+            username,
+            "--pgp-key",
+            &format!("{username}={key_id}"),
+            "--threshold",
+            "1",
+            "--no-upload",
+            "--keymaker-url",
+            &std::env::var("KEYMAKER_URL")?,
+            "--keymaker-pcr-policy",
+            "policies/keymaker-pcr-policy.json",
+        ])
+        .output()?;
+    anyhow::ensure!(
+        result.status.success(),
+        "username CLI: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8_lossy(&result.stderr).contains(&format!(
+        "{} ({})",
+        username,
+        member["user_id"].as_str().unwrap()
+    )));
+    let named: Value =
+        serde_json::from_slice(&fs::read(work.join(".caution/quorum-bundle.json"))?)?;
+    assert_eq!(
+        named["data"]["keyring"][0]["OpenPGP"]["cert"],
+        member["pgp_keys"][0]["public_key"]
+    );
+    checked(session.signed_at(Method::DELETE, &format!("/pgp-keys/{key_id}"), "", "")?)?;
     // The CLI must reject conflicting local inputs before contacting even an unavailable Keymaker.
     let saved_policy_path = work.join(".caution/keymaker-pcr-policy.json");
     let saved_policy = fs::read(&saved_policy_path)?;
