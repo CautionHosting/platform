@@ -209,7 +209,9 @@ async fn credentials(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid) {
         .await
         .unwrap_err();
     assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(error.message.contains("shared verifier"));
+    assert!(error.message.contains(
+        "certificate-service proof verification and Caution CA/context checks are not integrated"
+    ));
     assert_eq!(
         request_log().len(),
         before,

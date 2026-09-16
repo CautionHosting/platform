@@ -33,6 +33,9 @@ PGP certificates. Without an override, a sole registered PGP certificate is sele
 other cases require an interactive custody choice or explicit noninteractive
 selection. `--caution-backed` explicitly selects WebAuthn for users without PGP
 overrides. The CLI presents custody and threshold for confirmation when interactive.
+Automatic custody selection rejects members with neither registered PGP keys nor
+passkeys with a "no usable custody" error before prompting. Register a PGP key
+before selecting such a member; WebAuthn creation remains blocked as described above.
 The threshold defaults to one; `--max`, if supplied, must equal the holder count.
 Labels use repeated `--label KEY=VALUE`. Omitted or null API labels are stored as
 `{}`; supplied objects are preserved.
@@ -43,9 +46,12 @@ Eligibility still requires live signing, authentication and storage-encryption
 keys. Both checks recognize the critical `organization-id@caution.co` and
 `bundle-id@caution.co` notations.
 
-`--keymaker-url` takes precedence over `KEYMAKER_URL`. Either selects direct mode,
-which accepts local and registered PGP certificates only. WebAuthn/mixed direct
-requests fail before generation: Platform resolves credential bindings internally.
+`--keymaker-url` takes precedence over `KEYMAKER_URL`. The CLI treats an empty or
+whitespace-only `KEYMAKER_URL` as unset, preserving hosted mode when no flag is
+provided; an explicitly empty `--keymaker-url` remains invalid. Either nonempty
+override selects direct mode, which accepts local and registered PGP certificates
+only. WebAuthn/mixed direct requests fail before generation: Platform resolves
+credential bindings internally.
 Discovery exposes organization members, public PGP certificates and credential
 counts, never credential bindings. Completed v1 bundles contain public bindings.
 
@@ -90,12 +96,31 @@ PCR policy JSON follows Locksmith's shared contract:
 
 Obtain measurements independently from the operator's reviewed build. Missing,
 incomplete and debug policies fail closed. Never populate policy from the service
-response. CLI policy precedence is `--keymaker-pcr-policy`, then
+response. For `secret init`, policy precedence is `--keymaker-pcr-policy`, then
 `KEYMAKER_PCR_POLICY_PATH`, then `.caution/keymaker-pcr-policy.json`. In a project,
 initialization saves the accepted policy beside `.caution/quorum-bundle.json`.
 
+For existing proofed V1 bundles, `secret encrypt` and `secret send-shard` require
+an independently provisioned policy too. These commands have no
+`--keymaker-pcr-policy` flag: set `KEYMAKER_PCR_POLICY_PATH` to the policy's host
+path, or copy it to `.caution/keymaker-pcr-policy.json` in the working directory.
+The environment variable takes precedence. For example:
+
+```sh
+export KEYMAKER_PCR_POLICY_PATH=/absolute/path/to/verified-keymaker-policy.json
+caution secret encrypt TEST_SECRET --env-file .env.quorum-test
+caution secret send-shard --keyring /absolute/path/to/alice.private.asc
+```
+
+Legacy/unproofed bundles remain unsupported; supplying a policy does not upgrade
+them. Preserve the original bundle and its recovery material. Do not regenerate
+an existing quorum to resolve a loading error: a new quorum has a different key
+and cannot decrypt secrets encrypted for the original quorum.
+
 The gateway rejects paths changed by backend URL normalization before checking
 signatures, including literal and percent-encoded dot-segment aliases.
+`API_SERVICE_URL` must use a root URL such as `http://api:8080`; trailing slashes
+are normalized away. A path prefix such as `/v1` is rejected at gateway startup.
 
 Service requests have a 60-second timeout and no automatic generation retries.
 The CLI allows 125 seconds for the hosted generation HTTP request, including its
@@ -276,6 +301,11 @@ test passed with and without `--features e2e-testing-unsafe`, rejecting unsigned
 canonical writes with 403 and literal/encoded dot-segment aliases with 400 across
 generation, upload and PATCH. `cargo check -p cli -p gateway --locked` and
 `git diff --check` passed. These are local tests, not full-stack or Nitro validation.
+
+Validation on 2026-09-16: all 10 focused quorum CLI tests and 15 gateway
+configuration/authorization/proxy tests passed. `make test-quorum-db` passed
+through the certificate-verification blocker, storage round trips and hosted-PGP
+failure cases, including the 60-second timeout. `git diff --check` passed.
 
 ## Successful mock integration
 

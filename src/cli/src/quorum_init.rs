@@ -132,6 +132,7 @@ fn endpoint(
     explicit: Option<&str>,
     environment: Option<&str>,
 ) -> Result<Option<String>, InitError> {
+    let environment = environment.filter(|value| !value.trim().is_empty());
     explicit.or(environment).map(|value| {
         let url = reqwest::Url::parse(value).with_context(Ctx::new("invalid Keymaker URL"))?;
         if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
@@ -297,6 +298,11 @@ fn select_participants(
         let mut key_id = overrides.get(user_id).copied();
         let mut webauthn = options.caution_backed && key_id.is_none();
         if key_id.is_none() && !webauthn {
+            if member.pgp_keys.is_empty() && member.webauthn_credentials == 0 {
+                return Err(InitError::invalid(
+                    "no usable custody: selected member has no registered PGP keys or passkeys",
+                ));
+            }
             if member.pgp_keys.len() == 1 {
                 key_id = Some(member.pgp_keys[0].id);
             } else if interactive {

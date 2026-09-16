@@ -30,6 +30,16 @@ fn init_and_visible_new_alias_match() {
 #[test]
 fn endpoint_defaults_and_override_precedence() {
     assert_eq!(endpoint(None, None).unwrap(), None);
+    for blank in ["", " \t\n"] {
+        assert_eq!(endpoint(None, Some(blank)).unwrap(), None);
+        assert_eq!(
+            endpoint(Some("https://explicit/"), Some(blank))
+                .unwrap()
+                .as_deref(),
+            Some("https://explicit")
+        );
+        assert!(endpoint(Some(blank), Some("https://environment")).is_err());
+    }
     assert_eq!(
         endpoint(Some("https://explicit/"), Some("https://environment"))
             .unwrap()
@@ -126,6 +136,22 @@ fn selection_requires_explicit_webauthn_and_pgp_ownership() {
     assert_eq!(certs, vec!["test certificate"]);
     opts.pgp_keys[0].key = Uuid::new_v4();
     assert!(select_participants(&opts, &[member], false).is_err());
+}
+
+#[test]
+fn selection_without_custody_fails_before_prompting() {
+    let user = Uuid::new_v4();
+    let member = Member {
+        user_id: user,
+        username: "holder".into(),
+        pgp_keys: vec![],
+        webauthn_credentials: 0,
+    };
+    for interactive in [false, true] {
+        let error =
+            select_participants(&options(vec![user]), &[member.clone()], interactive).unwrap_err();
+        assert!(error.to_string().contains("no usable custody"));
+    }
 }
 
 #[test]

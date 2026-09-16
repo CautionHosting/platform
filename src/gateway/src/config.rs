@@ -5,6 +5,33 @@ use anyhow::{Context, Result};
 use std::env;
 use url::Url;
 
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+enum ApiServiceUrlError {
+    #[error("Invalid API_SERVICE_URL [{location:?}]")]
+    Parse {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+    #[error("API_SERVICE_URL must be a root URL without a path prefix [{location:?}]")]
+    PathPrefix {
+        #[location]
+        location: dterror::Location,
+    },
+}
+
+fn validate_api_service_url(value: &str) -> Result<(), ApiServiceUrlError> {
+    use ApiServiceUrlErrorCtx as Ctx;
+    let url = dterror::ResultExt::with_context(Url::parse(value), Ctx::parse())?;
+    if !matches!(url.path(), "" | "/") {
+        return Err(ApiServiceUrlError::PathPrefix {
+            location: std::panic::Location::caller(),
+        });
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub database_url: String,
@@ -38,7 +65,7 @@ impl Config {
             .to_string();
 
         // Validate API service URL
-        Url::parse(&api_service_url).context("Invalid API_SERVICE_URL")?;
+        validate_api_service_url(&api_service_url)?;
 
         let metering_service_url =
             env::var("METERING_SERVICE_URL").unwrap_or_else(|_| "http://metering:8083".to_string());
@@ -101,5 +128,30 @@ impl Config {
             data_dir,
             csrf_secret,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_service_url_requires_root_path() {
+        for value in ["http://api:8080", "http://api:8080/", "http://api:8080///"] {
+            assert!(validate_api_service_url(value.trim_end_matches('/')).is_ok());
+        }
+        for value in ["http://api:8080/v1", "http://api:8080/v1/"] {
+            let error = validate_api_service_url(value.trim_end_matches('/')).unwrap_err();
+            assert!(matches!(error, ApiServiceUrlError::PathPrefix { .. }));
+            assert!(
+                error
+                    .to_string()
+                    .contains("API_SERVICE_URL must be a root URL")
+            );
+        }
+        assert!(matches!(
+            validate_api_service_url("not a URL"),
+            Err(ApiServiceUrlError::Parse { .. })
+        ));
     }
 }
