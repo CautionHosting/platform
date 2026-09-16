@@ -13,6 +13,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use caution_config::app_name::{self, AppNameError};
 use dterror::{BoxError, CtxError, Location, ResultExt};
 
 use crate::output;
@@ -72,6 +73,15 @@ pub(crate) fn aws_credentials_error(profile: &str, action: &str) -> String {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum InitError {
+    #[error("invalid app name [{location:?}]")]
+    InvalidAppName {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
     #[error("failed to check git repository [{location:?}]")]
     CheckGitRepo {
         #[location]
@@ -383,14 +393,6 @@ pub(crate) enum InitByocError {
 pub(crate) enum InitByocInteractiveError {
     #[error("docker is required but not found. Please install Docker first. [{location:?}]")]
     DockerNotFound {
-        #[location]
-        location: Location,
-    },
-
-    #[error(
-        "app name must contain only alphanumeric characters, hyphens, and underscores [{location:?}]"
-    )]
-    InvalidAppName {
         #[location]
         location: Location,
     },
@@ -715,6 +717,22 @@ pub(crate) enum TeardownError {
     },
 }
 
+/// Resolve the app name to create.
+///
+/// An explicit `--name` is validated and never rewritten; a name derived from the
+/// working directory is sanitized, since the user never typed it. Both go through
+/// the same rule the API enforces, so `init` cannot post a name the server rejects.
+fn resolve_app_name(name: Option<String>) -> Result<String, AppNameError> {
+    match name {
+        Some(explicit) => app_name::validate(&explicit).map(|()| explicit),
+        None => Ok(std::env::current_dir()
+            .ok()
+            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
+            .and_then(|dir| app_name::sanitize(&dir))
+            .unwrap_or_else(|| "app".to_string())),
+    }
+}
+
 pub(crate) async fn init(
     client: &ApiClient,
     bring_your_own_cloud: bool,
@@ -725,6 +743,8 @@ pub(crate) async fn init(
     yes: bool,
 ) -> Result<(), InitError> {
     use InitErrorCtx as Ctx;
+
+    let app_name = resolve_app_name(name).with_context(Ctx::invalid_app_name())?;
 
     output::status("Initializing new deployment...");
 
@@ -754,7 +774,7 @@ pub(crate) async fn init(
     }
 
     if bring_your_own_cloud {
-        return init_byoc_interactive(client, name, region, local, yes)
+        return init_byoc_interactive(client, app_name, region, local, yes)
             .await
             .with_context(Ctx::init_byoc_interactive());
     }
@@ -788,18 +808,7 @@ pub(crate) async fn init(
         .await
         .with_context(Ctx::ensure_authenticated())?;
 
-    let app_name = name.unwrap_or_else(|| {
-        std::env::current_dir()
-            .ok()
-            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()))
-            .map(|s| s.to_lowercase().replace(' ', "-"))
-            .filter(|s| {
-                !s.is_empty()
-                    && s.chars()
-                        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-            })
-            .unwrap_or_else(|| "app".to_string())
-    });
+    output::status(format!("App name: {}", app_name));
 
     output::verbose(client.verbose, "Creating app on server...");
     let body = serde_json::json!({
@@ -1208,7 +1217,7 @@ fn parse_aws_config_region(content: &str, profile: &str) -> Option<String> {
 /// Interactive bring-your-own-compute initialization
 async fn init_byoc_interactive(
     client: &ApiClient,
-    name: Option<String>,
+    app_name: String,
     region: Option<String>,
     local: bool,
     yes: bool,
@@ -1223,28 +1232,6 @@ async fn init_byoc_interactive(
     let docker_check = Command::new("docker").arg("--version").output();
     if docker_check.is_err() || !docker_check.unwrap().status.success() {
         return Err(InitByocInteractiveError::DockerNotFound {
-            location: std::panic::Location::caller(),
-        });
-    }
-
-    let app_name = name.unwrap_or_else(|| {
-        std::env::current_dir()
-            .ok()
-            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().to_string()))
-            .map(|s| s.to_lowercase().replace(' ', "-"))
-            .filter(|s| {
-                !s.is_empty()
-                    && s.chars()
-                        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-            })
-            .unwrap_or_else(|| "app".to_string())
-    });
-
-    if !app_name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err(InitByocInteractiveError::InvalidAppName {
             location: std::panic::Location::caller(),
         });
     }
