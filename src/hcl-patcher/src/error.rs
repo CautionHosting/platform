@@ -1,52 +1,97 @@
-use std::fmt;
+use dterror::{BoxError, CtxError, Location};
 
-#[derive(Debug)]
+/// Errors produced while patching an HCL file.
+///
+/// The `#[error(...)]` messages are internal (they carry the source location and
+/// are meant for logs); the strings that reach the user come from
+/// [`PatcherError::client_message`], which renders HEAD-identical wording without
+/// the location segment.
+#[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum PatcherError {
-    Io(std::io::Error),
-    ParseHcl(String),
-    XPathNotFound(String),
-    InvalidType(String),
-    InvalidValue { type_name: String, raw: String },
-    XPathParse(String),
-}
+    #[error("I/O error [{location}]")]
+    Io {
+        #[location]
+        location: Location,
 
-impl fmt::Display for PatcherError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PatcherError::Io(e) => write!(f, "I/O error: {e}"),
-            PatcherError::ParseHcl(msg) => write!(f, "HCL parse error: {msg}"),
-            PatcherError::XPathNotFound(path) => write!(f, "xpath not found: {path}"),
-            PatcherError::InvalidType(t) => write!(f, "invalid type: {t}"),
-            PatcherError::InvalidValue { type_name, raw } => {
-                write!(f, "invalid {type_name} value: {raw}")
-            }
-            PatcherError::XPathParse(msg) => write!(f, "xpath parse error: {msg}"),
-        }
-    }
-}
+        #[source]
+        source: BoxError,
+    },
 
-impl std::error::Error for PatcherError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            PatcherError::Io(e) => Some(e),
-            _ => None,
-        }
-    }
-}
+    #[error("HCL parse error [{location}]")]
+    ParseHcl {
+        #[location]
+        location: Location,
 
-impl From<std::io::Error> for PatcherError {
-    fn from(e: std::io::Error) -> Self {
-        PatcherError::Io(e)
-    }
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("xpath not found [{location}]")]
+    XPathNotFound {
+        #[context(borrow = str)]
+        path: String,
+
+        #[location]
+        location: Location,
+    },
+
+    #[error("invalid type [{location}]")]
+    InvalidType {
+        #[context(borrow = str)]
+        type_name: String,
+
+        #[location]
+        location: Location,
+    },
+
+    #[error("invalid value [{location}]")]
+    InvalidValue {
+        #[context(borrow = str)]
+        type_name: String,
+
+        #[context(borrow = str)]
+        raw: String,
+
+        #[location]
+        location: Location,
+    },
+
+    #[error("xpath parse error [{location}]")]
+    XPathParse {
+        #[context(borrow = str)]
+        message: String,
+
+        #[location]
+        location: Location,
+    },
 }
 
 impl PatcherError {
+    /// The message shown to the user on stderr.
+    ///
+    /// Renders HEAD-identical wording without the internal source-location
+    /// segment that [`Display`](std::fmt::Display) appends for logs. The
+    /// `ParseHcl` case renders its underlying source here, since HEAD surfaced
+    /// the HCL parser's message to the user.
+    pub(crate) fn client_message(&self) -> String {
+        match self {
+            PatcherError::Io { source, .. } => format!("I/O error: {source}"),
+            PatcherError::ParseHcl { source, .. } => format!("HCL parse error: {source}"),
+            PatcherError::XPathNotFound { path, .. } => format!("xpath not found: {path}"),
+            PatcherError::InvalidType { type_name, .. } => format!("invalid type: {type_name}"),
+            PatcherError::InvalidValue { type_name, raw, .. } => {
+                format!("invalid {type_name} value: {raw}")
+            }
+            PatcherError::XPathParse { message, .. } => format!("xpath parse error: {message}"),
+        }
+    }
+
     pub(crate) fn exit_code(&self) -> i32 {
         match self {
-            PatcherError::Io(_) => 1,
-            PatcherError::ParseHcl(_) | PatcherError::XPathParse(_) => 2,
-            PatcherError::XPathNotFound(_)
-            | PatcherError::InvalidType(_)
+            PatcherError::Io { .. } => 1,
+            PatcherError::ParseHcl { .. } | PatcherError::XPathParse { .. } => 2,
+            PatcherError::XPathNotFound { .. }
+            | PatcherError::InvalidType { .. }
             | PatcherError::InvalidValue { .. } => 3,
         }
     }

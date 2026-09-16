@@ -8,6 +8,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
 use std::sync::Arc;
@@ -99,19 +100,27 @@ impl RegionCapacity {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, CtxError)]
 pub(crate) enum CandidateRegionsError {
-    #[error("failed to discover deployment regions")]
-    Describe(#[source] ec2::DescribeRegionsError),
+    #[error("failed to discover deployment regions [{location}]")]
+    Describe {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
+#[tracing::instrument(skip_all, err)]
 async fn candidate_regions() -> Result<Vec<String>, CandidateRegionsError> {
+    use CandidateRegionsErrorCtx as Ctx;
+
     let discovery_credentials = platform_credentials_for_region("us-east-1");
     let ec2 = ec2::Ec2Client::new(&discovery_credentials);
     let mut regions: Vec<String> = ec2
         .describe_regions(true)
         .await
-        .map_err(CandidateRegionsError::Describe)?
+        .with_context(Ctx::describe())?
         .into_iter()
         .filter(|region| {
             matches!(
@@ -125,33 +134,35 @@ async fn candidate_regions() -> Result<Vec<String>, CandidateRegionsError> {
     Ok(regions)
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Error, CtxError)]
 pub(crate) enum CapacityError {
-    #[error("No fully managed deployment regions are available.")]
-    NoRegionsAvailable,
-    #[error("{0}")]
-    NoCapacity(String),
-    #[error("Unable to check fully managed capacity right now. Please try again later.")]
-    CheckFailed,
-    #[error("Database error while reserving fully managed capacity.")]
-    Database(#[from] sqlx::Error),
-}
+    #[error("No fully managed deployment regions are available. [{location}]")]
+    NoRegionsAvailable { location: Location },
 
-impl CapacityError {
-    pub(crate) fn status_code(&self) -> StatusCode {
-        match self {
-            CapacityError::NoRegionsAvailable => StatusCode::SERVICE_UNAVAILABLE,
-            CapacityError::NoCapacity(_) => StatusCode::SERVICE_UNAVAILABLE,
-            CapacityError::CheckFailed => StatusCode::SERVICE_UNAVAILABLE,
-            CapacityError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        }
-    }
-}
+    #[error("{message} [{location}]")]
+    NoCapacity {
+        message: &'static str,
+        location: Location,
+    },
 
-impl IntoResponse for CapacityError {
-    fn into_response(self) -> Response<Body> {
-        (self.status_code(), self.to_string()).into_response()
-    }
+    #[error(
+        "Unable to check fully managed capacity right now. Please try again later. [{location}]"
+    )]
+    CheckFailed {
+        #[location]
+        location: Location,
+        #[source]
+        #[context(option)]
+        source: Option<BoxError>,
+    },
+
+    #[error("Database error while reserving fully managed capacity. [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
 #[tracing::instrument(skip_all, err)]
@@ -162,23 +173,24 @@ pub(crate) async fn reserve_capacity(
     resource_id: Uuid,
     requirements: &DeploymentRequirements,
 ) -> Result<CapacityReservation, CapacityError> {
-    let candidates = candidate_regions().await.map_err(|error| {
-        tracing::warn!(
-            "Failed to discover fully managed deployment regions: {:#}",
-            error
-        );
-        CapacityError::CheckFailed
-    })?;
+    use CapacityErrorCtx as Ctx;
+
+    let candidates = candidate_regions()
+        .await
+        .with_context(Ctx::check_failed())?;
 
     if candidates.is_empty() {
-        return Err(CapacityError::NoRegionsAvailable);
+        return Err(CapacityError::NoRegionsAvailable {
+            location: std::panic::Location::caller(),
+        });
     }
 
-    let mut tx = pool.begin().await?;
+    let mut tx = pool.begin().await.with_context(Ctx::database())?;
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
         .bind(CAPACITY_LOCK_ID)
         .execute(&mut *tx)
-        .await?;
+        .await
+        .with_context(Ctx::database())?;
 
     let mut checked_any_region = false;
     let mut _last_error: Option<String> = None;
@@ -224,9 +236,10 @@ pub(crate) async fn reserve_capacity(
                     .bind(requirements.vpcs as i32)
                     .bind(requirements.eips as i32)
                     .fetch_one(&mut *tx)
-                    .await?;
+                    .await
+                    .with_context(Ctx::database())?;
 
-                    tx.commit().await?;
+                    tx.commit().await.with_context(Ctx::database())?;
                     tracing::info!(
                         "Reserved fully managed capacity: resource_id={}, region={}, instance_type={}, host_vcpus={}, vpcs={}, eips={}",
                         resource_id,
@@ -265,17 +278,25 @@ pub(crate) async fn reserve_capacity(
     }
 
     if checked_any_region {
-        let already_waitlisted = user_has_waitlist_entry(&mut tx, org_id, user_id).await?;
-        tx.rollback().await?;
+        let already_waitlisted = user_has_waitlist_entry(&mut tx, org_id, user_id)
+            .await
+            .with_context(Ctx::database())?;
+        tx.rollback().await.with_context(Ctx::database())?;
         let message = if already_waitlisted {
             CAPACITY_ALREADY_WAITLISTED_MESSAGE
         } else {
             CAPACITY_WAITLIST_PROMPT
         };
-        Err(CapacityError::NoCapacity(message.to_string()))
+        Err(CapacityError::NoCapacity {
+            message,
+            location: std::panic::Location::caller(),
+        })
     } else {
-        tx.rollback().await?;
-        Err(CapacityError::CheckFailed)
+        tx.rollback().await.with_context(Ctx::database())?;
+        Err(CapacityError::CheckFailed {
+            location: std::panic::Location::caller(),
+            source: None,
+        })
     }
 }
 
@@ -302,26 +323,59 @@ pub(crate) async fn release_reservation(pool: &PgPool, reservation: &CapacityRes
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, CtxError)]
 pub(crate) enum RegionCapacityError {
-    #[error("Database error while checking region capacity")]
-    Database(#[from] sqlx::Error),
-    #[error("Failed to get service quota")]
-    Quota(#[source] ec2::GetServiceQuotaValueError),
-    #[error("Failed to count VPCs")]
-    CountVpcs(#[source] ec2::CountVpcsError),
-    #[error("Failed to count elastic IPs")]
-    CountElasticIps(#[source] ec2::CountElasticIpsError),
-    #[error("Failed to get active instance types")]
-    ActiveInstanceTypes(#[source] ec2::ActiveInstanceTypesError),
-    #[error("Unknown active instance type reported by EC2: {0}")]
-    UnknownInstanceType(String),
+    #[error("Database error while checking region capacity [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Failed to get service quota [{location}]")]
+    Quota {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Failed to count VPCs [{location}]")]
+    CountVpcs {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Failed to count elastic IPs [{location}]")]
+    CountElasticIps {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Failed to get active instance types [{location}]")]
+    ActiveInstanceTypes {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Unknown active instance type reported by EC2: {message} [{location}]")]
+    UnknownInstanceType { message: String, location: Location },
 }
 
+#[tracing::instrument(skip_all, err)]
 async fn region_capacity(
     tx: &mut Transaction<'_, Postgres>,
     region: &str,
 ) -> Result<RegionCapacity, RegionCapacityError> {
+    use RegionCapacityErrorCtx as Ctx;
+
     let credentials = platform_credentials_for_region(region);
     let ec2 = ec2::Ec2Client::new(&credentials);
     let quotas = ec2::ServiceQuotasClient::new(&credentials);
@@ -336,43 +390,44 @@ async fn region_capacity(
     )
     .bind(region)
     .fetch_one(&mut **tx)
-    .await?;
+    .await
+    .with_context(Ctx::database())?;
 
     let vpc_quota = quotas
         .get_service_quota_value("vpc", VPC_QUOTA_CODE)
         .await
-        .map_err(RegionCapacityError::Quota)?
+        .with_context(Ctx::quota())?
         .floor() as u32;
     let eip_quota = quotas
         .get_service_quota_value("ec2", ELASTIC_IP_QUOTA_CODE)
         .await
-        .map_err(RegionCapacityError::Quota)?
+        .with_context(Ctx::quota())?
         .floor() as u32;
     let host_vcpu_quota = quotas
         .get_service_quota_value("ec2", STANDARD_ON_DEMAND_VCPU_QUOTA_CODE)
         .await
-        .map_err(RegionCapacityError::Quota)?
+        .with_context(Ctx::quota())?
         .floor() as u32;
 
-    let vpcs_used = ec2
-        .count_vpcs()
-        .await
-        .map_err(RegionCapacityError::CountVpcs)?;
+    let vpcs_used = ec2.count_vpcs().await.with_context(Ctx::count_vpcs())?;
     let eips_used = ec2
         .count_elastic_ips()
         .await
-        .map_err(RegionCapacityError::CountElasticIps)?;
+        .with_context(Ctx::count_elastic_ips())?;
     let mut host_vcpus_used = 0;
     for instance_type in ec2
         .active_instance_types()
         .await
-        .map_err(RegionCapacityError::ActiveInstanceTypes)?
+        .with_context(Ctx::active_instance_types())?
     {
         let Some(vcpus) = deployment::host_vcpus_for_instance_type(&instance_type) else {
-            return Err(RegionCapacityError::UnknownInstanceType(format!(
-                "Unknown active instance type reported by EC2: {}",
-                instance_type
-            )));
+            return Err(RegionCapacityError::UnknownInstanceType {
+                message: format!(
+                    "Unknown active instance type reported by EC2: {}",
+                    instance_type
+                ),
+                location: std::panic::Location::caller(),
+            });
         };
         host_vcpus_used += vcpus;
     }
@@ -390,11 +445,26 @@ async fn region_capacity(
     })
 }
 
+/// Failure modes for [`user_has_waitlist_entry`].
+#[derive(Debug, Error, CtxError)]
+pub(crate) enum UserHasWaitlistEntryError {
+    #[error("failed to check the fully managed capacity waitlist [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn user_has_waitlist_entry(
     tx: &mut Transaction<'_, Postgres>,
     org_id: Uuid,
     user_id: Uuid,
-) -> Result<bool, sqlx::Error> {
+) -> Result<bool, UserHasWaitlistEntryError> {
+    use UserHasWaitlistEntryErrorCtx as Ctx;
+
     sqlx::query_scalar(
         "SELECT EXISTS (
              SELECT 1
@@ -406,6 +476,7 @@ async fn user_has_waitlist_entry(
     .bind(user_id)
     .fetch_one(&mut **tx)
     .await
+    .with_context(Ctx::query())
 }
 
 pub(crate) fn platform_credentials_for_region(region: &str) -> deployment::AwsCredentials {
@@ -447,51 +518,84 @@ pub(crate) struct WaitlistResponse {
     pub(crate) status: String,
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, CtxError)]
 pub(crate) enum JoinWaitlistError {
-    #[error("Organization access denied")]
-    OrganizationAccess,
-    #[error("Invalid email: {0}")]
-    InvalidEmail(String),
-    #[error("{0}")]
-    InvalidVCpus(String),
-    #[error("Failed to join capacity waitlist")]
-    Database(String),
+    #[error("Organization access denied [{location}]")]
+    OrganizationAccess {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Invalid email: {message} [{location}]")]
+    InvalidEmail { message: String, location: Location },
+
+    #[error("{message} [{location}]")]
+    InvalidVCpus { message: String, location: Location },
+
+    #[error("Failed to join capacity waitlist [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl JoinWaitlistError {
+    /// Client-facing message: fixed wording without the internal location segment.
+    fn client_message(&self) -> String {
+        match self {
+            JoinWaitlistError::OrganizationAccess { .. } => {
+                "Organization access denied".to_string()
+            }
+            JoinWaitlistError::InvalidEmail { message, .. } => format!("Invalid email: {message}"),
+            JoinWaitlistError::InvalidVCpus { message, .. } => message.clone(),
+            JoinWaitlistError::Database { .. } => "Failed to join capacity waitlist".to_string(),
+        }
+    }
 }
 
 impl IntoResponse for JoinWaitlistError {
     fn into_response(self) -> Response<Body> {
-        let (status, body) = match &self {
-            JoinWaitlistError::OrganizationAccess => (StatusCode::FORBIDDEN, self.to_string()),
-            JoinWaitlistError::InvalidEmail(_) => (StatusCode::BAD_REQUEST, self.to_string()),
-            JoinWaitlistError::InvalidVCpus(_) => (StatusCode::BAD_REQUEST, self.to_string()),
-            JoinWaitlistError::Database(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+        let status = match &self {
+            JoinWaitlistError::OrganizationAccess { .. } => StatusCode::FORBIDDEN,
+            JoinWaitlistError::InvalidEmail { .. } => StatusCode::BAD_REQUEST,
+            JoinWaitlistError::InvalidVCpus { .. } => StatusCode::BAD_REQUEST,
+            JoinWaitlistError::Database { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        (status, body).into_response()
+        (status, self.client_message()).into_response()
     }
 }
 
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 pub(crate) async fn join_waitlist(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(org_id): Path<Uuid>,
     Json(payload): Json<WaitlistRequest>,
 ) -> Result<Json<WaitlistResponse>, JoinWaitlistError> {
+    use JoinWaitlistErrorCtx as Ctx;
+
     crate::check_org_access(&state.db, auth.user_id, org_id)
         .await
-        .map_err(|_| JoinWaitlistError::OrganizationAccess)?;
+        .with_context(Ctx::organization_access())?;
 
     let email = payload.email.trim().to_lowercase();
-    validation::validate_email(&email)
-        .map_err(|error| JoinWaitlistError::InvalidEmail(error.to_string()))?;
+    validation::validate_email(&email).map_err(|error| JoinWaitlistError::InvalidEmail {
+        message: error.to_string(),
+        location: std::panic::Location::caller(),
+    })?;
 
     if let Some(cpus) = payload.requested_enclave_vcpus
         && (cpus == 0 || cpus > MAX_FULLY_MANAGED_ENCLAVE_VCPUS)
     {
-        return Err(JoinWaitlistError::InvalidVCpus(
-            "requested_enclave_vcpus must be between 1 and 46; contact support for larger requests"
+        return Err(JoinWaitlistError::InvalidVCpus {
+            message: "requested_enclave_vcpus must be between 1 and 46; contact support for larger requests"
                 .to_string(),
-        ));
+            location: std::panic::Location::caller(),
+        });
     }
 
     let required_host_vcpus = payload
@@ -501,7 +605,10 @@ pub(crate) async fn join_waitlist(
                 .map(|requirements| requirements.host_vcpus as i32)
         })
         .transpose()
-        .map_err(|error| JoinWaitlistError::InvalidVCpus(error.to_string()))?;
+        .map_err(|error| JoinWaitlistError::InvalidVCpus {
+            message: error.to_string(),
+            location: std::panic::Location::caller(),
+        })?;
 
     let inserted: Option<bool> = sqlx::query_scalar(
         "INSERT INTO fully_managed_capacity_waitlist
@@ -518,10 +625,7 @@ pub(crate) async fn join_waitlist(
     .bind(required_host_vcpus)
     .fetch_optional(&state.db)
     .await
-    .map_err(|error| {
-        tracing::error!("Failed to insert fully managed waitlist entry: {}", error);
-        JoinWaitlistError::Database("Failed to join capacity waitlist".to_string())
-    })?;
+    .with_context(Ctx::database())?;
 
     let joined = inserted.unwrap_or(false);
     if joined {
@@ -599,28 +703,38 @@ struct CapacityWaitlistAlert {
     required_host_vcpus: Option<i32>,
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Error, CtxError)]
 pub(crate) enum SendCapacityWaitlistAlertRequestError {
-    #[error("failed to build email client: {0}")]
-    ClientBuild(String),
-    #[error("{0}")]
-    Send(String),
-    #[error("email service returned {0}")]
-    NonSuccess(u16),
+    #[error("failed to build email client [{location}]")]
+    ClientBuild {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to send capacity waitlist alert [{location}]")]
+    Send {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("email service returned {status} [{location}]")]
+    NonSuccess { status: u16, location: Location },
 }
 
+#[tracing::instrument(skip_all, err, fields(org_id = %alert.org_id))]
 async fn send_capacity_waitlist_alert_request(
     alert: CapacityWaitlistAlert,
 ) -> Result<(), SendCapacityWaitlistAlertRequestError> {
+    use SendCapacityWaitlistAlertRequestErrorCtx as Ctx;
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
-        .map_err(|error| {
-            SendCapacityWaitlistAlertRequestError::ClientBuild(format!(
-                "failed to build email client: {}",
-                error
-            ))
-        })?;
+        .with_context(Ctx::client_build())?;
 
     let request = serde_json::json!({
         "to": alert.to,
@@ -639,14 +753,15 @@ async fn send_capacity_waitlist_alert_request(
         .json(&request)
         .send()
         .await
-        .map_err(|error| SendCapacityWaitlistAlertRequestError::Send(error.to_string()))?;
+        .with_context(Ctx::send())?;
 
     if response.status().is_success() {
         Ok(())
     } else {
-        Err(SendCapacityWaitlistAlertRequestError::NonSuccess(
-            response.status().as_u16(),
-        ))
+        Err(SendCapacityWaitlistAlertRequestError::NonSuccess {
+            status: response.status().as_u16(),
+            location: std::panic::Location::caller(),
+        })
     }
 }
 

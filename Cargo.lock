@@ -175,7 +175,6 @@ name = "api"
 version = "0.1.0"
 dependencies = [
  "aes-gcm 0.10.3",
- "anyhow",
  "async-trait",
  "aws-config",
  "aws-sdk-route53",
@@ -2648,6 +2647,7 @@ version = "0.1.0"
 dependencies = [
  "aws-config",
  "aws-sdk-ec2",
+ "dterror 0.3.0",
  "serde_json",
  "sqlx",
  "thiserror 1.0.69",
@@ -3517,8 +3517,10 @@ name = "hcl-patcher"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "dterror 0.3.0",
  "hcl-edit",
  "thiserror 2.0.20",
+ "tracing",
 ]
 
 [[package]]

@@ -1,28 +1,33 @@
+use dterror::ResultExt;
 use hcl_edit::Number;
 use hcl_edit::expr::Expression;
 use hcl_edit::structure::Body;
 
-use crate::error::PatcherError;
+use crate::error::{PatcherError, PatcherErrorCtx};
 use crate::xpath::{XPathSegment, parse_xpath};
 
+#[tracing::instrument(skip_all, err)]
 pub(crate) fn patch_hcl_value(
     hcl: &str,
     xpath: &str,
     value: &str,
     type_name: &str,
 ) -> Result<String, PatcherError> {
-    let segments = parse_xpath(xpath).map_err(PatcherError::XPathParse)?;
-    let mut body: Body = hcl
-        .parse::<Body>()
-        .map_err(|e| PatcherError::ParseHcl(e.to_string()))?;
+    use PatcherErrorCtx as Ctx;
+
+    let segments = parse_xpath(xpath)?;
+    let mut body: Body = hcl.parse::<Body>().with_context(Ctx::parse_hcl())?;
 
     let new_expr = build_expression(value, type_name)?;
-    set_value(&mut body, &segments, new_expr)
-        .ok_or_else(|| PatcherError::XPathNotFound(xpath.to_string()))?;
+    set_value(&mut body, &segments, new_expr).ok_or_else(|| PatcherError::XPathNotFound {
+        path: xpath.to_string(),
+        location: std::panic::Location::caller(),
+    })?;
 
     Ok(body.to_string())
 }
 
+#[tracing::instrument(skip_all)]
 fn set_value(body: &mut Body, segments: &[XPathSegment], new_expr: Expression) -> Option<()> {
     let attr_segment = segments.last()?;
     let block_count = segments.len() - 1;
@@ -57,6 +62,7 @@ fn set_value(body: &mut Body, segments: &[XPathSegment], new_expr: Expression) -
     Some(())
 }
 
+#[tracing::instrument(skip_all, err)]
 pub(crate) fn build_expression(value: &str, type_name: &str) -> Result<Expression, PatcherError> {
     match type_name {
         "string" => Ok(Expression::from(value)),
@@ -66,19 +72,25 @@ pub(crate) fn build_expression(value: &str, type_name: &str) -> Result<Expressio
             other => Err(PatcherError::InvalidValue {
                 type_name: "bool".to_string(),
                 raw: other.to_string(),
+                location: std::panic::Location::caller(),
             }),
         },
         "number" => {
             let n = parse_number(value).ok_or_else(|| PatcherError::InvalidValue {
                 type_name: "number".to_string(),
                 raw: value.to_string(),
+                location: std::panic::Location::caller(),
             })?;
             Ok(Expression::from(n))
         }
-        other => Err(PatcherError::InvalidType(other.to_string())),
+        other => Err(PatcherError::InvalidType {
+            type_name: other.to_string(),
+            location: std::panic::Location::caller(),
+        }),
     }
 }
 
+#[tracing::instrument(skip_all)]
 fn parse_number(s: &str) -> Option<Number> {
     if let Ok(i) = s.parse::<i64>() {
         Some(Number::from(i))
@@ -202,7 +214,7 @@ baz = 1
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
-            PatcherError::XPathNotFound(_)
+            PatcherError::XPathNotFound { .. }
         ));
     }
 

@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{Context, Result, bail};
 use dterror::{BoxError, CtxError, Location};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -397,8 +396,48 @@ fn managed_onprem_uses_direct_customer_bucket(
             .starts_with(&format!("s3://{}/", managed_onprem.eif_bucket))
 }
 
-#[tracing::instrument(skip_all)]
-pub async fn deploy_nitro_enclave(request: NitroDeploymentRequest) -> Result<DeploymentResult> {
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum DeployNitroEnclaveError {
+    #[error("deployment region is required [{location}]")]
+    MissingRegion { location: Location },
+    #[error("credentials required for managed on-prem [{location}]")]
+    MissingCredentials { location: Location },
+    #[error("failed to upload EIF to customer bucket [{location}]")]
+    UploadEifCustomerBucket {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("failed to upload EIF to S3 [{location}]")]
+    UploadEifS3 {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("managed on-prem provisioning failed [{location}]")]
+    ProvisionManagedOnprem {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("nitro enclave provisioning failed [{location}]")]
+    ProvisionNitroEnclave {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
+pub async fn deploy_nitro_enclave(
+    request: NitroDeploymentRequest,
+) -> std::result::Result<DeploymentResult, DeployNitroEnclaveError> {
+    use DeployNitroEnclaveErrorCtx as Ctx;
+
     tracing::info!(
         "Starting Nitro Enclave deployment for resource {} ({})",
         request.resource_id,
@@ -412,7 +451,9 @@ pub async fn deploy_nitro_enclave(request: NitroDeploymentRequest) -> Result<Dep
         .as_ref()
         .map(|c| c.region.clone())
         .or_else(|| request.region.clone())
-        .context("Deployment region is required")?;
+        .ok_or(DeployNitroEnclaveError::MissingRegion {
+            location: std::panic::Location::caller(),
+        })?;
 
     let config = TerraformConfig {
         module_path: PathBuf::from("terraform/modules/aws/nitro-enclave"),
@@ -422,36 +463,47 @@ pub async fn deploy_nitro_enclave(request: NitroDeploymentRequest) -> Result<Dep
 
     if let Some(ref managed_onprem) = request.managed_onprem {
         tracing::info!("Using managed on-prem deployment flow");
-        let customer_creds = request
-            .credentials
-            .as_ref()
-            .context("Credentials required for managed on-prem")?;
+        let customer_creds =
+            request
+                .credentials
+                .as_ref()
+                .ok_or(DeployNitroEnclaveError::MissingCredentials {
+                    location: std::panic::Location::caller(),
+                })?;
         let eif_s3_path = if managed_onprem_uses_direct_customer_bucket(&request, managed_onprem) {
             tracing::info!(
                 "Managed on-prem builder output already in customer bucket: {}",
                 request.eif_path
             );
-            Ok(request.eif_path.clone())
+            request.eif_path.clone()
         } else if let Some(ref s3_key) = request.eif_s3_key {
-            upload_eif_from_platform_s3_to_customer_bucket(
-                s3_key,
-                &request.resource_id,
-                &managed_onprem.eif_bucket,
-                customer_creds,
-                &request.aws_account_id,
-            )
-            .await
+            dterror::ResultExt::with_context(
+                upload_eif_from_platform_s3_to_customer_bucket(
+                    s3_key,
+                    &request.resource_id,
+                    &managed_onprem.eif_bucket,
+                    customer_creds,
+                    &request.aws_account_id,
+                )
+                .await,
+                Ctx::upload_eif_customer_bucket(),
+            )?
         } else {
-            upload_eif_to_customer_bucket(
-                &request.eif_path,
-                &request.resource_id,
-                &managed_onprem.eif_bucket,
-                customer_creds,
-            )
-            .await
-        }
-        .context("Failed to upload EIF to customer bucket")?;
-        provision_managed_onprem(&request, &eif_s3_path, &config).await
+            dterror::ResultExt::with_context(
+                upload_eif_to_customer_bucket(
+                    &request.eif_path,
+                    &request.resource_id,
+                    &managed_onprem.eif_bucket,
+                    customer_creds,
+                )
+                .await,
+                Ctx::upload_eif_customer_bucket(),
+            )?
+        };
+        dterror::ResultExt::with_context(
+            provision_managed_onprem(&request, &eif_s3_path, &config).await,
+            Ctx::provision_managed_onprem(),
+        )
     } else if let Some(ref s3_key) = request.eif_s3_key {
         // EIF already in S3 (uploaded by dedicated builder)
         let bucket = std::env::var("EIF_S3_BUCKET").unwrap_or_else(|_| {
@@ -460,27 +512,36 @@ pub async fn deploy_nitro_enclave(request: NitroDeploymentRequest) -> Result<Dep
         });
         let eif_s3_path = format!("s3://{}/{}", bucket, s3_key);
         tracing::info!("Using pre-uploaded EIF: {}", eif_s3_path);
-        provision_nitro_enclave(&request, &eif_s3_path, &config).await
-    } else {
-        let eif_s3_path = upload_eif_to_s3(
-            &request.eif_path,
-            &request.org_id,
-            &request.resource_id,
-            &request.aws_account_id,
+        dterror::ResultExt::with_context(
+            provision_nitro_enclave(&request, &eif_s3_path, &config).await,
+            Ctx::provision_nitro_enclave(),
         )
-        .await
-        .context("Failed to upload EIF to S3")?;
-        provision_nitro_enclave(&request, &eif_s3_path, &config).await
+    } else {
+        let eif_s3_path = dterror::ResultExt::with_context(
+            upload_eif_to_s3(
+                &request.eif_path,
+                &request.org_id,
+                &request.resource_id,
+                &request.aws_account_id,
+            )
+            .await,
+            Ctx::upload_eif_s3(),
+        )?;
+        dterror::ResultExt::with_context(
+            provision_nitro_enclave(&request, &eif_s3_path, &config).await,
+            Ctx::provision_nitro_enclave(),
+        )
     }
 }
 
+#[tracing::instrument(skip_all, err)]
 pub async fn destroy_app_with_credentials(
     org_id: Uuid,
     resource_id: Uuid,
     resource_name: String,
     credentials: Option<AwsCredentials>,
     asg_name: Option<String>,
-) -> Result<()> {
+) -> std::result::Result<(), DestroyEc2Error> {
     tracing::info!(
         "Starting Terraform destroy for resource {} ({})",
         resource_id,
@@ -510,14 +571,31 @@ pub async fn destroy_app_with_credentials(
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum ScaleDownAsgError {
+    #[error("could not set ASG desired capacity to 0 [{location}]")]
+    SetDesiredCapacity {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
 /// Scale down ASG to 0 and wait for instances to terminate
-async fn scale_down_asg(asg_name: &str, credentials: &AwsCredentials) -> Result<()> {
+#[tracing::instrument(skip_all, err)]
+async fn scale_down_asg(
+    asg_name: &str,
+    credentials: &AwsCredentials,
+) -> std::result::Result<(), ScaleDownAsgError> {
+    use ScaleDownAsgErrorCtx as Ctx;
     use std::time::{Duration, Instant};
 
     let asg = crate::ec2::AsgClient::new(credentials);
-    asg.set_desired_capacity(asg_name, 0)
-        .await
-        .context("Failed to set ASG desired capacity to 0")?;
+    dterror::ResultExt::with_context(
+        asg.set_desired_capacity(asg_name, 0).await,
+        Ctx::set_desired_capacity(),
+    )?;
 
     tracing::info!(
         "Set ASG {} desired capacity to 0, waiting for instance termination...",
@@ -1561,12 +1639,33 @@ fn get_managed_onprem_tofu_outputs(
     })
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum UpdateAsgLaunchTemplateError {
+    #[error("could not update ASG launch template after retries [{location}]")]
+    UpdateAsg {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not set ASG desired capacity [{location}]")]
+    SetDesiredCapacity {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
 /// Update an existing ASG to use a new launch template
+#[tracing::instrument(skip_all, err)]
 async fn update_asg_launch_template(
     asg_name: &str,
     launch_template_id: &str,
     credentials: &AwsCredentials,
-) -> Result<()> {
+) -> std::result::Result<(), UpdateAsgLaunchTemplateError> {
+    use UpdateAsgLaunchTemplateErrorCtx as Ctx;
+
     tracing::info!(
         "Updating ASG {} with launch template {}",
         asg_name,
@@ -1612,26 +1711,45 @@ async fn update_asg_launch_template(
         }
     }
     if let Some(e) = last_err {
-        return Err(e).context("Failed to update ASG launch template after retries");
+        return Err(UpdateAsgLaunchTemplateError::UpdateAsg {
+            location: std::panic::Location::caller(),
+            source: e.into(),
+        });
     }
 
     tracing::info!("Successfully updated ASG launch template");
 
-    asg.set_desired_capacity(asg_name, 1)
-        .await
-        .context("Failed to set ASG desired capacity")?;
+    dterror::ResultExt::with_context(
+        asg.set_desired_capacity(asg_name, 1).await,
+        Ctx::set_desired_capacity(),
+    )?;
 
     tracing::info!("Successfully set ASG desired capacity to 1");
 
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum WaitForAsgInstanceError {
+    #[error("timeout waiting for instance in ASG [{location}]")]
+    Timeout { location: Location },
+    #[error("could not describe instances [{location}]")]
+    DescribeInstances {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
 /// Wait for an instance to be running in the ASG and return its instance ID
+#[tracing::instrument(skip_all, err)]
 async fn wait_for_asg_instance(
     asg_name: &str,
     credentials: &AwsCredentials,
     timeout_secs: u64,
-) -> Result<String> {
+) -> std::result::Result<String, WaitForAsgInstanceError> {
+    use WaitForAsgInstanceErrorCtx as Ctx;
     use std::time::{Duration, Instant};
 
     tracing::info!("Waiting for instance to be running in ASG {}...", asg_name);
@@ -1643,16 +1761,19 @@ async fn wait_for_asg_instance(
 
     loop {
         if start.elapsed() > timeout {
-            bail!("Timeout waiting for instance in ASG {}", asg_name);
+            return Err(WaitForAsgInstanceError::Timeout {
+                location: std::panic::Location::caller(),
+            });
         }
 
-        let instances = ec2
-            .describe_instances(&[
+        let instances = dterror::ResultExt::with_context(
+            ec2.describe_instances(&[
                 crate::ec2::Filter::new("tag:aws:autoscaling:groupName", &[asg_name]),
                 crate::ec2::Filter::new("instance-state-name", &["running"]),
             ])
-            .await
-            .context("Failed to describe instances")?;
+            .await,
+            Ctx::describe_instances(),
+        )?;
 
         if let Some(instance) = instances.first() {
             tracing::info!("Found running instance: {}", instance.instance_id);
@@ -1664,12 +1785,26 @@ async fn wait_for_asg_instance(
     }
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum AssociateEipWithInstanceError {
+    #[error("could not associate EIP with instance [{location}]")]
+    AssociateAddress {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
 /// Associate an Elastic IP with an instance
+#[tracing::instrument(skip_all, err)]
 async fn associate_eip_with_instance(
     allocation_id: &str,
     instance_id: &str,
     credentials: &AwsCredentials,
-) -> Result<()> {
+) -> std::result::Result<(), AssociateEipWithInstanceError> {
+    use AssociateEipWithInstanceErrorCtx as Ctx;
+
     tracing::info!(
         "Associating EIP {} with instance {}",
         allocation_id,
@@ -1677,9 +1812,10 @@ async fn associate_eip_with_instance(
     );
 
     let ec2 = crate::ec2::Ec2Client::new(credentials);
-    ec2.associate_address(allocation_id, instance_id)
-        .await
-        .context("Failed to associate EIP with instance")?;
+    dterror::ResultExt::with_context(
+        ec2.associate_address(allocation_id, instance_id).await,
+        Ctx::associate_address(),
+    )?;
 
     tracing::info!("Successfully associated EIP with instance");
 
@@ -1731,12 +1867,32 @@ fn run_tofu_destroy(
     Ok(())
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum UploadEifToS3Error {
+    #[error("could not read EIF file [{location}]")]
+    ReadFile {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not upload EIF to S3 [{location}]")]
+    PutObject {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn upload_eif_to_s3(
     eif_path: &str,
     org_id: &Uuid,
     resource_id: &Uuid,
     aws_account_id: &str,
-) -> Result<String> {
+) -> std::result::Result<String, UploadEifToS3Error> {
+    use UploadEifToS3ErrorCtx as Ctx;
     use aws_sdk_s3::primitives::ByteStream;
 
     tracing::info!("Uploading EIF to S3: {}", eif_path);
@@ -1753,9 +1909,10 @@ async fn upload_eif_to_s3(
     //   Non-retryable:
     //     - File not found: EIF build produced no output or path is wrong
     //     - Permission denied: filesystem permissions on the EIF artifact
-    let body = ByteStream::from_path(Path::new(eif_path))
-        .await
-        .context("Failed to read EIF file")?;
+    let body = dterror::ResultExt::with_context(
+        ByteStream::from_path(Path::new(eif_path)).await,
+        Ctx::read_file(),
+    )?;
 
     // TODO(error-infra): S3 PutObject can fail with:
     //   Retryable:
@@ -1765,15 +1922,17 @@ async fn upload_eif_to_s3(
     //     - HTTP 404 NoSuchBucket: EIF_S3_BUCKET misconfigured or bucket deleted
     //     - HTTP 403 AccessDenied: IAM role lacks s3:PutObject on this bucket/key
     //     - HTTP 400 EntityTooLarge: EIF exceeds S3 single-PUT 5GB limit (should use multipart)
-    client
-        .put_object()
-        .bucket(&bucket_name)
-        .key(&s3_key)
-        .tagging(format!("org_id={}&resource_id={}", org_id, resource_id))
-        .body(body)
-        .send()
-        .await
-        .context("Failed to upload EIF to S3")?;
+    dterror::ResultExt::with_context(
+        client
+            .put_object()
+            .bucket(&bucket_name)
+            .key(&s3_key)
+            .tagging(format!("org_id={}&resource_id={}", org_id, resource_id))
+            .body(body)
+            .send()
+            .await,
+        Ctx::put_object(),
+    )?;
 
     let s3_path = format!("s3://{}/{}", bucket_name, s3_key);
 
@@ -1782,12 +1941,32 @@ async fn upload_eif_to_s3(
     Ok(s3_path)
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum UploadEifToCustomerBucketError {
+    #[error("could not read EIF file [{location}]")]
+    ReadFile {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not upload EIF to customer bucket after retries [{location}]")]
+    PutObject {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn upload_eif_to_customer_bucket(
     eif_path: &str,
     resource_id: &Uuid,
     bucket_name: &str,
     credentials: &AwsCredentials,
-) -> Result<String> {
+) -> std::result::Result<String, UploadEifToCustomerBucketError> {
+    use UploadEifToCustomerBucketErrorCtx as Ctx;
     use aws_sdk_s3::primitives::ByteStream;
 
     tracing::info!("Uploading EIF to customer bucket: {}", bucket_name);
@@ -1824,9 +2003,10 @@ async fn upload_eif_to_customer_bucket(
             tokio::time::sleep(delay).await;
         }
 
-        let body = ByteStream::from_path(Path::new(eif_path))
-            .await
-            .context("Failed to read EIF file")?;
+        let body = dterror::ResultExt::with_context(
+            ByteStream::from_path(Path::new(eif_path)).await,
+            Ctx::read_file(),
+        )?;
 
         // TODO(error-infra): S3 PutObject to customer bucket can fail with:
         //   Retryable:
@@ -1858,16 +2038,49 @@ async fn upload_eif_to_customer_bucket(
         }
     }
 
-    Err(last_err.unwrap()).context("Failed to upload EIF to customer bucket after retries")
+    Err(UploadEifToCustomerBucketError::PutObject {
+        location: std::panic::Location::caller(),
+        source: last_err
+            .expect("retry loop always executes at least once, so last_err is always Some")
+            .into(),
+    })
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum UploadEifFromPlatformS3Error {
+    #[error("could not download EIF from platform bucket [{location}]")]
+    GetObject {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not read EIF body from platform bucket [{location}]")]
+    ReadBody {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not upload EIF to customer bucket [{location}]")]
+    PutObject {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn upload_eif_from_platform_s3_to_customer_bucket(
     source_s3_key: &str,
     resource_id: &Uuid,
     bucket_name: &str,
     credentials: &AwsCredentials,
     aws_account_id: &str,
-) -> Result<String> {
+) -> std::result::Result<String, UploadEifFromPlatformS3Error> {
+    use UploadEifFromPlatformS3ErrorCtx as Ctx;
+
     tracing::info!(
         "Copying EIF from platform bucket to customer bucket: source_key={}, bucket={}",
         source_s3_key,
@@ -1879,19 +2092,17 @@ async fn upload_eif_from_platform_s3_to_customer_bucket(
     let platform_config = aws_config::load_from_env().await;
     let platform_client = aws_sdk_s3::Client::new(&platform_config);
 
-    let source_obj = platform_client
-        .get_object()
-        .bucket(&source_bucket)
-        .key(source_s3_key)
-        .send()
-        .await
-        .context("Failed to download EIF from platform bucket")?;
+    let source_obj = dterror::ResultExt::with_context(
+        platform_client
+            .get_object()
+            .bucket(&source_bucket)
+            .key(source_s3_key)
+            .send()
+            .await,
+        Ctx::get_object(),
+    )?;
 
-    let data = source_obj
-        .body
-        .collect()
-        .await
-        .context("Failed to read EIF from platform bucket")?;
+    let data = dterror::ResultExt::with_context(source_obj.body.collect().await, Ctx::read_body())?;
 
     let s3_key = format!("{}.eif", resource_id);
 
@@ -1911,25 +2122,90 @@ async fn upload_eif_from_platform_s3_to_customer_bucket(
 
     let client = aws_sdk_s3::Client::new(&config);
 
-    client
-        .put_object()
-        .bucket(bucket_name)
-        .key(&s3_key)
-        .body(data.into_bytes().into())
-        .send()
-        .await
-        .context("Failed to upload EIF to customer bucket")?;
+    dterror::ResultExt::with_context(
+        client
+            .put_object()
+            .bucket(bucket_name)
+            .key(&s3_key)
+            .body(data.into_bytes().into())
+            .send()
+            .await,
+        Ctx::put_object(),
+    )?;
 
     let s3_path = format!("s3://{}/{}", bucket_name, s3_key);
     tracing::info!("EIF copied successfully to customer bucket: {}", s3_path);
     Ok(s3_path)
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum ProvisionNitroEnclaveError {
+    #[error("could not create temporary directory [{location}]")]
+    TempDir {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not generate backend config [{location}]")]
+    BackendConfig {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not generate main.tf [{location}]")]
+    GenerateMainTf {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not read user-data.sh template [{location}]")]
+    ReadUserData {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not write user-data.sh [{location}]")]
+    WriteUserData {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not run tofu init [{location}]")]
+    TofuInit {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not run tofu apply [{location}]")]
+    TofuApply {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not get tofu outputs [{location}]")]
+    GetOutputs {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn provision_nitro_enclave(
     request: &NitroDeploymentRequest,
     eif_s3_path: &str,
     config: &TerraformConfig,
-) -> Result<DeploymentResult> {
+) -> std::result::Result<DeploymentResult, ProvisionNitroEnclaveError> {
+    use ProvisionNitroEnclaveErrorCtx as Ctx;
+
     tracing::info!(
         "Starting Terraform Nitro Enclave provisioning for resource: {}",
         request.resource_name
@@ -1949,47 +2225,57 @@ async fn provision_nitro_enclave(
         );
     }
 
-    let temp_dir = TempDir::new().context("Failed to create temporary directory")?;
+    let temp_dir = dterror::ResultExt::with_context(TempDir::new(), Ctx::temp_dir())?;
     let work_dir = temp_dir.path();
 
-    generate_backend_config(
-        work_dir,
-        request.org_id,
-        request.resource_id,
-        &config.s3_bucket,
-    )
-    .await
-    .context("Failed to generate backend config")?;
+    dterror::ResultExt::with_context(
+        generate_backend_config(
+            work_dir,
+            request.org_id,
+            request.resource_id,
+            &config.s3_bucket,
+        )
+        .await,
+        Ctx::backend_config(),
+    )?;
 
-    generate_nitro_deployment_main_tf(work_dir, request, eif_s3_path)
-        .await
-        .context("Failed to generate main.tf")?;
+    dterror::ResultExt::with_context(
+        generate_nitro_deployment_main_tf(work_dir, request, eif_s3_path).await,
+        Ctx::generate_main_tf(),
+    )?;
 
-    let user_data_template = std::fs::read_to_string(config.module_path.join("user-data.sh"))
-        .context("Failed to read user-data.sh template")?;
-    std::fs::write(work_dir.join("user-data.sh"), user_data_template)
-        .context("Failed to write user-data.sh")?;
+    let user_data_template = dterror::ResultExt::with_context(
+        std::fs::read_to_string(config.module_path.join("user-data.sh")),
+        Ctx::read_user_data(),
+    )?;
+    dterror::ResultExt::with_context(
+        std::fs::write(work_dir.join("user-data.sh"), user_data_template),
+        Ctx::write_user_data(),
+    )?;
 
     // Always use Caution's env credentials for init (S3 state backend access)
     let data_dir =
         std::env::var("CAUTION_DATA_DIR").unwrap_or_else(|_| "/var/cache/caution".to_string());
     let lockfile_path = get_or_generate_lockfile(&data_dir).await;
-    run_tofu_init(work_dir, lockfile_path.as_deref(), None)
-        .await
-        .context("Failed to run tofu init")?;
+    dterror::ResultExt::with_context(
+        run_tofu_init(work_dir, lockfile_path.as_deref(), None).await,
+        Ctx::tofu_init(),
+    )?;
 
     // Pass user credentials as Terraform variables, not env vars
     // This keeps Caution's creds for S3 state but uses user's creds for AWS provider
-    run_tofu_apply_with_provider_creds(
-        work_dir,
-        &request.resource_name,
-        &request.ports,
-        request.http_port,
-        request.credentials.as_ref(),
-    )
-    .context("Failed to run tofu apply")?;
+    dterror::ResultExt::with_context(
+        run_tofu_apply_with_provider_creds(
+            work_dir,
+            &request.resource_name,
+            &request.ports,
+            request.http_port,
+            request.credentials.as_ref(),
+        ),
+        Ctx::tofu_apply(),
+    )?;
 
-    let result = get_tofu_outputs(work_dir).context("Failed to get tofu outputs")?;
+    let result = dterror::ResultExt::with_context(get_tofu_outputs(work_dir), Ctx::get_outputs())?;
 
     tracing::info!(
         "Successfully provisioned Nitro Enclave for resource {} at {}",
@@ -2000,15 +2286,106 @@ async fn provision_nitro_enclave(
     Ok(result)
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum ProvisionManagedOnpremError {
+    #[error("missing managed_onprem config [{location}]")]
+    MissingConfig { location: Location },
+    #[error("could not create temporary directory [{location}]")]
+    TempDir {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not generate backend config [{location}]")]
+    BackendConfig {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not generate main.tf [{location}]")]
+    GenerateMainTf {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not read user-data.sh template [{location}]")]
+    ReadUserData {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not write user-data.sh [{location}]")]
+    WriteUserData {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not run tofu init [{location}]")]
+    TofuInit {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not run tofu apply [{location}]")]
+    TofuApply {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not get tofu outputs [{location}]")]
+    GetOutputs {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("missing AWS credentials for managed on-prem deployment [{location}]")]
+    MissingCredentials { location: Location },
+    #[error("could not update ASG [{location}]")]
+    UpdateAsg {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not wait for instance [{location}]")]
+    WaitForInstance {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not associate EIP [{location}]")]
+    AssociateEip {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn provision_managed_onprem(
     request: &NitroDeploymentRequest,
     eif_s3_path: &str,
     config: &TerraformConfig,
-) -> Result<DeploymentResult> {
-    let onprem = request
-        .managed_onprem
-        .as_ref()
-        .context("Missing managed_onprem config")?;
+) -> std::result::Result<DeploymentResult, ProvisionManagedOnpremError> {
+    use ProvisionManagedOnpremErrorCtx as Ctx;
+
+    let onprem =
+        request
+            .managed_onprem
+            .as_ref()
+            .ok_or(ProvisionManagedOnpremError::MissingConfig {
+                location: std::panic::Location::caller(),
+            })?;
 
     tracing::info!(
         "Starting managed on-prem deployment for resource: {} (deployment_id: {})",
@@ -2016,45 +2393,57 @@ async fn provision_managed_onprem(
         onprem.deployment_id
     );
 
-    let temp_dir = TempDir::new().context("Failed to create temporary directory")?;
+    let temp_dir = dterror::ResultExt::with_context(TempDir::new(), Ctx::temp_dir())?;
     let work_dir = temp_dir.path();
 
-    generate_backend_config(
-        work_dir,
-        request.org_id,
-        request.resource_id,
-        &config.s3_bucket,
-    )
-    .await
-    .context("Failed to generate backend config")?;
+    dterror::ResultExt::with_context(
+        generate_backend_config(
+            work_dir,
+            request.org_id,
+            request.resource_id,
+            &config.s3_bucket,
+        )
+        .await,
+        Ctx::backend_config(),
+    )?;
 
-    generate_managed_onprem_deployment_tf(work_dir, request, eif_s3_path)
-        .await
-        .context("Failed to generate main.tf")?;
+    dterror::ResultExt::with_context(
+        generate_managed_onprem_deployment_tf(work_dir, request, eif_s3_path).await,
+        Ctx::generate_main_tf(),
+    )?;
 
-    let user_data_template = std::fs::read_to_string(config.module_path.join("user-data.sh"))
-        .context("Failed to read user-data.sh template")?;
-    std::fs::write(work_dir.join("user-data.sh"), user_data_template)
-        .context("Failed to write user-data.sh")?;
+    let user_data_template = dterror::ResultExt::with_context(
+        std::fs::read_to_string(config.module_path.join("user-data.sh")),
+        Ctx::read_user_data(),
+    )?;
+    dterror::ResultExt::with_context(
+        std::fs::write(work_dir.join("user-data.sh"), user_data_template),
+        Ctx::write_user_data(),
+    )?;
 
     let data_dir =
         std::env::var("CAUTION_DATA_DIR").unwrap_or_else(|_| "/var/cache/caution".to_string());
     let lockfile_path = get_or_generate_lockfile(&data_dir).await;
-    run_tofu_init(work_dir, lockfile_path.as_deref(), None)
-        .await
-        .context("Failed to run tofu init")?;
+    dterror::ResultExt::with_context(
+        run_tofu_init(work_dir, lockfile_path.as_deref(), None).await,
+        Ctx::tofu_init(),
+    )?;
 
-    run_tofu_apply_with_provider_creds(
-        work_dir,
-        &request.resource_name,
-        &request.ports,
-        request.http_port,
-        request.credentials.as_ref(),
-    )
-    .context("Failed to run tofu apply")?;
+    dterror::ResultExt::with_context(
+        run_tofu_apply_with_provider_creds(
+            work_dir,
+            &request.resource_name,
+            &request.ports,
+            request.http_port,
+            request.credentials.as_ref(),
+        ),
+        Ctx::tofu_apply(),
+    )?;
 
-    let tf_outputs =
-        get_managed_onprem_tofu_outputs(work_dir).context("Failed to get tofu outputs")?;
+    let tf_outputs = dterror::ResultExt::with_context(
+        get_managed_onprem_tofu_outputs(work_dir),
+        Ctx::get_outputs(),
+    )?;
 
     tracing::info!(
         "Terraform created launch template {} and EIP {}",
@@ -2062,26 +2451,33 @@ async fn provision_managed_onprem(
         tf_outputs.eip_allocation_id
     );
 
-    let credentials = request
-        .credentials
-        .as_ref()
-        .context("Missing AWS credentials for managed on-prem deployment")?;
+    let credentials =
+        request
+            .credentials
+            .as_ref()
+            .ok_or(ProvisionManagedOnpremError::MissingCredentials {
+                location: std::panic::Location::caller(),
+            })?;
 
-    update_asg_launch_template(
-        &onprem.asg_name,
-        &tf_outputs.launch_template_id,
-        credentials,
-    )
-    .await
-    .context("Failed to update ASG")?;
+    dterror::ResultExt::with_context(
+        update_asg_launch_template(
+            &onprem.asg_name,
+            &tf_outputs.launch_template_id,
+            credentials,
+        )
+        .await,
+        Ctx::update_asg(),
+    )?;
 
-    let instance_id = wait_for_asg_instance(&onprem.asg_name, credentials, 300)
-        .await
-        .context("Failed to wait for instance")?;
+    let instance_id = dterror::ResultExt::with_context(
+        wait_for_asg_instance(&onprem.asg_name, credentials, 300).await,
+        Ctx::wait_for_instance(),
+    )?;
 
-    associate_eip_with_instance(&tf_outputs.eip_allocation_id, &instance_id, credentials)
-        .await
-        .context("Failed to associate EIP")?;
+    dterror::ResultExt::with_context(
+        associate_eip_with_instance(&tf_outputs.eip_allocation_id, &instance_id, credentials).await,
+        Ctx::associate_eip(),
+    )?;
 
     let result = DeploymentResult {
         instance_id,

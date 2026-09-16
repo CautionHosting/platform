@@ -8,6 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Duration, Utc};
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use std::sync::Arc;
@@ -41,10 +42,35 @@ struct EmailServiceResponse {
     success: bool,
 }
 
+/// Failure modes for [`get_current_user`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum GetCurrentUserError {
+    #[error("user {user_id} not found [{location}]")]
+    NotFound {
+        user_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for GetCurrentUserError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            GetCurrentUserError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found"),
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 pub async fn get_current_user(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
-) -> Result<Json<User>, StatusCode> {
+) -> Result<Json<User>, GetCurrentUserError> {
+    use GetCurrentUserErrorCtx as Ctx;
+
     let user = sqlx::query_as::<_, User>(
         "SELECT id,
                 username,
@@ -58,26 +84,75 @@ pub async fn get_current_user(
     .bind(auth.user_id)
     .fetch_one(&state.db)
     .await
-    .map_err(|_| StatusCode::NOT_FOUND)?;
+    .with_context(Ctx::not_found(auth.user_id))?;
 
     Ok(Json(user))
 }
 
-#[allow(clippy::result_large_err)]
+/// Failure modes for [`update_current_user`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum UpdateCurrentUserError {
+    #[error("at least one field is required [{location}]")]
+    InvalidRequest { location: Location },
+
+    #[error("could not read verification email throttle state [{location}]")]
+    ThrottleQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("verification email recently sent [{location}]")]
+    Throttled { location: Location },
+
+    #[error("username is required [{location}]")]
+    MissingUsername { location: Location },
+
+    #[error("could not update user [{location}]")]
+    Update {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for UpdateCurrentUserError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            UpdateCurrentUserError::InvalidRequest { .. } => {
+                (StatusCode::BAD_REQUEST, "bad request")
+            }
+            UpdateCurrentUserError::ThrottleQuery { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            UpdateCurrentUserError::Throttled { .. } => {
+                (StatusCode::TOO_MANY_REQUESTS, "too many requests")
+            }
+            UpdateCurrentUserError::MissingUsername { .. } => {
+                (StatusCode::BAD_REQUEST, "bad request")
+            }
+            UpdateCurrentUserError::Update { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 pub async fn update_current_user(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     validated_types::Validated(payload): validated_types::Validated<UpdateUserRequest>,
-) -> Result<Json<UpdateUserResponse>, Response> {
+) -> Result<Json<UpdateUserResponse>, UpdateCurrentUserError> {
+    use UpdateCurrentUserErrorCtx as Ctx;
+
     if payload.username.is_none() && payload.email.is_none() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "success": false,
-                "message": "at least one field is required",
-            })),
-        )
-            .into_response());
+        return Err(UpdateCurrentUserError::InvalidRequest {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let username = payload.username.as_deref();
@@ -99,20 +174,15 @@ pub async fn update_current_user(
         .bind(auth.user_id)
         .fetch_optional(&state.db)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?
+        .with_context(Ctx::throttle_query())?
         .flatten();
 
-        if let crate::onboarding::EmailVerificationThrottle::Throttled { retry_after } =
+        if let crate::onboarding::EmailVerificationThrottle::Throttled { retry_after: _ } =
             crate::onboarding::EmailVerificationThrottle::new(last_sent_at, Utc::now())
         {
-            return Err((
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(serde_json::json!({
-                    "success": false,
-                    "message": crate::onboarding::email_verification_throttled_message(retry_after),
-                })),
-            )
-                .into_response());
+            return Err(UpdateCurrentUserError::Throttled {
+                location: std::panic::Location::caller(),
+            });
         }
     }
 
@@ -121,7 +191,9 @@ pub async fn update_current_user(
     let user = match payload.email.as_deref() {
         None => {
             let Some(username) = username else {
-                return Err(StatusCode::BAD_REQUEST.into_response());
+                return Err(UpdateCurrentUserError::MissingUsername {
+                    location: std::panic::Location::caller(),
+                });
             };
             sqlx::query_as::<_, User>(
                 "UPDATE users
@@ -194,7 +266,7 @@ pub async fn update_current_user(
             user
         }
     }
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())?;
+    .with_context(Ctx::update())?;
 
     let mut verification_email_sent = None;
 
@@ -258,15 +330,41 @@ pub async fn update_current_user(
     }))
 }
 
+/// Failure modes for [`delete_current_user`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum DeleteCurrentUserError {
+    #[error("could not deactivate user [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for DeleteCurrentUserError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            DeleteCurrentUserError::Query { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 pub async fn delete_current_user(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, DeleteCurrentUserError> {
+    use DeleteCurrentUserErrorCtx as Ctx;
+
     sqlx::query("UPDATE users SET is_active = false WHERE id = $1")
         .bind(auth.user_id)
         .execute(&state.db)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .with_context(Ctx::query())?;
 
     Ok(StatusCode::NO_CONTENT)
 }

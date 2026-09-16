@@ -5,5 +5,7 @@ edition = "2024"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+dterror = { workspace = true }
 hcl-edit = "0.9.6"
 thiserror = "2"
+tracing = { workspace = true }

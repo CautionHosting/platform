@@ -7,8 +7,8 @@
 //! ephemeral EC2 instances that perform the build, upload the EIF to S3,
 //! and signal completion via an S3 status file.
 
-use anyhow::{Context, Result, bail};
 use chrono::{DateTime, TimeDelta, Utc};
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
@@ -60,15 +60,41 @@ pub struct BuilderSizesConfig {
     pub max_resources_per_org: u32,
 }
 
+/// Failure modes for [`BuilderSizesConfig::load`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum BuilderSizesConfigLoadError {
+    #[error(
+        "config.json not found. Copy config.json.example to config.json to configure. [{location}]"
+    )]
+    ReadFile {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Failed to parse config.json [{location}]")]
+    Parse {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("config.json: builder_sizes must not be empty [{location}]")]
+    Empty { location: Location },
+}
+
 impl BuilderSizesConfig {
-    pub fn load() -> Result<Self> {
-        let contents = std::fs::read_to_string("config.json").context(
-            "config.json not found. Copy config.json.example to config.json to configure.",
-        )?;
-        let config: Self =
-            serde_json::from_str(&contents).context("Failed to parse config.json")?;
+    pub fn load() -> Result<Self, BuilderSizesConfigLoadError> {
+        use BuilderSizesConfigLoadErrorCtx as Ctx;
+
+        let contents = std::fs::read_to_string("config.json").with_context(Ctx::read_file())?;
+        let config: Self = serde_json::from_str(&contents).with_context(Ctx::parse())?;
         if config.builder_sizes.is_empty() {
-            bail!("config.json: builder_sizes must not be empty");
+            return Err(BuilderSizesConfigLoadError::Empty {
+                location: std::panic::Location::caller(),
+            });
         }
         Ok(config)
     }
@@ -108,16 +134,47 @@ pub struct BuilderConfig {
     pub additional_instance_tags: Vec<(String, String)>,
 }
 
+/// Failure modes for [`BuilderConfig::from_env`] (leaf error: no underlying source).
+#[allow(clippy::enum_variant_names)]
+#[derive(Debug, thiserror::Error)]
+pub enum BuilderConfigFromEnvError {
+    #[error("BUILDER_AMI_ID required [{location}]")]
+    MissingAmiId { location: Location },
+
+    #[error("BUILDER_SECURITY_GROUP_ID required [{location}]")]
+    MissingSecurityGroupId { location: Location },
+
+    #[error("BUILDER_SUBNET_ID required [{location}]")]
+    MissingSubnetId { location: Location },
+
+    #[error("BUILDER_INSTANCE_PROFILE required [{location}]")]
+    MissingInstanceProfile { location: Location },
+}
+
 impl BuilderConfig {
-    pub fn from_env() -> Result<Self> {
+    pub fn from_env() -> Result<Self, BuilderConfigFromEnvError> {
         let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string());
         Ok(Self {
-            ami_id: std::env::var("BUILDER_AMI_ID").context("BUILDER_AMI_ID required")?,
-            security_group_id: std::env::var("BUILDER_SECURITY_GROUP_ID")
-                .context("BUILDER_SECURITY_GROUP_ID required")?,
-            subnet_id: std::env::var("BUILDER_SUBNET_ID").context("BUILDER_SUBNET_ID required")?,
-            instance_profile: std::env::var("BUILDER_INSTANCE_PROFILE")
-                .context("BUILDER_INSTANCE_PROFILE required")?,
+            ami_id: std::env::var("BUILDER_AMI_ID").map_err(|_| {
+                BuilderConfigFromEnvError::MissingAmiId {
+                    location: std::panic::Location::caller(),
+                }
+            })?,
+            security_group_id: std::env::var("BUILDER_SECURITY_GROUP_ID").map_err(|_| {
+                BuilderConfigFromEnvError::MissingSecurityGroupId {
+                    location: std::panic::Location::caller(),
+                }
+            })?,
+            subnet_id: std::env::var("BUILDER_SUBNET_ID").map_err(|_| {
+                BuilderConfigFromEnvError::MissingSubnetId {
+                    location: std::panic::Location::caller(),
+                }
+            })?,
+            instance_profile: std::env::var("BUILDER_INSTANCE_PROFILE").map_err(|_| {
+                BuilderConfigFromEnvError::MissingInstanceProfile {
+                    location: std::panic::Location::caller(),
+                }
+            })?,
             region,
             timeout_secs: std::env::var("BUILDER_TIMEOUT_SECS")
                 .ok()
@@ -181,16 +238,33 @@ pub struct BuildRequest {
 pub const ACTIVE_BUILD_CONFLICT_MSG: &str =
     "A build is already in progress for this app. Please wait for it to complete.";
 
-pub fn validate_remote_containerfile_path(containerfile: &str) -> Result<String> {
-    let containerfile = enclave_builder::validate_explicit_containerfile_path(containerfile)?;
-    if let Some(ch) = containerfile
+/// Failure modes for [`validate_remote_containerfile_path`] (leaf error: no underlying source).
+#[derive(Debug, thiserror::Error)]
+pub enum ValidateRemoteContainerfilePathError {
+    #[error("{reason}")]
+    InvalidPath { reason: String, location: Location },
+
+    #[error("Remote builder containerfile path contains unsupported character {character:?}")]
+    UnsupportedCharacter { character: char, location: Location },
+}
+
+#[tracing::instrument(skip_all, err)]
+pub fn validate_remote_containerfile_path(
+    containerfile: &str,
+) -> Result<String, ValidateRemoteContainerfilePathError> {
+    let containerfile = enclave_builder::validate_explicit_containerfile_path(containerfile)
+        .map_err(|source| ValidateRemoteContainerfilePathError::InvalidPath {
+            reason: source.to_string(),
+            location: std::panic::Location::caller(),
+        })?;
+    if let Some(character) = containerfile
         .chars()
         .find(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/')))
     {
-        bail!(
-            "Remote builder containerfile path contains unsupported character {:?}",
-            ch
-        );
+        return Err(ValidateRemoteContainerfilePathError::UnsupportedCharacter {
+            character,
+            location: std::panic::Location::caller(),
+        });
     }
 
     Ok(containerfile)
@@ -228,23 +302,60 @@ pub fn build_managed_onprem_builder_config(
     }
 }
 
+/// Failure modes for [`resolve_managed_onprem_builder_config`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum ResolveManagedOnpremBuilderConfigError {
+    #[error("Managed on-prem credential missing builder_instance_profile_name [{location}]")]
+    MissingBuilderProfile { location: Location },
+
+    #[error("Managed on-prem credential missing subnet_ids [{location}]")]
+    MissingSubnetIds { location: Location },
+
+    #[error("could not ensure managed on-prem builder security group [{location}]")]
+    SecurityGroup {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Failed to resolve Amazon Linux 2023 AMI for managed on-prem builder [{location}]")]
+    ResolveAmi {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 pub async fn resolve_managed_onprem_builder_config(
     default_config: &BuilderConfig,
     credentials: &AwsCredentials,
     managed_onprem: &ManagedOnPremConfig,
-) -> Result<BuilderConfig> {
+) -> Result<BuilderConfig, ResolveManagedOnpremBuilderConfigError> {
+    use ResolveManagedOnpremBuilderConfigErrorCtx as Ctx;
+
     let instance_profile = managed_onprem
         .builder_instance_profile_name
         .as_deref()
         .filter(|value| !value.is_empty())
-        .context("Managed on-prem credential missing builder_instance_profile_name")?
+        .ok_or_else(
+            || ResolveManagedOnpremBuilderConfigError::MissingBuilderProfile {
+                location: std::panic::Location::caller(),
+            },
+        )?
         .to_string();
     let subnet_id = managed_onprem
         .subnet_ids
         .iter()
         .find(|value| !value.is_empty())
         .cloned()
-        .context("Managed on-prem credential missing subnet_ids")?;
+        .ok_or_else(
+            || ResolveManagedOnpremBuilderConfigError::MissingSubnetIds {
+                location: std::panic::Location::caller(),
+            },
+        )?;
 
     let ec2 = Ec2Client::new(credentials);
     let security_group_id = ensure_managed_onprem_builder_security_group(
@@ -252,11 +363,12 @@ pub async fn resolve_managed_onprem_builder_config(
         &managed_onprem.deployment_id,
         &managed_onprem.vpc_id,
     )
-    .await?;
+    .await
+    .with_context(Ctx::security_group())?;
     let ami_id = ec2
         .latest_amazon_linux_2023_ami_id()
         .await
-        .context("Failed to resolve Amazon Linux 2023 AMI for managed on-prem builder")?;
+        .with_context(Ctx::resolve_ami())?;
 
     Ok(build_managed_onprem_builder_config(
         default_config,
@@ -323,16 +435,52 @@ pub fn compute_cache_key(
     format!("{:x}", hasher.finalize())
 }
 
+/// Failure modes for [`require_platform_framework_commit`] (leaf error: no underlying source).
+#[derive(Debug, thiserror::Error)]
+pub enum RequirePlatformFrameworkCommitError {
+    #[error("PLATFORM_GIT_SHA is required for EIF builds [{location}]")]
+    Missing { location: Location },
+
+    #[error("PLATFORM_GIT_SHA must be a 40-character Git commit SHA [{location}]")]
+    Invalid { location: Location },
+}
+
 #[tracing::instrument(skip_all, err)]
-pub fn require_platform_framework_commit(platform_git_sha: Option<&str>) -> Result<String> {
+pub fn require_platform_framework_commit(
+    platform_git_sha: Option<&str>,
+) -> Result<String, RequirePlatformFrameworkCommitError> {
     let commit = platform_git_sha
         .filter(|value| !value.is_empty())
-        .context("PLATFORM_GIT_SHA is required for EIF builds")?;
+        .ok_or_else(|| RequirePlatformFrameworkCommitError::Missing {
+            location: std::panic::Location::caller(),
+        })?;
     if commit.len() != 40 || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        bail!("PLATFORM_GIT_SHA must be a 40-character Git commit SHA");
+        return Err(RequirePlatformFrameworkCommitError::Invalid {
+            location: std::panic::Location::caller(),
+        });
     }
 
     Ok(commit.to_ascii_lowercase())
+}
+
+/// Failure modes for [`check_build_cache`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum CheckBuildCacheError {
+    #[error("Failed to query resource-scoped eif_builds cache [{location}]")]
+    ResourceScopedQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Failed to query eif_builds cache [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
 /// Check if a completed build exists in the cache for this org + cache_key.
@@ -342,7 +490,9 @@ pub async fn check_build_cache(
     org_id: Uuid,
     cache_key: &str,
     app_id_scope: Option<Uuid>,
-) -> Result<Option<BuildResult>> {
+) -> Result<Option<BuildResult>, CheckBuildCacheError> {
+    use CheckBuildCacheErrorCtx as Ctx;
+
     let row = if let Some(app_id) = app_id_scope {
         sqlx::query_as::<_, (String,)>(
             "SELECT eif_s3_key
@@ -355,7 +505,7 @@ pub async fn check_build_cache(
         .bind(cache_key)
         .fetch_optional(db)
         .await
-        .context("Failed to query resource-scoped eif_builds cache")?
+        .with_context(Ctx::resource_scoped_query())?
     } else {
         sqlx::query_as::<_, (String,)>(
             "SELECT eif_s3_key
@@ -367,10 +517,33 @@ pub async fn check_build_cache(
         .bind(cache_key)
         .fetch_optional(db)
         .await
-        .context("Failed to query eif_builds cache")?
+        .with_context(Ctx::query())?
     };
 
     Ok(row.map(|(eif_s3_key,)| BuildResult { eif_s3_key }))
+}
+
+/// Failure modes for [`upload_source_archive`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum UploadSourceArchiveError {
+    #[error("Failed to run git archive [{location}]")]
+    RunGitArchive {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("git archive failed: {stderr} [{location}]")]
+    GitArchiveFailed { stderr: String, location: Location },
+
+    #[error("Failed to upload source archive to S3 [{location}]")]
+    Upload {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
 /// Archive the source at a given commit and upload to S3 for the builder.
@@ -383,7 +556,9 @@ pub async fn upload_source_archive(
     commit_sha: &str,
     build_id: Uuid,
     org_id: Uuid,
-) -> Result<StagedArtifact> {
+) -> Result<StagedArtifact, UploadSourceArchiveError> {
+    use UploadSourceArchiveErrorCtx as Ctx;
+
     let s3_key = format!("builds/{}/source.tar.gz", build_id);
 
     // git archive produces a tar.gz of the repo at the given commit
@@ -397,11 +572,14 @@ pub async fn upload_source_archive(
         ])
         .output()
         .await
-        .context("Failed to run git archive")?;
+        .with_context(Ctx::run_git_archive())?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git archive failed: {}", stderr);
+        return Err(UploadSourceArchiveError::GitArchiveFailed {
+            stderr: stderr.to_string(),
+            location: std::panic::Location::caller(),
+        });
     }
 
     let archive_bytes = output.stdout;
@@ -414,22 +592,33 @@ pub async fn upload_source_archive(
         .body(aws_sdk_s3::primitives::ByteStream::from(archive_bytes))
         .send()
         .await
-        .context("Failed to upload source archive to S3")?;
+        .with_context(Ctx::upload())?;
 
     tracing::info!("Source archive uploaded to s3://{}/{}", bucket, s3_key);
     Ok(StagedArtifact { s3_key, sha256 })
 }
 
-fn resolve_remote_builder_helper_path() -> Result<PathBuf> {
+/// Failure modes for [`resolve_remote_builder_helper_path`] (leaf error: no underlying source).
+#[derive(Debug, thiserror::Error)]
+pub enum ResolveRemoteBuilderHelperPathError {
+    #[error("REMOTE_BUILDER_HELPER_PATH does not exist: {path} [{location}]")]
+    MissingOverride { path: String, location: Location },
+
+    #[error("Could not locate {helper} [{location}]")]
+    NotFound { helper: String, location: Location },
+}
+
+#[tracing::instrument(skip_all, err)]
+fn resolve_remote_builder_helper_path() -> Result<PathBuf, ResolveRemoteBuilderHelperPathError> {
     if let Ok(path) = std::env::var("REMOTE_BUILDER_HELPER_PATH") {
         let path = PathBuf::from(path);
         if path.exists() {
             return Ok(path);
         }
-        bail!(
-            "REMOTE_BUILDER_HELPER_PATH does not exist: {}",
-            path.display()
-        );
+        return Err(ResolveRemoteBuilderHelperPathError::MissingOverride {
+            path: path.display().to_string(),
+            location: std::panic::Location::caller(),
+        });
     }
 
     if let Ok(current_exe) = std::env::current_exe()
@@ -446,18 +635,55 @@ fn resolve_remote_builder_helper_path() -> Result<PathBuf> {
         return Ok(default_path);
     }
 
-    bail!("Could not locate {}", REMOTE_BUILDER_HELPER)
+    Err(ResolveRemoteBuilderHelperPathError::NotFound {
+        helper: REMOTE_BUILDER_HELPER.to_string(),
+        location: std::panic::Location::caller(),
+    })
 }
 
+/// Failure modes for [`upload_remote_builder_helper`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum UploadRemoteBuilderHelperError {
+    #[error("could not resolve remote builder helper path [{location}]")]
+    ResolvePath {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Failed to read {path} [{location}]")]
+    ReadFile {
+        #[context(borrow = str)]
+        path: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Failed to upload remote builder helper to S3 [{location}]")]
+    Upload {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn upload_remote_builder_helper(
     s3: &aws_sdk_s3::Client,
     bucket: &str,
     build_id: Uuid,
     org_id: Uuid,
-) -> Result<StagedArtifact> {
-    let helper_path = resolve_remote_builder_helper_path()?;
-    let helper_bytes = std::fs::read(&helper_path)
-        .with_context(|| format!("Failed to read {}", helper_path.display()))?;
+) -> Result<StagedArtifact, UploadRemoteBuilderHelperError> {
+    use UploadRemoteBuilderHelperErrorCtx as Ctx;
+
+    let helper_path = resolve_remote_builder_helper_path().with_context(Ctx::resolve_path())?;
+    let path_str = helper_path.display().to_string();
+    let helper_bytes =
+        std::fs::read(&helper_path).with_context(Ctx::read_file(path_str.as_str()))?;
     let s3_key = format!("builds/{}/{}", build_id, REMOTE_BUILDER_HELPER);
     let sha256 = format!("{:x}", Sha256::digest(&helper_bytes));
 
@@ -468,7 +694,7 @@ async fn upload_remote_builder_helper(
         .body(aws_sdk_s3::primitives::ByteStream::from(helper_bytes))
         .send()
         .await
-        .context("Failed to upload remote builder helper to S3")?;
+        .with_context(Ctx::upload())?;
 
     tracing::info!(
         "Remote builder helper uploaded to s3://{}/{}",
@@ -478,13 +704,40 @@ async fn upload_remote_builder_helper(
     Ok(StagedArtifact { s3_key, sha256 })
 }
 
+/// Failure modes for [`ensure_managed_onprem_builder_security_group`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum EnsureManagedOnpremBuilderSecurityGroupError {
+    #[error("could not look up builder security group [{location}]")]
+    Find {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not create builder security group [{location}]")]
+    Create {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn ensure_managed_onprem_builder_security_group(
     ec2: &Ec2Client,
     deployment_id: &str,
     vpc_id: &str,
-) -> Result<String> {
+) -> Result<String, EnsureManagedOnpremBuilderSecurityGroupError> {
+    use EnsureManagedOnpremBuilderSecurityGroupErrorCtx as Ctx;
+
     let group_name = format!("caution-builder-{}", deployment_id);
-    if let Some(group_id) = ec2.find_security_group_id(vpc_id, &group_name).await? {
+    if let Some(group_id) = ec2
+        .find_security_group_id(vpc_id, &group_name)
+        .await
+        .with_context(Ctx::find())?
+    {
         return Ok(group_id);
     }
 
@@ -505,6 +758,88 @@ async fn ensure_managed_onprem_builder_security_group(
         ],
     )
     .await
+    .with_context(Ctx::create())
+}
+
+/// Failure modes for [`execute_remote_build`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum ExecuteRemoteBuildError {
+    #[error("Failed to begin build reservation transaction [{location}]")]
+    BeginTransaction {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Failed to acquire per-app build lock [{location}]")]
+    AcquireLock {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Deployment already locked for app: {app_name} [{location}]")]
+    AlreadyLocked {
+        app_name: String,
+        location: Location,
+    },
+
+    #[error("Failed to check for existing builds [{location}]")]
+    CheckExisting {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("{message}")]
+    ActiveBuildConflict {
+        message: &'static str,
+        location: Location,
+    },
+
+    #[error("Failed to insert eif_builds row [{location}]")]
+    InsertBuild {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Failed to commit build reservation [{location}]")]
+    Commit {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Failed to stage remote builder helper [{location}]")]
+    StageHelper {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not generate builder user-data [{location}]")]
+    GenerateUserData {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Failed to launch builder instance: {message} [{location}]")]
+    LaunchBuilder { message: String, location: Location },
+
+    #[error("Unable to insert EIF: {message} [{location}]")]
+    InsertEif { message: String, location: Location },
+
+    #[error("{message} [{location}]")]
+    PollStatus { message: String, location: Location },
 }
 
 /// Execute a build on a dedicated EC2 instance.
@@ -525,7 +860,9 @@ pub async fn execute_remote_build(
     cache_key: &str,
     tx: &tokio::sync::mpsc::Sender<Result<bytes::Bytes, std::io::Error>>,
     user_id: Uuid,
-) -> Result<BuildResult> {
+) -> Result<BuildResult, ExecuteRemoteBuildError> {
+    use ExecuteRemoteBuildErrorCtx as Ctx;
+
     let build_id = Uuid::new_v4();
     let instance_type = request.builder_instance_type.as_str();
     let eif_s3_key = format!("eifs/{}/{}.eif", request.org_id, cache_key);
@@ -535,20 +872,19 @@ pub async fn execute_remote_build(
     // A per-app transaction-scoped advisory lock serializes concurrent deploys so the
     // check-then-insert below cannot race (two `git push` both passing the COUNT check).
     // The lock is released automatically when the transaction commits or rolls back.
-    let mut db_tx = db
-        .begin()
-        .await
-        .context("Failed to begin build reservation transaction")?;
+    let mut db_tx = db.begin().await.with_context(Ctx::begin_transaction())?;
 
     let app_lock_key = request.app_id.as_u128() as i64;
     let is_locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
         .bind(app_lock_key)
         .fetch_one(&mut *db_tx)
         .await
-        .context("Failed to acquire per-app build lock")?;
-
+        .with_context(Ctx::acquire_lock())?;
     if !is_locked {
-        bail!("Deployment already locked for app: {}", request.app_name);
+        return Err(ExecuteRemoteBuildError::AlreadyLocked {
+            app_name: request.app_name.clone(),
+            location: std::panic::Location::caller(),
+        });
     }
 
     // NOTE: The above advisory lock should ensure we don't have an existing build.
@@ -558,10 +894,12 @@ pub async fn execute_remote_build(
     .bind(request.app_id)
     .fetch_one(&mut *db_tx)
     .await
-    .context("Failed to check for existing builds")?;
-
+    .with_context(Ctx::check_existing())?;
     if existing > 0 {
-        bail!(ACTIVE_BUILD_CONFLICT_MSG);
+        return Err(ExecuteRemoteBuildError::ActiveBuildConflict {
+            message: ACTIVE_BUILD_CONFLICT_MSG,
+            location: std::panic::Location::caller(),
+        });
     }
 
     // 2. Insert pending build row and commit, releasing the lock.
@@ -579,18 +917,15 @@ pub async fn execute_remote_build(
     .bind(instance_type)
     .execute(&mut *db_tx)
     .await
-    .context("Failed to insert eif_builds row")?;
+    .with_context(Ctx::insert_build())?;
 
-    db_tx
-        .commit()
-        .await
-        .context("Failed to commit build reservation")?;
+    db_tx.commit().await.with_context(Ctx::commit())?;
 
     // 2. Generate user-data and launch EC2 instance
     let helper_artifact =
         upload_remote_builder_helper(s3, &config.eif_s3_bucket, build_id, request.org_id)
             .await
-            .context("Failed to stage remote builder helper")?;
+            .with_context(Ctx::stage_helper())?;
     let user_data = generate_builder_userdata(
         build_id,
         config,
@@ -598,7 +933,8 @@ pub async fn execute_remote_build(
         &eif_s3_key,
         &helper_artifact.s3_key,
         &helper_artifact.sha256,
-    )?;
+    )
+    .with_context(Ctx::generate_user_data())?;
     let mut instance_tags = vec![
         (
             "Name".to_string(),
@@ -624,7 +960,10 @@ pub async fn execute_remote_build(
         Ok(id) => id,
         Err(e) => {
             mark_build_failed(db, build_id, &format!("Failed to launch builder: {}", e)).await;
-            bail!("Failed to launch builder instance: {}", e);
+            return Err(ExecuteRemoteBuildError::LaunchBuilder {
+                message: e.to_string(),
+                location: std::panic::Location::caller(),
+            });
         }
     };
 
@@ -747,7 +1086,10 @@ pub async fn execute_remote_build(
                         "Duplicate EIF, ignoring error..."
                     );
                 } else {
-                    bail!("Unable to insert EIF: {e}");
+                    return Err(ExecuteRemoteBuildError::InsertEif {
+                        message: e.to_string(),
+                        location: std::panic::Location::caller(),
+                    });
                 }
             }
 
@@ -757,7 +1099,10 @@ pub async fn execute_remote_build(
         }
         Err(e) => {
             mark_build_failed(db, build_id, &e.to_string()).await;
-            Err(e)
+            Err(ExecuteRemoteBuildError::PollStatus {
+                message: e.to_string(),
+                location: std::panic::Location::caller(),
+            })
         }
     }
 }
@@ -774,7 +1119,7 @@ async fn mark_build_failed(db: &PgPool, build_id: Uuid, error: &str) {
 
 /// Status reported by the builder via S3.
 #[derive(Debug, Clone, serde::Deserialize)]
-struct BuildStatus {
+pub(crate) struct BuildStatus {
     phase: String,
     #[serde(with = "chrono::serde::ts_seconds")]
     timestamp: DateTime<Utc>,
@@ -824,13 +1169,31 @@ struct BuildPhaseStateMachine {
     current_index: usize,
 }
 
+/// Failure modes for [`BuildPhaseStateMachine::increment`] (leaf error: no underlying source).
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum BuildPhaseIncrementError {
+    #[error("Unknown build phase in status [{location}]")]
+    UnknownPhase { location: Location },
+
+    #[error("Phase regression: {previous} -> {current} [{location}]")]
+    Regression {
+        previous: String,
+        current: String,
+        location: Location,
+    },
+}
+
 impl BuildPhaseStateMachine {
     fn new() -> Self {
         Self { current_index: 0 }
     }
 
     /// Returns all milestone messages for phases traversed since the last call.
-    fn increment(&mut self, latest_status: &BuildStatus) -> Result<Vec<StatusMessage>> {
+    #[tracing::instrument(skip_all, err)]
+    fn increment(
+        &mut self,
+        latest_status: &BuildStatus,
+    ) -> Result<Vec<StatusMessage>, BuildPhaseIncrementError> {
         // "failed" is terminal and has no progress milestone — emit nothing.
         if latest_status.phase == "failed" {
             return Ok(vec![]);
@@ -839,17 +1202,19 @@ impl BuildPhaseStateMachine {
         let target_idx = BUILD_PHASES
             .iter()
             .position(|&p| p == latest_status.phase)
-            .context("Unknown build phase in status")?;
+            .ok_or_else(|| BuildPhaseIncrementError::UnknownPhase {
+                location: std::panic::Location::caller(),
+            })?;
 
         // Only flag a true regression — going back to an earlier phase.
         // current_index points to the next un-emitted phase, so the last emitted
         // was at index (current_index - 1). If target_idx is before that, it's a real regression.
         if self.current_index > 0 && target_idx < self.current_index - 1 {
-            bail!(
-                "Phase regression: {} -> {}",
-                BUILD_PHASES[self.current_index - 1],
-                latest_status.phase
-            );
+            return Err(BuildPhaseIncrementError::Regression {
+                previous: BUILD_PHASES[self.current_index - 1].to_string(),
+                current: latest_status.phase.clone(),
+                location: std::panic::Location::caller(),
+            });
         }
 
         let messages = BUILD_PHASES[self.current_index..=target_idx]
@@ -865,14 +1230,60 @@ impl BuildPhaseStateMachine {
     }
 }
 
+/// Failure modes for [`poll_build_status`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum PollBuildStatusError {
+    #[error("Build timed out after {timeout_secs} seconds [{location}]")]
+    TimedOut {
+        timeout_secs: u64,
+        location: Location,
+    },
+
+    #[error("Failed to read status body [{location}]")]
+    ReadBody {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Failed to parse status.json [{location}]")]
+    ParseStatus {
+        location: Location,
+        source: BoxError,
+    },
+
+    #[error("could not advance build phase state [{location}]")]
+    PhaseAdvance {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Build timed out after {elapsed}: {status:?} [{location}]")]
+    Stalled {
+        elapsed: TimeDelta,
+        status: BuildStatus,
+        location: Location,
+    },
+
+    #[error("{message} [{location}]")]
+    BuildFailed { message: String, location: Location },
+}
+
 /// Poll S3 for status.json until the build completes or times out.
+#[allow(clippy::result_large_err)]
+#[tracing::instrument(skip_all, err)]
 async fn poll_build_status(
     s3: &aws_sdk_s3::Client,
     bucket: &str,
     status_key: &str,
     timeout_secs: u64,
     tx: &tokio::sync::mpsc::Sender<Result<bytes::Bytes, std::io::Error>>,
-) -> Result<BuildStatus> {
+) -> Result<BuildStatus, PollBuildStatusError> {
+    use PollBuildStatusErrorCtx as Ctx;
+
     let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(timeout_secs);
     let stalled_timeout = TimeDelta::new(120, 0).expect("const timedelta is always valid");
@@ -881,7 +1292,10 @@ async fn poll_build_status(
 
     loop {
         if start.elapsed() > timeout {
-            bail!("Build timed out after {} seconds", timeout_secs);
+            return Err(PollBuildStatusError::TimedOut {
+                timeout_secs,
+                location: std::panic::Location::caller(),
+            });
         }
 
         tokio::time::sleep(poll_interval).await;
@@ -892,7 +1306,7 @@ async fn poll_build_status(
                     .body
                     .collect()
                     .await
-                    .context("Failed to read status body")?
+                    .with_context(Ctx::read_body())?
                     .to_vec();
                 let status: BuildStatus = match serde_json::from_slice(&body) {
                     Ok(o) => {
@@ -902,18 +1316,27 @@ async fn poll_build_status(
                     Err(e) => {
                         tracing::error!("Could not parse status.json: {e}");
                         tracing::error!("Received body: {:?}", String::from_utf8(body));
-                        return Err(e).context("Failed to parse status.json");
+                        return Err(PollBuildStatusError::ParseStatus {
+                            location: std::panic::Location::caller(),
+                            source: e.into(),
+                        });
                     }
                 };
 
                 // If the build status hasn't been updated in a while (machine stalled?), bail
                 let elapsed = Utc::now().signed_duration_since(status.timestamp);
                 if elapsed > stalled_timeout {
-                    bail!("Build timed out after {elapsed}: {status:?}");
+                    return Err(PollBuildStatusError::Stalled {
+                        elapsed,
+                        status,
+                        location: std::panic::Location::caller(),
+                    });
                 }
 
                 // Send milestone messages for all phases traversed since last poll.
-                let messages = phase_sm.increment(&status)?;
+                let messages = phase_sm
+                    .increment(&status)
+                    .with_context(Ctx::phase_advance())?;
                 for message in messages {
                     if let Some(msg) = message.milestone {
                         let _ = tx
@@ -925,10 +1348,13 @@ async fn poll_build_status(
                 match status.phase.as_str() {
                     "completed" => return Ok(status),
                     "failed" => {
-                        let err = status
+                        let message = status
                             .error
                             .unwrap_or_else(|| "Unknown build error".to_string());
-                        bail!("{}", err);
+                        return Err(PollBuildStatusError::BuildFailed {
+                            message,
+                            location: std::panic::Location::caller(),
+                        });
                     }
                     _ => continue,
                 }
@@ -946,7 +1372,15 @@ async fn poll_build_status(
     }
 }
 
+/// Failure modes for [`generate_builder_userdata`].
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum GenerateBuilderUserdataError {
+    #[error("{reason} [{location}]")]
+    ValidateContainerfile { reason: String, location: Location },
+}
+
 /// Generate the user-data shell script for the builder instance.
+#[tracing::instrument(skip_all, err)]
 fn generate_builder_userdata(
     build_id: Uuid,
     config: &BuilderConfig,
@@ -954,7 +1388,7 @@ fn generate_builder_userdata(
     eif_s3_key: &str,
     helper_s3_key: &str,
     helper_sha256: &str,
-) -> anyhow::Result<String> {
+) -> Result<String, GenerateBuilderUserdataError> {
     let status_key = format!("builds/{}/status.json", build_id);
     let bucket = &config.eif_s3_bucket;
     let source_s3_key = &request.source_s3_key;
@@ -970,7 +1404,13 @@ fn generate_builder_userdata(
         .map(|port| port.to_string())
         .unwrap_or_default();
 
-    let containerfile = validate_remote_containerfile_path(&request.containerfile)?;
+    let containerfile =
+        validate_remote_containerfile_path(&request.containerfile).map_err(|source| {
+            GenerateBuilderUserdataError::ValidateContainerfile {
+                reason: source.to_string(),
+                location: std::panic::Location::caller(),
+            }
+        })?;
 
     // STEVE and Platform are resolved before the cache lookup and carried on
     // BuildRequest, so the cache key, manifest, and EIF build use the same commits.
@@ -1287,7 +1727,7 @@ async fn bill_builder_usage(
         .await?;
 
         tx.commit().await?;
-        Ok::<_, anyhow::Error>(())
+        Ok::<(), sqlx::Error>(())
     }
     .await
     {

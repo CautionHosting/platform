@@ -2,8 +2,10 @@ use axum::{
     Json,
     extract::{Extension, State},
     http::StatusCode,
+    response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Utc};
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use serde::Deserialize;
 use sqlx::Row;
 use std::{sync::Arc, time::Duration};
@@ -16,66 +18,164 @@ fn paddle_subscriptions_enabled() -> bool {
         .is_ok_and(|value| value.eq_ignore_ascii_case("true"))
 }
 
+/// Failure modes for [`require_billing_manager`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum RequireBillingManagerError {
+    #[error("organization owner or administrator access is required [{location}]")]
+    Forbidden {
+        #[location]
+        location: Location,
+    },
+
+    #[error("could not check organization access [{location}]")]
+    AccessDenied {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn require_billing_manager(
     state: &AppState,
     user_id: Uuid,
     org_id: Uuid,
-) -> Result<(), (StatusCode, String)> {
+) -> Result<(), RequireBillingManagerError> {
+    use RequireBillingManagerErrorCtx as Ctx;
+
     let role = check_org_access(&state.db, user_id, org_id)
         .await
-        .map_err(|status| (status, "Organization access denied".to_string()))?;
+        .with_context(Ctx::access_denied())?;
     if !can_manage_org(&role) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Organization owner or administrator access is required".to_string(),
-        ));
+        return Err(RequireBillingManagerError::Forbidden {
+            location: std::panic::Location::caller(),
+        });
     }
     Ok(())
 }
 
-fn paddle_http_client() -> Result<reqwest::Client, (StatusCode, String)> {
+/// Failure modes for [`paddle_http_client`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum PaddleHttpClientError {
+    #[error("unable to initialize Paddle client [{location}]")]
+    Build {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
+fn paddle_http_client() -> Result<reqwest::Client, PaddleHttpClientError> {
+    use PaddleHttpClientErrorCtx as Ctx;
+
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Unable to initialize Paddle client".to_string(),
-            )
-        })
+        .with_context(Ctx::build())
 }
 
+/// Failure modes for [`paddle_json_request`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum PaddleJsonRequestError {
+    #[error("Paddle API is not configured [{location}]")]
+    NotConfigured {
+        #[location]
+        location: Location,
+    },
+
+    #[error("Paddle API origin is not configured safely [{location}]")]
+    UnsafeOrigin {
+        #[location]
+        location: Location,
+    },
+
+    #[error("invalid Paddle API path [{location}]")]
+    InvalidPath {
+        #[location]
+        location: Location,
+    },
+
+    #[error("unable to initialize Paddle client [{location}]")]
+    ClientBuild {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Paddle request could not be sent [{location}]")]
+    Send {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("unable to read Paddle response [{location}]")]
+    Read {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Paddle response exceeded the allowed size [{location}]")]
+    TooBig {
+        #[location]
+        location: Location,
+    },
+
+    #[error("Paddle API returned an error status [{location}]")]
+    ErrorStatus {
+        #[location]
+        location: Location,
+    },
+
+    #[error("Paddle returned an invalid response [{location}]")]
+    InvalidJson {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn paddle_json_request(
     state: &AppState,
     method: reqwest::Method,
     path: &str,
     body: Option<&serde_json::Value>,
     idempotency_key: Option<Uuid>,
-) -> Result<serde_json::Value, (StatusCode, String)> {
-    let api_key = state.paddle_api_key.as_deref().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Paddle API is not configured".to_string(),
-        )
-    })?;
+) -> Result<serde_json::Value, PaddleJsonRequestError> {
+    use PaddleJsonRequestErrorCtx as Ctx;
+
+    let api_key =
+        state
+            .paddle_api_key
+            .as_deref()
+            .ok_or_else(|| PaddleJsonRequestError::NotConfigured {
+                location: std::panic::Location::caller(),
+            })?;
     if state.paddle_api_url != "https://sandbox-api.paddle.com"
         && state.paddle_api_url != "https://api.paddle.com"
     {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Paddle API origin is not configured safely".to_string(),
-        ));
+        return Err(PaddleJsonRequestError::UnsafeOrigin {
+            location: std::panic::Location::caller(),
+        });
     }
     if !path.starts_with('/') || path.contains(['\r', '\n']) {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Invalid Paddle API path".to_string(),
-        ));
+        return Err(PaddleJsonRequestError::InvalidPath {
+            location: std::panic::Location::caller(),
+        });
     }
 
-    let client = paddle_http_client()?;
+    let client = paddle_http_client().with_context(Ctx::client_build())?;
     let mut request = client
         .request(method, format!("{}{}", state.paddle_api_url, path))
         .bearer_auth(api_key)
@@ -86,39 +186,21 @@ async fn paddle_json_request(
     if let Some(body) = body {
         request = request.json(body);
     }
-    let response = request.send().await.map_err(|error| {
-        tracing::warn!(error = %error, path, "Paddle request failed");
-        (
-            StatusCode::BAD_GATEWAY,
-            "Paddle is temporarily unavailable".to_string(),
-        )
-    })?;
+    let response = request.send().await.with_context(Ctx::send())?;
     let status = response.status();
-    let bytes = response.bytes().await.map_err(|_| {
-        (
-            StatusCode::BAD_GATEWAY,
-            "Unable to read Paddle response".to_string(),
-        )
-    })?;
+    let bytes = response.bytes().await.with_context(Ctx::read())?;
     if bytes.len() > 1_048_576 {
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            "Paddle response exceeded the allowed size".to_string(),
-        ));
+        return Err(PaddleJsonRequestError::TooBig {
+            location: std::panic::Location::caller(),
+        });
     }
     if !status.is_success() {
         tracing::warn!(%status, path, "Paddle API returned an error");
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            format!("Paddle request failed with status {status}"),
-        ));
+        return Err(PaddleJsonRequestError::ErrorStatus {
+            location: std::panic::Location::caller(),
+        });
     }
-    serde_json::from_slice(&bytes).map_err(|_| {
-        (
-            StatusCode::BAD_GATEWAY,
-            "Paddle returned an invalid response".to_string(),
-        )
-    })
+    serde_json::from_slice(&bytes).with_context(Ctx::invalid_json())
 }
 
 pub(crate) fn tier_display_name(id: &str) -> String {
@@ -134,11 +216,26 @@ pub(crate) fn tier_display_name(id: &str) -> String {
         .join(" ")
 }
 
+/// Failure modes for [`close_open_subscription_segment`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum CloseOpenSubscriptionSegmentError {
+    #[error("could not close the open subscription segment [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn close_open_subscription_segment(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     subscription_id: Uuid,
     period_end: DateTime<Utc>,
-) -> Result<(), (StatusCode, String)> {
+) -> Result<(), CloseOpenSubscriptionSegmentError> {
+    use CloseOpenSubscriptionSegmentErrorCtx as Ctx;
+
     sqlx::query(
         "UPDATE subscription_ledger
          SET billing_period_end = $1
@@ -150,12 +247,7 @@ async fn close_open_subscription_segment(
     .bind(subscription_id)
     .execute(&mut **tx)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .with_context(Ctx::query())?;
 
     Ok(())
 }
@@ -163,7 +255,7 @@ async fn close_open_subscription_segment(
 pub async fn get_subscription_tiers(
     State(state): State<Arc<AppState>>,
     Extension(_auth): Extension<AuthContext>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Json<serde_json::Value> {
     let mut tier_entries: Vec<(&String, &crate::TierPricing)> =
         state.pricing.subscription_tiers.iter().collect();
     tier_entries.sort_by_key(|(id, tier)| (tier.enclaves, id.as_str()));
@@ -180,17 +272,53 @@ pub async fn get_subscription_tiers(
         })
         .collect();
 
-    Ok(Json(serde_json::json!({ "tiers": tiers })))
+    Json(serde_json::json!({ "tiers": tiers }))
 }
 
+/// Failure modes for [`get_subscription`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum GetSubscriptionError {
+    #[error("could not look up the primary organization [{location}]")]
+    PrimaryOrgQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not read the subscription [{location}]")]
+    SubscriptionQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for GetSubscriptionError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            GetSubscriptionError::PrimaryOrgQuery { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            GetSubscriptionError::SubscriptionQuery { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 pub async fn get_subscription(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, GetSubscriptionError> {
+    use GetSubscriptionErrorCtx as Ctx;
+
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
-
+        .with_context(Ctx::primary_org_query())?;
     let row = sqlx::query(
         "SELECT s.id, s.user_id, s.organization_id, s.tier, s.max_vcpus, s.max_apps,
                 s.price_cents_per_cycle, s.status, s.billing_source, s.pending_tier,
@@ -219,12 +347,7 @@ pub async fn get_subscription(
     .bind(org_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .with_context(Ctx::subscription_query())?;
 
     let Some(row) = row else {
         return Ok(Json(serde_json::json!({ "subscription": null })));
@@ -290,68 +413,144 @@ pub struct SubscribeRequest {
 
 const LEGACY_MAX_VCPUS_PLACEHOLDER: i32 = 0;
 
+/// Failure modes for [`checkout_subscription`] and [`subscribe`], which share a call path.
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum CheckoutSubscriptionError {
+    #[error("invalid tier [{location}]")]
+    BadRequest {
+        #[location]
+        location: Location,
+    },
+
+    #[error("subscription not found [{location}]")]
+    NotFound {
+        #[location]
+        location: Location,
+    },
+
+    #[error("subscription checkout conflict [{location}]")]
+    Conflict {
+        #[location]
+        location: Location,
+    },
+
+    #[error("insufficient balance [{location}]")]
+    PaymentRequired {
+        #[location]
+        location: Location,
+    },
+
+    #[error("Paddle checkout is not available [{location}]")]
+    Unavailable {
+        #[location]
+        location: Location,
+    },
+
+    #[error("subscription checkout failed internally [{location}]")]
+    Internal {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Paddle response did not contain a transaction ID [{location}]")]
+    NoTransactionId {
+        #[location]
+        location: Location,
+    },
+}
+
+impl IntoResponse for CheckoutSubscriptionError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            CheckoutSubscriptionError::BadRequest { .. } => {
+                (StatusCode::BAD_REQUEST, "bad request")
+            }
+            CheckoutSubscriptionError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found"),
+            CheckoutSubscriptionError::Conflict { .. } => (StatusCode::CONFLICT, "conflict"),
+            CheckoutSubscriptionError::PaymentRequired { .. } => {
+                (StatusCode::PAYMENT_REQUIRED, "insufficient_balance")
+            }
+            CheckoutSubscriptionError::Unavailable { .. } => {
+                (StatusCode::SERVICE_UNAVAILABLE, "service unavailable")
+            }
+            CheckoutSubscriptionError::Internal { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            CheckoutSubscriptionError::NoTransactionId { .. } => {
+                (StatusCode::BAD_GATEWAY, "upstream error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 pub async fn checkout_subscription(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Json(req): Json<SubscribeRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, CheckoutSubscriptionError> {
+    perform_checkout(&state, &auth, &req).await
+}
+
+#[tracing::instrument(skip_all, err)]
+async fn perform_checkout(
+    state: &AppState,
+    auth: &AuthContext,
+    req: &SubscribeRequest,
+) -> Result<Json<serde_json::Value>, CheckoutSubscriptionError> {
+    use CheckoutSubscriptionErrorCtx as Ctx;
+
     if !paddle_subscriptions_enabled() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            "Paddle subscriptions are not enabled".to_string(),
-        ));
+        return Err(CheckoutSubscriptionError::NotFound {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let tier = state
         .pricing
         .subscription_tiers
         .get(&req.tier_id)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid tier".to_string()))?;
-    let price_id = tier.paddle_price_id.as_deref().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Selected tier is not available in Paddle".to_string(),
-        )
-    })?;
+        .ok_or_else(|| CheckoutSubscriptionError::BadRequest {
+            location: std::panic::Location::caller(),
+        })?;
+    let price_id =
+        tier.paddle_price_id
+            .as_deref()
+            .ok_or_else(|| CheckoutSubscriptionError::Unavailable {
+                location: std::panic::Location::caller(),
+            })?;
     let catalog_version = state
         .pricing
         .paddle_catalog
         .as_ref()
-        .ok_or_else(|| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Paddle catalog is not configured".to_string(),
-            )
+        .ok_or_else(|| CheckoutSubscriptionError::Unavailable {
+            location: std::panic::Location::caller(),
         })?
         .version;
     let client_token = state.paddle_client_token.as_deref().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Paddle checkout is not configured".to_string(),
-        )
+        CheckoutSubscriptionError::Unavailable {
+            location: std::panic::Location::caller(),
+        }
     })?;
 
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .map_err(|status| (status, "Failed to get organization".to_string()))?;
-    require_billing_manager(&state, auth.user_id, org_id).await?;
+        .with_context(Ctx::internal())?;
 
-    let mut tx = state.db.begin().await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to start subscription checkout".to_string(),
-        )
-    })?;
+    require_billing_manager(state, auth.user_id, org_id)
+        .await
+        .with_context(Ctx::internal())?;
+
+    let mut tx = state.db.begin().await.with_context(Ctx::internal())?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(org_id.to_string())
         .execute(&mut *tx)
         .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Unable to lock subscription checkout".to_string(),
-            )
-        })?;
+        .with_context(Ctx::internal())?;
 
     sqlx::query(
         "UPDATE subscription_intents SET status = 'canceled', updated_at = NOW()
@@ -361,12 +560,7 @@ pub async fn checkout_subscription(
     .bind(org_id)
     .execute(&mut *tx)
     .await
-    .map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to expire stale subscription checkout".to_string(),
-        )
-    })?;
+    .with_context(Ctx::internal())?;
 
     let existing: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM subscriptions WHERE organization_id = $1 AND status <> 'canceled')",
@@ -374,17 +568,11 @@ pub async fn checkout_subscription(
     .bind(org_id)
     .fetch_one(&mut *tx)
     .await
-    .map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to inspect subscription state".to_string(),
-        )
-    })?;
+    .with_context(Ctx::internal())?;
     if existing {
-        return Err((
-            StatusCode::CONFLICT,
-            "Organization already has a subscription".to_string(),
-        ));
+        return Err(CheckoutSubscriptionError::Conflict {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let pending: Option<(Uuid, Option<String>, Option<String>)> = sqlx::query_as(
@@ -396,26 +584,15 @@ pub async fn checkout_subscription(
     .bind(org_id)
     .fetch_optional(&mut *tx)
     .await
-    .map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to inspect pending checkout".to_string(),
-        )
-    })?;
+    .with_context(Ctx::internal())?;
     let intent_id = if let Some((intent_id, transaction_id, pending_tier)) = pending {
         if pending_tier.as_deref() != Some(req.tier_id.as_str()) {
-            return Err((
-                StatusCode::CONFLICT,
-                "A subscription checkout for another tier is already pending".to_string(),
-            ));
+            return Err(CheckoutSubscriptionError::Conflict {
+                location: std::panic::Location::caller(),
+            });
         }
         if let Some(transaction_id) = transaction_id {
-            tx.commit().await.map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Unable to finish checkout lookup".to_string(),
-                )
-            })?;
+            tx.commit().await.with_context(Ctx::internal())?;
             return Ok(Json(serde_json::json!({
                 "intent_id": intent_id,
                 "transaction_id": transaction_id,
@@ -423,12 +600,7 @@ pub async fn checkout_subscription(
                 "status": "provider_pending",
             })));
         }
-        tx.commit().await.map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Unable to finish checkout retry lookup".to_string(),
-            )
-        })?;
+        tx.commit().await.with_context(Ctx::internal())?;
         intent_id
     } else {
         let intent_id: Uuid = sqlx::query_scalar(
@@ -442,18 +614,8 @@ pub async fn checkout_subscription(
         .bind(tier.enclaves)
         .fetch_one(&mut *tx)
         .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Unable to create subscription checkout intent".to_string(),
-            )
-        })?;
-        tx.commit().await.map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Unable to persist subscription checkout intent".to_string(),
-            )
-        })?;
+        .with_context(Ctx::internal())?;
+        tx.commit().await.with_context(Ctx::internal())?;
         intent_id
     };
 
@@ -474,50 +636,39 @@ pub async fn checkout_subscription(
     .bind(org_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to read Paddle customer mapping".to_string(),
-        )
-    })?
+    .with_context(Ctx::internal())?
     .flatten();
     if let Some(customer_id) = customer_id {
         body["customer_id"] = serde_json::Value::String(customer_id);
     }
 
-    let response = match paddle_json_request(
-        &state,
+    let paddle_result = paddle_json_request(
+        state,
         reqwest::Method::POST,
         "/transactions",
         Some(&body),
         Some(intent_id),
     )
-    .await
-    {
-        Ok(response) => response,
-        Err(error) => {
-            // A timeout or response-read failure does not prove Paddle rejected the
-            // transaction. Retain the same intent and idempotency key so a retry
-            // cannot create a second billable checkout.
-            let _ = sqlx::query(
-                "UPDATE subscription_intents
-                 SET status = 'provider_pending', expires_at = GREATEST(expires_at, NOW() + INTERVAL '24 hours'), updated_at = NOW()
-                 WHERE id = $1 AND status IN ('pending', 'provider_pending')",
-            )
-            .bind(intent_id)
-            .execute(&state.db)
-            .await;
-            return Err(error);
-        }
-    };
+    .await;
+    if paddle_result.is_err() {
+        // A timeout or response-read failure does not prove Paddle rejected the
+        // transaction. Retain the same intent and idempotency key so a retry
+        // cannot create a second billable checkout.
+        let _ = sqlx::query(
+            "UPDATE subscription_intents
+             SET status = 'provider_pending', expires_at = GREATEST(expires_at, NOW() + INTERVAL '24 hours'), updated_at = NOW()
+             WHERE id = $1 AND status IN ('pending', 'provider_pending')",
+        )
+        .bind(intent_id)
+        .execute(&state.db)
+        .await;
+    }
+    let response = paddle_result.with_context(Ctx::internal())?;
     let transaction_id = response["data"]["id"]
         .as_str()
         .filter(|id| id.starts_with("txn_"))
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_GATEWAY,
-                "Paddle response did not contain a transaction ID".to_string(),
-            )
+        .ok_or_else(|| CheckoutSubscriptionError::NoTransactionId {
+            location: std::panic::Location::caller(),
         })?;
 
     let persisted = sqlx::query(
@@ -529,18 +680,12 @@ pub async fn checkout_subscription(
     .bind(intent_id)
     .execute(&state.db)
     .await
-    .map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to persist Paddle transaction ID".to_string(),
-        )
-    })?
+    .with_context(Ctx::internal())?
     .rows_affected();
     if persisted != 1 {
-        return Err((
-            StatusCode::CONFLICT,
-            "Subscription checkout intent is no longer pending".to_string(),
-        ));
+        return Err(CheckoutSubscriptionError::Conflict {
+            location: std::panic::Location::caller(),
+        });
     }
 
     Ok(Json(serde_json::json!({
@@ -551,198 +696,29 @@ pub async fn checkout_subscription(
     })))
 }
 
-async fn change_paddle_subscription(
-    state: &AppState,
-    auth: &AuthContext,
-    organization_id: Uuid,
-    subscription_id: Uuid,
-    paddle_subscription_id: &str,
-    old_limit: i32,
-    new_tier_id: &str,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    require_billing_manager(state, auth.user_id, organization_id).await?;
-    let new_tier = state
-        .pricing
-        .subscription_tiers
-        .get(new_tier_id)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid tier".to_string()))?;
-    let price_id = new_tier.paddle_price_id.as_deref().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Selected tier is not available in Paddle".to_string(),
-        )
-    })?;
-    if new_tier.enclaves < old_limit {
-        let allocated: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM compute_resources cr
-             JOIN cloud_credentials cc ON cc.resource_id = cr.id
-             WHERE cr.organization_id = $1 AND cc.managed_on_prem = true
-               AND cr.destroyed_at IS NULL
-               AND cr.state NOT IN ('terminated', 'failed')",
-        )
-        .bind(organization_id)
-        .fetch_one(&state.db)
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Unable to inspect allocated BYOC resources".to_string(),
-            )
-        })?;
-        if allocated > i64::from(new_tier.enclaves) {
-            return Err((
-                StatusCode::CONFLICT,
-                format!(
-                    "Cannot change to a {}-enclave plan while {} enclaves are allocated",
-                    new_tier.enclaves, allocated
-                ),
-            ));
-        }
-    }
-
-    sqlx::query(
-        "UPDATE subscription_intents SET status = 'canceled', updated_at = NOW()
-         WHERE organization_id = $1 AND status = 'pending'
-           AND expires_at <= NOW()",
-    )
-    .bind(organization_id)
-    .execute(&state.db)
-    .await
-    .map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to expire stale subscription changes".to_string(),
-        )
-    })?;
-
-    let operation = if new_tier.enclaves > old_limit {
-        "upgrade"
-    } else {
-        "downgrade"
-    };
-    let intent_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO subscription_intents
-         (organization_id, requested_by_user_id, operation, subscription_id,
-          paddle_subscription_id, old_limit, new_tier, new_limit)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
-    )
-    .bind(organization_id)
-    .bind(auth.user_id)
-    .bind(operation)
-    .bind(subscription_id)
-    .bind(paddle_subscription_id)
-    .bind(old_limit)
-    .bind(new_tier_id)
-    .bind(new_tier.enclaves)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|_| {
-        (
-            StatusCode::CONFLICT,
-            "Another subscription change is already pending".to_string(),
-        )
-    })?;
-
-    let mut pending_tx = state.db.begin().await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to persist pending subscription change".to_string(),
-        )
-    })?;
-    let claimed = sqlx::query(
-        "UPDATE subscription_intents SET status = 'provider_pending', updated_at = NOW()
-         WHERE id = $1 AND status = 'pending'",
-    )
-    .bind(intent_id)
-    .execute(&mut *pending_tx)
-    .await
-    .map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to persist pending subscription change".to_string(),
-        )
-    })?
-    .rows_affected();
-    if claimed != 1 {
-        return Err((
-            StatusCode::CONFLICT,
-            "Subscription change is no longer pending".to_string(),
-        ));
-    }
-    sqlx::query(
-        "UPDATE subscriptions SET pending_tier = $1, pending_max_apps = $2, updated_at = NOW()
-         WHERE id = $3",
-    )
-    .bind(new_tier_id)
-    .bind(new_tier.enclaves)
-    .bind(subscription_id)
-    .execute(&mut *pending_tx)
-    .await
-    .map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to persist pending subscription change".to_string(),
-        )
-    })?;
-    pending_tx.commit().await.map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to persist pending subscription change".to_string(),
-        )
-    })?;
-
-    let path = format!("/subscriptions/{paddle_subscription_id}");
-    let body = serde_json::json!({
-        "items": [{"price_id": price_id, "quantity": 1}],
-        "proration_billing_mode": if new_tier.enclaves > old_limit {
-            "prorated_immediately"
-        } else {
-            "do_not_bill"
-        },
-        "on_payment_failure": "prevent_change",
-        "custom_data": {
-            "caution_operation": "byoc_subscription",
-            "caution_change_intent_id": intent_id.to_string(),
-            "caution_organization_id": organization_id.to_string(),
-            "caution_tier_id": new_tier_id,
-        },
-    });
-    paddle_json_request(
-        state,
-        reqwest::Method::PATCH,
-        &path,
-        Some(&body),
-        Some(intent_id),
-    )
-    .await?;
-
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "intent_id": intent_id,
-        "new_tier": new_tier_id,
-        "new_price_cents_per_cycle": new_tier.monthly_cents(),
-        "effective": "pending_webhook",
-    })))
-}
-
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 pub async fn subscribe(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Json(req): Json<SubscribeRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, CheckoutSubscriptionError> {
+    use CheckoutSubscriptionErrorCtx as Ctx;
+
     if paddle_subscriptions_enabled() {
-        return checkout_subscription(State(state), Extension(auth), Json(req)).await;
+        return perform_checkout(&state, &auth, &req).await;
     }
 
     let tier = state
         .pricing
         .subscription_tiers
         .get(&req.tier_id)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid tier".to_string()))?;
+        .ok_or_else(|| CheckoutSubscriptionError::BadRequest {
+            location: std::panic::Location::caller(),
+        })?;
 
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+        .with_context(Ctx::internal())?;
 
     // Check no existing active subscription
     let existing: Option<(Uuid,)> = sqlx::query_as(
@@ -751,44 +727,34 @@ pub async fn subscribe(
     .bind(org_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+    .with_context(Ctx::internal())?;
 
     if existing.is_some() {
-        return Err((
-            StatusCode::CONFLICT,
-            "Organization already has an active subscription".to_string(),
-        ));
+        return Err(CheckoutSubscriptionError::Conflict {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let balance_cents = crate::billing::get_ledger_balance_cents(&state.db, org_id)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-        })?;
+        .with_context(Ctx::internal())?;
 
     let now = Utc::now();
     let price_per_cycle = tier.monthly_cents();
     let cost_hourly = state
         .pricing
         .subscription_cost_hourly_usd(&req.tier_id)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid tier".to_string()))?;
+        .ok_or_else(|| CheckoutSubscriptionError::BadRequest {
+            location: std::panic::Location::caller(),
+        })?;
 
     if balance_cents <= f64::round(cost_hourly * 100. * 24.) as i64 {
-        return Err((
-            StatusCode::PAYMENT_REQUIRED,
-            "insufficient_balance".to_string(),
-        ));
+        return Err(CheckoutSubscriptionError::PaymentRequired {
+            location: std::panic::Location::caller(),
+        });
     }
 
-    let mut tx = state.db.begin().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    let mut tx = state.db.begin().await.with_context(Ctx::internal())?;
 
     let sub_id: (Uuid,) = sqlx::query_as(
         "INSERT INTO subscriptions (
@@ -808,12 +774,7 @@ pub async fn subscribe(
     .bind(now)
     .fetch_one(&mut *tx)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to create subscription: {}", e),
-        )
-    })?;
+    .with_context(Ctx::internal())?;
 
     sqlx::query(
         "INSERT INTO subscription_ledger
@@ -827,14 +788,9 @@ pub async fn subscribe(
     .bind(cost_hourly)
     .execute(&mut *tx)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to record billing event: {}", e)))?;
+    .with_context(Ctx::internal())?;
 
-    tx.commit().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to commit: {}", e),
-        )
-    })?;
+    tx.commit().await.with_context(Ctx::internal())?;
 
     tracing::info!(
         "Subscription created: sub={}, tier={}, org={}, opening_balance={} cents",
@@ -860,23 +816,252 @@ pub struct ChangeTierRequest {
     tier_id: String,
 }
 
+/// Failure modes for [`change_subscription_tier`] and [`change_paddle_subscription`],
+/// which share a call path.
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum ChangeSubscriptionTierError {
+    #[error("invalid tier [{location}]")]
+    BadRequest {
+        #[location]
+        location: Location,
+    },
+
+    #[error("no active subscription [{location}]")]
+    NotFound {
+        #[location]
+        location: Location,
+    },
+
+    #[error("subscription change conflict [{location}]")]
+    Conflict {
+        #[location]
+        location: Location,
+        #[source]
+        source: Option<BoxError>,
+    },
+
+    #[error("Paddle tier is not available [{location}]")]
+    Unavailable {
+        #[location]
+        location: Location,
+    },
+
+    #[error("subscription change failed internally [{location}]")]
+    Internal {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Paddle subscription mapping is invalid [{location}]")]
+    MappingInvalid {
+        #[location]
+        location: Location,
+    },
+}
+
+impl IntoResponse for ChangeSubscriptionTierError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            ChangeSubscriptionTierError::BadRequest { .. } => {
+                (StatusCode::BAD_REQUEST, "bad request")
+            }
+            ChangeSubscriptionTierError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found"),
+            ChangeSubscriptionTierError::Conflict { .. } => (StatusCode::CONFLICT, "conflict"),
+            ChangeSubscriptionTierError::Unavailable { .. } => {
+                (StatusCode::SERVICE_UNAVAILABLE, "service unavailable")
+            }
+            ChangeSubscriptionTierError::Internal { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            ChangeSubscriptionTierError::MappingInvalid { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err)]
+async fn change_paddle_subscription(
+    state: &AppState,
+    auth: &AuthContext,
+    organization_id: Uuid,
+    subscription_id: Uuid,
+    paddle_subscription_id: &str,
+    old_limit: i32,
+    new_tier_id: &str,
+) -> Result<Json<serde_json::Value>, ChangeSubscriptionTierError> {
+    use ChangeSubscriptionTierErrorCtx as Ctx;
+
+    require_billing_manager(state, auth.user_id, organization_id)
+        .await
+        .with_context(Ctx::internal())?;
+    let new_tier = state
+        .pricing
+        .subscription_tiers
+        .get(new_tier_id)
+        .ok_or_else(|| ChangeSubscriptionTierError::BadRequest {
+            location: std::panic::Location::caller(),
+        })?;
+    let price_id = new_tier.paddle_price_id.as_deref().ok_or_else(|| {
+        ChangeSubscriptionTierError::Unavailable {
+            location: std::panic::Location::caller(),
+        }
+    })?;
+    if new_tier.enclaves < old_limit {
+        let allocated: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compute_resources cr
+             JOIN cloud_credentials cc ON cc.resource_id = cr.id
+             WHERE cr.organization_id = $1 AND cc.managed_on_prem = true
+               AND cr.destroyed_at IS NULL
+               AND cr.state NOT IN ('terminated', 'failed')",
+        )
+        .bind(organization_id)
+        .fetch_one(&state.db)
+        .await
+        .with_context(Ctx::internal())?;
+        if allocated > i64::from(new_tier.enclaves) {
+            return Err(ChangeSubscriptionTierError::Conflict {
+                location: std::panic::Location::caller(),
+                source: None,
+            });
+        }
+    }
+
+    sqlx::query(
+        "UPDATE subscription_intents SET status = 'canceled', updated_at = NOW()
+         WHERE organization_id = $1 AND status = 'pending'
+           AND expires_at <= NOW()",
+    )
+    .bind(organization_id)
+    .execute(&state.db)
+    .await
+    .with_context(Ctx::internal())?;
+
+    let operation = if new_tier.enclaves > old_limit {
+        "upgrade"
+    } else {
+        "downgrade"
+    };
+    let intent_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO subscription_intents
+         (organization_id, requested_by_user_id, operation, subscription_id,
+          paddle_subscription_id, old_limit, new_tier, new_limit)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
+    )
+    .bind(organization_id)
+    .bind(auth.user_id)
+    .bind(operation)
+    .bind(subscription_id)
+    .bind(paddle_subscription_id)
+    .bind(old_limit)
+    .bind(new_tier_id)
+    .bind(new_tier.enclaves)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|source| match &source {
+        sqlx::Error::Database(db_err)
+            if db_err.constraint() == Some("idx_subscription_intents_one_pending_org") =>
+        {
+            ChangeSubscriptionTierError::Conflict {
+                location: std::panic::Location::caller(),
+                source: Some(source.into()),
+            }
+        }
+        _ => ChangeSubscriptionTierError::Internal {
+            location: std::panic::Location::caller(),
+            source: source.into(),
+        },
+    })?;
+
+    let mut pending_tx = state.db.begin().await.with_context(Ctx::internal())?;
+    let claimed = sqlx::query(
+        "UPDATE subscription_intents SET status = 'provider_pending', updated_at = NOW()
+         WHERE id = $1 AND status = 'pending'",
+    )
+    .bind(intent_id)
+    .execute(&mut *pending_tx)
+    .await
+    .with_context(Ctx::internal())?
+    .rows_affected();
+    if claimed != 1 {
+        return Err(ChangeSubscriptionTierError::Conflict {
+            location: std::panic::Location::caller(),
+            source: None,
+        });
+    }
+    sqlx::query(
+        "UPDATE subscriptions SET pending_tier = $1, pending_max_apps = $2, updated_at = NOW()
+         WHERE id = $3",
+    )
+    .bind(new_tier_id)
+    .bind(new_tier.enclaves)
+    .bind(subscription_id)
+    .execute(&mut *pending_tx)
+    .await
+    .with_context(Ctx::internal())?;
+    pending_tx.commit().await.with_context(Ctx::internal())?;
+
+    let path = format!("/subscriptions/{paddle_subscription_id}");
+    let body = serde_json::json!({
+        "items": [{"price_id": price_id, "quantity": 1}],
+        "proration_billing_mode": if new_tier.enclaves > old_limit {
+            "prorated_immediately"
+        } else {
+            "do_not_bill"
+        },
+        "on_payment_failure": "prevent_change",
+        "custom_data": {
+            "caution_operation": "byoc_subscription",
+            "caution_change_intent_id": intent_id.to_string(),
+            "caution_organization_id": organization_id.to_string(),
+            "caution_tier_id": new_tier_id,
+        },
+    });
+    let paddle_result = paddle_json_request(
+        state,
+        reqwest::Method::PATCH,
+        &path,
+        Some(&body),
+        Some(intent_id),
+    )
+    .await;
+    paddle_result.with_context(Ctx::internal())?;
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "intent_id": intent_id,
+        "new_tier": new_tier_id,
+        "new_price_cents_per_cycle": new_tier.monthly_cents(),
+        "effective": "pending_webhook",
+    })))
+}
+
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 pub async fn change_subscription_tier(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Json(req): Json<ChangeTierRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ChangeSubscriptionTierError> {
+    use ChangeSubscriptionTierErrorCtx as Ctx;
+
     let new_tier = state
         .pricing
         .subscription_tiers
         .get(&req.tier_id)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid tier".to_string()))?;
+        .ok_or_else(|| ChangeSubscriptionTierError::BadRequest {
+            location: std::panic::Location::caller(),
+        })?;
 
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+        .with_context(Ctx::internal())?;
 
-    require_billing_manager(&state, auth.user_id, org_id).await?;
-
+    require_billing_manager(&state, auth.user_id, org_id)
+        .await
+        .with_context(Ctx::internal())?;
     let sub: Option<(Uuid, String, String, Option<String>, i32)> = sqlx::query_as(
         "SELECT id, tier, billing_source, paddle_subscription_id, max_apps
          FROM subscriptions WHERE organization_id = $1 AND status <> 'canceled' LIMIT 1",
@@ -884,34 +1069,30 @@ pub async fn change_subscription_tier(
     .bind(org_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to read subscription".to_string(),
-        )
-    })?;
+    .with_context(Ctx::internal())?;
 
     let Some((sub_id, old_tier_id, billing_source, paddle_subscription_id, old_limit)) = sub else {
-        return Err((StatusCode::NOT_FOUND, "No active subscription".to_string()));
+        return Err(ChangeSubscriptionTierError::NotFound {
+            location: std::panic::Location::caller(),
+        });
     };
 
     if old_tier_id == req.tier_id {
-        return Err((StatusCode::BAD_REQUEST, "Already on this tier".to_string()));
+        return Err(ChangeSubscriptionTierError::BadRequest {
+            location: std::panic::Location::caller(),
+        });
     }
     if billing_source == "enterprise" {
-        return Err((
-            StatusCode::CONFLICT,
-            "Enterprise entitlements must be changed by an operator".to_string(),
-        ));
+        return Err(ChangeSubscriptionTierError::Conflict {
+            location: std::panic::Location::caller(),
+            source: None,
+        });
     }
     if billing_source == "paddle" {
         let paddle_subscription_id = paddle_subscription_id
             .filter(|id| id.starts_with("sub_"))
-            .ok_or_else(|| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Paddle subscription mapping is invalid".to_string(),
-                )
+            .ok_or_else(|| ChangeSubscriptionTierError::MappingInvalid {
+                location: std::panic::Location::caller(),
             })?;
         return change_paddle_subscription(
             &state,
@@ -930,14 +1111,11 @@ pub async fn change_subscription_tier(
     let new_cost_hourly = state
         .pricing
         .subscription_cost_hourly_usd(&req.tier_id)
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid tier".to_string()))?;
+        .ok_or_else(|| ChangeSubscriptionTierError::BadRequest {
+            location: std::panic::Location::caller(),
+        })?;
 
-    let mut tx = state.db.begin().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    let mut tx = state.db.begin().await.with_context(Ctx::internal())?;
 
     let current_ledger: Option<(DateTime<Utc>, Option<Uuid>, String)> = sqlx::query_as(
         "SELECT billing_period_start, invoice_id, status
@@ -952,12 +1130,7 @@ pub async fn change_subscription_tier(
     .bind(now)
     .fetch_optional(&mut *tx)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .with_context(Ctx::internal())?;
 
     let latest_ledger_metadata: Option<(Option<Uuid>, String)> = if current_ledger.is_none() {
         sqlx::query_as(
@@ -970,12 +1143,7 @@ pub async fn change_subscription_tier(
         .bind(sub_id)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-        })?
+        .with_context(Ctx::internal())?
     } else {
         None
     };
@@ -1004,12 +1172,7 @@ pub async fn change_subscription_tier(
     .bind(sub_id)
     .execute(&mut *tx)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .with_context(Ctx::internal())?;
 
     let (carried_invoice_id, carried_status) = current_ledger
         .as_ref()
@@ -1028,12 +1191,7 @@ pub async fn change_subscription_tier(
         .bind(current_segment_start)
         .execute(&mut *tx)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-        })?;
+        .with_context(Ctx::internal())?;
     }
 
     sqlx::query(
@@ -1057,19 +1215,9 @@ pub async fn change_subscription_tier(
     .bind(carried_status)
     .execute(&mut *tx)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to roll subscription ledger: {}", e),
-        )
-    })?;
+    .with_context(Ctx::internal())?;
 
-    tx.commit().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to commit: {}", e),
-        )
-    })?;
+    tx.commit().await.with_context(Ctx::internal())?;
 
     tracing::info!(
         "Subscription {} tier changed {} → {}",
@@ -1086,16 +1234,69 @@ pub async fn change_subscription_tier(
     })))
 }
 
+/// Failure modes for [`cancel_subscription`].
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum CancelSubscriptionError {
+    #[error("no active subscription [{location}]")]
+    NotFound {
+        #[location]
+        location: Location,
+    },
+
+    #[error("subscription cancellation conflict [{location}]")]
+    Conflict {
+        #[location]
+        location: Location,
+        #[source]
+        source: Option<BoxError>,
+    },
+
+    #[error("subscription cancellation failed internally [{location}]")]
+    Internal {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Paddle subscription mapping is invalid [{location}]")]
+    MappingInvalid {
+        #[location]
+        location: Location,
+    },
+}
+
+impl IntoResponse for CancelSubscriptionError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            CancelSubscriptionError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found"),
+            CancelSubscriptionError::Conflict { .. } => (StatusCode::CONFLICT, "conflict"),
+            CancelSubscriptionError::Internal { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            CancelSubscriptionError::MappingInvalid { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 pub async fn cancel_subscription(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, CancelSubscriptionError> {
+    use CancelSubscriptionErrorCtx as Ctx;
+
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+        .with_context(Ctx::internal())?;
 
-    require_billing_manager(&state, auth.user_id, org_id).await?;
-
+    require_billing_manager(&state, auth.user_id, org_id)
+        .await
+        .with_context(Ctx::internal())?;
     let sub: Option<(Uuid, String, Option<String>, bool)> = sqlx::query_as(
         "SELECT id, billing_source, paddle_subscription_id, cancel_at_period_end
          FROM subscriptions
@@ -1105,15 +1306,12 @@ pub async fn cancel_subscription(
     .bind(org_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Unable to read subscription".to_string(),
-        )
-    })?;
+    .with_context(Ctx::internal())?;
 
     let Some((sub_id, billing_source, paddle_subscription_id, cancel_at_period_end)) = sub else {
-        return Err((StatusCode::NOT_FOUND, "No active subscription".to_string()));
+        return Err(CancelSubscriptionError::NotFound {
+            location: std::panic::Location::caller(),
+        });
     };
     if cancel_at_period_end {
         return Ok(Json(serde_json::json!({
@@ -1122,19 +1320,16 @@ pub async fn cancel_subscription(
         })));
     }
     if billing_source == "enterprise" {
-        return Err((
-            StatusCode::CONFLICT,
-            "Enterprise entitlements must be changed by an operator".to_string(),
-        ));
+        return Err(CancelSubscriptionError::Conflict {
+            location: std::panic::Location::caller(),
+            source: None,
+        });
     }
     if billing_source == "paddle" {
         let paddle_subscription_id = paddle_subscription_id
             .filter(|id| id.starts_with("sub_"))
-            .ok_or_else(|| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Paddle subscription mapping is invalid".to_string(),
-                )
+            .ok_or_else(|| CancelSubscriptionError::MappingInvalid {
+                location: std::panic::Location::caller(),
             })?;
         sqlx::query(
             "UPDATE subscription_intents SET status = 'canceled', updated_at = NOW()
@@ -1144,12 +1339,7 @@ pub async fn cancel_subscription(
         .bind(org_id)
         .execute(&state.db)
         .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Unable to expire stale subscription changes".to_string(),
-            )
-        })?;
+        .with_context(Ctx::internal())?;
         let intent_id: Uuid = sqlx::query_scalar(
             "INSERT INTO subscription_intents
              (organization_id, requested_by_user_id, operation, subscription_id,
@@ -1162,18 +1352,21 @@ pub async fn cancel_subscription(
         .bind(&paddle_subscription_id)
         .fetch_one(&state.db)
         .await
-        .map_err(|_| {
-            (
-                StatusCode::CONFLICT,
-                "Another subscription change is already pending".to_string(),
-            )
+        .map_err(|source| match &source {
+            sqlx::Error::Database(db_err)
+                if db_err.constraint() == Some("idx_subscription_intents_one_pending_org") =>
+            {
+                CancelSubscriptionError::Conflict {
+                    location: std::panic::Location::caller(),
+                    source: Some(source.into()),
+                }
+            }
+            _ => CancelSubscriptionError::Internal {
+                location: std::panic::Location::caller(),
+                source: source.into(),
+            },
         })?;
-        let mut pending_tx = state.db.begin().await.map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Unable to persist pending cancellation".to_string(),
-            )
-        })?;
+        let mut pending_tx = state.db.begin().await.with_context(Ctx::internal())?;
         let claimed = sqlx::query(
             "UPDATE subscription_intents SET status = 'provider_pending', updated_at = NOW()
              WHERE id = $1 AND status = 'pending'",
@@ -1181,18 +1374,13 @@ pub async fn cancel_subscription(
         .bind(intent_id)
         .execute(&mut *pending_tx)
         .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Unable to persist pending cancellation".to_string(),
-            )
-        })?
+        .with_context(Ctx::internal())?
         .rows_affected();
         if claimed != 1 {
-            return Err((
-                StatusCode::CONFLICT,
-                "Cancellation is no longer pending".to_string(),
-            ));
+            return Err(CancelSubscriptionError::Conflict {
+                location: std::panic::Location::caller(),
+                source: None,
+            });
         }
         sqlx::query(
             "UPDATE subscriptions SET cancel_at_period_end = true, updated_at = NOW() WHERE id = $1",
@@ -1200,29 +1388,20 @@ pub async fn cancel_subscription(
         .bind(sub_id)
         .execute(&mut *pending_tx)
         .await
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Unable to persist pending cancellation".to_string(),
-            )
-        })?;
-        pending_tx.commit().await.map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Unable to persist pending cancellation".to_string(),
-            )
-        })?;
+        .with_context(Ctx::internal())?;
+        pending_tx.commit().await.with_context(Ctx::internal())?;
 
         let path = format!("/subscriptions/{paddle_subscription_id}/cancel");
         let body = serde_json::json!({"effective_from": "next_billing_period"});
-        paddle_json_request(
+        let paddle_result = paddle_json_request(
             &state,
             reqwest::Method::POST,
             &path,
             Some(&body),
             Some(intent_id),
         )
-        .await?;
+        .await;
+        paddle_result.with_context(Ctx::internal())?;
         return Ok(Json(serde_json::json!({
             "success": true,
             "intent_id": intent_id,
@@ -1231,14 +1410,11 @@ pub async fn cancel_subscription(
     }
 
     let now = Utc::now();
-    let mut tx = state.db.begin().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    let mut tx = state.db.begin().await.with_context(Ctx::internal())?;
 
-    close_open_subscription_segment(&mut tx, sub_id, now).await?;
+    close_open_subscription_segment(&mut tx, sub_id, now)
+        .await
+        .with_context(Ctx::internal())?;
 
     sqlx::query(
         "UPDATE subscriptions SET
@@ -1254,19 +1430,9 @@ pub async fn cancel_subscription(
     .bind(sub_id)
     .execute(&mut *tx)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .with_context(Ctx::internal())?;
 
-    tx.commit().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to commit: {}", e),
-        )
-    })?;
+    tx.commit().await.with_context(Ctx::internal())?;
 
     tracing::info!("Subscription {} canceled immediately", sub_id);
 

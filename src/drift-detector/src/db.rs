@@ -6,60 +6,75 @@
 //! This module provides functions to query the database and retrieve
 //! the expected state of resources that should exist in AWS.
 
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use sqlx::{PgPool, Row};
-use thiserror::Error;
 use uuid::Uuid;
 
 /// Error types for database access operations.
 ///
 /// Each variant corresponds to a distinct query and carries the identifiers
 /// needed to diagnose a failure (organization, resource, etc.).
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error, CtxError)]
 pub enum DbError {
     /// Failed to list active organizations.
-    #[error("failed to list active organizations")]
-    ListActiveOrganizations(#[source] sqlx::Error),
+    #[error("failed to list active organizations [{location}]")]
+    ListActiveOrganizations {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
     /// Failed to list the provider accounts of an organization.
-    #[error("failed to list provider accounts for organization {org_id}")]
+    #[error("failed to list provider accounts for organization {org_id} [{location}]")]
     ListProviderAccounts {
         /// The organization being queried.
         org_id: Uuid,
+        #[location]
+        location: Location,
         /// The underlying database error.
         #[source]
-        source: sqlx::Error,
+        source: BoxError,
     },
 
     /// Failed to list the compute resources of an organization.
-    #[error("failed to list compute resources for organization {org_id}")]
+    #[error("failed to list compute resources for organization {org_id} [{location}]")]
     ListComputeResources {
         /// The organization being queried.
         org_id: Uuid,
+        #[location]
+        location: Location,
         /// The underlying database error.
         #[source]
-        source: sqlx::Error,
+        source: BoxError,
     },
 
     /// Failed to list the users of an organization.
-    #[error("failed to list users for organization {org_id}")]
+    #[error("failed to list users for organization {org_id} [{location}]")]
     ListOrgUsers {
         /// The organization being queried.
         org_id: Uuid,
+        #[location]
+        location: Location,
         /// The underlying database error.
         #[source]
-        source: sqlx::Error,
+        source: BoxError,
     },
 
     /// Failed to fetch a single compute resource.
-    #[error("failed to fetch compute resource {resource_id} for organization {org_id}")]
+    #[error(
+        "failed to fetch compute resource {resource_id} for organization {org_id} [{location}]"
+    )]
     FetchComputeResource {
         /// The organization being queried.
         org_id: Uuid,
         /// The resource being fetched.
         resource_id: Uuid,
+        #[location]
+        location: Location,
         /// The underlying database error.
         #[source]
-        source: sqlx::Error,
+        source: BoxError,
     },
 }
 
@@ -207,13 +222,16 @@ impl From<sqlx::postgres::PgRow> for ComputeResource {
 /// # Errors
 ///
 /// Returns [`DbError::ListActiveOrganizations`] when the query fails.
+#[tracing::instrument(skip_all, err)]
 pub async fn get_active_organization_ids(pool: &PgPool) -> Result<Vec<Uuid>, DbError> {
+    use DbErrorCtx as Ctx;
+
     let rows = sqlx::query_as::<_, (Uuid,)>(
         "SELECT id FROM organizations WHERE is_active = true ORDER BY created_at ASC",
     )
     .fetch_all(pool)
     .await
-    .map_err(DbError::ListActiveOrganizations)?;
+    .with_context(Ctx::list_active_organizations())?;
 
     Ok(rows.into_iter().map(|(id,)| id).collect())
 }
@@ -230,10 +248,13 @@ pub async fn get_active_organization_ids(pool: &PgPool) -> Result<Vec<Uuid>, DbE
 ///
 /// Returns [`DbError::ListProviderAccounts`] when the query fails, carrying
 /// the queried organization ID.
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 pub async fn get_provider_accounts(
     pool: &PgPool,
     org_id: Uuid,
 ) -> Result<Vec<ProviderAccount>, DbError> {
+    use DbErrorCtx as Ctx;
+
     let rows = sqlx::query(
         r"
         SELECT
@@ -264,7 +285,7 @@ pub async fn get_provider_accounts(
     .bind(org_id)
     .fetch_all(pool)
     .await
-    .map_err(|source| DbError::ListProviderAccounts { org_id, source })?;
+    .with_context(Ctx::list_provider_accounts(org_id))?;
 
     let accounts: Vec<ProviderAccount> = rows.into_iter().map(Into::into).collect();
 
@@ -280,7 +301,10 @@ pub async fn get_provider_accounts(
 ///
 /// Returns [`DbError::ListOrgUsers`] when the query fails, carrying the
 /// queried organization ID.
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 pub async fn get_org_users(pool: &PgPool, org_id: Uuid) -> Result<Vec<OrgUser>, DbError> {
+    use DbErrorCtx as Ctx;
+
     let rows = sqlx::query(
         r"
         SELECT u.username, u.email
@@ -293,7 +317,7 @@ pub async fn get_org_users(pool: &PgPool, org_id: Uuid) -> Result<Vec<OrgUser>, 
     .bind(org_id)
     .fetch_all(pool)
     .await
-    .map_err(|source| DbError::ListOrgUsers { org_id, source })?;
+    .with_context(Ctx::list_org_users(org_id))?;
 
     let users: Vec<OrgUser> = rows.into_iter().map(Into::into).collect();
 
@@ -308,10 +332,13 @@ pub async fn get_org_users(pool: &PgPool, org_id: Uuid) -> Result<Vec<OrgUser>, 
 ///
 /// Returns [`DbError::ListComputeResources`] when the query fails, carrying
 /// the queried organization ID.
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 pub async fn get_compute_resources(
     pool: &PgPool,
     org_id: Uuid,
 ) -> Result<Vec<ComputeResource>, DbError> {
+    use DbErrorCtx as Ctx;
+
     let rows = sqlx::query(
         r"
         SELECT 
@@ -332,7 +359,7 @@ pub async fn get_compute_resources(
     .bind(org_id)
     .fetch_all(pool)
     .await
-    .map_err(|source| DbError::ListComputeResources { org_id, source })?;
+    .with_context(Ctx::list_compute_resources(org_id))?;
 
     let resources: Vec<ComputeResource> = rows.into_iter().map(Into::into).collect();
 
@@ -345,11 +372,14 @@ pub async fn get_compute_resources(
 ///
 /// Returns [`DbError::FetchComputeResource`] when the query fails, carrying
 /// the queried organization and resource IDs.
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id, resource_id = %resource_id))]
 pub async fn get_compute_resource(
     pool: &PgPool,
     org_id: Uuid,
     resource_id: Uuid,
 ) -> Result<Option<ComputeResource>, DbError> {
+    use DbErrorCtx as Ctx;
+
     let row = sqlx::query(
         r"
         SELECT 
@@ -370,11 +400,7 @@ pub async fn get_compute_resource(
     .bind(org_id)
     .fetch_optional(pool)
     .await
-    .map_err(|source| DbError::FetchComputeResource {
-        org_id,
-        resource_id,
-        source,
-    })?;
+    .with_context(Ctx::fetch_compute_resource(org_id, resource_id))?;
 
     Ok(row.map(Into::into))
 }
@@ -417,17 +443,18 @@ mod tests {
     fn test_db_error_display_includes_context() {
         let err = DbError::ListComputeResources {
             org_id: Uuid::nil(),
-            source: sqlx::Error::RowNotFound,
+            location: std::panic::Location::caller(),
+            source: sqlx::Error::RowNotFound.into(),
         };
-        assert_eq!(
-            err.to_string(),
+        assert!(err.to_string().starts_with(
             "failed to list compute resources for organization 00000000-0000-0000-0000-000000000000"
-        );
+        ));
 
         let err = DbError::FetchComputeResource {
             org_id: Uuid::nil(),
             resource_id: Uuid::nil(),
-            source: sqlx::Error::RowNotFound,
+            location: std::panic::Location::caller(),
+            source: sqlx::Error::RowNotFound.into(),
         };
         assert!(
             err.to_string()

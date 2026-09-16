@@ -8,6 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -92,10 +93,40 @@ impl std::fmt::Debug for VerifyEmailQuery {
     }
 }
 
+/// Failure modes for [`get_user_status`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum GetUserStatusError {
+    #[error("could not read user status [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("user {user_id} has no status row [{location}]")]
+    NotFound { user_id: Uuid, location: Location },
+}
+
+impl IntoResponse for GetUserStatusError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            GetUserStatusError::Query { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            GetUserStatusError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found"),
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 pub async fn get_user_status(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
-) -> Result<Json<UserStatus>, StatusCode> {
+) -> Result<Json<UserStatus>, GetUserStatusError> {
+    use GetUserStatusErrorCtx as Ctx;
+
     let result: Option<UserStatusRow> = sqlx::query_as(
         "SELECT email_verified_at, payment_method_added_at, beta_code_id
          FROM users
@@ -104,13 +135,14 @@ pub async fn get_user_status(
     .bind(auth.user_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| {
-        tracing::error!("Failed to get user status: {:?}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    .inspect_err(|e| tracing::error!("Failed to get user status: {:?}", e))
+    .with_context(Ctx::query())?;
 
     let (email_verified_at, payment_method_added_at, alpha_code_id) =
-        result.ok_or(StatusCode::NOT_FOUND)?;
+        result.ok_or_else(|| GetUserStatusError::NotFound {
+            user_id: auth.user_id,
+            location: std::panic::Location::caller(),
+        })?;
 
     // Alpha users skip email verification AND payment
     let is_alpha_user = alpha_code_id.is_some();
@@ -137,11 +169,56 @@ pub async fn get_user_status(
     }))
 }
 
+/// Failure modes for [`send_verification_email`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum SendVerificationEmailError {
+    #[error("could not update user with verification token [{location}]")]
+    UpdateToken {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not read verification email throttle state [{location}]")]
+    ThrottleQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error(
+        "could not update verification email token for authenticated user {user_id} [{location}]"
+    )]
+    TokenNotUpdated { user_id: Uuid, location: Location },
+}
+
+impl IntoResponse for SendVerificationEmailError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            SendVerificationEmailError::UpdateToken { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            SendVerificationEmailError::ThrottleQuery { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            SendVerificationEmailError::TokenNotUpdated { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 pub async fn send_verification_email(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Json(payload): Json<SendVerificationRequest>,
-) -> Result<Json<SendVerificationResponse>, StatusCode> {
+) -> Result<Json<SendVerificationResponse>, SendVerificationEmailError> {
+    use SendVerificationEmailErrorCtx as Ctx;
+
     if let Err(e) = validate_email(&payload.email) {
         return Ok(Json(SendVerificationResponse {
             success: false,
@@ -168,10 +245,10 @@ pub async fn send_verification_email(
     .bind(auth.user_id)
     .execute(&state.db)
     .await
-    .map_err(|e| {
+    .inspect_err(|e| {
         tracing::error!("Failed to update user with verification token: {:?}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    })
+    .with_context(Ctx::update_token())?;
 
     if update_result.rows_affected() == 0 {
         let last_sent_at: Option<DateTime<Utc>> = sqlx::query_scalar(
@@ -182,10 +259,10 @@ pub async fn send_verification_email(
         .bind(auth.user_id)
         .fetch_optional(&state.db)
         .await
-        .map_err(|e| {
+        .inspect_err(|e| {
             tracing::error!("Failed to get verification email throttle state: {:?}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
+        })
+        .with_context(Ctx::throttle_query())?
         .flatten();
 
         if let EmailVerificationThrottle::Throttled { retry_after } =
@@ -201,7 +278,10 @@ pub async fn send_verification_email(
             "Failed to update verification email token for authenticated user {}",
             auth.user_id
         );
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        return Err(SendVerificationEmailError::TokenNotUpdated {
+            user_id: auth.user_id,
+            location: std::panic::Location::caller(),
+        });
     }
 
     let email_service_url =
@@ -245,10 +325,47 @@ pub async fn send_verification_email(
     }
 }
 
+/// Failure modes for [`verify_email`] (both source-bearing query failures).
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum VerifyEmailError {
+    #[error("could not find verification token [{location}]")]
+    FindToken {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not mark email as verified [{location}]")]
+    MarkVerified {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for VerifyEmailError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            VerifyEmailError::FindToken { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            VerifyEmailError::MarkVerified { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err)]
 pub async fn verify_email(
     State(state): State<Arc<AppState>>,
     Query(params): Query<VerifyEmailQuery>,
-) -> Result<Response, StatusCode> {
+) -> Result<Response, VerifyEmailError> {
+    use VerifyEmailErrorCtx as Ctx;
+
     let result: Option<(uuid::Uuid, DateTime<Utc>)> = sqlx::query_as(
         "SELECT id, email_verification_token_expires_at
          FROM users
@@ -258,10 +375,10 @@ pub async fn verify_email(
     .bind(&params.token)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| {
+    .inspect_err(|e| {
         tracing::error!("Failed to find verification token: {:?}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    })
+    .with_context(Ctx::find_token())?;
 
     let (user_id, expires_at) = match result {
         Some(r) => r,
@@ -288,10 +405,10 @@ pub async fn verify_email(
     .bind(user_id)
     .execute(&state.db)
     .await
-    .map_err(|e| {
+    .inspect_err(|e| {
         tracing::error!("Failed to mark email as verified: {:?}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    })
+    .with_context(Ctx::mark_verified())?;
 
     tracing::info!("Email verified for user {}", user_id);
 
@@ -367,15 +484,34 @@ a:hover {{ background: #333; }}
     Ok((StatusCode::OK, [("content-type", "text/html")], html).into_response())
 }
 
-pub async fn check_onboarding_status(db: &PgPool, user_id: uuid::Uuid) -> Result<bool, StatusCode> {
+/// Failure modes for [`check_onboarding_status`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum CheckOnboardingStatusError {
+    #[error("could not check onboarding status for user {user_id} [{location}]")]
+    Query {
+        user_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
+pub async fn check_onboarding_status(
+    db: &PgPool,
+    user_id: uuid::Uuid,
+) -> Result<bool, CheckOnboardingStatusError> {
+    use CheckOnboardingStatusErrorCtx as Ctx;
+
     let result: Option<bool> = sqlx::query_scalar("SELECT user_is_onboarded($1)")
         .bind(user_id)
         .fetch_optional(db)
         .await
-        .map_err(|e| {
+        .inspect_err(|e| {
             tracing::error!("Failed to check onboarding status: {:?}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        })
+        .with_context(Ctx::query(user_id))?;
 
     Ok(result.unwrap_or(false))
 }

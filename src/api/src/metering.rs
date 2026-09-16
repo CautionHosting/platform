@@ -1,14 +1,28 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{Context, Result, bail};
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use uuid::Uuid;
+
+/// Failure modes for [`upsert_tracked_resource`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum UpsertTrackedResourceError {
+    #[error("Failed to upsert tracked resource '{resource_id}' [{location}]")]
+    Upsert {
+        #[context(borrow = str)]
+        resource_id: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
 
 /// Upsert a tracked resource row for a compute resource that should accrue
 /// real-time metering. If a stopped row is resumed, reset billing timestamps so
 /// downtime is not charged.
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
 pub async fn upsert_tracked_resource(
     state: &crate::AppState,
     resource_id: &str,
@@ -19,7 +33,9 @@ pub async fn upsert_tracked_resource(
     instance_type: Option<&str>,
     region: Option<&str>,
     metadata: &serde_json::Value,
-) -> Result<()> {
+) -> Result<(), UpsertTrackedResourceError> {
+    use UpsertTrackedResourceErrorCtx as Ctx;
+
     sqlx::query(
         r#"
         INSERT INTO tracked_resources (
@@ -57,21 +73,50 @@ pub async fn upsert_tracked_resource(
     .bind(metadata)
     .execute(&state.db)
     .await
-    .context("Failed to upsert tracked resource")?;
+    .with_context(Ctx::upsert(resource_id))?;
 
     Ok(())
 }
 
+/// Failure modes for [`stop_tracked_resource`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum StopTrackedResourceError {
+    #[error("INTERNAL_SERVICE_SECRET must be set to stop tracked resources safely [{location}]")]
+    MissingSecret { location: Location },
+
+    #[error("Failed to call metering untrack endpoint [{location}]")]
+    SendRequest {
+        #[context(borrow = str)]
+        resource_id: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Metering untrack returned {status}: {body} [{location}]")]
+    UntrackFailed {
+        status: reqwest::StatusCode,
+        body: String,
+        location: Location,
+    },
+}
+
 /// Ask the metering service to collect any final usage and stop tracking a
 /// resource. Falls back to the configured internal service secret.
+#[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
 pub async fn stop_tracked_resource(
     internal_service_secret: Option<&str>,
     resource_id: &str,
-) -> Result<()> {
+) -> Result<(), StopTrackedResourceError> {
+    use StopTrackedResourceErrorCtx as Ctx;
+
     let metering_service_url = std::env::var("METERING_SERVICE_URL")
         .unwrap_or_else(|_| "http://metering:8083".to_string());
-    let internal_secret = internal_service_secret
-        .context("INTERNAL_SERVICE_SECRET must be set to stop tracked resources safely")?;
+    let internal_secret =
+        internal_service_secret.ok_or_else(|| StopTrackedResourceError::MissingSecret {
+            location: std::panic::Location::caller(),
+        })?;
 
     let response = reqwest::Client::new()
         .post(format!(
@@ -81,12 +126,16 @@ pub async fn stop_tracked_resource(
         .header("x-internal-service-secret", internal_secret)
         .send()
         .await
-        .context("Failed to call metering untrack endpoint")?;
+        .with_context(Ctx::send_request(resource_id))?;
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        bail!("Metering untrack returned {}: {}", status, body);
+        return Err(StopTrackedResourceError::UntrackFailed {
+            status,
+            body,
+            location: std::panic::Location::caller(),
+        });
     }
 
     Ok(())

@@ -1,22 +1,18 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use axum::{
-    Json,
-    http::StatusCode,
-    response::{IntoResponse, Response},
-};
-use serde::Serialize;
 use std::error::Error;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct Span {
     pub start: usize,
     pub end: usize,
 }
 
 impl Span {
+    #[allow(dead_code)]
     pub fn new(start: usize, end: usize) -> Self {
         Self { start, end }
     }
@@ -34,11 +30,9 @@ pub enum ValidationError {
         min: usize,
         max: usize,
         actual: usize,
-        span: Span,
     },
     AppNameInvalidChars {
         invalid_char: char,
-        span: Span,
     },
 
     OrgNameLength {
@@ -146,14 +140,7 @@ impl fmt::Display for ValidationError {
 impl Error for ValidationError {}
 
 impl ValidationError {
-    pub fn span(&self) -> Option<Span> {
-        match self {
-            Self::AppNameLength { span, .. } => Some(*span),
-            Self::AppNameInvalidChars { span, .. } => Some(*span),
-            _ => None,
-        }
-    }
-
+    #[allow(dead_code)]
     pub fn code(&self) -> &'static str {
         match self {
             Self::AppNameLength { .. } => "app_name_length",
@@ -174,67 +161,5 @@ impl ValidationError {
             Self::BranchNameLength { .. } => "branch_name_length",
             Self::BranchNameInvalidChars => "branch_name_invalid_chars",
         }
-    }
-
-    pub fn help(&self) -> Option<&'static str> {
-        match self {
-            Self::AppNameLength { .. } => Some("Choose a name with 3-63 characters"),
-            Self::AppNameInvalidChars { .. } => Some(
-                "Use only letters, numbers, hyphens, and underscores. Must start and end with alphanumeric.",
-            ),
-
-            Self::OrgNameInvalidChars => {
-                Some("Use only letters, numbers, spaces, hyphens, and underscores")
-            }
-
-            Self::UsernameInvalidChars => {
-                Some("Use only letters, numbers, hyphens, and underscores")
-            }
-
-            Self::InvalidRole { .. } => Some("Valid roles: owner, admin, member, viewer"),
-
-            Self::BranchNameInvalidChars => Some(
-                "Use only letters, numbers, slashes, underscores, dots, and hyphens. Must start with alphanumeric.",
-            ),
-
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub struct ErrorResponse {
-    pub error: String,
-    pub code: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub help: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub span: Option<SpanResponse>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SpanResponse {
-    pub start: usize,
-    pub end: usize,
-}
-
-impl From<&ValidationError> for ErrorResponse {
-    fn from(err: &ValidationError) -> Self {
-        Self {
-            error: err.to_string(),
-            code: err.code().to_string(),
-            help: err.help().map(String::from),
-            span: err.span().map(|s| SpanResponse {
-                start: s.start,
-                end: s.end,
-            }),
-        }
-    }
-}
-
-impl IntoResponse for ValidationError {
-    fn into_response(self) -> Response {
-        let body = Json(ErrorResponse::from(&self));
-        (StatusCode::BAD_REQUEST, body).into_response()
     }
 }

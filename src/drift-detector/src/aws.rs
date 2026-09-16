@@ -11,28 +11,39 @@
 use aws_config::SdkConfig;
 use aws_sdk_ec2::Client as Ec2Client;
 use aws_sdk_ec2::config::Region;
-use aws_sdk_ec2::error::SdkError as Ec2SdkError;
-use aws_sdk_ec2::operation::describe_instances::DescribeInstancesError;
-use aws_sdk_ec2::operation::describe_regions::DescribeRegionsError;
 use aws_sdk_ec2::types::{Filter, Instance, InstanceStateName};
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use std::collections::HashMap;
-use thiserror::Error;
 
 /// Error types for AWS API operations.
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error, CtxError)]
 pub enum AwsError {
     /// Failed to describe EC2 instances in a region.
-    #[error("failed to describe EC2 instances in region {region}")]
+    #[error("failed to describe EC2 instances in region {region} [{location}]")]
     DescribeInstances {
         /// The region that was queried.
+        #[allow(
+            missing_docs,
+            reason = "mirror of the owned context field on AwsErrorCtx"
+        )]
         region: String,
         /// The underlying AWS SDK error.
+        #[location]
+        location: Location,
+        /// The underlying AWS SDK error.
         #[source]
-        source: Box<Ec2SdkError<DescribeInstancesError>>,
+        source: BoxError,
     },
     /// Failed to discover the enabled AWS regions.
-    #[error("failed to discover enabled AWS regions")]
-    DescribeRegions(#[source] Box<Ec2SdkError<DescribeRegionsError>>),
+    #[error("failed to discover enabled AWS regions [{location}]")]
+    DescribeRegions {
+        /// The underlying AWS SDK error.
+        #[location]
+        location: Location,
+        /// The underlying AWS SDK error.
+        #[source]
+        source: BoxError,
+    },
 }
 
 /// Represents an EC2 instance in AWS.
@@ -183,6 +194,7 @@ impl Ec2Inspector {
     ///
     /// Returns [`AwsError::DescribeInstances`] when the AWS API call fails in
     /// the region this inspector is based in.
+    #[tracing::instrument(skip_all, err)]
     pub async fn describe_instances(
         &self,
         filters: &[Filter],
@@ -196,11 +208,14 @@ impl Ec2Inspector {
     /// # Errors
     ///
     /// Returns [`AwsError::DescribeInstances`] when the AWS API call fails.
+    #[tracing::instrument(skip_all, err)]
     async fn describe_instances_in_region(
         client: &Ec2Client,
         filters: &[Filter],
         region: &str,
     ) -> Result<Vec<Ec2Instance>, AwsError> {
+        use AwsErrorCtx as Ctx;
+
         let mut paginator = client
             .describe_instances()
             .set_filters(Some(filters.to_vec()))
@@ -210,10 +225,7 @@ impl Ec2Inspector {
         let mut instances = Vec::new();
 
         while let Some(page) = paginator.next().await {
-            let page = page.map_err(|source| AwsError::DescribeInstances {
-                region: region.to_string(),
-                source: Box::new(source),
-            })?;
+            let page = page.with_context(Ctx::describe_instances(region))?;
 
             for reservation in page.reservations() {
                 for instance in reservation.instances() {
@@ -234,6 +246,7 @@ impl Ec2Inspector {
     ///
     /// Returns [`AwsError::DescribeInstances`] when the AWS API call fails in
     /// the region this inspector is based in.
+    #[tracing::instrument(skip_all, err)]
     pub async fn describe_instance(
         &self,
         instance_id: &str,
@@ -255,6 +268,7 @@ impl Ec2Inspector {
     ///
     /// Returns [`AwsError::DescribeInstances`] when the AWS API call fails in
     /// the region this inspector is based in.
+    #[tracing::instrument(skip_all, err)]
     pub async fn list_running_instances(&self) -> Result<Vec<Ec2Instance>, AwsError> {
         let filters = vec![
             Filter::builder()
@@ -279,6 +293,7 @@ impl Ec2Inspector {
     ///
     /// Returns [`AwsError::DescribeInstances`] when the AWS API call fails in
     /// the region this inspector is based in.
+    #[tracing::instrument(skip_all, err)]
     pub async fn list_live_instances(&self) -> Result<Vec<Ec2Instance>, AwsError> {
         let filters = vec![live_instance_filter()];
 
@@ -293,14 +308,17 @@ impl Ec2Inspector {
     /// # Errors
     ///
     /// Returns [`AwsError::DescribeRegions`] when the AWS API call fails.
+    #[tracing::instrument(skip_all, err)]
     pub async fn enabled_regions(&self) -> Result<Vec<String>, AwsError> {
+        use AwsErrorCtx as Ctx;
+
         let output = self
             .client
             .describe_regions()
             .all_regions(true)
             .send()
             .await
-            .map_err(|source| AwsError::DescribeRegions(Box::new(source)))?;
+            .with_context(Ctx::describe_regions())?;
 
         let mut regions: Vec<String> = output
             .regions()
@@ -320,6 +338,7 @@ impl Ec2Inspector {
     ///
     /// Returns [`AwsError::DescribeInstances`] when the AWS API call fails in
     /// the given region.
+    #[tracing::instrument(skip_all, err)]
     pub async fn list_live_instances_in_region(
         &self,
         region: &str,
@@ -336,6 +355,7 @@ impl Ec2Inspector {
     ///
     /// Returns [`AwsError::DescribeInstances`] when the AWS API call fails in
     /// the region this inspector is based in.
+    #[tracing::instrument(skip_all, err)]
     pub async fn find_by_tag(&self, key: &str, value: &str) -> Result<Vec<Ec2Instance>, AwsError> {
         let filters = vec![
             Filter::builder()
@@ -420,6 +440,9 @@ impl std::fmt::Debug for Ec2Inspector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aws_sdk_ec2::error::SdkError as Ec2SdkError;
+    use aws_sdk_ec2::operation::describe_instances::DescribeInstancesError;
+    use aws_sdk_ec2::operation::describe_regions::DescribeRegionsError;
     use aws_sdk_ec2::types::Tag;
 
     #[test]
@@ -518,6 +541,7 @@ mod tests {
             source: Box::new(Ec2SdkError::<DescribeInstancesError>::construction_failure(
                 std::io::Error::other("boom"),
             )),
+            location: std::panic::Location::caller(),
         };
 
         let display = err.to_string();
@@ -529,14 +553,18 @@ mod tests {
 
     #[test]
     fn test_aws_error_describe_regions_display() {
-        let err = AwsError::DescribeRegions(Box::new(
-            Ec2SdkError::<DescribeRegionsError>::construction_failure(std::io::Error::other(
-                "boom",
+        let err = AwsError::DescribeRegions {
+            location: std::panic::Location::caller(),
+            source: Box::new(Ec2SdkError::<DescribeRegionsError>::construction_failure(
+                std::io::Error::other("boom"),
             )),
-        ));
+        };
 
         let display = err.to_string();
-        assert_eq!(display, "failed to discover enabled AWS regions");
+        assert!(
+            display.starts_with("failed to discover enabled AWS regions"),
+            "unexpected display: {display}"
+        );
     }
 
     #[test]

@@ -2,23 +2,77 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use crate::types;
-use anyhow::{Context, Result, bail};
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 const DEFAULT_ORGANIZATION_NAME: &str = "My organization";
 
-pub async fn initialize_user_account(pool: &PgPool, user_id: Uuid) -> Result<Uuid> {
+/// Failure modes for [`initialize_user_account`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum InitializeUserAccountError {
+    #[error("Failed to begin transaction [{location}]")]
+    BeginTransaction {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Failed to create organization [{location}]")]
+    CreateOrganization {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Failed to add user {user_id} as organization owner of {org_id} [{location}]")]
+    AddOwner {
+        org_id: Uuid,
+        user_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Failed to commit transaction [{location}]")]
+    Commit {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Failed to create provider account in database [{location}]")]
+    CreateProviderAccount {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Creates the default organization and owner membership for a user, then
+/// registers the shared root AWS provider account.
+#[tracing::instrument(skip_all, err, fields(user_id = %user_id))]
+pub async fn initialize_user_account(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Uuid, InitializeUserAccountError> {
+    use InitializeUserAccountErrorCtx as Ctx;
+
     tracing::info!("Initializing account for user_id: {}", user_id);
 
-    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
+    let mut tx = pool.begin().await.with_context(Ctx::begin_transaction())?;
 
     let org_id: Uuid =
         sqlx::query_scalar("INSERT INTO organizations (name) VALUES ($1) RETURNING id")
             .bind(DEFAULT_ORGANIZATION_NAME)
             .fetch_one(&mut *tx)
             .await
-            .context("Failed to create organization")?;
+            .with_context(Ctx::create_organization())?;
 
     tracing::info!("Created organization {} for user {}", org_id, user_id);
 
@@ -31,10 +85,10 @@ pub async fn initialize_user_account(pool: &PgPool, user_id: Uuid) -> Result<Uui
     .bind(types::UserRole::Owner)
     .execute(&mut *tx)
     .await
-    .context("Failed to add user as organization owner")?;
+    .with_context(Ctx::add_owner(org_id, user_id))?;
 
     // Commit the transaction before Terraform (so org exists even if Terraform fails)
-    tx.commit().await.context("Failed to commit transaction")?;
+    tx.commit().await.with_context(Ctx::commit())?;
 
     tracing::info!("Database transaction committed for org {}", org_id);
 
@@ -49,30 +103,66 @@ pub async fn initialize_user_account(pool: &PgPool, user_id: Uuid) -> Result<Uui
 
     create_provider_account(pool, org_id, &root_aws_account_id, None)
         .await
-        .context("Failed to create provider account in database")?;
+        .with_context(Ctx::create_provider_account())?;
 
     tracing::info!("Successfully initialized account for user {}", user_id);
 
     Ok(org_id)
 }
 
-pub fn validate_setup() -> Result<()> {
+/// Failure modes for [`validate_setup`] (leaf error: no underlying source).
+#[derive(Debug, thiserror::Error)]
+pub enum ValidateSetupError {
+    #[error("AWS_ACCESS_KEY_ID environment variable not set [{location}]")]
+    MissingAccessKeyId { location: Location },
+
+    #[error("AWS_SECRET_ACCESS_KEY environment variable not set [{location}]")]
+    MissingSecretAccessKey { location: Location },
+}
+
+/// Verifies the AWS credentials required for child-account provisioning are set.
+#[tracing::instrument(skip_all, err)]
+pub fn validate_setup() -> Result<(), ValidateSetupError> {
     if std::env::var("AWS_ACCESS_KEY_ID").is_err() {
-        bail!("AWS_ACCESS_KEY_ID environment variable not set");
+        return Err(ValidateSetupError::MissingAccessKeyId {
+            location: std::panic::Location::caller(),
+        });
     }
     if std::env::var("AWS_SECRET_ACCESS_KEY").is_err() {
-        bail!("AWS_SECRET_ACCESS_KEY environment variable not set");
+        return Err(ValidateSetupError::MissingSecretAccessKey {
+            location: std::panic::Location::caller(),
+        });
     }
 
     Ok(())
 }
 
+/// Failure modes for [`create_provider_account`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum CreateProviderAccountError {
+    #[error(
+        "Failed to insert provider account for org {org_id} (AWS account {aws_account_id}) [{location}]"
+    )]
+    Insert {
+        org_id: Uuid,
+        #[context(borrow = str)]
+        aws_account_id: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn create_provider_account(
     pool: &PgPool,
     org_id: Uuid,
     aws_account_id: &str,
     role_arn: Option<&str>,
-) -> Result<()> {
+) -> Result<(), CreateProviderAccountError> {
+    use CreateProviderAccountErrorCtx as Ctx;
+
     let description = if role_arn.is_some() {
         "AWS child account created via Terraform"
     } else {
@@ -92,7 +182,7 @@ async fn create_provider_account(
     .bind(role_arn)
     .execute(pool)
     .await
-    .context("Failed to insert provider account")?;
+    .with_context(Ctx::insert(org_id, aws_account_id))?;
 
     tracing::info!(
         "Created provider account for org {} with AWS account {}",
