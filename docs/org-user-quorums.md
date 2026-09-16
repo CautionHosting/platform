@@ -148,6 +148,14 @@ When stdout is redirected, `secret init`/`new` emits the proofed bundle JSON eve
 inside a project, in addition to saving `.caution/quorum-bundle.json`. Outside a
 project it always emits the JSON. Status messages go to stderr.
 
+Direct Keymaker creation saves the verified bundle locally before requesting
+authorization to upload it to Platform (unless `--no-upload` is set). The upload
+prompt displays the bundle ID, threshold, holder fingerprints and SHA-256 of the
+exact request body instead of dumping certificates and attestation bytes. The
+signature still covers the complete upload body. Successful upload prints a
+confirmation and repeats the local file paths. An upload failure does not require
+regenerating the bundle or calling another Keymaker.
+
 Uploads of existing proofed V1 bundles validate holder certificate eligibility at
 the authenticated generation timestamp; new bundles require eligibility today.
 For example, a January bundle can still be restored after one holder's key expires
