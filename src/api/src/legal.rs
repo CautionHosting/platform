@@ -5,8 +5,10 @@ use axum::{
     Json,
     extract::{Extension, State},
     http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Utc};
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
 use std::collections::{BTreeMap, HashSet};
@@ -77,26 +79,47 @@ pub struct PublicLegalDocumentSummary {
     pub url: String,
 }
 
+/// Failure modes for [`list_active_legal_documents`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum ListActiveLegalDocumentsError {
+    #[error("could not list active legal documents [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for ListActiveLegalDocumentsError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            ListActiveLegalDocumentsError::Query { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
 /// Public (unauthenticated) list of every currently-active document. The
 /// registration screen renders this list to build its "by creating an
 /// account, you agree to X and Y" notice, and signup records a consent
 /// event for exactly these documents — so what's presented and what's
 /// recorded always match, however many document types are configured.
+#[tracing::instrument(skip_all, err)]
 pub async fn list_active_legal_documents(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<Vec<PublicLegalDocumentSummary>>, (StatusCode, String)> {
+) -> Result<Json<Vec<PublicLegalDocumentSummary>>, ListActiveLegalDocumentsError> {
+    use ListActiveLegalDocumentsErrorCtx as Ctx;
+
     let rows: Vec<(String, Option<String>, String)> = sqlx::query_as(
         "SELECT document_type, title, url FROM legal_documents WHERE is_active = true ORDER BY document_type",
     )
     .fetch_all(&state.db)
     .await
-    .map_err(|e| {
-        tracing::error!("Failed to list active legal documents: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to load legal documents".to_string(),
-        )
-    })?;
+    .inspect_err(|e| tracing::error!("Failed to list active legal documents: {:?}", e))
+    .with_context(Ctx::query())?;
 
     Ok(Json(
         rows.into_iter()
@@ -150,9 +173,48 @@ pub struct SendLegalNoticesResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct EmailServiceResponse {
     success: bool,
     message: Option<String>,
+}
+
+/// Failure modes for [`RecipientSelection::from_request`] (all source-less
+/// domain failures).
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum RecipientSelectionError {
+    #[error("recipient_ids must not be empty [{location}]")]
+    EmptyIds {
+        #[location]
+        location: Location,
+    },
+
+    #[error("recipient_emails must not be empty [{location}]")]
+    EmptyEmails {
+        #[location]
+        location: Location,
+    },
+
+    #[error("recipient_emails must not contain empty values [{location}]")]
+    EmptyEmailValue {
+        #[location]
+        location: Location,
+    },
+
+    #[error("invalid recipient email '{email}' [{location}]")]
+    InvalidEmail {
+        email: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("limit must be greater than zero [{location}]")]
+    ZeroLimit {
+        #[location]
+        location: Location,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -163,13 +225,14 @@ struct RecipientSelection {
 }
 
 impl RecipientSelection {
-    fn from_request(request: &SendLegalNoticesRequest) -> Result<Self, (StatusCode, String)> {
+    fn from_request(request: &SendLegalNoticesRequest) -> Result<Self, RecipientSelectionError> {
+        use RecipientSelectionErrorCtx as Ctx;
+
         let recipient_ids = match request.recipient_ids.as_ref() {
             Some(ids) if ids.is_empty() => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "recipient_ids must not be empty".to_string(),
-                ));
+                return Err(RecipientSelectionError::EmptyIds {
+                    location: std::panic::Location::caller(),
+                });
             }
             Some(ids) => Some(ids.clone()),
             None => None,
@@ -177,27 +240,20 @@ impl RecipientSelection {
 
         let recipient_emails = match request.recipient_emails.as_ref() {
             Some(emails) if emails.is_empty() => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "recipient_emails must not be empty".to_string(),
-                ));
+                return Err(RecipientSelectionError::EmptyEmails {
+                    location: std::panic::Location::caller(),
+                });
             }
             Some(emails) => {
                 let mut normalized = Vec::with_capacity(emails.len());
                 for email in emails {
                     let trimmed = email.trim().to_lowercase();
                     if trimmed.is_empty() {
-                        return Err((
-                            StatusCode::BAD_REQUEST,
-                            "recipient_emails must not contain empty values".to_string(),
-                        ));
+                        return Err(RecipientSelectionError::EmptyEmailValue {
+                            location: std::panic::Location::caller(),
+                        });
                     }
-                    validate_email(&trimmed).map_err(|e| {
-                        (
-                            StatusCode::BAD_REQUEST,
-                            format!("Invalid recipient email '{}': {}", email, e),
-                        )
-                    })?;
+                    validate_email(&trimmed).with_context(Ctx::invalid_email(email.as_str()))?;
                     normalized.push(trimmed);
                 }
                 normalized.sort_unstable();
@@ -209,10 +265,9 @@ impl RecipientSelection {
 
         let limit = match request.limit {
             Some(0) => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "limit must be greater than zero".to_string(),
-                ));
+                return Err(RecipientSelectionError::ZeroLimit {
+                    location: std::panic::Location::caller(),
+                });
             }
             Some(limit) => Some(i64::from(limit)),
             None => None,
@@ -261,11 +316,27 @@ fn legal_notice_dedupe_key(document_ids: &[Uuid]) -> String {
     ids.join(";")
 }
 
+/// Failure modes for [`get_active_document`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum GetActiveDocumentError {
+    #[error("could not query active legal document '{document_type}' [{location}]")]
+    Query {
+        document_type: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
 /// Get the active version for a document type, or None if no active version exists.
+#[tracing::instrument(skip_all, err)]
 async fn get_active_document(
     pool: &PgPool,
     document_type: &str,
-) -> Result<Option<ActiveLegalDocument>, sqlx::Error> {
+) -> Result<Option<ActiveLegalDocument>, GetActiveDocumentError> {
+    use GetActiveDocumentErrorCtx as Ctx;
+
     sqlx::query_as(
         "SELECT id, version, title, url, requires_blocking_reacceptance, requires_acknowledgment
          FROM legal_documents
@@ -274,6 +345,20 @@ async fn get_active_document(
     .bind(document_type)
     .fetch_optional(pool)
     .await
+    .with_context(Ctx::query(document_type))
+}
+
+/// Failure modes for [`get_latest_user_document_by_type`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum GetLatestUserDocumentByTypeError {
+    #[error("could not query latest user legal document '{document_type}' [{location}]")]
+    Query {
+        document_type: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
 /// Get the user's most recent legal event for a document type, of any
@@ -285,11 +370,14 @@ async fn get_active_document(
 /// "notice_shown"; if either were ever the most recent row for a document,
 /// an unfiltered "most recent event of any type" query would treat it as
 /// satisfying the document and clear requires_action without real consent.
+#[tracing::instrument(skip_all, err)]
 async fn get_latest_user_document_by_type(
     pool: &PgPool,
     user_id: Uuid,
     document_type: &str,
-) -> Result<Option<LegalDocumentIdentity>, sqlx::Error> {
+) -> Result<Option<LegalDocumentIdentity>, GetLatestUserDocumentByTypeError> {
+    use GetLatestUserDocumentByTypeErrorCtx as Ctx;
+
     sqlx::query_as(
         "SELECT
             legal_document_id AS id,
@@ -306,6 +394,164 @@ async fn get_latest_user_document_by_type(
     .bind(document_type)
     .fetch_optional(pool)
     .await
+    .with_context(Ctx::query(document_type))
+}
+
+/// Failure modes for [`user_predates_legal_tracking`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum UserPredatesLegalTrackingError {
+    #[error("could not query legal event history [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// True if the user has no legal event history at all (registered before
+/// legal tracking existed), as opposed to having history for other document
+/// types but not this one. See `compute_document_status` for why this
+/// distinction matters.
+#[tracing::instrument(skip_all, err)]
+async fn user_predates_legal_tracking(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<bool, UserPredatesLegalTrackingError> {
+    use UserPredatesLegalTrackingErrorCtx as Ctx;
+
+    let has_any_event: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_legal_events WHERE user_id = $1)")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await
+            .with_context(Ctx::query())?;
+    Ok(!has_any_event)
+}
+
+/// Failure modes for [`get_user_legal_status`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum GetUserLegalStatusError {
+    #[error("could not query active document types [{location}]")]
+    QueryTypes {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not check legal tracking history [{location}]")]
+    PredatesTracking {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not load active legal document [{location}]")]
+    ActiveDocument {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not load latest user legal document [{location}]")]
+    UserDocument {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Get the full legal status for a user across every document type that
+/// currently has an active version.
+#[tracing::instrument(skip_all, err)]
+pub async fn get_user_legal_status(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<UserLegalStatus, GetUserLegalStatusError> {
+    use GetUserLegalStatusErrorCtx as Ctx;
+
+    let document_types: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT document_type FROM legal_documents WHERE is_active = true ORDER BY document_type",
+    )
+    .fetch_all(pool)
+    .await
+    .with_context(Ctx::query_types())?;
+
+    let predates_tracking = user_predates_legal_tracking(pool, user_id)
+        .await
+        .with_context(Ctx::predates_tracking())?;
+
+    let mut status = BTreeMap::new();
+    for document_type in document_types {
+        let active = get_active_document(pool, &document_type)
+            .await
+            .with_context(Ctx::active_document())?;
+        let user_doc = get_latest_user_document_by_type(pool, user_id, &document_type)
+            .await
+            .with_context(Ctx::user_document())?;
+        status.insert(
+            document_type.clone(),
+            compute_document_status(&document_type, active.as_ref(), user_doc, predates_tracking),
+        );
+    }
+
+    Ok(status)
+}
+
+/// Failure modes for [`get_blocking_document_requiring_acceptance`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum GetBlockingDocumentRequiringAcceptanceError {
+    #[error("could not fetch legal status [{location}]")]
+    LegalStatus {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not query blocking document types [{location}]")]
+    QueryBlocking {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
+pub async fn get_blocking_document_requiring_acceptance(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Option<String>, GetBlockingDocumentRequiringAcceptanceError> {
+    use GetBlockingDocumentRequiringAcceptanceErrorCtx as Ctx;
+
+    let legal = get_user_legal_status(pool, user_id)
+        .await
+        .with_context(Ctx::legal_status())?;
+
+    let blocking_types: Vec<String> = sqlx::query_scalar(
+        "SELECT document_type FROM legal_documents
+         WHERE is_active = true AND requires_blocking_reacceptance = true
+         ORDER BY document_type",
+    )
+    .fetch_all(pool)
+    .await
+    .with_context(Ctx::query_blocking())?;
+
+    for document_type in blocking_types {
+        if legal
+            .get(&document_type)
+            .is_some_and(|status| status.requires_action)
+        {
+            return Ok(Some(document_type));
+        }
+    }
+
+    Ok(None)
 }
 
 /// Compute legal status for a single document type.
@@ -367,72 +613,6 @@ fn compute_document_status(
     }
 }
 
-/// True if the user has no legal event history at all (registered before
-/// legal tracking existed), as opposed to having history for other document
-/// types but not this one. See `compute_document_status` for why this
-/// distinction matters.
-async fn user_predates_legal_tracking(pool: &PgPool, user_id: Uuid) -> Result<bool, sqlx::Error> {
-    let has_any_event: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM user_legal_events WHERE user_id = $1)")
-            .bind(user_id)
-            .fetch_one(pool)
-            .await?;
-    Ok(!has_any_event)
-}
-
-/// Get the full legal status for a user across every document type that
-/// currently has an active version.
-pub async fn get_user_legal_status(
-    pool: &PgPool,
-    user_id: Uuid,
-) -> Result<UserLegalStatus, sqlx::Error> {
-    let document_types: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT document_type FROM legal_documents WHERE is_active = true ORDER BY document_type",
-    )
-    .fetch_all(pool)
-    .await?;
-
-    let predates_tracking = user_predates_legal_tracking(pool, user_id).await?;
-
-    let mut status = BTreeMap::new();
-    for document_type in document_types {
-        let active = get_active_document(pool, &document_type).await?;
-        let user_doc = get_latest_user_document_by_type(pool, user_id, &document_type).await?;
-        status.insert(
-            document_type.clone(),
-            compute_document_status(&document_type, active.as_ref(), user_doc, predates_tracking),
-        );
-    }
-
-    Ok(status)
-}
-
-pub async fn get_blocking_document_requiring_acceptance(
-    pool: &PgPool,
-    user_id: Uuid,
-) -> Result<Option<String>, sqlx::Error> {
-    let legal = get_user_legal_status(pool, user_id).await?;
-
-    let blocking_types: Vec<String> = sqlx::query_scalar(
-        "SELECT document_type FROM legal_documents
-         WHERE is_active = true AND requires_blocking_reacceptance = true
-         ORDER BY document_type",
-    )
-    .fetch_all(pool)
-    .await?;
-
-    for document_type in blocking_types {
-        if legal
-            .get(&document_type)
-            .is_some_and(|status| status.requires_action)
-        {
-            return Ok(Some(document_type));
-        }
-    }
-
-    Ok(None)
-}
-
 #[derive(Debug, Deserialize)]
 pub struct AcceptLegalRequest {
     pub document_type: String,
@@ -447,29 +627,78 @@ pub struct AcceptLegalResponse {
     pub legal: UserLegalStatus,
 }
 
+/// Failure modes for [`accept_legal_document`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum AcceptLegalDocumentError {
+    #[error("could not query active legal version [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("no active '{document_type}' document found [{location}]")]
+    NotFound {
+        document_type: String,
+        #[location]
+        location: Location,
+    },
+
+    #[error("could not record legal event [{location}]")]
+    RecordEvent {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not fetch updated legal status [{location}]")]
+    FetchStatus {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for AcceptLegalDocumentError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            AcceptLegalDocumentError::Query { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            AcceptLegalDocumentError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found"),
+            AcceptLegalDocumentError::RecordEvent { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            AcceptLegalDocumentError::FetchStatus { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
 /// Accept/acknowledge the current active version of a legal document.
 /// Records an append-only event and returns the updated legal status.
+#[tracing::instrument(skip_all, err, fields(document_type = %payload.document_type))]
 pub async fn accept_legal_document(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     headers: HeaderMap,
     Json(payload): Json<AcceptLegalRequest>,
-) -> Result<Json<AcceptLegalResponse>, (StatusCode, String)> {
+) -> Result<Json<AcceptLegalResponse>, AcceptLegalDocumentError> {
+    use AcceptLegalDocumentErrorCtx as Ctx;
+
     let active_document = get_active_document(&state.db, &payload.document_type)
         .await
-        .map_err(|e| {
-            tracing::error!("Failed to get active legal version: {:?}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to query legal documents".to_string(),
-            )
-        })?;
+        .inspect_err(|e| tracing::error!("Failed to get active legal version: {:?}", e))
+        .with_context(Ctx::query())?;
 
-    let active_document = active_document.ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            format!("No active {} document found", payload.document_type),
-        )
+    let active_document = active_document.ok_or_else(|| AcceptLegalDocumentError::NotFound {
+        document_type: payload.document_type.clone(),
+        location: std::panic::Location::caller(),
     })?;
     let version = active_document.version.clone();
 
@@ -499,13 +728,8 @@ pub async fn accept_legal_document(
     .bind(session_id)
     .execute(&state.db)
     .await
-    .map_err(|e| {
-        tracing::error!("Failed to record legal event: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to record legal acceptance".to_string(),
-        )
-    })?;
+    .inspect_err(|e| tracing::error!("Failed to record legal event: {:?}", e))
+    .with_context(Ctx::record_event())?;
 
     tracing::info!(
         "User {} {} {} version {}",
@@ -517,13 +741,8 @@ pub async fn accept_legal_document(
 
     let legal = get_user_legal_status(&state.db, auth.user_id)
         .await
-        .map_err(|e| {
-            tracing::error!("Failed to fetch updated legal status: {:?}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to fetch legal status".to_string(),
-            )
-        })?;
+        .inspect_err(|e| tracing::error!("Failed to fetch updated legal status: {:?}", e))
+        .with_context(Ctx::fetch_status())?;
 
     Ok(Json(AcceptLegalResponse {
         success: true,
@@ -534,13 +753,143 @@ pub async fn accept_legal_document(
     }))
 }
 
+/// Failure modes for [`send_legal_notices`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum SendLegalNoticesError {
+    #[error("invalid legal notice request [{location}]")]
+    InvalidRequest {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not load legal notice documents [{location}]")]
+    DocumentsQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not query legal notice batch [{location}]")]
+    BatchQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not create legal notice batch [{location}]")]
+    BatchUpsert {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not count legal notice recipients [{location}]")]
+    CountRecipients {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not count legal notice deliveries [{location}]")]
+    CountSent {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not count pending legal notice recipients [{location}]")]
+    CountPending {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not load legal notice recipients [{location}]")]
+    LoadRecipients {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not create legal notice batch [{location}]")]
+    BatchMissing {
+        #[location]
+        location: Location,
+    },
+
+    #[error("could not record legal notice delivery [{location}]")]
+    RecordDelivery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for SendLegalNoticesError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            SendLegalNoticesError::InvalidRequest { .. } => {
+                (StatusCode::BAD_REQUEST, "bad request")
+            }
+            SendLegalNoticesError::DocumentsQuery { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            SendLegalNoticesError::BatchQuery { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            SendLegalNoticesError::BatchUpsert { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            SendLegalNoticesError::CountRecipients { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            SendLegalNoticesError::CountSent { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            SendLegalNoticesError::CountPending { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            SendLegalNoticesError::LoadRecipients { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            SendLegalNoticesError::BatchMissing { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            SendLegalNoticesError::RecordDelivery { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err)]
 pub async fn send_legal_notices(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<SendLegalNoticesRequest>,
-) -> Result<Json<SendLegalNoticesResponse>, (StatusCode, String)> {
-    let recipient_selection = RecipientSelection::from_request(&payload)?;
-    let documents = load_legal_notice_documents(&state.db, payload.document_ids.as_deref()).await?;
-    let document_ids = legal_notice_document_ids(&documents)?;
+) -> Result<Json<SendLegalNoticesResponse>, SendLegalNoticesError> {
+    use SendLegalNoticesErrorCtx as Ctx;
+
+    let recipient_selection =
+        RecipientSelection::from_request(&payload).with_context(Ctx::invalid_request())?;
+    let documents_result =
+        load_legal_notice_documents(&state.db, payload.document_ids.as_deref()).await;
+    let ctx = match &documents_result {
+        Err(LoadLegalNoticeDocumentsError::Query { .. }) => Ctx::documents_query(),
+        _ => Ctx::invalid_request(),
+    };
+    let documents = documents_result.with_context(ctx)?;
+    let document_ids = legal_notice_document_ids(&documents).with_context(Ctx::invalid_request())?;
     let dedupe_key = legal_notice_dedupe_key(&document_ids);
 
     let existing_batch_id: Option<Uuid> =
@@ -548,41 +897,44 @@ pub async fn send_legal_notices(
             .bind(&dedupe_key)
             .fetch_optional(&state.db)
             .await
-            .map_err(|e| {
-                tracing::error!("Failed to query legal notice batch: {:?}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to query legal notice batch".to_string(),
-                )
-            })?;
+            .inspect_err(|e| tracing::error!("Failed to query legal notice batch: {:?}", e))
+            .with_context(Ctx::batch_query())?;
 
     let dry_run_batch_id = existing_batch_id;
     let batch_id = if payload.dry_run {
         dry_run_batch_id
     } else {
-        Some(upsert_legal_notice_batch(&state.db, &dedupe_key, &document_ids).await?)
+        Some(
+            upsert_legal_notice_batch(&state.db, &dedupe_key, &document_ids)
+                .await
+                .with_context(Ctx::batch_upsert())?,
+        )
     };
 
-    let eligible_recipient_count =
-        count_legal_notice_recipients(&state.db, &recipient_selection).await?;
+    let eligible_recipient_count = count_legal_notice_recipients(&state.db, &recipient_selection)
+        .await
+        .with_context(Ctx::count_recipients())?;
     let already_sent_count = count_sent_legal_notice_deliveries(
         &state.db,
         batch_id.or(existing_batch_id),
         &recipient_selection,
     )
-    .await?;
+    .await
+    .with_context(Ctx::count_sent())?;
     let pending_recipient_count = count_pending_legal_notice_recipients(
         &state.db,
         batch_id.or(existing_batch_id),
         &recipient_selection,
     )
-    .await?;
+    .await
+    .with_context(Ctx::count_pending())?;
     let recipients = load_pending_legal_notice_recipients(
         &state.db,
         batch_id.or(existing_batch_id),
         &recipient_selection,
     )
-    .await?;
+    .await
+    .with_context(Ctx::load_recipients())?;
     let selected_recipient_count = recipients.len() as i64;
     let has_more = pending_recipient_count > selected_recipient_count;
 
@@ -615,11 +967,8 @@ pub async fn send_legal_notices(
         }));
     }
 
-    let batch_id = batch_id.ok_or_else(|| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to create legal notice batch".to_string(),
-        )
+    let batch_id = batch_id.ok_or_else(|| SendLegalNoticesError::BatchMissing {
+        location: std::panic::Location::caller(),
     })?;
 
     let email_service_url =
@@ -640,18 +989,7 @@ pub async fn send_legal_notices(
             "data": email_data.clone(),
         });
 
-        let delivery_result = send_legal_notice_email(&client, &email_service_url, &email_request)
-            .await
-            .map_err(|e| {
-                tracing::warn!(
-                    "Failed to send legal notice email to user {}: {}",
-                    recipient.id,
-                    e
-                );
-                e
-            });
-
-        match delivery_result {
+        match send_legal_notice_email(&client, &email_service_url, &email_request).await {
             Ok(()) => {
                 sent_count += 1;
                 record_legal_notice_delivery(
@@ -662,9 +1000,15 @@ pub async fn send_legal_notices(
                     "sent",
                     None,
                 )
-                .await?;
+                .await
+                .with_context(Ctx::record_delivery())?;
             }
-            Err(e) => {
+            Err(error) => {
+                tracing::warn!(
+                    "Failed to send legal notice email to user {}: {:?}",
+                    recipient.id,
+                    error
+                );
                 failed_count += 1;
                 record_legal_notice_delivery(
                     &state.db,
@@ -672,9 +1016,10 @@ pub async fn send_legal_notices(
                     recipient.id,
                     &recipient.email,
                     "failed",
-                    Some(&e),
+                    Some(error.message()),
                 )
-                .await?;
+                .await
+                .with_context(Ctx::record_delivery())?;
             }
         }
     }
@@ -694,16 +1039,50 @@ pub async fn send_legal_notices(
     }))
 }
 
+/// Failure modes for [`load_legal_notice_documents`]. The `EmptyIds`,
+/// `NoneSelected`, and `CountMismatch` variants are source-less domain
+/// failures; only `Query` carries an underlying error.
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum LoadLegalNoticeDocumentsError {
+    #[error("document_ids must not be empty [{location}]")]
+    EmptyIds {
+        #[location]
+        location: Location,
+    },
+
+    #[error("could not load legal notice documents [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("no legal documents selected for notice [{location}]")]
+    NoneSelected {
+        #[location]
+        location: Location,
+    },
+
+    #[error("one or more document_ids were not found [{location}]")]
+    CountMismatch {
+        #[location]
+        location: Location,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn load_legal_notice_documents(
     pool: &PgPool,
     document_ids: Option<&[Uuid]>,
-) -> Result<Vec<LegalNoticeDocument>, (StatusCode, String)> {
+) -> Result<Vec<LegalNoticeDocument>, LoadLegalNoticeDocumentsError> {
+    use LoadLegalNoticeDocumentsErrorCtx as Ctx;
+
     let documents = if let Some(document_ids) = document_ids {
         if document_ids.is_empty() {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "document_ids must not be empty".to_string(),
-            ));
+            return Err(LoadLegalNoticeDocumentsError::EmptyIds {
+                location: std::panic::Location::caller(),
+            });
         }
 
         sqlx::query_as::<_, LegalNoticeDocument>(
@@ -739,65 +1118,106 @@ async fn load_legal_notice_documents(
         .fetch_all(pool)
         .await
     }
-    .map_err(|e| {
-        tracing::error!("Failed to load legal notice documents: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to load legal notice documents".to_string(),
-        )
-    })?;
+    .inspect_err(|e| tracing::error!("Failed to load legal notice documents: {:?}", e))
+    .with_context(Ctx::query())?;
 
     if documents.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "No legal documents selected for notice".to_string(),
-        ));
+        return Err(LoadLegalNoticeDocumentsError::NoneSelected {
+            location: std::panic::Location::caller(),
+        });
     }
 
     if let Some(document_ids) = document_ids
         && documents.len() != document_ids.len()
     {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "One or more document_ids were not found".to_string(),
-        ));
+        return Err(LoadLegalNoticeDocumentsError::CountMismatch {
+            location: std::panic::Location::caller(),
+        });
     }
 
     Ok(documents)
 }
 
+/// Failure modes for [`legal_notice_document_ids`] (source-less domain
+/// failure). Leaf error: no source-bearing variant, so it derives only
+/// `thiserror` and is hand-built at its single call site.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum LegalNoticeDocumentIdsError {
+    #[error("legal notice batches can include at most one document of each type [{location}]")]
+    DuplicateType { location: Location },
+}
+
 /// Validate at most one document per type in a notice batch, and collect
 /// their ids. Generalized over an arbitrary set of document types instead
 /// of two named slots.
+#[tracing::instrument(skip_all, err)]
 fn legal_notice_document_ids(
     documents: &[LegalNoticeDocument],
-) -> Result<Vec<Uuid>, (StatusCode, String)> {
+) -> Result<Vec<Uuid>, LegalNoticeDocumentIdsError> {
     let mut seen_types = HashSet::with_capacity(documents.len());
 
     for document in documents {
         if !seen_types.insert(document.document_type.as_str()) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "Legal notice batches can include at most one document of each type".to_string(),
-            ));
+            return Err(LegalNoticeDocumentIdsError::DuplicateType {
+                location: std::panic::Location::caller(),
+            });
         }
     }
 
     Ok(documents.iter().map(|document| document.id).collect())
 }
 
+/// Failure modes for [`upsert_legal_notice_batch`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum UpsertLegalNoticeBatchError {
+    #[error("failed to start legal notice batch transaction [{location}]")]
+    Begin {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to upsert legal notice batch [{location}]")]
+    Insert {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to link legal notice batch document [{location}]")]
+    Link {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to commit legal notice batch [{location}]")]
+    Commit {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn upsert_legal_notice_batch(
     pool: &PgPool,
     dedupe_key: &str,
     document_ids: &[Uuid],
-) -> Result<Uuid, (StatusCode, String)> {
-    let mut tx = pool.begin().await.map_err(|e| {
-        tracing::error!("Failed to start legal notice batch transaction: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to create legal notice batch".to_string(),
-        )
-    })?;
+) -> Result<Uuid, UpsertLegalNoticeBatchError> {
+    use UpsertLegalNoticeBatchErrorCtx as Ctx;
+
+    let mut tx = pool
+        .begin()
+        .await
+        .inspect_err(|e| {
+            tracing::error!("Failed to start legal notice batch transaction: {:?}", e);
+        })
+        .with_context(Ctx::begin())?;
 
     let batch_id: Uuid = sqlx::query_scalar(
         "INSERT INTO legal_notice_batches (dedupe_key)
@@ -809,13 +1229,8 @@ async fn upsert_legal_notice_batch(
     .bind(dedupe_key)
     .fetch_one(&mut *tx)
     .await
-    .map_err(|e| {
-        tracing::error!("Failed to upsert legal notice batch: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to create legal notice batch".to_string(),
-        )
-    })?;
+    .inspect_err(|e| tracing::error!("Failed to upsert legal notice batch: {:?}", e))
+    .with_context(Ctx::insert())?;
 
     for document_id in document_ids {
         sqlx::query(
@@ -827,30 +1242,39 @@ async fn upsert_legal_notice_batch(
         .bind(document_id)
         .execute(&mut *tx)
         .await
-        .map_err(|e| {
+        .inspect_err(|e| {
             tracing::error!("Failed to link legal notice batch document: {:?}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to create legal notice batch".to_string(),
-            )
-        })?;
+        })
+        .with_context(Ctx::link())?;
     }
 
-    tx.commit().await.map_err(|e| {
-        tracing::error!("Failed to commit legal notice batch: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to create legal notice batch".to_string(),
-        )
-    })?;
+    tx.commit()
+        .await
+        .inspect_err(|e| tracing::error!("Failed to commit legal notice batch: {:?}", e))
+        .with_context(Ctx::commit())?;
 
     Ok(batch_id)
 }
 
+/// Failure modes for [`count_legal_notice_recipients`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum CountLegalNoticeRecipientsError {
+    #[error("failed to count legal notice recipients [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn count_legal_notice_recipients(
     pool: &PgPool,
     recipient_selection: &RecipientSelection,
-) -> Result<i64, (StatusCode, String)> {
+) -> Result<i64, CountLegalNoticeRecipientsError> {
+    use CountLegalNoticeRecipientsErrorCtx as Ctx;
+
     sqlx::query_scalar(
         "SELECT COUNT(*)
          FROM users
@@ -867,20 +1291,30 @@ async fn count_legal_notice_recipients(
     .bind(recipient_selection.recipient_emails.clone())
     .fetch_one(pool)
     .await
-    .map_err(|e| {
-        tracing::error!("Failed to count legal notice recipients: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to count legal notice recipients".to_string(),
-        )
-    })
+    .inspect_err(|e| tracing::error!("Failed to count legal notice recipients: {:?}", e))
+    .with_context(Ctx::query())
 }
 
+/// Failure modes for [`count_sent_legal_notice_deliveries`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum CountSentLegalNoticeDeliveriesError {
+    #[error("failed to count legal notice deliveries [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn count_sent_legal_notice_deliveries(
     pool: &PgPool,
     batch_id: Option<Uuid>,
     recipient_selection: &RecipientSelection,
-) -> Result<i64, (StatusCode, String)> {
+) -> Result<i64, CountSentLegalNoticeDeliveriesError> {
+    use CountSentLegalNoticeDeliveriesErrorCtx as Ctx;
+
     let Some(batch_id) = batch_id else {
         return Ok(0);
     };
@@ -905,20 +1339,30 @@ async fn count_sent_legal_notice_deliveries(
     .bind(recipient_selection.recipient_emails.clone())
     .fetch_one(pool)
     .await
-    .map_err(|e| {
-        tracing::error!("Failed to count legal notice deliveries: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to count legal notice deliveries".to_string(),
-        )
-    })
+    .inspect_err(|e| tracing::error!("Failed to count legal notice deliveries: {:?}", e))
+    .with_context(Ctx::query())
 }
 
+/// Failure modes for [`count_pending_legal_notice_recipients`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum CountPendingLegalNoticeRecipientsError {
+    #[error("failed to count pending legal notice recipients [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn count_pending_legal_notice_recipients(
     pool: &PgPool,
     batch_id: Option<Uuid>,
     recipient_selection: &RecipientSelection,
-) -> Result<i64, (StatusCode, String)> {
+) -> Result<i64, CountPendingLegalNoticeRecipientsError> {
+    use CountPendingLegalNoticeRecipientsErrorCtx as Ctx;
+
     sqlx::query_scalar(
         "SELECT COUNT(*)
          FROM users
@@ -946,20 +1390,30 @@ async fn count_pending_legal_notice_recipients(
     .bind(batch_id)
     .fetch_one(pool)
     .await
-    .map_err(|e| {
-        tracing::error!("Failed to count pending legal notice recipients: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to count pending legal notice recipients".to_string(),
-        )
-    })
+    .inspect_err(|e| tracing::error!("Failed to count pending legal notice recipients: {:?}", e))
+    .with_context(Ctx::query())
 }
 
+/// Failure modes for [`load_pending_legal_notice_recipients`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum LoadPendingLegalNoticeRecipientsError {
+    #[error("failed to load legal notice recipients [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn load_pending_legal_notice_recipients(
     pool: &PgPool,
     batch_id: Option<Uuid>,
     recipient_selection: &RecipientSelection,
-) -> Result<Vec<LegalNoticeRecipient>, (StatusCode, String)> {
+) -> Result<Vec<LegalNoticeRecipient>, LoadPendingLegalNoticeRecipientsError> {
+    use LoadPendingLegalNoticeRecipientsErrorCtx as Ctx;
+
     sqlx::query_as::<_, LegalNoticeRecipient>(
         "SELECT id, email
          FROM users
@@ -990,13 +1444,8 @@ async fn load_pending_legal_notice_recipients(
     .bind(recipient_selection.limit_or_max())
     .fetch_all(pool)
     .await
-    .map_err(|e| {
-        tracing::error!("Failed to load legal notice recipients: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to load legal notice recipients".to_string(),
-        )
-    })
+    .inspect_err(|e| tracing::error!("Failed to load legal notice recipients: {:?}", e))
+    .with_context(Ctx::query())
 }
 
 fn build_legal_notice_email_data(documents: &[LegalNoticeDocument]) -> serde_json::Value {
@@ -1026,37 +1475,103 @@ fn build_legal_notice_email_data(documents: &[LegalNoticeDocument]) -> serde_jso
     })
 }
 
+/// Failure modes for [`send_legal_notice_email`]. The `ErrorStatus` and
+/// `Unsuccessful` variants are source-less domain failures.
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum SendLegalNoticeEmailError {
+    #[error("email service request failed [{location}]")]
+    Request {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("email service returned error status {status} [{location}]")]
+    ErrorStatus {
+        status: reqwest::StatusCode,
+        #[location]
+        location: Location,
+    },
+
+    #[error("could not parse email service response [{location}]")]
+    Parse {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("email service reported unsuccessful delivery [{location}]")]
+    Unsuccessful {
+        #[location]
+        location: Location,
+    },
+}
+
+impl SendLegalNoticeEmailError {
+    /// Fixed wording recorded in the delivery log; never the underlying
+    /// source or the internal location segment.
+    pub(crate) fn message(&self) -> &'static str {
+        match self {
+            Self::Request { .. } => "email service request failed",
+            Self::ErrorStatus { .. } => "email service returned an error status",
+            Self::Parse { .. } => "could not parse email service response",
+            Self::Unsuccessful { .. } => "email service reported unsuccessful delivery",
+        }
+    }
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn send_legal_notice_email(
     client: &reqwest::Client,
     email_service_url: &str,
     email_request: &serde_json::Value,
-) -> Result<(), String> {
+) -> Result<(), SendLegalNoticeEmailError> {
+    use SendLegalNoticeEmailErrorCtx as Ctx;
+
     let response = client
         .post(format!("{}/send", email_service_url))
         .json(email_request)
         .send()
         .await
-        .map_err(|e| format!("Email service request failed: {}", e))?;
+        .with_context(Ctx::request())?;
 
     let status = response.status();
     if !status.is_success() {
-        return Err(format!("Email service returned {}", status));
+        return Err(SendLegalNoticeEmailError::ErrorStatus {
+            status,
+            location: std::panic::Location::caller(),
+        });
     }
 
     let email_response = response
         .json::<EmailServiceResponse>()
         .await
-        .map_err(|e| format!("Failed to parse email service response: {}", e))?;
+        .with_context(Ctx::parse())?;
 
     if email_response.success {
         Ok(())
     } else {
-        Err(email_response
-            .message
-            .unwrap_or_else(|| "Email service reported unsuccessful delivery".to_string()))
+        Err(SendLegalNoticeEmailError::Unsuccessful {
+            location: std::panic::Location::caller(),
+        })
     }
 }
 
+/// Failure modes for [`record_legal_notice_delivery`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum RecordLegalNoticeDeliveryError {
+    #[error("failed to record legal notice delivery [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn record_legal_notice_delivery(
     pool: &PgPool,
     batch_id: Uuid,
@@ -1064,7 +1579,9 @@ async fn record_legal_notice_delivery(
     email: &str,
     status: &str,
     error: Option<&str>,
-) -> Result<(), (StatusCode, String)> {
+) -> Result<(), RecordLegalNoticeDeliveryError> {
+    use RecordLegalNoticeDeliveryErrorCtx as Ctx;
+
     sqlx::query(
         "INSERT INTO legal_email_deliveries (
             batch_id, user_id, email, status, error, sent_at, updated_at
@@ -1088,13 +1605,8 @@ async fn record_legal_notice_delivery(
     .bind(error)
     .execute(pool)
     .await
-    .map_err(|e| {
-        tracing::error!("Failed to record legal notice delivery: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to record legal notice delivery".to_string(),
-        )
-    })?;
+    .inspect_err(|e| tracing::error!("Failed to record legal notice delivery: {:?}", e))
+    .with_context(Ctx::query())?;
 
     Ok(())
 }
@@ -1304,8 +1816,10 @@ mod tests {
             make(Uuid::new_v4(), &dup_type_id),
         ];
         let error = legal_notice_document_ids(&documents_with_dup).unwrap_err();
-        assert_eq!(error.0, StatusCode::BAD_REQUEST);
-        assert!(error.1.contains("at most one document of each type"));
+        assert!(matches!(
+            error,
+            LegalNoticeDocumentIdsError::DuplicateType { .. }
+        ));
     }
 
     #[test]
@@ -1345,8 +1859,7 @@ mod tests {
         };
 
         let error = RecipientSelection::from_request(&request).unwrap_err();
-        assert_eq!(error.0, StatusCode::BAD_REQUEST);
-        assert!(error.1.contains("recipient_ids"));
+        assert!(matches!(error, RecipientSelectionError::EmptyIds { .. }));
     }
 
     #[test]
@@ -1360,8 +1873,10 @@ mod tests {
         };
 
         let error = RecipientSelection::from_request(&request).unwrap_err();
-        assert_eq!(error.0, StatusCode::BAD_REQUEST);
-        assert!(error.1.contains("Invalid recipient email"));
+        assert!(matches!(
+            error,
+            RecipientSelectionError::InvalidEmail { .. }
+        ));
     }
 
     #[test]
@@ -1375,7 +1890,6 @@ mod tests {
         };
 
         let error = RecipientSelection::from_request(&request).unwrap_err();
-        assert_eq!(error.0, StatusCode::BAD_REQUEST);
-        assert!(error.1.contains("limit"));
+        assert!(matches!(error, RecipientSelectionError::ZeroLimit { .. }));
     }
 }

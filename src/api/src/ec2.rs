@@ -4,10 +4,9 @@
 //! Minimal AWS clients using direct HTTP calls with SigV4 signing.
 //! Replaces aws-sdk-ec2 and aws-sdk-autoscaling to avoid compiling massive generated SDKs.
 
-use anyhow::{Result, bail};
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
-use thiserror::Error;
 
 use base64::Engine;
 
@@ -51,42 +50,79 @@ pub struct Region {
     pub opt_in_status: Option<String>,
 }
 
-#[derive(Debug, Error)]
+/// Failure modes for [`Ec2Client::count_vpcs`].
+#[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum CountVpcsError {
-    #[error("failed to count VPCs")]
-    Request(#[source] anyhow::Error),
+    #[error("failed to count VPCs [{location}]")]
+    Request {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
-#[derive(Debug, Error)]
+/// Failure modes for [`Ec2Client::count_elastic_ips`].
+#[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum CountElasticIpsError {
-    #[error("failed to count elastic IPs")]
-    Request(#[source] anyhow::Error),
+    #[error("failed to count elastic IPs [{location}]")]
+    Request {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
-#[derive(Debug, Error)]
+/// Failure modes for [`Ec2Client::active_instance_types`].
+#[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum ActiveInstanceTypesError {
-    #[error("failed to get active instance types")]
-    Describe(#[source] anyhow::Error),
+    #[error("failed to get active instance types [{location}]")]
+    Describe {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
-#[derive(Debug, Error)]
+/// Failure modes for [`Ec2Client::describe_regions`].
+#[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum DescribeRegionsError {
-    #[error("failed to describe regions")]
-    Request(#[source] anyhow::Error),
+    #[error("failed to describe regions [{location}]")]
+    Request {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
-#[derive(Debug, Error)]
+/// Failure modes for [`Ec2Client::instance_type_offered`].
+#[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum InstanceTypeOfferedError {
-    #[error("failed to check instance type offering")]
-    Request(#[source] anyhow::Error),
+    #[error("failed to check instance type offering [{location}]")]
+    Request {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
-#[derive(Debug, Error)]
+/// Failure modes for [`ServiceQuotasClient::get_service_quota_value`].
+#[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum GetServiceQuotaValueError {
-    #[error("failed to get service quota value")]
-    Request(#[source] SignedJsonRequestError),
-    #[error("Service quota response did not include Quota.Value")]
-    MissingQuotaValue,
+    #[error("failed to get service quota value [{location}]")]
+    Request {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Service quota response did not include Quota.Value [{location}]")]
+    MissingQuotaValue { location: Location },
 }
 
 // Allow the EC2 host to use IMDSv2 while blocking metadata responses from
@@ -166,22 +202,196 @@ fn run_instances_request_params(params: &RunInstancesParams) -> Vec<(String, Str
     req_params
 }
 
-#[derive(Debug, Error)]
+/// Failure modes for [`Ec2Client::signed_request`].
+#[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum Ec2SignedRequestError {
-    #[error("EC2 API request failed")]
-    Request(#[source] SignedRequestError),
+    #[error("EC2 API request failed [{location}]")]
+    Request {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
-#[derive(Debug, Error)]
+/// Failure modes for [`Ec2Client::describe_instances`].
+#[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum DescribeInstancesError {
-    #[error("EC2 DescribeInstances request failed")]
-    Request(#[source] Ec2SignedRequestError),
+    #[error("EC2 DescribeInstances request failed [{location}]")]
+    Request {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
-#[derive(Debug, Error)]
+impl DescribeInstancesError {
+    pub(crate) fn client_message(&self) -> &'static str {
+        "EC2 DescribeInstances request failed"
+    }
+}
+
+/// Failure modes for [`Ec2Client::terminate_instances`].
+#[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum TerminateInstancesError {
-    #[error("EC2 TerminateInstances request failed")]
-    Request(#[source] Ec2SignedRequestError),
+    #[error("EC2 TerminateInstances request failed [{location}]")]
+    Request {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Failure modes for [`Ec2Client::stop_instances`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum StopInstancesError {
+    #[error("EC2 StopInstances request failed [{location}]")]
+    Request {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl StopInstancesError {
+    pub(crate) fn client_message(&self) -> &'static str {
+        "EC2 API request failed"
+    }
+}
+
+/// Failure modes for [`Ec2Client::start_instances`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum StartInstancesError {
+    #[error("EC2 StartInstances request failed [{location}]")]
+    Request {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl StartInstancesError {
+    pub(crate) fn client_message(&self) -> &'static str {
+        "EC2 API request failed"
+    }
+}
+
+/// Failure modes for [`Ec2Client::run_instances`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum RunInstancesError {
+    #[error("EC2 RunInstances request failed [{location}]")]
+    Request {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("RunInstances response did not contain an instance ID [{location}]")]
+    MissingInstanceId { location: Location },
+}
+
+/// Failure modes for [`Ec2Client::latest_amazon_linux_2023_ami_id`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum LatestAmazonLinuxAmiError {
+    #[error("EC2 DescribeImages request failed [{location}]")]
+    Request {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("No Amazon Linux 2023 AMI returned by DescribeImages [{location}]")]
+    NoAmi { location: Location },
+}
+
+/// Failure modes for [`Ec2Client::find_security_group_id`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum FindSecurityGroupError {
+    #[error("EC2 DescribeSecurityGroups request failed [{location}]")]
+    Request {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Failure modes for [`Ec2Client::create_security_group`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum CreateSecurityGroupError {
+    #[error("EC2 CreateSecurityGroup request failed [{location}]")]
+    Request {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("CreateSecurityGroup response did not contain a groupId [{location}]")]
+    MissingGroupId { location: Location },
+}
+
+/// Failure modes for [`Ec2Client::associate_address`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum AssociateAddressError {
+    #[error("EC2 AssociateAddress request failed [{location}]")]
+    Request {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Failure modes for [`Ec2Client::associate_app_address`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum AssociateAppAddressError {
+    #[error("could not describe Elastic IP addresses [{location}]")]
+    DescribeAddresses {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not parse app Elastic IP address [{location}]")]
+    ParseAddress {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not associate Elastic IP address [{location}]")]
+    AssociateAddress {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl AssociateAppAddressError {
+    pub(crate) fn client_message(&self) -> &'static str {
+        match self {
+            Self::DescribeAddresses { .. } => "EC2 API request failed",
+            Self::ParseAddress { .. } => "expected exactly one Elastic IP tagged for app",
+            Self::AssociateAddress { .. } => "EC2 API request failed",
+        }
+    }
+}
+
+/// Failure modes for [`parse_app_address`] (leaf error: no underlying source).
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ParseAppAddressError {
+    #[error("expected exactly one Elastic IP tagged for app [{location}]")]
+    NotExactlyOne { location: Location },
 }
 
 impl Ec2Client {
@@ -210,10 +420,13 @@ impl Ec2Client {
         }
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub async fn describe_instances(
         &self,
         filters: &[Filter],
     ) -> Result<Vec<Instance>, DescribeInstancesError> {
+        use DescribeInstancesErrorCtx as Ctx;
+
         let mut params = vec![
             ("Action".to_string(), "DescribeInstances".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
@@ -230,11 +443,14 @@ impl Ec2Client {
         let body = self
             .signed_request(&params)
             .await
-            .map_err(DescribeInstancesError::Request)?;
+            .with_context(Ctx::request())?;
         Ok(parse_instance_ids(&body))
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub async fn count_vpcs(&self) -> Result<u32, CountVpcsError> {
+        use CountVpcsErrorCtx as Ctx;
+
         let params = vec![
             ("Action".to_string(), "DescribeVpcs".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
@@ -243,11 +459,14 @@ impl Ec2Client {
         let body = self
             .signed_request(&params)
             .await
-            .map_err(|e| CountVpcsError::Request(anyhow::Error::new(e)))?;
+            .with_context(Ctx::request())?;
         Ok(parse_tag_values(&body, "vpcId").len() as u32)
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub async fn count_elastic_ips(&self) -> Result<u32, CountElasticIpsError> {
+        use CountElasticIpsErrorCtx as Ctx;
+
         let params = vec![
             ("Action".to_string(), "DescribeAddresses".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
@@ -256,34 +475,46 @@ impl Ec2Client {
         let body = self
             .signed_request(&params)
             .await
-            .map_err(|e| CountElasticIpsError::Request(anyhow::Error::new(e)))?;
+            .with_context(Ctx::request())?;
         Ok(parse_tag_values(&body, "publicIp").len() as u32)
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub async fn associate_app_address(
         &self,
         resource_id: &str,
         instance_id: &str,
-    ) -> Result<String> {
+    ) -> Result<String, AssociateAppAddressError> {
+        use AssociateAppAddressErrorCtx as Ctx;
+
         let params = vec![
             ("Action".to_string(), "DescribeAddresses".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
             ("Filter.1.Name".to_string(), "tag:ResourceId".to_string()),
             ("Filter.1.Value.1".to_string(), resource_id.to_string()),
         ];
-        let body = self.signed_request(&params).await?;
-        let (allocation_id, public_ip, attached_instance_id) = parse_app_address(&body)?;
+        let body = self
+            .signed_request(&params)
+            .await
+            .with_context(Ctx::describe_addresses())?;
+        let (allocation_id, public_ip, attached_instance_id) =
+            parse_app_address(&body).with_context(Ctx::parse_address())?;
         if attached_instance_id.as_deref() != Some(instance_id) {
-            self.associate_address(&allocation_id, instance_id).await?;
+            self.associate_address(&allocation_id, instance_id)
+                .await
+                .with_context(Ctx::associate_address())?;
         }
         Ok(public_ip)
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub async fn active_instance_types(&self) -> Result<Vec<String>, ActiveInstanceTypesError> {
+        use ActiveInstanceTypesErrorCtx as Ctx;
+
         let instances = self
             .describe_instances(&[Filter::new("instance-state-name", &["pending", "running"])])
             .await
-            .map_err(|e| ActiveInstanceTypesError::Describe(anyhow::Error::new(e)))?;
+            .with_context(Ctx::describe())?;
 
         Ok(instances
             .into_iter()
@@ -291,10 +522,13 @@ impl Ec2Client {
             .collect())
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub async fn describe_regions(
         &self,
         all_regions: bool,
     ) -> Result<Vec<Region>, DescribeRegionsError> {
+        use DescribeRegionsErrorCtx as Ctx;
+
         let mut params = vec![
             ("Action".to_string(), "DescribeRegions".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
@@ -307,14 +541,17 @@ impl Ec2Client {
         let body = self
             .signed_request(&params)
             .await
-            .map_err(|e| DescribeRegionsError::Request(anyhow::Error::new(e)))?;
+            .with_context(Ctx::request())?;
         Ok(parse_regions(&body))
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub async fn instance_type_offered(
         &self,
         instance_type: &str,
     ) -> Result<bool, InstanceTypeOfferedError> {
+        use InstanceTypeOfferedErrorCtx as Ctx;
+
         let params = vec![
             (
                 "Action".to_string(),
@@ -329,11 +566,14 @@ impl Ec2Client {
         let body = self
             .signed_request(&params)
             .await
-            .map_err(|e| InstanceTypeOfferedError::Request(anyhow::Error::new(e)))?;
+            .with_context(Ctx::request())?;
         Ok(!parse_tag_values(&body, "instanceType").is_empty())
     }
 
-    pub async fn stop_instances(&self, instance_ids: &[String]) -> Result<()> {
+    #[tracing::instrument(skip_all, err)]
+    pub async fn stop_instances(&self, instance_ids: &[String]) -> Result<(), StopInstancesError> {
+        use StopInstancesErrorCtx as Ctx;
+
         let mut params = vec![
             ("Action".to_string(), "StopInstances".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
@@ -341,11 +581,19 @@ impl Ec2Client {
         for (i, id) in instance_ids.iter().enumerate() {
             params.push((format!("InstanceId.{}", i + 1), id.clone()));
         }
-        self.signed_request(&params).await?;
+        self.signed_request(&params)
+            .await
+            .with_context(Ctx::request())?;
         Ok(())
     }
 
-    pub async fn start_instances(&self, instance_ids: &[String]) -> Result<()> {
+    #[tracing::instrument(skip_all, err)]
+    pub async fn start_instances(
+        &self,
+        instance_ids: &[String],
+    ) -> Result<(), StartInstancesError> {
+        use StartInstancesErrorCtx as Ctx;
+
         let mut params = vec![
             ("Action".to_string(), "StartInstances".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
@@ -353,14 +601,25 @@ impl Ec2Client {
         for (i, id) in instance_ids.iter().enumerate() {
             params.push((format!("InstanceId.{}", i + 1), id.clone()));
         }
-        self.signed_request(&params).await?;
+        self.signed_request(&params)
+            .await
+            .with_context(Ctx::request())?;
         Ok(())
     }
 
-    pub async fn run_instances(&self, params: &RunInstancesParams) -> Result<String> {
+    #[tracing::instrument(skip_all, err)]
+    pub async fn run_instances(
+        &self,
+        params: &RunInstancesParams,
+    ) -> Result<String, RunInstancesError> {
+        use RunInstancesErrorCtx as Ctx;
+
         let req_params = run_instances_request_params(params);
 
-        let body = self.signed_request(&req_params).await?;
+        let body = self
+            .signed_request(&req_params)
+            .await
+            .with_context(Ctx::request())?;
 
         // Parse instance ID from RunInstances response
         let instances = parse_instance_ids(&body);
@@ -368,10 +627,17 @@ impl Ec2Client {
             .into_iter()
             .next()
             .map(|i| i.instance_id)
-            .ok_or_else(|| anyhow::anyhow!("RunInstances response did not contain an instance ID"))
+            .ok_or_else(|| RunInstancesError::MissingInstanceId {
+                location: std::panic::Location::caller(),
+            })
     }
 
-    pub async fn latest_amazon_linux_2023_ami_id(&self) -> Result<String> {
+    #[tracing::instrument(skip_all, err)]
+    pub async fn latest_amazon_linux_2023_ami_id(
+        &self,
+    ) -> Result<String, LatestAmazonLinuxAmiError> {
+        use LatestAmazonLinuxAmiErrorCtx as Ctx;
+
         let params = vec![
             ("Action".to_string(), "DescribeImages".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
@@ -390,20 +656,28 @@ impl Ec2Client {
             ("Filter.3.Value.1".to_string(), "ebs".to_string()),
         ];
 
-        let body = self.signed_request(&params).await?;
+        let body = self
+            .signed_request(&params)
+            .await
+            .with_context(Ctx::request())?;
         let mut images = parse_images(&body);
         images.sort_by(|left, right| left.creation_date.cmp(&right.creation_date));
         images
             .pop()
             .map(|image| image.image_id)
-            .ok_or_else(|| anyhow::anyhow!("No Amazon Linux 2023 AMI returned by DescribeImages"))
+            .ok_or_else(|| LatestAmazonLinuxAmiError::NoAmi {
+                location: std::panic::Location::caller(),
+            })
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub async fn find_security_group_id(
         &self,
         vpc_id: &str,
         group_name: &str,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<String>, FindSecurityGroupError> {
+        use FindSecurityGroupErrorCtx as Ctx;
+
         let params = vec![
             ("Action".to_string(), "DescribeSecurityGroups".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
@@ -413,17 +687,23 @@ impl Ec2Client {
             ("Filter.2.Value.1".to_string(), group_name.to_string()),
         ];
 
-        let body = self.signed_request(&params).await?;
+        let body = self
+            .signed_request(&params)
+            .await
+            .with_context(Ctx::request())?;
         Ok(parse_first_tag_value(&body, "groupId"))
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub async fn create_security_group(
         &self,
         group_name: &str,
         description: &str,
         vpc_id: &str,
         tags: &[(String, String)],
-    ) -> Result<String> {
+    ) -> Result<String, CreateSecurityGroupError> {
+        use CreateSecurityGroupErrorCtx as Ctx;
+
         let mut params = vec![
             ("Action".to_string(), "CreateSecurityGroup".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
@@ -447,16 +727,24 @@ impl Ec2Client {
             }
         }
 
-        let body = self.signed_request(&params).await?;
+        let body = self
+            .signed_request(&params)
+            .await
+            .with_context(Ctx::request())?;
         parse_first_tag_value(&body, "groupId").ok_or_else(|| {
-            anyhow::anyhow!("CreateSecurityGroup response did not contain a groupId")
+            CreateSecurityGroupError::MissingGroupId {
+                location: std::panic::Location::caller(),
+            }
         })
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub async fn terminate_instances(
         &self,
         instance_ids: &[String],
     ) -> Result<(), TerminateInstancesError> {
+        use TerminateInstancesErrorCtx as Ctx;
+
         let mut params = vec![
             ("Action".to_string(), "TerminateInstances".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
@@ -466,11 +754,18 @@ impl Ec2Client {
         }
         self.signed_request(&params)
             .await
-            .map_err(TerminateInstancesError::Request)?;
+            .with_context(Ctx::request())?;
         Ok(())
     }
 
-    pub async fn associate_address(&self, allocation_id: &str, instance_id: &str) -> Result<()> {
+    #[tracing::instrument(skip_all, err)]
+    pub async fn associate_address(
+        &self,
+        allocation_id: &str,
+        instance_id: &str,
+    ) -> Result<(), AssociateAddressError> {
+        use AssociateAddressErrorCtx as Ctx;
+
         let params = vec![
             ("Action".to_string(), "AssociateAddress".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
@@ -478,15 +773,20 @@ impl Ec2Client {
             ("InstanceId".to_string(), instance_id.to_string()),
         ];
 
-        self.signed_request(&params).await?;
+        self.signed_request(&params)
+            .await
+            .with_context(Ctx::request())?;
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, err)]
     async fn signed_request(
         &self,
         params: &[(String, String)],
     ) -> Result<String, Ec2SignedRequestError> {
-        signed_request(
+        use Ec2SignedRequestErrorCtx as Ctx;
+
+        let body = signed_request(
             &self.http,
             &self.access_key_id,
             &self.secret_access_key,
@@ -495,7 +795,8 @@ impl Ec2Client {
             params,
         )
         .await
-        .map_err(Ec2SignedRequestError::Request)
+        .with_context(Ctx::request())?;
+        Ok(body)
     }
 }
 
@@ -516,11 +817,14 @@ impl ServiceQuotasClient {
         }
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub async fn get_service_quota_value(
         &self,
         service_code: &str,
         quota_code: &str,
     ) -> Result<f64, GetServiceQuotaValueError> {
+        use GetServiceQuotaValueErrorCtx as Ctx;
+
         let body = serde_json::json!({
             "ServiceCode": service_code,
             "QuotaCode": quota_code,
@@ -536,13 +840,15 @@ impl ServiceQuotasClient {
             &body,
         )
         .await
-        .map_err(GetServiceQuotaValueError::Request)?;
+        .with_context(Ctx::request())?;
 
         response
             .get("Quota")
             .and_then(|quota| quota.get("Value"))
             .and_then(|value| value.as_f64())
-            .ok_or(GetServiceQuotaValueError::MissingQuotaValue)
+            .ok_or_else(|| GetServiceQuotaValueError::MissingQuotaValue {
+                location: std::panic::Location::caller(),
+            })
     }
 }
 
@@ -551,6 +857,42 @@ pub struct AsgClient {
     secret_access_key: String,
     region: String,
     http: reqwest::Client,
+}
+
+/// Failure modes for [`AsgClient::signed_request`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum AsgSignedRequestError {
+    #[error("Auto Scaling API request failed [{location}]")]
+    Request {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Failure modes for [`AsgClient::set_desired_capacity`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum SetDesiredCapacityError {
+    #[error("Auto Scaling SetDesiredCapacity request failed [{location}]")]
+    Request {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Failure modes for [`AsgClient::update_auto_scaling_group`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum UpdateAutoScalingGroupError {
+    #[error("Auto Scaling UpdateAutoScalingGroup request failed [{location}]")]
+    Request {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
 impl AsgClient {
@@ -563,7 +905,14 @@ impl AsgClient {
         }
     }
 
-    pub async fn set_desired_capacity(&self, asg_name: &str, desired_capacity: i32) -> Result<()> {
+    #[tracing::instrument(skip_all, err)]
+    pub async fn set_desired_capacity(
+        &self,
+        asg_name: &str,
+        desired_capacity: i32,
+    ) -> Result<(), SetDesiredCapacityError> {
+        use SetDesiredCapacityErrorCtx as Ctx;
+
         let params = vec![
             ("Action".to_string(), "SetDesiredCapacity".to_string()),
             ("Version".to_string(), "2011-01-01".to_string()),
@@ -571,15 +920,20 @@ impl AsgClient {
             ("DesiredCapacity".to_string(), desired_capacity.to_string()),
         ];
 
-        self.signed_request(&params).await?;
+        self.signed_request(&params)
+            .await
+            .with_context(Ctx::request())?;
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub async fn update_auto_scaling_group(
         &self,
         asg_name: &str,
         launch_template_id: &str,
-    ) -> Result<()> {
+    ) -> Result<(), UpdateAutoScalingGroupError> {
+        use UpdateAutoScalingGroupErrorCtx as Ctx;
+
         let params = vec![
             ("Action".to_string(), "UpdateAutoScalingGroup".to_string()),
             ("Version".to_string(), "2011-01-01".to_string()),
@@ -591,12 +945,20 @@ impl AsgClient {
             ("LaunchTemplate.Version".to_string(), "$Latest".to_string()),
         ];
 
-        self.signed_request(&params).await?;
+        self.signed_request(&params)
+            .await
+            .with_context(Ctx::request())?;
         Ok(())
     }
 
-    async fn signed_request(&self, params: &[(String, String)]) -> Result<String> {
-        signed_request(
+    #[tracing::instrument(skip_all, err)]
+    async fn signed_request(
+        &self,
+        params: &[(String, String)],
+    ) -> Result<String, AsgSignedRequestError> {
+        use AsgSignedRequestErrorCtx as Ctx;
+
+        let body = signed_request(
             &self.http,
             &self.access_key_id,
             &self.secret_access_key,
@@ -605,20 +967,43 @@ impl AsgClient {
             params,
         )
         .await
-        .map_err(anyhow::Error::new)
+        .with_context(Ctx::request())?;
+        Ok(body)
     }
 }
 
-#[derive(Debug, Error)]
+/// Failure modes for the free [`signed_request`] helper.
+#[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum SignedRequestError {
-    #[error("{1} API request failed")]
-    Http(#[source] reqwest::Error, String),
-    #[error("{0} API returned {1}")]
-    NonSuccess(String, u16),
-    #[error("Failed to read {1} response")]
-    ReadResponse(#[source] reqwest::Error, String),
+    #[error("{service} API request failed [{location}]")]
+    Http {
+        #[context(borrow = str)]
+        service: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("{service} API returned {status} [{location}]")]
+    NonSuccess {
+        service: String,
+        status: u16,
+        location: Location,
+    },
+
+    #[error("Failed to read {service} response [{location}]")]
+    ReadResponse {
+        #[context(borrow = str)]
+        service: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
+#[tracing::instrument(skip_all, err)]
 async fn signed_request(
     http: &reqwest::Client,
     access_key_id: &str,
@@ -627,6 +1012,8 @@ async fn signed_request(
     service: &str,
     params: &[(String, String)],
 ) -> Result<String, SignedRequestError> {
+    use SignedRequestErrorCtx as Ctx;
+
     let host = format!("{}.{}.amazonaws.com", service, region);
     let url = format!("https://{}/", host);
     let body = encode_form(params);
@@ -677,38 +1064,76 @@ async fn signed_request(
         .body(body)
         .send()
         .await
-        .map_err(|e| SignedRequestError::Http(e, service.to_string()))?;
+        .with_context(Ctx::http(service))?;
 
     let status = response.status();
     let text = response
         .text()
         .await
-        .map_err(|e| SignedRequestError::ReadResponse(e, service.to_string()))?;
+        .with_context(Ctx::read_response(service))?;
 
     if !status.is_success() {
-        return Err(SignedRequestError::NonSuccess(
-            service.to_string(),
-            status.as_u16(),
-        ));
+        return Err(SignedRequestError::NonSuccess {
+            service: service.to_string(),
+            status: status.as_u16(),
+            location: std::panic::Location::caller(),
+        });
     }
 
     Ok(text)
 }
 
-#[derive(Debug, Error)]
+/// Failure modes for the free [`signed_json_request`] helper.
+#[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum SignedJsonRequestError {
-    #[error("Failed to serialize AWS JSON body")]
-    Serialize(#[source] serde_json::Error),
-    #[error("{0} API request failed")]
-    Http(#[source] reqwest::Error, String),
-    #[error("{0} API returned {1}: {2}")]
-    NonSuccess(String, u16, String),
-    #[error("Failed to read {0} response")]
-    ReadResponse(#[source] reqwest::Error, String),
-    #[error("Failed to parse {0} response JSON")]
-    ParseJson(#[source] serde_json::Error, String),
+    #[error("Failed to serialize AWS JSON body [{location}]")]
+    Serialize {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("{service} API request failed [{location}]")]
+    Http {
+        #[context(borrow = str)]
+        service: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("{service} API returned {status}: {response_body} [{location}]")]
+    NonSuccess {
+        service: String,
+        status: u16,
+        response_body: String,
+        location: Location,
+    },
+
+    #[error("Failed to read {service} response [{location}]")]
+    ReadResponse {
+        #[context(borrow = str)]
+        service: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Failed to parse {service} response JSON [{location}]")]
+    ParseJson {
+        #[context(borrow = str)]
+        service: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
+#[tracing::instrument(skip_all, err)]
 async fn signed_json_request(
     http: &reqwest::Client,
     access_key_id: &str,
@@ -718,9 +1143,11 @@ async fn signed_json_request(
     target: &str,
     body: &serde_json::Value,
 ) -> Result<serde_json::Value, SignedJsonRequestError> {
+    use SignedJsonRequestErrorCtx as Ctx;
+
     let host = format!("{}.{}.amazonaws.com", service, region);
     let url = format!("https://{}/", host);
-    let body = serde_json::to_string(body).map_err(SignedJsonRequestError::Serialize)?;
+    let body = serde_json::to_string(body).with_context(Ctx::serialize())?;
 
     let now = chrono::Utc::now();
     let date_stamp = now.format("%Y%m%d").to_string();
@@ -763,24 +1190,24 @@ async fn signed_json_request(
         .body(body)
         .send()
         .await
-        .map_err(|e| SignedJsonRequestError::Http(e, service.to_string()))?;
+        .with_context(Ctx::http(service))?;
 
     let status = response.status();
     let text = response
         .text()
         .await
-        .map_err(|e| SignedJsonRequestError::ReadResponse(e, service.to_string()))?;
+        .with_context(Ctx::read_response(service))?;
 
     if !status.is_success() {
-        return Err(SignedJsonRequestError::NonSuccess(
-            service.to_string(),
-            status.as_u16(),
-            text,
-        ));
+        return Err(SignedJsonRequestError::NonSuccess {
+            service: service.to_string(),
+            status: status.as_u16(),
+            response_body: text,
+            location: std::panic::Location::caller(),
+        });
     }
 
-    serde_json::from_str(&text)
-        .map_err(|e| SignedJsonRequestError::ParseJson(e, service.to_string()))
+    serde_json::from_str(&text).with_context(Ctx::parse_json(service))
 }
 
 fn encode_form(params: &[(String, String)]) -> String {
@@ -893,11 +1320,14 @@ fn parse_tag_set(instance_item: &str) -> std::collections::HashMap<String, Strin
     tags
 }
 
-fn parse_app_address(xml: &str) -> Result<(String, String, Option<String>)> {
+#[tracing::instrument(skip_all, err)]
+fn parse_app_address(xml: &str) -> Result<(String, String, Option<String>), ParseAppAddressError> {
     let allocation_ids = parse_tag_values(xml, "allocationId");
     let public_ips = parse_tag_values(xml, "publicIp");
     if allocation_ids.len() != 1 || public_ips.len() != 1 {
-        bail!("expected exactly one Elastic IP tagged for app");
+        return Err(ParseAppAddressError::NotExactlyOne {
+            location: std::panic::Location::caller(),
+        });
     }
     Ok((
         allocation_ids[0].clone(),

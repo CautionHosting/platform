@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use axum::http::StatusCode;
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
@@ -44,10 +44,26 @@ pub struct UpdateBundleRequest {
 
 // -- Quorum Bundles --
 
+/// Failure modes for [`list_quorum_bundles`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum ListQuorumBundlesError {
+    #[error("failed to list quorum bundles for organization {org_id} [{location}]")]
+    Database {
+        org_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 pub async fn list_quorum_bundles(
     pool: &PgPool,
     org_id: Uuid,
-) -> Result<Vec<QuorumBundle>, (StatusCode, String)> {
+) -> Result<Vec<QuorumBundle>, ListQuorumBundlesError> {
+    use ListQuorumBundlesErrorCtx as Ctx;
+
     let rows = sqlx::query_as::<_, QuorumBundle>(
         "SELECT id, organization_id, data, name, labels, created_by, created_at, updated_at
          FROM quorum_bundles
@@ -57,16 +73,33 @@ pub async fn list_quorum_bundles(
     .bind(org_id)
     .fetch_all(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .with_context(Ctx::database(org_id))?;
 
     Ok(rows)
 }
 
+/// Failure modes for [`get_quorum_bundle`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum GetQuorumBundleError {
+    #[error("failed to get quorum bundle {bundle_id} for organization {org_id} [{location}]")]
+    Database {
+        org_id: Uuid,
+        bundle_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id, bundle_id = %bundle_id))]
 pub async fn get_quorum_bundle(
     pool: &PgPool,
     org_id: Uuid,
     bundle_id: Uuid,
-) -> Result<Option<QuorumBundle>, (StatusCode, String)> {
+) -> Result<Option<QuorumBundle>, GetQuorumBundleError> {
+    use GetQuorumBundleErrorCtx as Ctx;
+
     let row = sqlx::query_as::<_, QuorumBundle>(
         "SELECT id, organization_id, data, name, labels, created_by, created_at, updated_at
          FROM quorum_bundles
@@ -76,17 +109,33 @@ pub async fn get_quorum_bundle(
     .bind(bundle_id)
     .fetch_optional(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .with_context(Ctx::database(org_id, bundle_id))?;
 
     Ok(row)
 }
 
+/// Failure modes for [`create_quorum_bundle`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum CreateQuorumBundleError {
+    #[error("failed to create quorum bundle for organization {org_id} [{location}]")]
+    Database {
+        org_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 pub async fn create_quorum_bundle(
     pool: &PgPool,
     org_id: Uuid,
     user_id: Uuid,
     req: CreateBundleRequest,
-) -> Result<QuorumBundle, (StatusCode, String)> {
+) -> Result<QuorumBundle, CreateQuorumBundleError> {
+    use CreateQuorumBundleErrorCtx as Ctx;
+
     let labels = req.labels.unwrap_or(serde_json::json!({}));
     let row = sqlx::query_as::<_, QuorumBundle>(
         "INSERT INTO quorum_bundles (organization_id, data, name, labels, created_by)
@@ -100,17 +149,34 @@ pub async fn create_quorum_bundle(
     .bind(user_id)
     .fetch_one(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .with_context(Ctx::database(org_id))?;
 
     Ok(row)
 }
 
+/// Failure modes for [`update_quorum_bundle`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum UpdateQuorumBundleError {
+    #[error("failed to update quorum bundle {bundle_id} for organization {org_id} [{location}]")]
+    Database {
+        org_id: Uuid,
+        bundle_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id, bundle_id = %bundle_id))]
 pub async fn update_quorum_bundle(
     pool: &PgPool,
     org_id: Uuid,
     bundle_id: Uuid,
     req: UpdateBundleRequest,
-) -> Result<Option<QuorumBundle>, (StatusCode, String)> {
+) -> Result<Option<QuorumBundle>, UpdateQuorumBundleError> {
+    use UpdateQuorumBundleErrorCtx as Ctx;
+
     let row = sqlx::query_as::<_, QuorumBundle>(
         "UPDATE quorum_bundles
          SET data = COALESCE($1, data),
@@ -127,32 +193,65 @@ pub async fn update_quorum_bundle(
     .bind(bundle_id)
     .fetch_optional(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .with_context(Ctx::database(org_id, bundle_id))?;
 
     Ok(row)
 }
 
+/// Failure modes for [`delete_quorum_bundle`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum DeleteQuorumBundleError {
+    #[error("failed to delete quorum bundle {bundle_id} for organization {org_id} [{location}]")]
+    Database {
+        org_id: Uuid,
+        bundle_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id, bundle_id = %bundle_id))]
 pub async fn delete_quorum_bundle(
     pool: &PgPool,
     org_id: Uuid,
     bundle_id: Uuid,
-) -> Result<bool, (StatusCode, String)> {
+) -> Result<bool, DeleteQuorumBundleError> {
+    use DeleteQuorumBundleErrorCtx as Ctx;
+
     let result = sqlx::query("DELETE FROM quorum_bundles WHERE organization_id = $1 AND id = $2")
         .bind(org_id)
         .bind(bundle_id)
         .execute(pool)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .with_context(Ctx::database(org_id, bundle_id))?;
 
     Ok(result.rows_affected() > 0)
 }
 
 // -- Secrets Bundles --
 
+/// Failure modes for [`list_secrets_bundles`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum ListSecretsBundlesError {
+    #[error("failed to list secrets bundles for organization {org_id} [{location}]")]
+    Database {
+        org_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 pub async fn list_secrets_bundles(
     pool: &PgPool,
     org_id: Uuid,
-) -> Result<Vec<SecretsBundle>, (StatusCode, String)> {
+) -> Result<Vec<SecretsBundle>, ListSecretsBundlesError> {
+    use ListSecretsBundlesErrorCtx as Ctx;
+
     let rows = sqlx::query_as::<_, SecretsBundle>(
         "SELECT id, organization_id, data, created_by, created_at, updated_at
          FROM secrets_bundles
@@ -162,16 +261,33 @@ pub async fn list_secrets_bundles(
     .bind(org_id)
     .fetch_all(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .with_context(Ctx::database(org_id))?;
 
     Ok(rows)
 }
 
+/// Failure modes for [`get_secrets_bundle`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum GetSecretsBundleError {
+    #[error("failed to get secrets bundle {bundle_id} for organization {org_id} [{location}]")]
+    Database {
+        org_id: Uuid,
+        bundle_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id, bundle_id = %bundle_id))]
 pub async fn get_secrets_bundle(
     pool: &PgPool,
     org_id: Uuid,
     bundle_id: Uuid,
-) -> Result<Option<SecretsBundle>, (StatusCode, String)> {
+) -> Result<Option<SecretsBundle>, GetSecretsBundleError> {
+    use GetSecretsBundleErrorCtx as Ctx;
+
     let row = sqlx::query_as::<_, SecretsBundle>(
         "SELECT id, organization_id, data, created_by, created_at, updated_at
          FROM secrets_bundles
@@ -181,17 +297,33 @@ pub async fn get_secrets_bundle(
     .bind(bundle_id)
     .fetch_optional(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .with_context(Ctx::database(org_id, bundle_id))?;
 
     Ok(row)
 }
 
+/// Failure modes for [`create_secrets_bundle`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum CreateSecretsBundleError {
+    #[error("failed to create secrets bundle for organization {org_id} [{location}]")]
+    Database {
+        org_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 pub async fn create_secrets_bundle(
     pool: &PgPool,
     org_id: Uuid,
     user_id: Uuid,
     req: CreateBundleRequest,
-) -> Result<SecretsBundle, (StatusCode, String)> {
+) -> Result<SecretsBundle, CreateSecretsBundleError> {
+    use CreateSecretsBundleErrorCtx as Ctx;
+
     let row = sqlx::query_as::<_, SecretsBundle>(
         "INSERT INTO secrets_bundles (organization_id, data, created_by)
          VALUES ($1, $2, $3)
@@ -202,17 +334,34 @@ pub async fn create_secrets_bundle(
     .bind(user_id)
     .fetch_one(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .with_context(Ctx::database(org_id))?;
 
     Ok(row)
 }
 
+/// Failure modes for [`update_secrets_bundle`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum UpdateSecretsBundleError {
+    #[error("failed to update secrets bundle {bundle_id} for organization {org_id} [{location}]")]
+    Database {
+        org_id: Uuid,
+        bundle_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id, bundle_id = %bundle_id))]
 pub async fn update_secrets_bundle(
     pool: &PgPool,
     org_id: Uuid,
     bundle_id: Uuid,
     req: UpdateBundleRequest,
-) -> Result<Option<SecretsBundle>, (StatusCode, String)> {
+) -> Result<Option<SecretsBundle>, UpdateSecretsBundleError> {
+    use UpdateSecretsBundleErrorCtx as Ctx;
+
     let row = sqlx::query_as::<_, SecretsBundle>(
         "UPDATE secrets_bundles SET data = COALESCE($1, data), updated_at = NOW()
          WHERE organization_id = $2 AND id = $3
@@ -223,22 +372,39 @@ pub async fn update_secrets_bundle(
     .bind(bundle_id)
     .fetch_optional(pool)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .with_context(Ctx::database(org_id, bundle_id))?;
 
     Ok(row)
 }
 
+/// Failure modes for [`delete_secrets_bundle`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum DeleteSecretsBundleError {
+    #[error("failed to delete secrets bundle {bundle_id} for organization {org_id} [{location}]")]
+    Database {
+        org_id: Uuid,
+        bundle_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id, bundle_id = %bundle_id))]
 pub async fn delete_secrets_bundle(
     pool: &PgPool,
     org_id: Uuid,
     bundle_id: Uuid,
-) -> Result<bool, (StatusCode, String)> {
+) -> Result<bool, DeleteSecretsBundleError> {
+    use DeleteSecretsBundleErrorCtx as Ctx;
+
     let result = sqlx::query("DELETE FROM secrets_bundles WHERE organization_id = $1 AND id = $2")
         .bind(org_id)
         .bind(bundle_id)
         .execute(pool)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .with_context(Ctx::database(org_id, bundle_id))?;
 
     Ok(result.rows_affected() > 0)
 }

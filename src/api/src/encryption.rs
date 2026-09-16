@@ -6,6 +6,7 @@ use aes_gcm::{
     aead::{Aead, KeyInit},
 };
 use base64::{Engine as _, engine::general_purpose};
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use rand::RngCore;
 
 const NONCE_SIZE: usize = 12;
@@ -14,29 +15,129 @@ pub struct Encryptor {
     cipher: Aes256Gcm,
 }
 
+/// Failure modes for [`Encryptor::from_env`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum EncryptorFromEnvError {
+    #[error("CAUTION_ENCRYPTION_KEY environment variable not set [{location}]")]
+    MissingKey { location: Location },
+
+    #[error("invalid base64 in CAUTION_ENCRYPTION_KEY [{location}]")]
+    InvalidBase64 {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("CAUTION_ENCRYPTION_KEY must be 32 bytes (256 bits), got {got} bytes [{location}]")]
+    WrongLength { got: usize, location: Location },
+
+    #[error("failed to create cipher [{location}]")]
+    Cipher {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Failure modes for [`Encryptor::encrypt`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum EncryptError {
+    #[error("encryption failed [{location}]")]
+    Cipher {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Failure modes for [`Encryptor::decrypt`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum DecryptError {
+    #[error("encrypted data too short [{location}]")]
+    TooShort { location: Location },
+
+    #[error("decryption failed [{location}]")]
+    Cipher {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Failure modes for [`Encryptor::encrypt_json`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum EncryptJsonError {
+    #[error("JSON serialization failed [{location}]")]
+    Serialize {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("encryption failed [{location}]")]
+    Encrypt {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Failure modes for [`Encryptor::decrypt_json`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum DecryptJsonError {
+    #[error("decryption failed [{location}]")]
+    Decrypt {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("JSON deserialization failed [{location}]")]
+    Deserialize {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
 impl Encryptor {
-    pub fn from_env() -> Result<Self, String> {
-        let key_b64 = std::env::var("CAUTION_ENCRYPTION_KEY")
-            .map_err(|_| "CAUTION_ENCRYPTION_KEY environment variable not set")?;
+    pub fn from_env() -> Result<Self, EncryptorFromEnvError> {
+        use EncryptorFromEnvErrorCtx as Ctx;
+
+        let key_b64 = std::env::var("CAUTION_ENCRYPTION_KEY").map_err(|_| {
+            EncryptorFromEnvError::MissingKey {
+                location: std::panic::Location::caller(),
+            }
+        })?;
 
         let key_bytes = general_purpose::STANDARD
             .decode(&key_b64)
-            .map_err(|e| format!("Invalid base64 in CAUTION_ENCRYPTION_KEY: {}", e))?;
+            .with_context(Ctx::invalid_base64())?;
 
         if key_bytes.len() != 32 {
-            return Err(format!(
-                "CAUTION_ENCRYPTION_KEY must be 32 bytes (256 bits), got {} bytes",
-                key_bytes.len()
-            ));
+            return Err(EncryptorFromEnvError::WrongLength {
+                got: key_bytes.len(),
+                location: std::panic::Location::caller(),
+            });
         }
 
-        let cipher = Aes256Gcm::new_from_slice(&key_bytes)
-            .map_err(|e| format!("Failed to create cipher: {}", e))?;
+        let cipher = Aes256Gcm::new_from_slice(&key_bytes).with_context(Ctx::cipher())?;
 
         Ok(Self { cipher })
     }
 
-    pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    #[tracing::instrument(skip_all, err)]
+    pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, EncryptError> {
+        use EncryptErrorCtx as Ctx;
+
         let mut nonce_bytes = [0u8; NONCE_SIZE];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
@@ -44,7 +145,8 @@ impl Encryptor {
         let ciphertext = self
             .cipher
             .encrypt(nonce, plaintext)
-            .map_err(|e| format!("Encryption failed: {}", e))?;
+            .map_err(|e| std::io::Error::other(e.to_string()))
+            .with_context(Ctx::cipher())?;
 
         let mut result = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
         result.extend_from_slice(&nonce_bytes);
@@ -53,9 +155,14 @@ impl Encryptor {
         Ok(result)
     }
 
-    pub fn decrypt(&self, encrypted: &[u8]) -> Result<Vec<u8>, String> {
+    #[tracing::instrument(skip_all, err)]
+    pub fn decrypt(&self, encrypted: &[u8]) -> Result<Vec<u8>, DecryptError> {
+        use DecryptErrorCtx as Ctx;
+
         if encrypted.len() < NONCE_SIZE {
-            return Err("Encrypted data too short".to_string());
+            return Err(DecryptError::TooShort {
+                location: std::panic::Location::caller(),
+            });
         }
 
         let (nonce_bytes, ciphertext) = encrypted.split_at(NONCE_SIZE);
@@ -63,22 +170,32 @@ impl Encryptor {
 
         self.cipher
             .decrypt(nonce, ciphertext)
-            .map_err(|e| format!("Decryption failed: {}", e))
+            .map_err(|e| std::io::Error::other(e.to_string()))
+            .with_context(Ctx::cipher())
     }
 
-    pub fn encrypt_json<T: serde::Serialize>(&self, value: &T) -> Result<Vec<u8>, String> {
-        let json =
-            serde_json::to_vec(value).map_err(|e| format!("JSON serialization failed: {}", e))?;
-        self.encrypt(&json)
+    #[tracing::instrument(skip_all, err)]
+    pub fn encrypt_json<T: serde::Serialize>(
+        &self,
+        value: &T,
+    ) -> Result<Vec<u8>, EncryptJsonError> {
+        use EncryptJsonErrorCtx as Ctx;
+
+        let json = serde_json::to_vec(value).with_context(Ctx::serialize())?;
+        let encrypted = self.encrypt(&json).with_context(Ctx::encrypt())?;
+
+        Ok(encrypted)
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub fn decrypt_json<T: serde::de::DeserializeOwned>(
         &self,
         encrypted: &[u8],
-    ) -> Result<T, String> {
-        let plaintext = self.decrypt(encrypted)?;
-        serde_json::from_slice(&plaintext)
-            .map_err(|e| format!("JSON deserialization failed: {}", e))
+    ) -> Result<T, DecryptJsonError> {
+        use DecryptJsonErrorCtx as Ctx;
+
+        let plaintext = self.decrypt(encrypted).with_context(Ctx::decrypt())?;
+        serde_json::from_slice(&plaintext).with_context(Ctx::deserialize())
     }
 }
 
@@ -89,19 +206,47 @@ pub fn generate_encryption_key() -> String {
     general_purpose::STANDARD.encode(key)
 }
 
+/// Failure modes for [`Encryptor::from_key`] (test helper).
+#[cfg(test)]
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum EncryptorFromKeyError {
+    #[error("invalid base64 [{location}]")]
+    InvalidBase64 {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("key must be 32 bytes, got {got} [{location}]")]
+    WrongLength { got: usize, location: Location },
+
+    #[error("failed to create cipher [{location}]")]
+    Cipher {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
 #[cfg(test)]
 impl Encryptor {
-    fn from_key(key_b64: &str) -> Result<Self, String> {
+    fn from_key(key_b64: &str) -> Result<Self, EncryptorFromKeyError> {
+        use EncryptorFromKeyErrorCtx as Ctx;
+
         let key_bytes = general_purpose::STANDARD
             .decode(key_b64)
-            .map_err(|e| format!("Invalid base64: {}", e))?;
+            .with_context(Ctx::invalid_base64())?;
 
         if key_bytes.len() != 32 {
-            return Err(format!("Key must be 32 bytes, got {}", key_bytes.len()));
+            return Err(EncryptorFromKeyError::WrongLength {
+                got: key_bytes.len(),
+                location: std::panic::Location::caller(),
+            });
         }
 
-        let cipher = Aes256Gcm::new_from_slice(&key_bytes)
-            .map_err(|e| format!("Failed to create cipher: {}", e))?;
+        let cipher = Aes256Gcm::new_from_slice(&key_bytes).with_context(Ctx::cipher())?;
 
         Ok(Self { cipher })
     }
@@ -195,8 +340,7 @@ mod tests {
 
         // Less than NONCE_SIZE bytes
         let result = enc.decrypt(&[0u8; 5]);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("too short"));
+        assert!(matches!(result, Err(DecryptError::TooShort { .. })));
     }
 
     #[test]
@@ -268,20 +412,19 @@ mod tests {
     #[test]
     fn test_from_key_invalid_base64() {
         let result = Encryptor::from_key("not-valid-base64!!!");
-        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(EncryptorFromKeyError::InvalidBase64 { .. })
+        ));
     }
 
     #[test]
     fn test_from_key_wrong_length() {
         let short_key = general_purpose::STANDARD.encode([0u8; 16]);
         let result = Encryptor::from_key(&short_key);
-        match result {
-            Err(e) => assert!(
-                e.contains("32 bytes"),
-                "Error should mention key size: {}",
-                e
-            ),
-            Ok(_) => panic!("Expected error for wrong key length"),
-        }
+        assert!(
+            matches!(result, Err(EncryptorFromKeyError::WrongLength { .. })),
+            "expected wrong-length error"
+        );
     }
 }

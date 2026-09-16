@@ -73,10 +73,7 @@ fn verified_user_data(payload: &CborValue) -> Option<UserData> {
     let CborValue::Bytes(value) = value else {
         panic!("verified Nitro user_data is not bytes");
     };
-    Some(
-        serde_json::from_slice(value)
-            .expect("verified Nitro user_data is not valid Caddy JSON"),
-    )
+    Some(serde_json::from_slice(value).expect("verified Nitro user_data is not valid Caddy JSON"))
 }
 
 async fn live_leaf_fingerprint(client: &Client, base_url: &Url) -> String {
@@ -120,10 +117,8 @@ async fn attest(client: &Client, base_url: &Url, live_certfp: &str) -> bool {
         "attestation returned {}",
         response.status()
     );
-    let response: AttestationResponse = response
-        .json()
-        .await
-        .expect("invalid attestation response");
+    let response: AttestationResponse =
+        response.json().await.expect("invalid attestation response");
     let document = general_purpose::STANDARD
         .decode(response.attestation_document)
         .expect("attestation document is not base64");
@@ -225,10 +220,8 @@ async fn check_http_paths(client: &Client, base_url: &Url) {
 #[tokio::test]
 #[ignore = "requires CADDY_E2E_URL pointing to a live production-mode Nitro enclave"]
 async fn caddy_nitro_live() {
-    let base_url = Url::parse(
-        &std::env::var("CADDY_E2E_URL").expect("CADDY_E2E_URL is required"),
-    )
-    .expect("CADDY_E2E_URL is invalid");
+    let base_url = Url::parse(&std::env::var("CADDY_E2E_URL").expect("CADDY_E2E_URL is required"))
+        .expect("CADDY_E2E_URL is invalid");
     assert_eq!(base_url.scheme(), "https", "CADDY_E2E_URL must use HTTPS");
     assert!(
         base_url.host_str().is_some(),

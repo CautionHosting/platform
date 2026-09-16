@@ -7,6 +7,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -32,30 +33,38 @@ impl IntoResponse for WebauthnResetResponse {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, CtxError)]
 pub enum WebauthnResetError {
-    #[error("user not found")]
-    UserNotFound,
-    #[error("user has no email address configured")]
-    UserHasNoEmail,
-    #[error("failed to query database")]
-    Database(#[source] sqlx::Error),
-    #[error("failed to send email notification")]
-    EmailFailed,
+    #[error("user not found [{location}]")]
+    UserNotFound { location: Location },
+
+    #[error("user has no email address configured [{location}]")]
+    UserHasNoEmail { location: Location },
+
+    #[error("failed to query database [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to send email notification [{location}]")]
+    EmailFailed { location: Location },
 }
 
 impl IntoResponse for WebauthnResetError {
     fn into_response(self) -> Response {
         let (status, body) = match &self {
-            WebauthnResetError::UserNotFound => (StatusCode::NOT_FOUND, "user not found"),
-            WebauthnResetError::UserHasNoEmail => (
+            WebauthnResetError::UserNotFound { .. } => (StatusCode::NOT_FOUND, "user not found"),
+            WebauthnResetError::UserHasNoEmail { .. } => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "user has no email address configured",
             ),
-            WebauthnResetError::Database(_) => {
+            WebauthnResetError::Database { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
-            WebauthnResetError::EmailFailed => {
+            WebauthnResetError::EmailFailed { .. } => {
                 (StatusCode::BAD_GATEWAY, "email service unavailable")
             }
         };
@@ -66,11 +75,13 @@ impl IntoResponse for WebauthnResetError {
 /// Token TTL in seconds (24 hours).
 const TOKEN_TTL_SECONDS: i64 = 86_400;
 
-#[tracing::instrument(skip_all, fields(user_id = %req.user_id))]
+#[tracing::instrument(skip_all, err, fields(user_id = %req.user_id))]
 pub async fn reset_webauthn_credentials(
     State(state): State<Arc<AppState>>,
     Json(req): Json<WebauthnResetRequest>,
 ) -> Result<Response, WebauthnResetError> {
+    use WebauthnResetErrorCtx as Ctx;
+
     // Generate a 32-byte cryptographic random token (CPU-bound, fast).
     let mut token_bytes = [0u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut token_bytes);
@@ -80,10 +91,12 @@ pub async fn reset_webauthn_credentials(
     // All DB operations are atomic: user lookup, token invalidation/insertion,
     // and credential deletion share a single transaction. If any step fails the
     // entire operation rolls back — no partial state is visible to other readers.
-    let mut tx = state.db.begin().await.map_err(|e| {
-        tracing::error!("Failed to begin reset token transaction: {:?}", e);
-        WebauthnResetError::Database(e)
-    })?;
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .inspect_err(|e| tracing::error!("Failed to begin reset token transaction: {:?}", e))
+        .with_context(Ctx::database())?;
 
     // Verify user exists and has an email (inside tx).
     let user: Option<(Uuid, Option<String>)> =
@@ -91,14 +104,22 @@ pub async fn reset_webauthn_credentials(
             .bind(req.user_id)
             .fetch_optional(&mut *tx)
             .await
-            .map_err(|e| {
+            .inspect_err(|e| {
                 tracing::error!("Database error looking up user for reset: {:?}", e);
-                WebauthnResetError::Database(e)
-            })?;
+            })
+            .with_context(Ctx::database())?;
 
     let (user_id, user_email) = match user {
-        None => return Err(WebauthnResetError::UserNotFound),
-        Some((_, None)) => return Err(WebauthnResetError::UserHasNoEmail),
+        None => {
+            return Err(WebauthnResetError::UserNotFound {
+                location: std::panic::Location::caller(),
+            });
+        }
+        Some((_, None)) => {
+            return Err(WebauthnResetError::UserHasNoEmail {
+                location: std::panic::Location::caller(),
+            });
+        }
         Some((id, Some(email))) => (id, email),
     };
 
@@ -109,10 +130,10 @@ pub async fn reset_webauthn_credentials(
     .bind(user_id)
     .execute(&mut *tx)
     .await
-    .map_err(|e| {
+    .inspect_err(|e| {
         tracing::error!("Failed to invalidate prior reset tokens: {:?}", e);
-        WebauthnResetError::Database(e)
-    })?;
+    })
+    .with_context(Ctx::database())?;
 
     // Insert the new token (hashed).
     let token_hash = hex::encode(Sha256::digest(token_bytes));
@@ -124,29 +145,31 @@ pub async fn reset_webauthn_credentials(
     .bind(expires_at)
     .execute(&mut *tx)
     .await
-    .map_err(|e| {
+    .inspect_err(|e| {
         tracing::error!("Failed to insert reset token: {:?}", e);
-        WebauthnResetError::Database(e)
-    })?;
+    })
+    .with_context(Ctx::database())?;
 
     // Delete existing credentials atomically with the token insertion.
     sqlx::query("DELETE FROM fido2_credentials WHERE user_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await
-        .map_err(|e| {
+        .inspect_err(|e| {
             tracing::error!(
                 user_id = %user_id,
                 error = ?e,
                 "Failed to delete credentials during reset"
             );
-            WebauthnResetError::Database(e)
-        })?;
+        })
+        .with_context(Ctx::database())?;
 
-    tx.commit().await.map_err(|e| {
-        tracing::error!("Failed to commit reset token transaction: {:?}", e);
-        WebauthnResetError::Database(e)
-    })?;
+    tx.commit()
+        .await
+        .inspect_err(|e| {
+            tracing::error!("Failed to commit reset token transaction: {:?}", e);
+        })
+        .with_context(Ctx::database())?;
 
     // Send the reset email.
     let token_hex = hex::encode(token_bytes);
@@ -176,7 +199,9 @@ pub async fn reset_webauthn_credentials(
                 "Failed to build HTTP client for webauthn reset email: {:?}",
                 e
             );
-            return Err(WebauthnResetError::EmailFailed);
+            return Err(WebauthnResetError::EmailFailed {
+                location: std::panic::Location::caller(),
+            });
         }
     };
 
@@ -206,7 +231,9 @@ pub async fn reset_webauthn_credentials(
     };
 
     if !email_sent {
-        return Err(WebauthnResetError::EmailFailed);
+        return Err(WebauthnResetError::EmailFailed {
+            location: std::panic::Location::caller(),
+        });
     }
 
     Ok(WebauthnResetResponse {
@@ -227,28 +254,37 @@ mod tests {
 
     #[tokio::test]
     async fn test_user_not_found_returns_404() {
-        let err = WebauthnResetError::UserNotFound;
+        let err = WebauthnResetError::UserNotFound {
+            location: std::panic::Location::caller(),
+        };
         let response = err.into_response();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn test_user_has_no_email_returns_422() {
-        let err = WebauthnResetError::UserHasNoEmail;
+        let err = WebauthnResetError::UserHasNoEmail {
+            location: std::panic::Location::caller(),
+        };
         let response = err.into_response();
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]
     async fn test_database_error_returns_500() {
-        let err = WebauthnResetError::Database(sqlx::Error::RowNotFound);
+        let err = WebauthnResetError::Database {
+            location: std::panic::Location::caller(),
+            source: Box::new(sqlx::Error::RowNotFound),
+        };
         let response = err.into_response();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[tokio::test]
     async fn test_email_failed_returns_502() {
-        let err = WebauthnResetError::EmailFailed;
+        let err = WebauthnResetError::EmailFailed {
+            location: std::panic::Location::caller(),
+        };
         let response = err.into_response();
         assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     }

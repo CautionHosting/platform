@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use crate::errors::{Span, ValidationError};
+use crate::errors::ValidationError;
 use crate::types::UserRole;
 use regex::Regex;
 use std::sync::OnceLock;
@@ -59,7 +59,6 @@ pub fn validate_app_name(name: &str) -> Result<(), ValidationError> {
             min: APP_NAME_MIN_LEN,
             max: APP_NAME_MAX_LEN,
             actual: len,
-            span: Span::new(0, len),
         });
     }
 
@@ -76,10 +75,7 @@ pub fn validate_app_name(name: &str) -> Result<(), ValidationError> {
             })
             .map(|(_, c)| c)
             .unwrap_or('?');
-        return Err(ValidationError::AppNameInvalidChars {
-            invalid_char,
-            span: Span::new(0, len),
-        });
+        return Err(ValidationError::AppNameInvalidChars { invalid_char });
     }
 
     Ok(())
@@ -370,7 +366,6 @@ mod tests {
             min: 3,
             max: 63,
             actual: 2,
-            span: Span::new(0, 2),
         };
         assert!(err.to_string().contains("3"));
         assert!(err.to_string().contains("63"));
@@ -385,7 +380,6 @@ mod tests {
             min: 3,
             max: 63,
             actual: 2,
-            span: Span::new(0, 2),
         };
         assert_eq!(err.code(), "app_name_length");
 

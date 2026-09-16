@@ -1,10 +1,11 @@
-use anyhow::Context;
 use axum::{
     Json,
     extract::{Extension, Path, State},
     http::StatusCode,
+    response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Utc};
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use serde::{Deserialize, Serialize};
 use sqlx::{Connection, FromRow, PgConnection};
 use std::sync::Arc;
@@ -40,37 +41,91 @@ pub struct ComputeResource {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Failure modes for [`create_resource`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum CreateResourceError {
+    #[error("could not look up the primary organization [{location}]")]
+    PrimaryOrgLookup {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not obtain a provider account for organization {org_id} [{location}]")]
+    ProviderAccount { org_id: Uuid, location: Location },
+
+    #[error("could not obtain the compute resource type [{location}]")]
+    ResourceType { location: Location },
+
+    #[error("failed to check for an existing resource name '{resource_name}' [{location}]")]
+    CheckName {
+        resource_name: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to create compute resource '{provider_resource_id}' [{location}]")]
+    Insert {
+        provider_resource_id: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for CreateResourceError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            CreateResourceError::PrimaryOrgLookup { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            CreateResourceError::ProviderAccount { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            CreateResourceError::ResourceType { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            CreateResourceError::CheckName { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            CreateResourceError::Insert { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 pub async fn create_resource(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     validated_types::Validated(payload): validated_types::Validated<CreateResourceRequest>,
-) -> Result<Json<CreateResourceResponse>, StatusCode> {
+) -> Result<Json<CreateResourceResponse>, CreateResourceError> {
+    use CreateResourceErrorCtx as Ctx;
+
     tracing::info!("Creating resource for user_id: {}", auth.user_id);
     tracing::debug!("Resource payload: {:?}", payload);
 
-    let org_id = match get_user_primary_org(&state.db, auth.user_id).await {
-        Ok(id) => {
-            tracing::debug!("Found primary org: {}", id);
-            id
-        }
-        Err(e) => {
-            tracing::error!(
-                "Failed to get primary org for user {}: {:?}",
-                auth.user_id,
-                e
-            );
-            return Err(e);
-        }
-    };
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .with_context(Ctx::primary_org_lookup())?;
 
     let provider_account_id = match get_or_create_provider_account(&state.db, org_id).await {
         Ok(id) => {
             tracing::debug!("Provider account: {}", id);
             id
         }
-        Err(e) => {
-            tracing::error!("Failed to get/create provider account: {:?}", e);
-            return Err(e);
+        Err(status) => {
+            tracing::error!("Failed to get/create provider account: {:?}", status);
+            return Err(CreateResourceError::ProviderAccount {
+                org_id,
+                location: std::panic::Location::caller(),
+            });
         }
     };
 
@@ -79,9 +134,11 @@ pub async fn create_resource(
             tracing::debug!("Resource type: {}", id);
             id
         }
-        Err(e) => {
-            tracing::error!("Failed to get/create resource type: {:?}", e);
-            return Err(e);
+        Err(status) => {
+            tracing::error!("Failed to get/create resource type: {:?}", status);
+            return Err(CreateResourceError::ResourceType {
+                location: std::panic::Location::caller(),
+            });
         }
     };
 
@@ -107,10 +164,7 @@ pub async fn create_resource(
             .bind(name)
             .fetch_optional(&state.db)
             .await
-            .map_err(|e| {
-                tracing::error!("Failed to check for existing resource name: {:?}", e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
+            .with_context(Ctx::check_name(name.as_str()))?;
 
             if existing.is_some() {
                 tracing::warn!(
@@ -133,7 +187,7 @@ pub async fn create_resource(
 
     tracing::debug!("Creating resource with slug: {}", resource_slug);
 
-    let resource: (Uuid, types::ResourceState, DateTime<Utc>) = match sqlx::query_as(
+    let resource: (Uuid, types::ResourceState, DateTime<Utc>) = sqlx::query_as(
         "INSERT INTO compute_resources
          (organization_id, provider_account_id, resource_type_id, provider_resource_id,
           resource_name, state, configuration, created_by)
@@ -150,13 +204,7 @@ pub async fn create_resource(
     .bind(auth.user_id)
     .fetch_one(&state.db)
     .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!("Database error creating resource: {:?}", e);
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
+    .with_context(Ctx::insert(provider_resource_id.as_str()))?;
 
     let (resource_id, resource_state, created_at) = resource;
 
@@ -190,11 +238,51 @@ fn initial_resource_configuration() -> serde_json::Value {
     serde_json::json!({})
 }
 
+/// Failure modes for [`list_resources`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum ListResourcesError {
+    #[error("could not look up the primary organization [{location}]")]
+    PrimaryOrgLookup {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to list resources for organization {org_id} [{location}]")]
+    Query {
+        org_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for ListResourcesError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            ListResourcesError::PrimaryOrgLookup { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            ListResourcesError::Query { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 pub async fn list_resources(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
-) -> Result<Json<Vec<serde_json::Value>>, StatusCode> {
-    let org_id = get_user_primary_org(&state.db, auth.user_id).await?;
+) -> Result<Json<Vec<serde_json::Value>>, ListResourcesError> {
+    use ListResourcesErrorCtx as Ctx;
+
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .with_context(Ctx::primary_org_lookup())?;
 
     tracing::info!(
         "Listing resources for user {} in org {}",
@@ -213,10 +301,7 @@ pub async fn list_resources(
     .bind(org_id)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| {
-        tracing::error!("Failed to list resources: {:?}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    .with_context(Ctx::query(org_id))?;
 
     tracing::info!("Found {} resources", resources.len());
 
@@ -258,11 +343,36 @@ mod tests {
     }
 }
 
+/// Failure modes for [`get_resource`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum GetResourceError {
+    #[error("resource {resource_id} not found [{location}]")]
+    NotFound {
+        resource_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for GetResourceError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            GetResourceError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found"),
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
 pub async fn get_resource(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(resource_id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<serde_json::Value>, GetResourceError> {
+    use GetResourceErrorCtx as Ctx;
+
     let resource = sqlx::query_as::<_, ComputeResource>(
         "SELECT cr.id, cr.organization_id, cr.provider_account_id, cr.resource_type_id,
                 cr.provider_resource_id, cr.resource_name, cr.state::text as state,
@@ -277,7 +387,7 @@ pub async fn get_resource(
     .bind(auth.user_id)
     .fetch_one(&state.db)
     .await
-    .map_err(|_| StatusCode::NOT_FOUND)?;
+    .with_context(Ctx::not_found(resource_id))?;
 
     let git_url = match state.git_ssh_port {
         Some(port) => format!(
@@ -299,12 +409,91 @@ pub async fn get_resource(
     Ok(Json(response))
 }
 
+/// Failure modes for [`proxy_attestation`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum ProxyAttestationError {
+    #[error("resource not found [{location}]")]
+    ResourceNotFound {
+        resource_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("resource has no public IP [{location}]")]
+    NoPublicIp {
+        resource_id: Uuid,
+        location: Location,
+    },
+
+    #[error("failed to create HTTP client [{location}]")]
+    ClientBuild {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to reach attestation endpoint [{location}]")]
+    SendRequest {
+        resource_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("attestation endpoint returned an error status [{location}]")]
+    EndpointStatus {
+        resource_id: Uuid,
+        location: Location,
+    },
+
+    #[error("invalid JSON from attestation endpoint [{location}]")]
+    JsonParse {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for ProxyAttestationError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            ProxyAttestationError::ResourceNotFound { .. } => {
+                (StatusCode::NOT_FOUND, "resource not found")
+            }
+            ProxyAttestationError::NoPublicIp { .. } => {
+                (StatusCode::BAD_REQUEST, "resource has no public IP")
+            }
+            ProxyAttestationError::ClientBuild { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            ProxyAttestationError::SendRequest { .. } => {
+                (StatusCode::BAD_GATEWAY, "attestation endpoint unreachable")
+            }
+            ProxyAttestationError::EndpointStatus { .. } => {
+                (StatusCode::BAD_GATEWAY, "attestation endpoint error")
+            }
+            ProxyAttestationError::JsonParse { .. } => {
+                (StatusCode::BAD_GATEWAY, "invalid attestation response")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
 pub async fn proxy_attestation(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(resource_id): Path<Uuid>,
     body: axum::body::Bytes,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, ProxyAttestationError> {
+    use ProxyAttestationErrorCtx as Ctx;
+
     // Get the resource to verify ownership and get the public IP
     let public_ip: Option<String> = sqlx::query_scalar(
         "SELECT cr.public_ip
@@ -316,24 +505,17 @@ pub async fn proxy_attestation(
     .bind(auth.user_id)
     .fetch_one(&state.db)
     .await
-    .map_err(|_| (StatusCode::NOT_FOUND, "Resource not found".to_string()))?;
+    .with_context(Ctx::resource_not_found(resource_id))?;
 
-    let public_ip = public_ip.ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            "Resource has no public IP".to_string(),
-        )
+    let public_ip = public_ip.ok_or_else(|| ProxyAttestationError::NoPublicIp {
+        resource_id,
+        location: std::panic::Location::caller(),
     })?;
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to create HTTP client: {}", e),
-            )
-        })?;
+        .with_context(Ctx::client_build())?;
 
     // Fetch over plain HTTP by IP: the attestation document is a COSE_Sign1 verified
     // client-side (certificate chain + signature + nonce), so transport TLS is not
@@ -348,40 +530,94 @@ pub async fn proxy_attestation(
         .body(body.to_vec())
         .send()
         .await
-        .map_err(|e| {
-            tracing::error!("Attestation proxy request failed: {:?}", e);
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Failed to reach attestation endpoint: {}", e),
-            )
-        })?;
+        .with_context(Ctx::send_request(resource_id))?;
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         tracing::error!("Attestation endpoint returned error: {} - {}", status, body);
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            format!("Attestation endpoint error: {}", status),
-        ));
+        return Err(ProxyAttestationError::EndpointStatus {
+            resource_id,
+            location: std::panic::Location::caller(),
+        });
     }
 
-    let json: serde_json::Value = response.json().await.map_err(|e| {
-        (
-            StatusCode::BAD_GATEWAY,
-            format!("Invalid JSON from attestation endpoint: {}", e),
-        )
-    })?;
+    let json: serde_json::Value = response.json().await.with_context(Ctx::json_parse())?;
 
     Ok(Json(json))
 }
 
+/// Failure modes for [`rename_resource`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum RenameResourceError {
+    #[error("resource not found [{location}]")]
+    NotFound {
+        resource_id: Uuid,
+        location: Location,
+    },
+
+    #[error("failed to look up resource [{location}]")]
+    Lookup {
+        resource_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to check name uniqueness [{location}]")]
+    CheckName {
+        org_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("an app with that name already exists in this organization [{location}]")]
+    NameTaken {
+        resource_id: Uuid,
+        location: Location,
+    },
+
+    #[error("failed to update resource name [{location}]")]
+    Update {
+        resource_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for RenameResourceError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            RenameResourceError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found"),
+            RenameResourceError::Lookup { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            RenameResourceError::CheckName { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            RenameResourceError::NameTaken { .. } => (StatusCode::CONFLICT, "name already taken"),
+            RenameResourceError::Update { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
 pub async fn rename_resource(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(resource_id): Path<Uuid>,
     validated_types::Validated(payload): validated_types::Validated<RenameResourceRequest>,
-) -> Result<Json<ComputeResource>, (StatusCode, String)> {
+) -> Result<Json<ComputeResource>, RenameResourceError> {
+    use RenameResourceErrorCtx as Ctx;
+
     tracing::info!(
         "rename_resource: resource_id={}, user_id={}, new_name={}",
         resource_id,
@@ -400,16 +636,13 @@ pub async fn rename_resource(
     .bind(auth.user_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| {
-        tracing::error!("Database error in rename_resource: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Database error".to_string(),
-        )
-    })?;
+    .with_context(Ctx::lookup(resource_id))?;
 
     let Some((org_id, old_name)) = resource else {
-        return Err((StatusCode::NOT_FOUND, "Resource not found".to_string()));
+        return Err(RenameResourceError::NotFound {
+            resource_id,
+            location: std::panic::Location::caller(),
+        });
     };
 
     // Check if the new name is already taken within this organization (for active resources)
@@ -424,22 +657,13 @@ pub async fn rename_resource(
     .bind(resource_id)
     .fetch_one(&state.db)
     .await
-    .map_err(|e| {
-        tracing::error!("Database error checking name uniqueness: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Database error".to_string(),
-        )
-    })?;
+    .with_context(Ctx::check_name(org_id))?;
 
     if name_exists == Some(true) {
-        return Err((
-            StatusCode::CONFLICT,
-            format!(
-                "An app with the name '{}' already exists in this organization",
-                payload.name
-            ),
-        ));
+        return Err(RenameResourceError::NameTaken {
+            resource_id,
+            location: std::panic::Location::caller(),
+        });
     }
 
     // Update the resource name
@@ -457,13 +681,7 @@ pub async fn rename_resource(
     .bind(org_id)
     .fetch_one(&state.db)
     .await
-    .map_err(|e| {
-        tracing::error!("Failed to update resource name: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to rename resource".to_string(),
-        )
-    })?;
+    .with_context(Ctx::update(resource_id))?;
 
     // Rename the git repository if it exists
     let old_repo_path = format!("{}/git-repos/{}.git", state.data_dir, old_name);
@@ -503,12 +721,86 @@ pub struct DeleteResourceQuery {
     pub force: bool,
 }
 
+/// Failure modes for [`delete_resource`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum DeleteResourceError {
+    #[error("failed to read app state [{location}]")]
+    AccessQuery {
+        resource_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("app not found [{location}]")]
+    NotFound {
+        resource_id: Uuid,
+        location: Location,
+    },
+
+    #[error("failed to update app deletion state [{location}]")]
+    ClaimUpdate {
+        resource_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("resource is deploying [{location}]")]
+    Deploying {
+        resource_id: Uuid,
+        location: Location,
+    },
+
+    #[error("app no longer exists [{location}]")]
+    AlreadyGone {
+        resource_id: Uuid,
+        location: Location,
+    },
+
+    #[error("app destroy failed [{location}]")]
+    DestroyFailed {
+        resource_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for DeleteResourceError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            DeleteResourceError::AccessQuery { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            DeleteResourceError::NotFound { .. } => (StatusCode::NOT_FOUND, "app not found"),
+            DeleteResourceError::ClaimUpdate { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            DeleteResourceError::Deploying { .. } => {
+                (StatusCode::CONFLICT, "resource is deploying")
+            }
+            DeleteResourceError::AlreadyGone { .. } => (StatusCode::NOT_FOUND, "app not found"),
+            DeleteResourceError::DestroyFailed { .. } => {
+                (StatusCode::SERVICE_UNAVAILABLE, "app destroy failed")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
 pub async fn delete_resource(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(resource_id): Path<Uuid>,
     query: axum::extract::Query<DeleteResourceQuery>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, DeleteResourceError> {
+    use DeleteResourceErrorCtx as Ctx;
+
     tracing::info!(
         "delete_resource called: resource_id={}, user_id={}, force={}",
         resource_id,
@@ -531,13 +823,7 @@ pub async fn delete_resource(
     .bind(auth.user_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| {
-        tracing::error!("Database query failed in delete_resource: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to read app state".to_string(),
-        )
-    })?;
+    .with_context(Ctx::access_query(resource_id))?;
 
     let Some((resource_id, destroyed)) = resource else {
         tracing::warn!(
@@ -545,7 +831,10 @@ pub async fn delete_resource(
             resource_id,
             auth.user_id
         );
-        return Err((StatusCode::NOT_FOUND, "App not found".to_string()));
+        return Err(DeleteResourceError::NotFound {
+            resource_id,
+            location: std::panic::Location::caller(),
+        });
     };
     if destroyed {
         return Ok(StatusCode::NO_CONTENT);
@@ -560,15 +849,10 @@ pub async fn delete_resource(
     .bind(resource_id)
     .execute(&state.db)
     .await
-    .map_err(|error| {
-        tracing::error!(resource_id = %resource_id, error = %error, "failed to claim terminating app for explicit deletion");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to update app deletion state".to_string(),
-        )
-    })?;
+    .with_context(Ctx::claim_update(resource_id))?;
 
-    if let Err(error) = destroy_resource_by_id(&state, resource_id, query.force).await {
+    let destroy_result = destroy_resource_by_id(&state, resource_id, query.force).await;
+    if let Err(ref error) = destroy_result {
         let destroyed: bool = sqlx::query_scalar(
             "SELECT EXISTS(
                  SELECT 1 FROM compute_resources cr
@@ -586,15 +870,27 @@ pub async fn delete_resource(
         }
 
         tracing::error!(resource_id = %resource_id, error = %error, "app destroy failed");
-        let message = error.to_string();
-        let status = if message == "resource is deploying" {
-            StatusCode::CONFLICT
-        } else if message == "resource no longer exists" {
-            StatusCode::NOT_FOUND
-        } else {
-            StatusCode::SERVICE_UNAVAILABLE
-        };
-        return Err((status, message));
+        match error.kind {
+            DestroyResourceByIdErrorKind::Deploying => {
+                return Err(DeleteResourceError::Deploying {
+                    resource_id,
+                    location: std::panic::Location::caller(),
+                });
+            }
+            DestroyResourceByIdErrorKind::Gone => {
+                return Err(DeleteResourceError::AlreadyGone {
+                    resource_id,
+                    location: std::panic::Location::caller(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    if destroy_result.is_err() {
+        return destroy_result
+            .map(|()| StatusCode::NO_CONTENT)
+            .with_context(Ctx::destroy_failed(resource_id));
     }
 
     tracing::info!(
@@ -606,30 +902,103 @@ pub async fn delete_resource(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Categories of failure surfaced by [`destroy_resource_by_id`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum DestroyResourceByIdErrorKind {
+    BeginTermination,
+    Deploying,
+    Gone,
+    TeardownLimiterClosed,
+    EnsureSafeToRelease,
+    DnsDisabled,
+    DnsSnapshot,
+    LoadResource,
+    ConnectLock,
+    AdvisoryLock,
+    StillTerminating,
+    TofuDestroyFailed,
+    MarkDestroyed,
+}
+
+/// Failure modes for [`destroy_resource_by_id`]. The shared `resource_id` context
+/// rides along on every failure; source-less kinds carry `source: None`.
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("could not destroy resource {resource_id} ({kind:?}) [{location}]")]
+pub(crate) struct DestroyResourceByIdError {
+    kind: DestroyResourceByIdErrorKind,
+    resource_id: Uuid,
+    #[location]
+    location: Location,
+    #[source]
+    #[context(option)]
+    source: Option<BoxError>,
+}
+
+impl DestroyResourceByIdError {
+    /// Client-facing message for the e2e-testing teardown surface: fixed literals,
+    /// never the underlying source or the internal location segment.
+    #[cfg(feature = "e2e-testing-unsafe")]
+    pub(crate) fn client_message(&self) -> &'static str {
+        match self.kind {
+            DestroyResourceByIdErrorKind::Deploying => "resource is deploying",
+            DestroyResourceByIdErrorKind::Gone => "resource no longer exists",
+            _ => "internal error",
+        }
+    }
+}
+
+#[tracing::instrument(skip_all, err)]
 pub(crate) async fn destroy_resource_by_id(
     state: &Arc<AppState>,
     resource_id: Uuid,
     force: bool,
-) -> anyhow::Result<()> {
-    crate::managed_dns::begin_termination(&state.db, resource_id).await?;
+) -> Result<(), DestroyResourceByIdError> {
+    use DestroyResourceByIdErrorCtx as Ctx;
+    use DestroyResourceByIdErrorKind as Kind;
+
+    let begin_error = crate::managed_dns::begin_termination(&state.db, resource_id).await;
+    if let Err(ref error) = begin_error {
+        let message = error.to_string();
+        if message == "resource is deploying" {
+            return Err(DestroyResourceByIdError {
+                kind: Kind::Deploying,
+                resource_id,
+                location: std::panic::Location::caller(),
+                source: None,
+            });
+        } else if message == "resource no longer exists" {
+            return Err(DestroyResourceByIdError {
+                kind: Kind::Gone,
+                resource_id,
+                location: std::panic::Location::caller(),
+                source: None,
+            });
+        }
+    }
+    begin_error.with_context(Ctx::new(Kind::BeginTermination, resource_id))?;
 
     let _teardown_slot = state
         .teardown_slots
         .acquire()
         .await
-        .map_err(|_| anyhow::anyhow!("teardown concurrency limiter closed"))?;
+        .with_context(Ctx::new(Kind::TeardownLimiterClosed, resource_id))?;
 
     if let Some(managed_dns) = state.managed_dns.as_ref() {
         managed_dns
             .ensure_safe_to_release(&state.db, resource_id)
             .await
-            .context("Managed DNS withdrawal is incomplete; the Elastic IP was retained")?;
+            .with_context(Ctx::new(Kind::EnsureSafeToRelease, resource_id))?;
     } else {
-        let dns = crate::managed_dns::dns_snapshot(&state.db, resource_id).await?;
+        let dns = crate::managed_dns::dns_snapshot(&state.db, resource_id)
+            .await
+            .with_context(Ctx::new(Kind::DnsSnapshot, resource_id))?;
         if dns.status != "reserved" {
-            anyhow::bail!(
-                "Managed DNS is disabled while this app has published DNS state; the Elastic IP was retained"
-            );
+            return Err(DestroyResourceByIdError {
+                kind: Kind::DnsDisabled,
+                resource_id,
+                location: std::panic::Location::caller(),
+                source: None,
+            });
         }
     }
 
@@ -640,7 +1009,8 @@ pub(crate) async fn destroy_resource_by_id(
     )
     .bind(resource_id)
     .fetch_optional(&state.db)
-    .await?;
+    .await
+    .with_context(Ctx::new(Kind::LoadResource, resource_id))?;
     let Some((org_id, resource_name, tracked_resource_id, resource_region)) = resource else {
         return Ok(());
     };
@@ -653,11 +1023,14 @@ pub(crate) async fn destroy_resource_by_id(
 
     // Use a dedicated session lock so OpenTofu cannot consume the API pool or
     // hold a database transaction open. Closing the connection releases it.
-    let mut lock_connection = PgConnection::connect(&state.database_url).await?;
+    let mut lock_connection = PgConnection::connect(&state.database_url)
+        .await
+        .with_context(Ctx::new(Kind::ConnectLock, resource_id))?;
     sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 1))")
         .bind(resource_id.to_string())
         .execute(&mut lock_connection)
-        .await?;
+        .await
+        .with_context(Ctx::new(Kind::AdvisoryLock, resource_id))?;
 
     let still_terminating: bool = sqlx::query_scalar(
         "SELECT EXISTS(
@@ -667,29 +1040,34 @@ pub(crate) async fn destroy_resource_by_id(
     )
     .bind(resource_id)
     .fetch_one(&mut lock_connection)
-    .await?;
+    .await
+    .with_context(Ctx::new(Kind::StillTerminating, resource_id))?;
     if !still_terminating {
         release_teardown_lock(&mut lock_connection, resource_id).await;
         return Ok(());
     }
 
-    let terraform_result = match destroy_credentials {
-        Ok((aws_credentials, asg_name)) => {
-            deployment::destroy_app_with_credentials(
-                org_id,
-                resource_id,
-                resource_name,
-                aws_credentials,
-                asg_name,
-            )
-            .await
-        }
-        Err(error) => Err(error),
+    let terraform_result: Result<(), BoxError> = match destroy_credentials {
+        Ok((aws_credentials, asg_name)) => deployment::destroy_app_with_credentials(
+            org_id,
+            resource_id,
+            resource_name,
+            aws_credentials,
+            asg_name,
+        )
+        .await
+        .map_err(|error| -> BoxError { error.into() }),
+        Err(error) => Err(error.into()),
     };
     if let Err(error) = terraform_result {
         tracing::error!(resource_id = %resource_id, error = %error, "OpenTofu destroy failed");
         if !force {
-            anyhow::bail!("OpenTofu destroy failed after safe DNS withdrawal: {error}");
+            return Err(DestroyResourceByIdError {
+                kind: Kind::TofuDestroyFailed,
+                resource_id,
+                location: std::panic::Location::caller(),
+                source: Some(error),
+            });
         }
         tracing::warn!(resource_id = %resource_id, "force enabled after DNS withdrawal; marking app destroyed despite OpenTofu failure");
     }
@@ -709,7 +1087,8 @@ pub(crate) async fn destroy_resource_by_id(
     .bind(resource_id)
     .bind(org_id)
     .execute(&mut lock_connection)
-    .await?;
+    .await
+    .with_context(Ctx::new(Kind::MarkDestroyed, resource_id))?;
     release_teardown_lock(&mut lock_connection, resource_id).await;
     drop(lock_connection);
 
@@ -732,6 +1111,7 @@ pub(crate) async fn destroy_resource_by_id(
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
 async fn release_teardown_lock(connection: &mut PgConnection, resource_id: Uuid) {
     if let Err(error) = sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 1))")
         .bind(resource_id.to_string())
@@ -742,37 +1122,81 @@ async fn release_teardown_lock(connection: &mut PgConnection, resource_id: Uuid)
     }
 }
 
+/// Failure modes for [`destroy_credentials`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum DestroyCredentialsError {
+    #[error("could not load cloud credential for resource {resource_id} [{location}]")]
+    LoadCredential {
+        resource_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("BYOC teardown requires the configured credential encryptor [{location}]")]
+    MissingEncryptor { location: Location },
+
+    #[error("BYOC credentials are unavailable; infrastructure was preserved [{location}]")]
+    SecretsUnavailable {
+        #[location]
+        location: Location,
+        #[source]
+        #[context(option)]
+        source: Option<BoxError>,
+    },
+
+    #[error("BYOC access key is unavailable [{location}]")]
+    AccessKeyUnavailable { location: Location },
+
+    #[error("BYOC secret key is unavailable [{location}]")]
+    SecretKeyUnavailable { location: Location },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn destroy_credentials(
     state: &Arc<AppState>,
     org_id: Uuid,
     resource_id: Uuid,
     resource_region: &str,
-) -> anyhow::Result<(Option<deployment::AwsCredentials>, Option<String>)> {
+) -> Result<(Option<deployment::AwsCredentials>, Option<String>), DestroyCredentialsError> {
+    use DestroyCredentialsErrorCtx as Ctx;
+
     let credential = cloud_credentials::get_credential_by_resource(&state.db, org_id, resource_id)
         .await
-        .map_err(|(_, message)| anyhow::anyhow!(message))?;
+        .with_context(Ctx::load_credential(resource_id))?;
 
     if let Some(credential) = credential
         && credential.managed_on_prem
     {
-        let encryptor = state
-            .encryptor
-            .as_ref()
-            .context("BYOC teardown requires the configured credential encryptor")?;
+        let encryptor =
+            state
+                .encryptor
+                .as_ref()
+                .ok_or_else(|| DestroyCredentialsError::MissingEncryptor {
+                    location: std::panic::Location::caller(),
+                })?;
         let secrets =
             cloud_credentials::get_credential_secrets(&state.db, encryptor, org_id, credential.id)
                 .await
-                .map_err(|(_, message)| anyhow::anyhow!(message))?
-                .context("BYOC credentials are unavailable; infrastructure was preserved")?;
+                .with_context(Ctx::secrets_unavailable())?
+                .ok_or_else(|| DestroyCredentialsError::SecretsUnavailable {
+                    location: std::panic::Location::caller(),
+                    source: None,
+                })?;
         let access_key_id = secrets["aws_access_key_id"]
             .as_str()
             .filter(|value| !value.is_empty())
-            .context("BYOC access key is unavailable")?
+            .ok_or_else(|| DestroyCredentialsError::AccessKeyUnavailable {
+                location: std::panic::Location::caller(),
+            })?
             .to_string();
         let secret_access_key = secrets["aws_secret_access_key"]
             .as_str()
             .filter(|value| !value.is_empty())
-            .context("BYOC secret key is unavailable")?
+            .ok_or_else(|| DestroyCredentialsError::SecretKeyUnavailable {
+                location: std::panic::Location::caller(),
+            })?
             .to_string();
         let region = credential.config["aws_region"]
             .as_str()

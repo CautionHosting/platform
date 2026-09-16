@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use axum::http::StatusCode;
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
@@ -100,8 +100,15 @@ impl std::fmt::Debug for CreateCredentialRequest {
     }
 }
 
+/// Failure modes for [`CreateCredentialRequest::validate`] (leaf error: no underlying source).
+#[derive(Debug, thiserror::Error)]
+pub enum ValidateCredentialError {
+    #[error("missing required field '{field}' [{location}]")]
+    MissingField { field: String, location: Location },
+}
+
 impl CreateCredentialRequest {
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), ValidateCredentialError> {
         match self.platform {
             CloudPlatform::Aws => {
                 if self.managed_on_prem {
@@ -122,10 +129,10 @@ impl CreateCredentialRequest {
                     ];
                     for (field, value) in required {
                         if value.is_none() || value.map(|s| s.is_empty()).unwrap_or(true) {
-                            return Err(format!(
-                                "Missing required field for managed on-prem: {}",
-                                field
-                            ));
+                            return Err(ValidateCredentialError::MissingField {
+                                field: format!("managed on-prem: {}", field),
+                                location: std::panic::Location::caller(),
+                            });
                         }
                     }
                     if self
@@ -134,9 +141,10 @@ impl CreateCredentialRequest {
                         .map(|v| v.is_empty())
                         .unwrap_or(true)
                     {
-                        return Err(
-                            "Missing required field for managed on-prem: subnet_ids".to_string()
-                        );
+                        return Err(ValidateCredentialError::MissingField {
+                            field: "managed on-prem: subnet_ids".to_string(),
+                            location: std::panic::Location::caller(),
+                        });
                     }
                 } else {
                     if self
@@ -145,7 +153,10 @@ impl CreateCredentialRequest {
                         .map(|s| s.is_empty())
                         .unwrap_or(true)
                     {
-                        return Err("Missing required field: access_key_id".to_string());
+                        return Err(ValidateCredentialError::MissingField {
+                            field: "access_key_id".to_string(),
+                            location: std::panic::Location::caller(),
+                        });
                     }
                     if self
                         .secret_access_key
@@ -153,7 +164,10 @@ impl CreateCredentialRequest {
                         .map(|s| s.is_empty())
                         .unwrap_or(true)
                     {
-                        return Err("Missing required field: secret_access_key".to_string());
+                        return Err(ValidateCredentialError::MissingField {
+                            field: "secret_access_key".to_string(),
+                            location: std::panic::Location::caller(),
+                        });
                     }
                 }
                 Ok(())
@@ -205,21 +219,220 @@ impl CreateCredentialRequest {
     }
 }
 
+/// Failure modes for [`create_credential`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum CreateCredentialError {
+    #[error("invalid credential request [{location}]")]
+    InvalidRequest {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("encryption failed [{location}]")]
+    Encrypt {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to update default flag [{location}]")]
+    UpdateDefault {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to check resource ownership [{location}]")]
+    ResourceLookup {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("resource not found [{location}]")]
+    ResourceNotFound { location: Location },
+
+    #[error("failed to look up existing credential [{location}]")]
+    LookupExisting {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to update credential [{location}]")]
+    Update {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to insert credential [{location}]")]
+    Insert {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Failure modes for [`list_credentials`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum ListCredentialsError {
+    #[error("failed to list cloud credentials [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Failure modes for [`get_credential`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum GetCredentialError {
+    #[error("failed to get cloud credential [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Failure modes for [`get_credential_secrets`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum GetCredentialSecretsError {
+    #[error("failed to query secrets [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("decryption failed [{location}]")]
+    Decrypt {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Failure modes for [`delete_credential`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum DeleteCredentialError {
+    #[error("failed to delete cloud credential [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Failure modes for [`set_default_credential`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum SetDefaultCredentialError {
+    #[error("failed to look up credential [{location}]")]
+    Lookup {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to clear previous default [{location}]")]
+    ClearDefault {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to set new default [{location}]")]
+    SetDefault {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Failure modes for [`get_managed_onprem_credential`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum GetManagedOnpremCredentialError {
+    #[error("failed to look up credential [{location}]")]
+    Lookup {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("credential is not a managed on-prem type [{location}]")]
+    NotManagedOnPrem { location: Location },
+
+    #[error("failed to get secrets [{location}]")]
+    Secrets {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("secrets not found [{location}]")]
+    SecretsMissing { location: Location },
+}
+
+/// Failure modes for [`get_credential_by_resource`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum GetCredentialByResourceError {
+    #[error("failed to query credential by resource [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Failure modes for [`get_credential_by_identifier`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum GetCredentialByIdentifierError {
+    #[error("failed to query credential by identifier [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 pub async fn create_credential(
     pool: &PgPool,
     encryptor: &Encryptor,
     org_id: Uuid,
     user_id: Uuid,
     req: CreateCredentialRequest,
-) -> Result<CloudCredential, (StatusCode, String)> {
-    req.validate().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+) -> Result<CloudCredential, CreateCredentialError> {
+    use CreateCredentialErrorCtx as Ctx;
 
-    let secrets_encrypted = encryptor.encrypt_json(&req.secrets()).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Encryption failed: {}", e),
-        )
-    })?;
+    req.validate()
+        .inspect_err(|e| tracing::error!("Invalid credential request: {e}"))
+        .with_context(Ctx::invalid_request())?;
+
+    let secrets_encrypted = encryptor
+        .encrypt_json(&req.secrets())
+        .with_context(Ctx::encrypt())?;
 
     if req.is_default {
         sqlx::query(
@@ -230,13 +443,10 @@ pub async fn create_credential(
         .bind(req.platform)
         .execute(pool)
         .await
-        .map_err(|e| {
-            tracing::error!("Database error: {:?}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal database error".to_string(),
-            )
-        })?;
+        .inspect_err(|source| {
+            tracing::error!("Database error: {:?}", source);
+        })
+        .with_context(Ctx::update_default())?;
     }
 
     // Verify resource_id belongs to this org to prevent IDOR
@@ -248,23 +458,26 @@ pub async fn create_credential(
         .bind(org_id)
         .fetch_optional(pool)
         .await
-        .map_err(|e| {
-            tracing::error!("Database error: {:?}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal database error".to_string(),
-            )
-        })?;
+        .inspect_err(|source| {
+            tracing::error!("Database error: {:?}", source);
+        })
+        .with_context(Ctx::resource_lookup())?;
 
         if owns_resource.is_none() {
-            return Err((StatusCode::NOT_FOUND, "Resource not found".to_string()));
+            return Err(CreateCredentialError::ResourceNotFound {
+                location: std::panic::Location::caller(),
+            });
         }
     }
 
     let existing_cred = if let Some(resource_id) = req.resource_id {
-        get_credential_by_resource(pool, org_id, resource_id).await?
+        get_credential_by_resource(pool, org_id, resource_id)
+            .await
+            .with_context(Ctx::lookup_existing())?
     } else if req.managed_on_prem {
-        get_credential_by_identifier(pool, org_id, &req.identifier()).await?
+        get_credential_by_identifier(pool, org_id, &req.identifier())
+            .await
+            .with_context(Ctx::lookup_existing())?
     } else {
         None
     };
@@ -291,13 +504,10 @@ pub async fn create_credential(
         .bind(org_id)
         .fetch_one(pool)
         .await
-        .map_err(|e| {
-            tracing::error!("Database error: {:?}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal database error".to_string(),
-            )
-        })?;
+        .inspect_err(|source| {
+            tracing::error!("Database error: {:?}", source);
+        })
+        .with_context(Ctx::update())?;
 
         return Ok(row);
     }
@@ -321,15 +531,21 @@ pub async fn create_credential(
     .bind(user_id)
     .fetch_one(pool)
     .await
-    .map_err(|e| { tracing::error!("Database error: {:?}", e); (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error".to_string()) })?;
+    .inspect_err(|source| {
+        tracing::error!("Database error: {:?}", source);
+    })
+    .with_context(Ctx::insert())?;
 
     Ok(row)
 }
 
+#[tracing::instrument(skip_all, err)]
 pub async fn list_credentials(
     pool: &PgPool,
     org_id: Uuid,
-) -> Result<Vec<CloudCredential>, (StatusCode, String)> {
+) -> Result<Vec<CloudCredential>, ListCredentialsError> {
+    use ListCredentialsErrorCtx as Ctx;
+
     let rows = sqlx::query_as::<_, CloudCredential>(
         "SELECT id, organization_id, resource_id, platform, managed_on_prem, identifier,
                 config, is_default, is_active, last_validated_at, validation_error,
@@ -341,22 +557,22 @@ pub async fn list_credentials(
     .bind(org_id)
     .fetch_all(pool)
     .await
-    .map_err(|e| {
-        tracing::error!("Database error: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Internal database error".to_string(),
-        )
-    })?;
+    .inspect_err(|source| {
+        tracing::error!("Database error: {:?}", source);
+    })
+    .with_context(Ctx::query())?;
 
     Ok(rows)
 }
 
+#[tracing::instrument(skip_all, err)]
 pub async fn get_credential(
     pool: &PgPool,
     org_id: Uuid,
     credential_id: Uuid,
-) -> Result<Option<CloudCredential>, (StatusCode, String)> {
+) -> Result<Option<CloudCredential>, GetCredentialError> {
+    use GetCredentialErrorCtx as Ctx;
+
     let row = sqlx::query_as::<_, CloudCredential>(
         "SELECT id, organization_id, resource_id, platform, managed_on_prem, identifier,
                 config, is_default, is_active, last_validated_at, validation_error,
@@ -368,23 +584,23 @@ pub async fn get_credential(
     .bind(credential_id)
     .fetch_optional(pool)
     .await
-    .map_err(|e| {
-        tracing::error!("Database error: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Internal database error".to_string(),
-        )
-    })?;
+    .inspect_err(|source| {
+        tracing::error!("Database error: {:?}", source);
+    })
+    .with_context(Ctx::query())?;
 
     Ok(row)
 }
 
+#[tracing::instrument(skip_all, err)]
 pub async fn get_credential_secrets(
     pool: &PgPool,
     encryptor: &Encryptor,
     org_id: Uuid,
     credential_id: Uuid,
-) -> Result<Option<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Option<serde_json::Value>, GetCredentialSecretsError> {
+    use GetCredentialSecretsErrorCtx as Ctx;
+
     let row: Option<(Vec<u8>,)> = sqlx::query_as(
         "SELECT secrets_encrypted FROM cloud_credentials
          WHERE organization_id = $1 AND id = $2",
@@ -393,57 +609,55 @@ pub async fn get_credential_secrets(
     .bind(credential_id)
     .fetch_optional(pool)
     .await
-    .map_err(|e| {
-        tracing::error!("Database error: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Internal database error".to_string(),
-        )
-    })?;
+    .inspect_err(|source| {
+        tracing::error!("Database error: {:?}", source);
+    })
+    .with_context(Ctx::query())?;
 
     match row {
         Some((secrets_encrypted,)) => {
-            let secrets: serde_json::Value =
-                encryptor.decrypt_json(&secrets_encrypted).map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Decryption failed: {}", e),
-                    )
-                })?;
+            let secrets: serde_json::Value = encryptor
+                .decrypt_json(&secrets_encrypted)
+                .with_context(Ctx::decrypt())?;
             Ok(Some(secrets))
         }
         None => Ok(None),
     }
 }
 
+#[tracing::instrument(skip_all, err)]
 pub async fn delete_credential(
     pool: &PgPool,
     org_id: Uuid,
     credential_id: Uuid,
-) -> Result<bool, (StatusCode, String)> {
+) -> Result<bool, DeleteCredentialError> {
+    use DeleteCredentialErrorCtx as Ctx;
+
     let result =
         sqlx::query("DELETE FROM cloud_credentials WHERE organization_id = $1 AND id = $2")
             .bind(org_id)
             .bind(credential_id)
             .execute(pool)
             .await
-            .map_err(|e| {
-                tracing::error!("Database error: {:?}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Internal database error".to_string(),
-                )
-            })?;
+            .inspect_err(|source| {
+                tracing::error!("Database error: {:?}", source);
+            })
+            .with_context(Ctx::query())?;
 
     Ok(result.rows_affected() > 0)
 }
 
+#[tracing::instrument(skip_all, err)]
 pub async fn set_default_credential(
     pool: &PgPool,
     org_id: Uuid,
     credential_id: Uuid,
-) -> Result<bool, (StatusCode, String)> {
-    let cred = get_credential(pool, org_id, credential_id).await?;
+) -> Result<bool, SetDefaultCredentialError> {
+    use SetDefaultCredentialErrorCtx as Ctx;
+
+    let cred = get_credential(pool, org_id, credential_id)
+        .await
+        .with_context(Ctx::lookup())?;
     let cred = match cred {
         Some(c) => c,
         None => return Ok(false),
@@ -457,13 +671,10 @@ pub async fn set_default_credential(
     .bind(cred.platform)
     .execute(pool)
     .await
-    .map_err(|e| {
-        tracing::error!("Database error: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Internal database error".to_string(),
-        )
-    })?;
+    .inspect_err(|source| {
+        tracing::error!("Database error: {:?}", source);
+    })
+    .with_context(Ctx::clear_default())?;
 
     let result = sqlx::query(
         "UPDATE cloud_credentials SET is_default = true
@@ -473,13 +684,10 @@ pub async fn set_default_credential(
     .bind(credential_id)
     .execute(pool)
     .await
-    .map_err(|e| {
-        tracing::error!("Database error: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Internal database error".to_string(),
-        )
-    })?;
+    .inspect_err(|source| {
+        tracing::error!("Database error: {:?}", source);
+    })
+    .with_context(Ctx::set_default())?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -569,42 +777,47 @@ fn managed_onprem_credential_data(
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug))]
+#[tracing::instrument(skip_all, err)]
 pub async fn get_managed_onprem_credential(
     pool: &PgPool,
     encryptor: &Encryptor,
     org_id: Uuid,
     credential_id: Uuid,
-) -> Result<Option<ManagedOnPremCredentialData>, (StatusCode, String)> {
-    let cred = get_credential(pool, org_id, credential_id).await?;
+) -> Result<Option<ManagedOnPremCredentialData>, GetManagedOnpremCredentialError> {
+    use GetManagedOnpremCredentialErrorCtx as Ctx;
+
+    let cred = get_credential(pool, org_id, credential_id)
+        .await
+        .with_context(Ctx::lookup())?;
     let cred = match cred {
         Some(c) => c,
         None => return Ok(None),
     };
 
     if !cred.managed_on_prem {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Credential is not a managed on-prem type".to_string(),
-        ));
+        return Err(GetManagedOnpremCredentialError::NotManagedOnPrem {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let secrets = get_credential_secrets(pool, encryptor, org_id, credential_id)
-        .await?
-        .ok_or((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to get secrets".to_string(),
-        ))?;
+        .await
+        .with_context(Ctx::secrets())?
+        .ok_or(GetManagedOnpremCredentialError::SecretsMissing {
+            location: std::panic::Location::caller(),
+        })?;
 
     Ok(Some(managed_onprem_credential_data(&cred, &secrets)))
 }
 
-#[tracing::instrument(skip_all, err(Debug))]
+#[tracing::instrument(skip_all, err)]
 pub async fn get_credential_by_resource(
     pool: &PgPool,
     org_id: Uuid,
     resource_id: Uuid,
-) -> Result<Option<CloudCredential>, (StatusCode, String)> {
+) -> Result<Option<CloudCredential>, GetCredentialByResourceError> {
+    use GetCredentialByResourceErrorCtx as Ctx;
+
     let row = sqlx::query_as::<_, CloudCredential>(
         "SELECT id, organization_id, resource_id, platform, managed_on_prem, identifier,
                 config, is_default, is_active, last_validated_at, validation_error,
@@ -616,22 +829,22 @@ pub async fn get_credential_by_resource(
     .bind(resource_id)
     .fetch_optional(pool)
     .await
-    .map_err(|e| {
-        tracing::error!("Database error: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Internal database error".to_string(),
-        )
-    })?;
+    .inspect_err(|source| {
+        tracing::error!("Database error: {:?}", source);
+    })
+    .with_context(Ctx::query())?;
 
     Ok(row)
 }
 
+#[tracing::instrument(skip_all, err)]
 pub async fn get_credential_by_identifier(
     pool: &PgPool,
     org_id: Uuid,
     identifier: &str,
-) -> Result<Option<CloudCredential>, (StatusCode, String)> {
+) -> Result<Option<CloudCredential>, GetCredentialByIdentifierError> {
+    use GetCredentialByIdentifierErrorCtx as Ctx;
+
     let row = sqlx::query_as::<_, CloudCredential>(
         "SELECT id, organization_id, resource_id, platform, managed_on_prem, identifier,
                 config, is_default, is_active, last_validated_at, validation_error,
@@ -643,13 +856,10 @@ pub async fn get_credential_by_identifier(
     .bind(identifier)
     .fetch_optional(pool)
     .await
-    .map_err(|e| {
-        tracing::error!("Database error: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Internal database error".to_string(),
-        )
-    })?;
+    .inspect_err(|source| {
+        tracing::error!("Database error: {:?}", source);
+    })
+    .with_context(Ctx::query())?;
 
     Ok(row)
 }

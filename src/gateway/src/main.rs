@@ -403,7 +403,7 @@ async fn main() -> Result<(), MainError> {
             "X-Fido2-Response".parse().unwrap(),
         ]);
 
-    let auth_routes = Router::new()
+    let mut auth_routes = Router::new()
         .route(
             "/auth/register/begin",
             post(handlers::begin_register_handler),

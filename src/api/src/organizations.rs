@@ -9,6 +9,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -74,46 +75,31 @@ pub struct OrgSettings {
     pub require_pin: bool,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum InvitationError {
-    #[error("organization invitation not found")]
-    NotFound,
-    #[error("you do not have permission to manage this organization")]
-    Forbidden,
-    #[error("a user with this email is already a member of this organization")]
-    AlreadyMember,
-    #[error("an active invitation already exists for this email")]
-    AlreadyInvited,
-    #[error("a platform user with this email already exists")]
-    UserAlreadyExists,
-    #[error("failed to create invitation")]
-    Database,
+/// Failure modes for [`user_has_organization`] (leaf error: no underlying source
+/// surfaces to a client; callers box it into their own error).
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum UserHasOrganizationError {
+    #[error("failed to check user organization membership [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
-impl IntoResponse for InvitationError {
-    fn into_response(self) -> Response {
-        #[derive(Serialize)]
-        struct ErrorBody {
-            error: String,
-        }
+#[tracing::instrument(skip_all, err)]
+async fn user_has_organization(
+    db: &PgPool,
+    user_id: Uuid,
+) -> Result<bool, UserHasOrganizationError> {
+    use UserHasOrganizationErrorCtx as Ctx;
 
-        let status = match self {
-            Self::NotFound => StatusCode::NOT_FOUND,
-            Self::Forbidden => StatusCode::FORBIDDEN,
-            Self::AlreadyMember | Self::AlreadyInvited | Self::UserAlreadyExists => {
-                StatusCode::CONFLICT
-            }
-            Self::Database => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-
-        (
-            status,
-            Json(ErrorBody {
-                error: self.to_string(),
-            }),
-        )
-            .into_response()
-    }
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM organization_members WHERE user_id = $1)")
+        .bind(user_id)
+        .fetch_one(db)
+        .await
+        .with_context(Ctx::query())
 }
 
 fn generate_invitation_token() -> (String, String) {
@@ -136,21 +122,36 @@ fn public_organization_name(name: &str) -> String {
     trimmed.to_string()
 }
 
-async fn user_has_organization(db: &PgPool, user_id: Uuid) -> Result<bool, StatusCode> {
-    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM organization_members WHERE user_id = $1)")
-        .bind(user_id)
-        .fetch_one(db)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to check user organization membership: {:?}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })
+/// Failure modes for [`list_organizations`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum ListOrganizationsError {
+    #[error("failed to list organizations [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
+impl IntoResponse for ListOrganizationsError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            ListOrganizationsError::Query { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 pub async fn list_organizations(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
-) -> Result<Json<Vec<Organization>>, StatusCode> {
+) -> Result<Json<Vec<Organization>>, ListOrganizationsError> {
+    use ListOrganizationsErrorCtx as Ctx;
+
     tracing::debug!("list_organizations called for user {}", auth.user_id);
     let orgs = sqlx::query_as::<_, Organization>(
         "SELECT o.id, o.name, o.is_active, o.created_at, o.updated_at
@@ -162,29 +163,111 @@ pub async fn list_organizations(
     .bind(auth.user_id)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| {
-        tracing::error!("list_organizations failed: {:?}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    .with_context(Ctx::query())?;
 
     tracing::debug!("list_organizations returning {} orgs", orgs.len());
     Ok(Json(orgs))
 }
 
+/// Failure modes for [`create_organization`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum CreateOrganizationError {
+    #[error("failed to check existing organization membership [{location}]")]
+    HasOrgCheck {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("user {user_id} already belongs to an organization [{location}]")]
+    AlreadyMember { user_id: Uuid, location: Location },
+
+    #[error("failed to begin transaction [{location}]")]
+    Begin {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to create organization [{location}]")]
+    InsertOrg {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("user already belongs to an organization [{location}]")]
+    MemberConflict {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to add organization member [{location}]")]
+    MemberInsert {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to commit transaction [{location}]")]
+    Commit {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for CreateOrganizationError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            CreateOrganizationError::HasOrgCheck { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            CreateOrganizationError::AlreadyMember { .. } => (StatusCode::CONFLICT, "conflict"),
+            CreateOrganizationError::Begin { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            CreateOrganizationError::InsertOrg { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            CreateOrganizationError::MemberConflict { .. } => (StatusCode::CONFLICT, "conflict"),
+            CreateOrganizationError::MemberInsert { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            CreateOrganizationError::Commit { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 pub async fn create_organization(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     validated_types::Validated(payload): validated_types::Validated<CreateOrganizationRequest>,
-) -> Result<Json<Organization>, StatusCode> {
-    if user_has_organization(&state.db, auth.user_id).await? {
-        return Err(StatusCode::CONFLICT);
+) -> Result<Json<Organization>, CreateOrganizationError> {
+    use CreateOrganizationErrorCtx as Ctx;
+
+    if user_has_organization(&state.db, auth.user_id)
+        .await
+        .with_context(Ctx::has_org_check())?
+    {
+        return Err(CreateOrganizationError::AlreadyMember {
+            user_id: auth.user_id,
+            location: std::panic::Location::caller(),
+        });
     }
 
-    let mut tx = state
-        .db
-        .begin()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut tx = state.db.begin().await.with_context(Ctx::begin())?;
 
     let org = sqlx::query_as::<_, Organization>(
         "INSERT INTO organizations (name)
@@ -194,7 +277,7 @@ pub async fn create_organization(
     .bind(&payload.name)
     .fetch_one(&mut *tx)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .with_context(Ctx::insert_org())?;
 
     sqlx::query(
         "INSERT INTO organization_members (organization_id, user_id, role)
@@ -210,24 +293,67 @@ pub async fn create_organization(
             .map(|database_error| database_error.is_unique_violation())
             .unwrap_or(false)
         {
-            return StatusCode::CONFLICT;
+            CreateOrganizationError::MemberConflict {
+                location: std::panic::Location::caller(),
+                source: Box::new(e),
+            }
+        } else {
+            CreateOrganizationError::MemberInsert {
+                location: std::panic::Location::caller(),
+                source: Box::new(e),
+            }
         }
-        StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    tx.commit()
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    tx.commit().await.with_context(Ctx::commit())?;
 
     Ok(Json(org))
 }
 
+/// Failure modes for [`get_organization`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum GetOrganizationError {
+    #[error("failed to check organization access [{location}]")]
+    AccessQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("organization {org_id} not found [{location}]")]
+    NotFound {
+        org_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for GetOrganizationError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            GetOrganizationError::AccessQuery { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            GetOrganizationError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found"),
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 pub async fn get_organization(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(org_id): Path<Uuid>,
-) -> Result<Json<Organization>, StatusCode> {
-    check_org_access(&state.db, auth.user_id, org_id).await?;
+) -> Result<Json<Organization>, GetOrganizationError> {
+    use GetOrganizationErrorCtx as Ctx;
+
+    check_org_access(&state.db, auth.user_id, org_id)
+        .await
+        .with_context(Ctx::access_query())?;
 
     let org = sqlx::query_as::<_, Organization>(
         "SELECT id, name, is_active, created_at, updated_at
@@ -236,25 +362,77 @@ pub async fn get_organization(
     .bind(org_id)
     .fetch_one(&state.db)
     .await
-    .map_err(|_| StatusCode::NOT_FOUND)?;
+    .with_context(Ctx::not_found(org_id))?;
 
     Ok(Json(org))
 }
 
+/// Failure modes for [`update_organization`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum UpdateOrganizationError {
+    #[error("failed to check organization access [{location}]")]
+    AccessQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("you do not have permission to manage this organization [{location}]")]
+    NotManager { location: Location },
+
+    #[error("no organization name provided [{location}]")]
+    BadRequest { location: Location },
+
+    #[error("failed to update organization {org_id} [{location}]")]
+    Update {
+        org_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for UpdateOrganizationError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            UpdateOrganizationError::AccessQuery { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            UpdateOrganizationError::NotManager { .. } => (StatusCode::FORBIDDEN, "forbidden"),
+            UpdateOrganizationError::BadRequest { .. } => (StatusCode::BAD_REQUEST, "bad request"),
+            UpdateOrganizationError::Update { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 pub async fn update_organization(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(org_id): Path<Uuid>,
     validated_types::Validated(payload): validated_types::Validated<UpdateOrganizationRequest>,
-) -> Result<Json<Organization>, StatusCode> {
-    let role = check_org_access(&state.db, auth.user_id, org_id).await?;
+) -> Result<Json<Organization>, UpdateOrganizationError> {
+    use UpdateOrganizationErrorCtx as Ctx;
+
+    let role = check_org_access(&state.db, auth.user_id, org_id)
+        .await
+        .with_context(Ctx::access_query())?;
 
     if !can_manage_org(&role) {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(UpdateOrganizationError::NotManager {
+            location: std::panic::Location::caller(),
+        });
     }
 
     if payload.name.is_none() {
-        return Err(StatusCode::BAD_REQUEST);
+        return Err(UpdateOrganizationError::BadRequest {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let mut query_builder = sqlx::QueryBuilder::new("UPDATE organizations SET ");
@@ -272,49 +450,130 @@ pub async fn update_organization(
         .build_query_as::<Organization>()
         .fetch_one(&state.db)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .with_context(Ctx::update(org_id))?;
 
     Ok(Json(org))
 }
 
+/// Failure modes for [`delete_organization`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum DeleteOrganizationError {
+    #[error("failed to check organization access [{location}]")]
+    AccessQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("you do not have permission to manage this organization [{location}]")]
+    NotOwner { location: Location },
+
+    #[error("failed to delete organization {org_id} [{location}]")]
+    Update {
+        org_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for DeleteOrganizationError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            DeleteOrganizationError::AccessQuery { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            DeleteOrganizationError::NotOwner { .. } => (StatusCode::FORBIDDEN, "forbidden"),
+            DeleteOrganizationError::Update { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 pub async fn delete_organization(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(org_id): Path<Uuid>,
-) -> Result<StatusCode, StatusCode> {
-    let role = check_org_access(&state.db, auth.user_id, org_id).await?;
+) -> Result<StatusCode, DeleteOrganizationError> {
+    use DeleteOrganizationErrorCtx as Ctx;
+
+    let role = check_org_access(&state.db, auth.user_id, org_id)
+        .await
+        .with_context(Ctx::access_query())?;
 
     if !is_owner(&role) {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(DeleteOrganizationError::NotOwner {
+            location: std::panic::Location::caller(),
+        });
     }
 
     sqlx::query("UPDATE organizations SET is_active = false WHERE id = $1")
         .bind(org_id)
         .execute(&state.db)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .with_context(Ctx::update(org_id))?;
 
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[tracing::instrument(skip(state, auth))]
+/// Failure modes for [`get_org_settings`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum GetOrgSettingsError {
+    #[error("failed to check organization access [{location}]")]
+    AccessQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to load organization settings [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for GetOrgSettingsError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            GetOrgSettingsError::AccessQuery { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            GetOrgSettingsError::Query { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 pub async fn get_org_settings(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(org_id): Path<Uuid>,
-) -> Result<Json<OrgSettings>, StatusCode> {
+) -> Result<Json<OrgSettings>, GetOrgSettingsError> {
+    use GetOrgSettingsErrorCtx as Ctx;
+
     tracing::debug!("get_org_settings called for org {}", org_id);
-    check_org_access(&state.db, auth.user_id, org_id).await?;
+    check_org_access(&state.db, auth.user_id, org_id)
+        .await
+        .with_context(Ctx::access_query())?;
 
     let settings: Option<serde_json::Value> =
         sqlx::query_scalar("SELECT settings FROM organizations WHERE id = $1")
             .bind(org_id)
             .fetch_optional(&state.db)
             .await
-            .map_err(|e| {
-                tracing::error!("get_org_settings failed: {:?}", e);
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?
+            .with_context(Ctx::query())?
             .flatten();
 
     let org_settings = settings
@@ -325,17 +584,72 @@ pub async fn get_org_settings(
     Ok(Json(org_settings))
 }
 
-#[tracing::instrument(skip(state, auth, payload))]
+/// Failure modes for [`update_org_settings`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum UpdateOrgSettingsError {
+    #[error("failed to check organization access [{location}]")]
+    AccessQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("you do not have permission to manage this organization [{location}]")]
+    NotManager { location: Location },
+
+    #[error("failed to update organization settings [{location}]")]
+    Update {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to parse updated organization settings [{location}]")]
+    Parse {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for UpdateOrgSettingsError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            UpdateOrgSettingsError::AccessQuery { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            UpdateOrgSettingsError::NotManager { .. } => (StatusCode::FORBIDDEN, "forbidden"),
+            UpdateOrgSettingsError::Update { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            UpdateOrgSettingsError::Parse { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 pub async fn update_org_settings(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(org_id): Path<Uuid>,
     validated_types::Validated(payload): validated_types::Validated<UpdateOrgSettingsRequest>,
-) -> Result<Json<OrgSettings>, StatusCode> {
-    let role = check_org_access(&state.db, auth.user_id, org_id).await?;
+) -> Result<Json<OrgSettings>, UpdateOrgSettingsError> {
+    use UpdateOrgSettingsErrorCtx as Ctx;
+
+    let role = check_org_access(&state.db, auth.user_id, org_id)
+        .await
+        .with_context(Ctx::access_query())?;
 
     if !can_manage_org(&role) {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(UpdateOrgSettingsError::NotManager {
+            location: std::panic::Location::caller(),
+        });
     }
 
     // Build the settings JSON update
@@ -355,30 +669,57 @@ pub async fn update_org_settings(
     .bind(org_id)
     .fetch_one(&state.db)
     .await
-    .map_err(|e| {
-        tracing::error!("Failed to update org settings: {:?}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    .with_context(Ctx::update())?;
 
     let org_settings: OrgSettings =
-        serde_json::from_value(updated_settings.clone()).map_err(|e| {
-            tracing::error!(
-                "Failed to parse updated org settings: {:?}, raw value: {:?}",
-                e,
-                updated_settings
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        serde_json::from_value(updated_settings.clone()).with_context(Ctx::parse())?;
 
     Ok(Json(org_settings))
 }
 
+/// Failure modes for [`list_members`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum ListMembersError {
+    #[error("failed to check organization access [{location}]")]
+    AccessQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to list organization members [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for ListMembersError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            ListMembersError::AccessQuery { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            ListMembersError::Query { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 pub async fn list_members(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(org_id): Path<Uuid>,
-) -> Result<Json<Vec<OrganizationMember>>, StatusCode> {
-    check_org_access(&state.db, auth.user_id, org_id).await?;
+) -> Result<Json<Vec<OrganizationMember>>, ListMembersError> {
+    use ListMembersErrorCtx as Ctx;
+
+    check_org_access(&state.db, auth.user_id, org_id)
+        .await
+        .with_context(Ctx::access_query())?;
 
     let members = sqlx::query_as::<_, OrganizationMember>(
         "SELECT om.id,
@@ -398,26 +739,71 @@ pub async fn list_members(
     .bind(org_id)
     .fetch_all(&state.db)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .with_context(Ctx::query())?;
 
     Ok(Json(members))
 }
 
+/// Failure modes for [`invite_member`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum InviteMemberError {
+    #[error("you do not have permission to manage this organization [{location}]")]
+    Forbidden { location: Location },
+
+    #[error("a user with this email is already a member of this organization [{location}]")]
+    AlreadyMember { location: Location },
+
+    #[error("an active invitation already exists for this email [{location}]")]
+    AlreadyInvited { location: Location },
+
+    #[error("a platform user with this email already exists [{location}]")]
+    UserAlreadyExists { location: Location },
+
+    #[error("organization invitation not found [{location}]")]
+    NotFound { org_id: Uuid, location: Location },
+
+    #[error("failed to create invitation [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for InviteMemberError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            InviteMemberError::Forbidden { .. } => (StatusCode::FORBIDDEN, "forbidden"),
+            InviteMemberError::AlreadyMember { .. } => (StatusCode::CONFLICT, "conflict"),
+            InviteMemberError::AlreadyInvited { .. } => (StatusCode::CONFLICT, "conflict"),
+            InviteMemberError::UserAlreadyExists { .. } => (StatusCode::CONFLICT, "conflict"),
+            InviteMemberError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found"),
+            InviteMemberError::Database { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 pub async fn invite_member(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(org_id): Path<Uuid>,
     validated_types::Validated(payload): validated_types::Validated<InviteMemberRequest>,
-) -> Result<Json<InviteMemberResponse>, InvitationError> {
+) -> Result<Json<InviteMemberResponse>, InviteMemberError> {
+    use InviteMemberErrorCtx as Ctx;
+
     let role = check_org_access(&state.db, auth.user_id, org_id)
         .await
-        .map_err(|status| match status {
-            StatusCode::FORBIDDEN => InvitationError::Forbidden,
-            _ => InvitationError::Database,
-        })?;
+        .with_context(Ctx::database())?;
 
     if !can_manage_org(&role) {
-        return Err(InvitationError::Forbidden);
+        return Err(InviteMemberError::Forbidden {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let email = payload.email.trim().to_lowercase();
@@ -434,13 +820,12 @@ pub async fn invite_member(
     .bind(&email)
     .fetch_one(&state.db)
     .await
-    .map_err(|e| {
-        tracing::error!("Failed to check existing member email: {:?}", e);
-        InvitationError::Database
-    })?;
+    .with_context(Ctx::database())?;
 
     if already_member {
-        return Err(InvitationError::AlreadyMember);
+        return Err(InviteMemberError::AlreadyMember {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let already_invited: bool = sqlx::query_scalar(
@@ -458,13 +843,12 @@ pub async fn invite_member(
     .bind(&email)
     .fetch_one(&state.db)
     .await
-    .map_err(|e| {
-        tracing::error!("Failed to check existing invitation email: {:?}", e);
-        InvitationError::Database
-    })?;
+    .with_context(Ctx::database())?;
 
     if already_invited {
-        return Err(InvitationError::AlreadyInvited);
+        return Err(InviteMemberError::AlreadyInvited {
+            location: std::panic::Location::caller(),
+        });
     }
 
     sqlx::query(
@@ -480,43 +864,36 @@ pub async fn invite_member(
     .bind(&email)
     .execute(&state.db)
     .await
-    .map_err(|e| {
-        tracing::error!("Failed to revoke expired invitation email: {:?}", e);
-        InvitationError::Database
-    })?;
+    .with_context(Ctx::database())?;
 
     let existing_user: bool =
         sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE lower(email) = $1)")
             .bind(&email)
             .fetch_one(&state.db)
             .await
-            .map_err(|e| {
-                tracing::error!("Failed to check existing user email: {:?}", e);
-                InvitationError::Database
-            })?;
+            .with_context(Ctx::database())?;
 
     if existing_user {
-        return Err(InvitationError::UserAlreadyExists);
+        return Err(InviteMemberError::UserAlreadyExists {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let org_name: String = sqlx::query_scalar("SELECT name FROM organizations WHERE id = $1")
         .bind(org_id)
         .fetch_optional(&state.db)
         .await
-        .map_err(|e| {
-            tracing::error!("Failed to load organization for invitation: {:?}", e);
-            InvitationError::Database
-        })?
-        .ok_or(InvitationError::NotFound)?;
+        .with_context(Ctx::database())?
+        .ok_or_else(|| InviteMemberError::NotFound {
+            org_id,
+            location: std::panic::Location::caller(),
+        })?;
 
     let inviter_email: Option<String> = sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
         .bind(auth.user_id)
         .fetch_optional(&state.db)
         .await
-        .map_err(|e| {
-            tracing::error!("Failed to load inviter email: {:?}", e);
-            InvitationError::Database
-        })?
+        .with_context(Ctx::database())?
         .flatten();
 
     let (token, token_hash) = generate_invitation_token();
@@ -550,10 +927,14 @@ pub async fn invite_member(
             .map(|database_error| database_error.is_unique_violation())
             .unwrap_or(false)
         {
-            return InvitationError::AlreadyInvited;
+            return InviteMemberError::AlreadyInvited {
+                location: std::panic::Location::caller(),
+            };
         }
-        tracing::error!("Failed to create organization invitation: {:?}", e);
-        InvitationError::Database
+        InviteMemberError::Database {
+            location: std::panic::Location::caller(),
+            source: Box::new(e),
+        }
     })?;
 
     let email_sent = send_organization_invite_email(
@@ -571,20 +952,49 @@ pub async fn invite_member(
     }))
 }
 
+/// Failure modes for [`list_active_invitations`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum ListActiveInvitationsError {
+    #[error("you do not have permission to manage this organization [{location}]")]
+    Forbidden { location: Location },
+
+    #[error("failed to list organization invitations [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for ListActiveInvitationsError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            ListActiveInvitationsError::Forbidden { .. } => (StatusCode::FORBIDDEN, "forbidden"),
+            ListActiveInvitationsError::Query { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 pub async fn list_active_invitations(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(org_id): Path<Uuid>,
-) -> Result<Json<Vec<OrganizationInvitation>>, InvitationError> {
+) -> Result<Json<Vec<OrganizationInvitation>>, ListActiveInvitationsError> {
+    use ListActiveInvitationsErrorCtx as Ctx;
+
     let role = check_org_access(&state.db, auth.user_id, org_id)
         .await
-        .map_err(|status| match status {
-            StatusCode::FORBIDDEN => InvitationError::Forbidden,
-            _ => InvitationError::Database,
-        })?;
+        .with_context(Ctx::query())?;
 
     if !can_manage_org(&role) {
-        return Err(InvitationError::Forbidden);
+        return Err(ListActiveInvitationsError::Forbidden {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let invitations = sqlx::query_as::<_, OrganizationInvitation>(
@@ -608,28 +1018,58 @@ pub async fn list_active_invitations(
     .bind(org_id)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| {
-        tracing::error!("Failed to list organization invitations: {:?}", e);
-        InvitationError::Database
-    })?;
+    .with_context(Ctx::query())?;
 
     Ok(Json(invitations))
 }
 
+/// Failure modes for [`cancel_invitation`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum CancelInvitationError {
+    #[error("you do not have permission to manage this organization [{location}]")]
+    Forbidden { location: Location },
+
+    #[error("organization invitation not found [{location}]")]
+    NotFound { location: Location },
+
+    #[error("failed to cancel organization invitation [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for CancelInvitationError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            CancelInvitationError::Forbidden { .. } => (StatusCode::FORBIDDEN, "forbidden"),
+            CancelInvitationError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found"),
+            CancelInvitationError::Database { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 pub async fn cancel_invitation(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path((org_id, invitation_id)): Path<(Uuid, Uuid)>,
-) -> Result<StatusCode, InvitationError> {
+) -> Result<StatusCode, CancelInvitationError> {
+    use CancelInvitationErrorCtx as Ctx;
+
     let role = check_org_access(&state.db, auth.user_id, org_id)
         .await
-        .map_err(|status| match status {
-            StatusCode::FORBIDDEN => InvitationError::Forbidden,
-            _ => InvitationError::Database,
-        })?;
+        .with_context(Ctx::database())?;
 
     if !can_manage_org(&role) {
-        return Err(InvitationError::Forbidden);
+        return Err(CancelInvitationError::Forbidden {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let result = sqlx::query(
@@ -644,18 +1084,18 @@ pub async fn cancel_invitation(
     .bind(org_id)
     .execute(&state.db)
     .await
-    .map_err(|e| {
-        tracing::error!("Failed to cancel organization invitation: {:?}", e);
-        InvitationError::Database
-    })?;
+    .with_context(Ctx::database())?;
 
     if result.rows_affected() == 0 {
-        return Err(InvitationError::NotFound);
+        return Err(CancelInvitationError::NotFound {
+            location: std::panic::Location::caller(),
+        });
     }
 
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[tracing::instrument(skip_all)]
 async fn send_organization_invite_email(
     email: &str,
     org_name: &str,
@@ -708,20 +1148,83 @@ async fn send_organization_invite_email(
     }
 }
 
+/// Failure modes for [`add_member`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum AddMemberError {
+    #[error("failed to check organization access [{location}]")]
+    AccessQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("you do not have permission to manage this organization [{location}]")]
+    NotManager { location: Location },
+
+    #[error("failed to check existing organization membership [{location}]")]
+    HasOrgCheck {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("user already belongs to an organization [{location}]")]
+    AlreadyMember { location: Location },
+
+    #[error("failed to add organization member [{location}]")]
+    Insert {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for AddMemberError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            AddMemberError::AccessQuery { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            AddMemberError::NotManager { .. } => (StatusCode::FORBIDDEN, "forbidden"),
+            AddMemberError::HasOrgCheck { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            AddMemberError::AlreadyMember { .. } => (StatusCode::CONFLICT, "conflict"),
+            AddMemberError::Insert { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 pub async fn add_member(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(org_id): Path<Uuid>,
     validated_types::Validated(payload): validated_types::Validated<AddMemberRequest>,
-) -> Result<Json<OrganizationMember>, StatusCode> {
-    let role = check_org_access(&state.db, auth.user_id, org_id).await?;
+) -> Result<Json<OrganizationMember>, AddMemberError> {
+    use AddMemberErrorCtx as Ctx;
+
+    let role = check_org_access(&state.db, auth.user_id, org_id)
+        .await
+        .with_context(Ctx::access_query())?;
 
     if !can_manage_org(&role) {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(AddMemberError::NotManager {
+            location: std::panic::Location::caller(),
+        });
     }
 
-    if user_has_organization(&state.db, payload.user_id).await? {
-        return Err(StatusCode::CONFLICT);
+    if user_has_organization(&state.db, payload.user_id)
+        .await
+        .with_context(Ctx::has_org_check())?
+    {
+        return Err(AddMemberError::AlreadyMember {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let member = sqlx::query_as::<_, OrganizationMember>(
@@ -743,21 +1246,66 @@ pub async fn add_member(
     .bind(auth.user_id)
     .fetch_one(&state.db)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .with_context(Ctx::insert())?;
 
     Ok(Json(member))
 }
 
+/// Failure modes for [`update_member`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum UpdateMemberError {
+    #[error("failed to check organization access [{location}]")]
+    AccessQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("you do not have permission to manage this organization [{location}]")]
+    NotManager { location: Location },
+
+    #[error("failed to update organization member [{location}]")]
+    Update {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for UpdateMemberError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            UpdateMemberError::AccessQuery { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            UpdateMemberError::NotManager { .. } => (StatusCode::FORBIDDEN, "forbidden"),
+            UpdateMemberError::Update { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 pub async fn update_member(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path((org_id, member_user_id)): Path<(Uuid, Uuid)>,
     validated_types::Validated(payload): validated_types::Validated<UpdateMemberRequest>,
-) -> Result<Json<OrganizationMember>, StatusCode> {
-    let role = check_org_access(&state.db, auth.user_id, org_id).await?;
+) -> Result<Json<OrganizationMember>, UpdateMemberError> {
+    use UpdateMemberErrorCtx as Ctx;
+
+    let role = check_org_access(&state.db, auth.user_id, org_id)
+        .await
+        .with_context(Ctx::access_query())?;
 
     if !can_manage_org(&role) {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(UpdateMemberError::NotManager {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let member = sqlx::query_as::<_, OrganizationMember>(
@@ -779,20 +1327,65 @@ pub async fn update_member(
     .bind(member_user_id)
     .fetch_one(&state.db)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .with_context(Ctx::update())?;
 
     Ok(Json(member))
 }
 
+/// Failure modes for [`remove_member`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum RemoveMemberError {
+    #[error("failed to check organization access [{location}]")]
+    AccessQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("you do not have permission to manage this organization [{location}]")]
+    NotManager { location: Location },
+
+    #[error("failed to remove organization member [{location}]")]
+    Delete {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for RemoveMemberError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            RemoveMemberError::AccessQuery { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            RemoveMemberError::NotManager { .. } => (StatusCode::FORBIDDEN, "forbidden"),
+            RemoveMemberError::Delete { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 pub async fn remove_member(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path((org_id, member_user_id)): Path<(Uuid, Uuid)>,
-) -> Result<StatusCode, StatusCode> {
-    let role = check_org_access(&state.db, auth.user_id, org_id).await?;
+) -> Result<StatusCode, RemoveMemberError> {
+    use RemoveMemberErrorCtx as Ctx;
+
+    let role = check_org_access(&state.db, auth.user_id, org_id)
+        .await
+        .with_context(Ctx::access_query())?;
 
     if !can_manage_org(&role) {
-        return Err(StatusCode::FORBIDDEN);
+        return Err(RemoveMemberError::NotManager {
+            location: std::panic::Location::caller(),
+        });
     }
 
     sqlx::query(
@@ -803,7 +1396,7 @@ pub async fn remove_member(
     .bind(member_user_id)
     .execute(&state.db)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .with_context(Ctx::delete())?;
 
     Ok(StatusCode::NO_CONTENT)
 }

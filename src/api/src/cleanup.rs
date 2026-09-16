@@ -75,7 +75,7 @@ pub async fn destroy_next_app(
     {
         tracing::error!(resource_id = %resource_id, error = %error, "destroy_next_app failed");
         return DestroyNextResponse::Error {
-            error: error.to_string(),
+            error: error.client_message().to_string(),
         }
         .into_response();
     }

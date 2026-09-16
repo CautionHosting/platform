@@ -2,8 +2,10 @@ use axum::{
     Json,
     extract::{Extension, Path, State},
     http::StatusCode,
+    response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Datelike, Utc};
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
@@ -242,14 +244,28 @@ pub(crate) fn build_credit_packages(
         .collect()
 }
 
+/// Failure modes for [`get_ledger_balance_cents`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum GetLedgerBalanceCentsError {
+    #[error("could not read credit ledger balance [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
 #[tracing::instrument(skip_all, err)]
 pub async fn get_ledger_balance_cents<'e, E>(
     executor: E,
     organization_id: Uuid,
-) -> Result<i64, sqlx::Error>
+) -> Result<i64, GetLedgerBalanceCentsError>
 where
     E: Executor<'e, Database = Postgres>,
 {
+    use GetLedgerBalanceCentsErrorCtx as Ctx;
+
     sqlx::query_scalar(
         r#"
         SELECT COALESCE(clb.credit_cents, 0) - COALESCE(dlb.debit_cents, 0)
@@ -261,15 +277,31 @@ where
     .bind(organization_id)
     .fetch_one(executor)
     .await
+    .with_context(Ctx::query())
 }
 
+/// Failure modes for [`get_debit_balance_cents`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum GetDebitBalanceCentsError {
+    #[error("could not read debit ledger balance [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 pub async fn get_debit_balance_cents<'e, E>(
     executor: E,
     organization_id: Uuid,
-) -> Result<i64, sqlx::Error>
+) -> Result<i64, GetDebitBalanceCentsError>
 where
     E: Executor<'e, Database = Postgres>,
 {
+    use GetDebitBalanceCentsErrorCtx as Ctx;
+
     sqlx::query_scalar(
         r#"
         SELECT COALESCE(dlb.debit_cents, 0)
@@ -280,15 +312,54 @@ where
     .bind(organization_id)
     .fetch_one(executor)
     .await
+    .with_context(Ctx::query())
 }
 
+/// Failure modes for [`get_billing_usage`]. Every failure carries a source.
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum GetBillingUsageError {
+    #[error("could not look up the primary organization [{location}]")]
+    OrgLookup {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("database query failed [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for GetBillingUsageError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            GetBillingUsageError::OrgLookup { .. } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to get organization",
+            ),
+            GetBillingUsageError::Database { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 pub async fn get_billing_usage(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, GetBillingUsageError> {
+    use GetBillingUsageErrorCtx as Ctx;
+
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+        .with_context(Ctx::org_lookup())?;
 
     let now = chrono::Utc::now();
 
@@ -304,12 +375,7 @@ pub async fn get_billing_usage(
 
     let lifetime_debits_cents = get_debit_balance_cents(&state.db, org_id)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-        })?;
+        .with_context(Ctx::database())?;
 
     let usage_rows: Vec<BillingUsageRow> = sqlx::query_as(
         r#"
@@ -373,12 +439,7 @@ pub async fn get_billing_usage(
     .bind(now)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .with_context(Ctx::database())?;
 
     let subscription_rows: Vec<SubscriptionSpendRow> = sqlx::query_as(
         r#"
@@ -441,12 +502,7 @@ pub async fn get_billing_usage(
     .bind(next_month_dt)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .with_context(Ctx::database())?;
 
     let active_runners: Vec<ActiveRunnerProjectionRow> = sqlx::query_as(
         r#"
@@ -480,12 +536,7 @@ pub async fn get_billing_usage(
     .bind(org_id)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .with_context(Ctx::database())?;
 
     let mut future_runner_costs = HashMap::new();
     for runner in active_runners {
@@ -591,14 +642,42 @@ pub async fn get_billing_usage(
     })))
 }
 
+/// Failure modes for [`get_billing_invoices`]. Only the primary-organization
+/// lookup can fail (the invoice read swallows errors and returns an empty list).
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum GetBillingInvoicesError {
+    #[error("could not look up the primary organization [{location}]")]
+    OrgLookup {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for GetBillingInvoicesError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            GetBillingInvoicesError::OrgLookup { .. } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to get organization",
+            ),
+        };
+        (status, body).into_response()
+    }
+}
+
 /// Get billing invoices
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 pub async fn get_billing_invoices(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, GetBillingInvoicesError> {
+    use GetBillingInvoicesErrorCtx as Ctx;
+
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+        .with_context(Ctx::org_lookup())?;
 
     // Query invoices from database
     let invoices: Vec<(
@@ -639,11 +718,41 @@ pub async fn get_billing_invoices(
     })))
 }
 
+/// Failure modes for [`list_paddle_saved_payment_methods`]. All failures are
+/// surfaced to a caller-side log; none reach an HTTP client.
+#[derive(Debug, thiserror::Error, CtxError)]
+enum ListPaddleSavedPaymentMethodsError {
+    #[error("could not reach the Paddle API [{location}]")]
+    Transport {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Paddle rate limited this server IP [{location}]")]
+    RateLimited { location: Location },
+
+    #[error("Paddle returned an error status [{location}]")]
+    ApiStatus { location: Location },
+
+    #[error("could not parse the Paddle response [{location}]")]
+    Parse {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn list_paddle_saved_payment_methods(
     api_url: &str,
     api_key: &str,
     customer_id: &str,
-) -> Result<Vec<PaddleSavedPaymentMethod>, String> {
+) -> Result<Vec<PaddleSavedPaymentMethod>, ListPaddleSavedPaymentMethodsError> {
+    use ListPaddleSavedPaymentMethodsError as E;
+    use ListPaddleSavedPaymentMethodsErrorCtx as Ctx;
     let client = reqwest::Client::new();
     let mut url = format!(
         "{}/customers/{}/payment-methods?per_page=200",
@@ -657,31 +766,25 @@ async fn list_paddle_saved_payment_methods(
             .header("Authorization", format!("Bearer {}", api_key))
             .send()
             .await
-            .map_err(|e| format!("Paddle API error: {}", e))?;
+            .with_context(Ctx::transport())?;
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let retry_after = paddle_retry_after_seconds(resp.headers());
-            let body = resp.text().await.unwrap_or_default();
-            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                return Err(match retry_after {
-                    Some(seconds) => format!(
-                        "Paddle API rate limited this server IP. Retry after {} seconds.",
-                        seconds
-                    ),
-                    None => "Paddle API rate limited this server IP. Retry after the delay in the Retry-After header.".to_string(),
-                });
-            }
-            if body.is_empty() {
-                return Err(format!("Paddle API returned {}", status));
-            }
-            return Err(format!("Paddle API returned {}: {}", status, body));
+            let rate_limited = status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+            let _body = resp.text().await.unwrap_or_default();
+            return Err(if rate_limited {
+                E::RateLimited {
+                    location: std::panic::Location::caller(),
+                }
+            } else {
+                E::ApiStatus {
+                    location: std::panic::Location::caller(),
+                }
+            });
         }
 
-        let page: PaddleSavedPaymentMethodsResponse = resp
-            .json()
-            .await
-            .map_err(|e| format!("Parse error: {}", e))?;
+        let page: PaddleSavedPaymentMethodsResponse =
+            resp.json().await.with_context(Ctx::parse())?;
 
         let next = page
             .meta
@@ -698,35 +801,42 @@ async fn list_paddle_saved_payment_methods(
     Ok(methods)
 }
 
-fn paddle_retry_after_seconds(headers: &reqwest::header::HeaderMap) -> Option<u64> {
-    headers
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
+/// Failure modes for [`sync_payment_methods_from_paddle`]. All failures carry a
+/// source; the caller logs them and never surfaces them to an HTTP client.
+#[derive(Debug, thiserror::Error, CtxError)]
+enum SyncPaymentMethodsFromPaddleError {
+    #[error("could not list Paddle payment methods [{location}]")]
+    List {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("database operation failed [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
+#[tracing::instrument(skip_all, err)]
 async fn sync_payment_methods_from_paddle(
     db: &PgPool,
     api_url: &str,
     api_key: &str,
     org_id: Uuid,
     customer_id: &str,
-) -> Result<(), (StatusCode, String)> {
+) -> Result<(), SyncPaymentMethodsFromPaddleError> {
+    use SyncPaymentMethodsFromPaddleErrorCtx as Ctx;
+
     let paddle_methods = list_paddle_saved_payment_methods(api_url, api_key, customer_id)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Failed to list Paddle payment methods: {}", e),
-            )
-        })?;
+        .with_context(Ctx::list())?;
 
-    let mut tx = db.begin().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    let mut tx = db.begin().await.with_context(Ctx::database())?;
 
     let local_rows: Vec<LocalPaymentMethodRow> = sqlx::query_as(
         "SELECT id, paddle_payment_method_id, is_primary
@@ -737,12 +847,7 @@ async fn sync_payment_methods_from_paddle(
     .bind(org_id)
     .fetch_all(&mut *tx)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .with_context(Ctx::database())?;
 
     let mut local_by_paddle_id: HashMap<String, LocalPaymentMethodRow> = HashMap::new();
     let mut duplicate_local_ids = Vec::new();
@@ -769,12 +874,7 @@ async fn sync_payment_methods_from_paddle(
         .bind(duplicate_id)
         .execute(&mut *tx)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-        })?;
+        .with_context(Ctx::database())?;
     }
 
     for method in &paddle_methods {
@@ -799,12 +899,7 @@ async fn sync_payment_methods_from_paddle(
             .bind(email)
             .execute(&mut *tx)
             .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Database error: {}", e),
-                )
-            })?;
+            .with_context(Ctx::database())?;
         } else {
             let should_be_primary = local_rows.is_empty()
                 || !local_rows.iter().any(|row| row.is_primary) && paddle_methods.len() == 1;
@@ -834,12 +929,7 @@ async fn sync_payment_methods_from_paddle(
             .bind(should_be_primary)
             .execute(&mut *tx)
             .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Database error: {}", e),
-                )
-            })?;
+            .with_context(Ctx::database())?;
         }
     }
 
@@ -855,12 +945,7 @@ async fn sync_payment_methods_from_paddle(
             .bind(row.id)
             .execute(&mut *tx)
             .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Database error: {}", e),
-                )
-            })?;
+            .with_context(Ctx::database())?;
         }
     }
 
@@ -872,12 +957,7 @@ async fn sync_payment_methods_from_paddle(
     .bind(org_id)
     .fetch_one(&mut *tx)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .with_context(Ctx::database())?;
 
     if active_primary_count == 0 {
         sqlx::query(
@@ -894,40 +974,40 @@ async fn sync_payment_methods_from_paddle(
         .bind(org_id)
         .execute(&mut *tx)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-        })?;
+        .with_context(Ctx::database())?;
     }
 
-    tx.commit().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    tx.commit().await.with_context(Ctx::database())?;
 
     Ok(())
 }
 
+/// Failure modes for [`should_sync_payment_methods`] (a single source-bearing
+/// database failure).
+#[derive(Debug, thiserror::Error, CtxError)]
+enum ShouldSyncPaymentMethodsError {
+    #[error("database query failed [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn should_sync_payment_methods(
     db: &PgPool,
     org_id: Uuid,
-) -> Result<bool, (StatusCode, String)> {
+) -> Result<bool, ShouldSyncPaymentMethodsError> {
+    use ShouldSyncPaymentMethodsErrorCtx as Ctx;
     let last_updated: Option<chrono::NaiveDateTime> = sqlx::query_scalar(
         "SELECT MAX(updated_at) FROM payment_methods WHERE organization_id = $1",
     )
     .bind(org_id)
     .fetch_one(db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .with_context(Ctx::database())?;
 
     let Some(last_updated) = last_updated else {
         return Ok(true);
@@ -940,14 +1020,54 @@ async fn should_sync_payment_methods(
         >= PAYMENT_METHOD_SYNC_TTL_SECS)
 }
 
+/// Failure modes for [`get_payment_methods`]. The payment-method sync is
+/// best-effort (logged, never surfaced); only the org lookup and local reads reach
+/// a client.
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum GetPaymentMethodsError {
+    #[error("could not look up the primary organization [{location}]")]
+    OrgLookup {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("database query failed [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for GetPaymentMethodsError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            GetPaymentMethodsError::OrgLookup { .. } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to get organization",
+            ),
+            GetPaymentMethodsError::Database { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
 /// Get all active payment methods
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 pub async fn get_payment_methods(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, GetPaymentMethodsError> {
+    use GetPaymentMethodsErrorCtx as Ctx;
+
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+        .with_context(Ctx::org_lookup())?;
 
     let paddle_customer_id: Option<String> = sqlx::query_scalar(
         "SELECT paddle_customer_id FROM billing_config WHERE organization_id = $1",
@@ -955,34 +1075,29 @@ pub async fn get_payment_methods(
     .bind(org_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?
+    .with_context(Ctx::database())?
     .flatten();
 
     if let (Some(customer_id), Some(api_key)) = (
         paddle_customer_id.as_deref(),
         state.paddle_api_key.as_deref(),
     ) && !state.paddle_api_url.is_empty()
-        && should_sync_payment_methods(&state.db, org_id).await?
-        && let Err((status, err)) = sync_payment_methods_from_paddle(
-            &state.db,
-            &state.paddle_api_url,
-            api_key,
-            org_id,
-            customer_id,
-        )
-        .await
     {
-        tracing::warn!(
-            "Failed to sync Paddle payment methods for org {} (status {}): {}",
-            org_id,
-            status,
-            err
-        );
+        let should_sync = should_sync_payment_methods(&state.db, org_id)
+            .await
+            .with_context(Ctx::database())?;
+        if should_sync
+            && let Err(err) = sync_payment_methods_from_paddle(
+                &state.db,
+                &state.paddle_api_url,
+                api_key,
+                org_id,
+                customer_id,
+            )
+            .await
+        {
+            tracing::warn!(org_id = %org_id, error = %err, "Failed to sync Paddle payment methods");
+        }
     }
 
     let rows: Vec<PaymentMethodRow> = sqlx::query_as(
@@ -994,12 +1109,7 @@ pub async fn get_payment_methods(
     .bind(org_id)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .with_context(Ctx::database())?;
 
     let methods: Vec<serde_json::Value> = rows
         .into_iter()
@@ -1020,15 +1130,84 @@ pub async fn get_payment_methods(
     })))
 }
 
+/// Failure modes for [`delete_payment_method`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum DeletePaymentMethodError {
+    #[error("could not look up the primary organization [{location}]")]
+    OrgLookup {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("payment method not found [{location}]")]
+    NotFound { location: Location },
+
+    #[error("cannot remove the last payment method [{location}]")]
+    LastMethod { location: Location },
+
+    #[error("could not reach the Paddle API [{location}]")]
+    PaddleTransport {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Paddle could not remove this payment method [{location}]")]
+    PaddleAgreement { location: Location },
+
+    #[error("database query failed [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for DeletePaymentMethodError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            DeletePaymentMethodError::OrgLookup { .. } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to get organization",
+            ),
+            DeletePaymentMethodError::NotFound { .. } => {
+                (StatusCode::NOT_FOUND, "Payment method not found")
+            }
+            DeletePaymentMethodError::LastMethod { .. } => (
+                StatusCode::CONFLICT,
+                "You must have at least one payment method on file. Add another payment method before removing this one.",
+            ),
+            DeletePaymentMethodError::PaddleTransport { .. } => {
+                (StatusCode::BAD_GATEWAY, "failed to delete payment method")
+            }
+            DeletePaymentMethodError::PaddleAgreement { .. } => (
+                StatusCode::CONFLICT,
+                "Paddle could not remove this payment method. It may still be tied to an active billing agreement.",
+            ),
+            DeletePaymentMethodError::Database { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
 /// Delete a specific payment method by ID
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id, method_id = %method_id))]
 pub async fn delete_payment_method(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(method_id): Path<Uuid>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<StatusCode, DeletePaymentMethodError> {
+    use DeletePaymentMethodErrorCtx as Ctx;
+
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+        .with_context(Ctx::org_lookup())?;
 
     // Verify the method belongs to this org and get its primary status
     let method: Option<(bool, Option<String>)> = sqlx::query_as(
@@ -1040,18 +1219,13 @@ pub async fn delete_payment_method(
     .bind(org_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .with_context(Ctx::database())?;
 
     let Some((was_primary, paddle_payment_method_id)) = method else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            "Payment method not found".to_string(),
-        ));
+        tracing::warn!(method_id = %method_id, "payment method not found or no access");
+        return Err(DeletePaymentMethodError::NotFound {
+            location: std::panic::Location::caller(),
+        });
     };
 
     // Block deletion if this is the last active payment method and org has running resources
@@ -1061,16 +1235,12 @@ pub async fn delete_payment_method(
     .bind(org_id)
     .fetch_one(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .with_context(Ctx::database())?;
 
     if active_count <= 1 {
-        return Err((StatusCode::CONFLICT,
-            "You must have at least one payment method on file. Add another payment method before removing this one.".to_string()));
+        return Err(DeletePaymentMethodError::LastMethod {
+            location: std::panic::Location::caller(),
+        });
     }
 
     if let (Some(customer_id), Some(api_key), Some(payment_method_id)) = (
@@ -1080,12 +1250,7 @@ pub async fn delete_payment_method(
         .bind(org_id)
         .fetch_optional(&state.db)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-        })?
+        .with_context(Ctx::database())?
         .flatten(),
         state.paddle_api_key.as_deref(),
         paddle_payment_method_id.as_deref(),
@@ -1099,27 +1264,18 @@ pub async fn delete_payment_method(
             .header("Authorization", format!("Bearer {}", api_key))
             .send()
             .await
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    format!("Failed to delete payment method in Paddle: {}", e),
-                )
-            })?;
+            .with_context(Ctx::paddle_transport())?;
 
         if !response.status().is_success() {
             let status = response.status();
             let err_body = response.text().await.unwrap_or_default();
             tracing::warn!(
-                "Failed to delete Paddle payment method {} for org {}: {} - {}",
-                payment_method_id,
-                org_id,
-                status,
-                err_body
+                payment_method_id, org_id = %org_id, status = %status, body = %err_body,
+                "Failed to delete Paddle payment method"
             );
-            return Err((
-                StatusCode::CONFLICT,
-                "Paddle could not remove this payment method. It may still be tied to an active billing agreement.".to_string(),
-            ));
+            return Err(DeletePaymentMethodError::PaddleAgreement {
+                location: std::panic::Location::caller(),
+            });
         }
     }
 
@@ -1128,12 +1284,7 @@ pub async fn delete_payment_method(
         .bind(method_id)
         .execute(&state.db)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-        })?;
+        .with_context(Ctx::database())?;
 
     // If deleted method was primary, promote the most recent remaining card
     if was_primary {
@@ -1148,26 +1299,65 @@ pub async fn delete_payment_method(
         .bind(org_id)
         .execute(&state.db)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-        })?;
+        .with_context(Ctx::database())?;
     }
 
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Failure modes for [`set_primary_payment_method`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum SetPrimaryPaymentMethodError {
+    #[error("could not look up the primary organization [{location}]")]
+    OrgLookup {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("payment method not found [{location}]")]
+    NotFound { location: Location },
+
+    #[error("database query failed [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for SetPrimaryPaymentMethodError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            SetPrimaryPaymentMethodError::OrgLookup { .. } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to get organization",
+            ),
+            SetPrimaryPaymentMethodError::NotFound { .. } => {
+                (StatusCode::NOT_FOUND, "Payment method not found")
+            }
+            SetPrimaryPaymentMethodError::Database { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
 /// Set a payment method as primary
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id, method_id = %method_id))]
 pub async fn set_primary_payment_method(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(method_id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, SetPrimaryPaymentMethodError> {
+    use SetPrimaryPaymentMethodErrorCtx as Ctx;
+
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+        .with_context(Ctx::org_lookup())?;
 
     // Verify the method belongs to this org
     let exists: Option<(Uuid,)> = sqlx::query_as(
@@ -1177,22 +1367,18 @@ pub async fn set_primary_payment_method(
     .bind(org_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+
+    .with_context(Ctx::database())?;
 
     if exists.is_none() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            "Payment method not found".to_string(),
-        ));
+        return Err(SetPrimaryPaymentMethodError::NotFound {
+            location: std::panic::Location::caller(),
+        });
     }
 
     // Atomically swap primary in a transaction
-    let mut tx = state.db.begin().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    let mut tx = state.db.begin().await.with_context(Ctx::database())?;
 
     sqlx::query(
         "UPDATE payment_methods SET is_primary = false WHERE organization_id = $1 AND is_active = true"
@@ -1200,44 +1386,82 @@ pub async fn set_primary_payment_method(
     .bind(org_id)
     .execute(&mut *tx)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+
+    .with_context(Ctx::database())?;
 
     sqlx::query("UPDATE payment_methods SET is_primary = true WHERE id = $1")
         .bind(method_id)
         .execute(&mut *tx)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-        })?;
+        .with_context(Ctx::database())?;
 
-    tx.commit().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    tx.commit().await.with_context(Ctx::database())?;
 
     Ok(Json(serde_json::json!({ "success": true })))
 }
 
+/// Failure modes for [`get_paddle_client_token`]. Token generation is best-effort
+/// (logged and defaulted to `None`); only the config gate, org lookup, and the
+/// customer read reach a client.
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum GetPaddleClientTokenError {
+    #[error("Paddle is not configured [{location}]")]
+    NotConfigured { location: Location },
+
+    #[error("could not look up the primary organization [{location}]")]
+    OrgLookup {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("database query failed [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for GetPaddleClientTokenError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            GetPaddleClientTokenError::NotConfigured { .. } => {
+                (StatusCode::SERVICE_UNAVAILABLE, "Paddle is not configured")
+            }
+            GetPaddleClientTokenError::OrgLookup { .. } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to get organization",
+            ),
+            GetPaddleClientTokenError::Database { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
 /// Get Paddle client token and customer ID for frontend Paddle.js initialization
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 pub async fn get_paddle_client_token(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, GetPaddleClientTokenError> {
+    use GetPaddleClientTokenErrorCtx as Ctx;
+
     let client_token = state.paddle_client_token.as_ref().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Paddle is not configured".to_string(),
-        )
+        tracing::warn!("Paddle is not configured");
+        GetPaddleClientTokenError::NotConfigured {
+            location: std::panic::Location::caller(),
+        }
     })?;
 
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+        .with_context(Ctx::org_lookup())?;
 
     // Get the org's Paddle customer ID if one exists
     let paddle_customer_id: Option<String> = sqlx::query_scalar(
@@ -1246,12 +1470,7 @@ pub async fn get_paddle_client_token(
     .bind(org_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?
+    .with_context(Ctx::database())?
     .flatten();
 
     let customer_auth_token = if let (Some(customer_id), Some(api_key)) = (
@@ -1266,12 +1485,7 @@ pub async fn get_paddle_client_token(
             {
                 Ok(token) => Some(token),
                 Err(err) => {
-                    tracing::warn!(
-                        "Failed to generate Paddle customer auth token for org {} and customer {}: {}",
-                        org_id,
-                        customer_id,
-                        err
-                    );
+                    tracing::warn!(org_id = %org_id, customer_id, error = %err, "Failed to generate Paddle customer auth token");
                     None
                 }
             }
@@ -1302,6 +1516,7 @@ pub struct PaddleTransactionCompletedRequest {
     card_brand: Option<String>,
 }
 
+#[tracing::instrument(skip_all, err)]
 async fn upsert_local_payment_method(
     db: &PgPool,
     org_id: Uuid,
@@ -1444,90 +1659,189 @@ fn build_paddle_checkout_custom_data(
     })
 }
 
+/// Categories of checkout-binding validation failure. Each maps to a fixed
+/// client-facing message via [`ValidatePaddleCheckoutBindingError::client_message`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ValidatePaddleCheckoutBindingErrorKind {
+    NotBound,
+    WrongAccount,
+    Expired,
+    InvalidSig,
+}
+
+/// Failure modes for [`validate_paddle_checkout_binding`] (source-less domain
+/// failures; the caller surfaces `client_message` to the client).
+#[derive(Debug, thiserror::Error)]
+#[error("invalid checkout binding ({kind:?}) [{location}]")]
+struct ValidatePaddleCheckoutBindingError {
+    kind: ValidatePaddleCheckoutBindingErrorKind,
+    location: Location,
+}
+
+impl ValidatePaddleCheckoutBindingError {
+    fn client_message(&self) -> &'static str {
+        match self.kind {
+            ValidatePaddleCheckoutBindingErrorKind::NotBound => {
+                "Transaction is not bound to this account"
+            }
+            ValidatePaddleCheckoutBindingErrorKind::WrongAccount => {
+                "Transaction does not belong to this account"
+            }
+            ValidatePaddleCheckoutBindingErrorKind::Expired => {
+                "Transaction checkout has expired. Please try again."
+            }
+            ValidatePaddleCheckoutBindingErrorKind::InvalidSig => {
+                "Transaction checkout binding is invalid"
+            }
+        }
+    }
+}
+
+#[tracing::instrument(skip_all, err)]
 fn validate_paddle_checkout_binding(
     txn: &serde_json::Value,
     secret: &str,
     user_id: Uuid,
     org_id: Uuid,
-) -> Result<(), String> {
+) -> Result<(), ValidatePaddleCheckoutBindingError> {
+    use ValidatePaddleCheckoutBindingErrorKind as Kind;
+    let not_bound = |kind| ValidatePaddleCheckoutBindingError {
+        kind,
+        location: std::panic::Location::caller(),
+    };
+
     let custom_data = txn["data"]["custom_data"]
         .as_object()
-        .ok_or_else(|| "Transaction is not bound to this account".to_string())?;
+        .ok_or_else(|| not_bound(Kind::NotBound))?;
     let txn_user_id = custom_data
         .get("caution_checkout_user_id")
         .and_then(|value| value.as_str())
-        .ok_or_else(|| "Transaction is not bound to this account".to_string())?;
+        .ok_or_else(|| not_bound(Kind::NotBound))?;
     let txn_org_id = custom_data
         .get("caution_checkout_org_id")
         .and_then(|value| value.as_str())
-        .ok_or_else(|| "Transaction is not bound to this account".to_string())?;
+        .ok_or_else(|| not_bound(Kind::NotBound))?;
     let issued_at = custom_data
         .get("caution_checkout_issued_at")
         .and_then(|value| value.as_i64())
-        .ok_or_else(|| "Transaction is not bound to this account".to_string())?;
+        .ok_or_else(|| not_bound(Kind::NotBound))?;
     let sig_hex = custom_data
         .get("caution_checkout_sig")
         .and_then(|value| value.as_str())
-        .ok_or_else(|| "Transaction is not bound to this account".to_string())?;
+        .ok_or_else(|| not_bound(Kind::NotBound))?;
 
     if txn_user_id != user_id.to_string() || txn_org_id != org_id.to_string() {
-        return Err("Transaction does not belong to this account".to_string());
+        return Err(not_bound(Kind::WrongAccount));
     }
 
     let now = Utc::now().timestamp();
     if issued_at > now + 300 || now - issued_at > PADDLE_CHECKOUT_BINDING_MAX_AGE_SECS {
-        return Err("Transaction checkout has expired. Please try again.".to_string());
+        return Err(not_bound(Kind::Expired));
     }
 
-    let sig_bytes =
-        hex::decode(sig_hex).map_err(|_| "Transaction checkout binding is invalid".to_string())?;
+    let Ok(sig_bytes) = hex::decode(sig_hex) else {
+        return Err(not_bound(Kind::InvalidSig));
+    };
     let payload = paddle_checkout_binding_payload(user_id, org_id, issued_at);
     let mut mac =
         HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
     mac.update(payload.as_bytes());
     mac.verify_slice(&sig_bytes)
-        .map_err(|_| "Transaction checkout binding is invalid".to_string())
+        .map_err(|_| not_bound(Kind::InvalidSig))
 }
 
+/// Categories of setup-transaction validation failure. Each maps to a fixed
+/// client-facing message via [`ValidatePaddleSetupTransactionError::client_message`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ValidatePaddleSetupTransactionErrorKind {
+    NotCompleted,
+    NotAutomatic,
+    WrongPrice,
+    NoCustomerId,
+    WrongAccount,
+    CustomerEmailUnavailable,
+    NoBinding,
+}
+
+/// Failure modes for [`validate_paddle_setup_transaction`] (source-less domain
+/// failures; the caller surfaces `client_message` to the client).
+#[derive(Debug, thiserror::Error)]
+#[error("invalid setup transaction ({kind:?}) [{location}]")]
+struct ValidatePaddleSetupTransactionError {
+    kind: ValidatePaddleSetupTransactionErrorKind,
+    location: Location,
+}
+
+impl ValidatePaddleSetupTransactionError {
+    fn client_message(&self) -> &'static str {
+        match self.kind {
+            ValidatePaddleSetupTransactionErrorKind::NotCompleted => "transaction not completed",
+            ValidatePaddleSetupTransactionErrorKind::NotAutomatic => {
+                "Transaction is not an automatic checkout"
+            }
+            ValidatePaddleSetupTransactionErrorKind::WrongPrice => {
+                "Transaction does not match the configured setup price"
+            }
+            ValidatePaddleSetupTransactionErrorKind::NoCustomerId => {
+                "Transaction has no customer_id"
+            }
+            ValidatePaddleSetupTransactionErrorKind::WrongAccount => {
+                "Transaction does not belong to this account"
+            }
+            ValidatePaddleSetupTransactionErrorKind::CustomerEmailUnavailable => {
+                "Transaction customer email is unavailable"
+            }
+            ValidatePaddleSetupTransactionErrorKind::NoBinding => {
+                "No billing customer, account email, or valid checkout binding on file"
+            }
+        }
+    }
+}
+
+#[tracing::instrument(skip_all, err)]
 fn validate_paddle_setup_transaction(
     txn: &serde_json::Value,
     expected_setup_price_id: &str,
     expected_customer_id: Option<&str>,
     expected_customer_email: Option<&str>,
     allow_checkout_binding: bool,
-) -> Result<(String, Option<String>), String> {
+) -> Result<(String, Option<String>), ValidatePaddleSetupTransactionError> {
+    use ValidatePaddleSetupTransactionErrorKind as Kind;
+    let reject = |kind| ValidatePaddleSetupTransactionError {
+        kind,
+        location: std::panic::Location::caller(),
+    };
+
     let status = txn["data"]["status"].as_str().unwrap_or("");
     if !is_completed_paddle_transaction_status(status) {
-        return Err(format!("Transaction not completed (status: {})", status));
+        return Err(reject(Kind::NotCompleted));
     }
 
     if txn["data"]["collection_mode"].as_str().unwrap_or("") != "automatic" {
-        return Err("Transaction is not an automatic checkout".to_string());
+        return Err(reject(Kind::NotAutomatic));
     }
 
     if !transaction_contains_price_id(txn, expected_setup_price_id) {
-        return Err("Transaction does not match the configured setup price".to_string());
+        return Err(reject(Kind::WrongPrice));
     }
 
     let customer_id = txn["data"]["customer_id"]
         .as_str()
-        .ok_or_else(|| "Transaction has no customer_id".to_string())?;
+        .ok_or_else(|| reject(Kind::NoCustomerId))?;
 
     if let Some(expected_customer_id) = expected_customer_id {
         if customer_id != expected_customer_id {
-            return Err("Transaction does not belong to this account".to_string());
+            return Err(reject(Kind::WrongAccount));
         }
     } else if let Some(expected_customer_email) = expected_customer_email {
         let txn_customer_email = txn["data"]["customer"]["email"]
             .as_str()
-            .ok_or_else(|| "Transaction customer email is unavailable".to_string())?;
+            .ok_or_else(|| reject(Kind::CustomerEmailUnavailable))?;
         if !txn_customer_email.eq_ignore_ascii_case(expected_customer_email) {
-            return Err("Transaction does not belong to this account".to_string());
+            return Err(reject(Kind::WrongAccount));
         }
     } else if !allow_checkout_binding {
-        return Err(
-            "No billing customer, account email, or valid checkout binding on file".to_string(),
-        );
+        return Err(reject(Kind::NoBinding));
     }
 
     Ok((
@@ -1536,27 +1850,107 @@ fn validate_paddle_setup_transaction(
     ))
 }
 
+/// Failure modes for [`paddle_transaction_completed`]. Setup- and binding-level
+/// rejections carry a fixed client message; transport and database failures map to
+/// generic bodies.
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum PaddleTransactionCompletedError {
+    #[error("could not look up the primary organization [{location}]")]
+    OrgLookup {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Paddle API not configured [{location}]")]
+    ApiNotConfigured { location: Location },
+
+    #[error("Paddle setup price not configured [{location}]")]
+    SetupPriceNotConfigured { location: Location },
+
+    #[error("checkout binding unavailable [{location}]")]
+    CheckoutBindingUnavailable { location: Location },
+
+    #[error("transaction rejected ({message}) [{location}]")]
+    BadRequest {
+        message: &'static str,
+        location: Location,
+    },
+
+    #[error("could not verify the Paddle transaction [{location}]")]
+    FetchTransaction {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("database query failed [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for PaddleTransactionCompletedError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            PaddleTransactionCompletedError::OrgLookup { .. } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to get organization",
+            ),
+            PaddleTransactionCompletedError::ApiNotConfigured { .. } => {
+                (StatusCode::SERVICE_UNAVAILABLE, "Paddle API not configured")
+            }
+            PaddleTransactionCompletedError::SetupPriceNotConfigured { .. } => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Paddle setup price not configured",
+            ),
+            PaddleTransactionCompletedError::CheckoutBindingUnavailable { .. } => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Checkout binding is unavailable. Contact support.",
+            ),
+            PaddleTransactionCompletedError::BadRequest { message, .. } => {
+                (StatusCode::BAD_REQUEST, *message)
+            }
+            PaddleTransactionCompletedError::FetchTransaction { .. } => {
+                (StatusCode::BAD_GATEWAY, "failed to verify transaction")
+            }
+            PaddleTransactionCompletedError::Database { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
 /// Frontend callback after Paddle checkout completion — records payment method reference locally
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 pub async fn paddle_transaction_completed(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Json(req): Json<PaddleTransactionCompletedRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, PaddleTransactionCompletedError> {
+    use PaddleTransactionCompletedErrorCtx as Ctx;
+
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+        .with_context(Ctx::org_lookup())?;
 
     let paddle_api_key = state.paddle_api_key.as_ref().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Paddle API not configured".to_string(),
-        )
+        tracing::warn!("Paddle API not configured");
+        PaddleTransactionCompletedError::ApiNotConfigured {
+            location: std::panic::Location::caller(),
+        }
     })?;
     let setup_price_id = state.paddle_setup_price_id.as_ref().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Paddle setup price not configured".to_string(),
-        )
+        tracing::warn!("Paddle setup price not configured");
+        PaddleTransactionCompletedError::SetupPriceNotConfigured {
+            location: std::panic::Location::caller(),
+        }
     })?;
 
     let existing_paddle_customer_id: Option<String> = sqlx::query_scalar(
@@ -1565,12 +1959,7 @@ pub async fn paddle_transaction_completed(
     .bind(org_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?
+    .with_context(Ctx::database())?
     .flatten();
 
     let user_email: Option<String> = if existing_paddle_customer_id.is_none() {
@@ -1578,12 +1967,7 @@ pub async fn paddle_transaction_completed(
             .bind(auth.user_id)
             .fetch_optional(&state.db)
             .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Database error: {}", e),
-                )
-            })?
+            .with_context(Ctx::database())?
             .flatten()
     } else {
         None
@@ -1591,22 +1975,21 @@ pub async fn paddle_transaction_completed(
 
     let txn = fetch_paddle_transaction(&state.paddle_api_url, paddle_api_key, &req.transaction_id)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Failed to verify transaction: {}", e),
-            )
-        })?;
+        .with_context(Ctx::fetch_transaction())?;
     let allow_checkout_binding =
         if existing_paddle_customer_id.is_none() && user_email.as_deref().is_none() {
             let secret = state.internal_service_secret.as_deref().ok_or_else(|| {
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Checkout binding is unavailable. Contact support.".to_string(),
-                )
+                tracing::warn!("checkout binding unavailable (no internal service secret)");
+                PaddleTransactionCompletedError::CheckoutBindingUnavailable {
+                    location: std::panic::Location::caller(),
+                }
             })?;
-            validate_paddle_checkout_binding(&txn, secret, auth.user_id, org_id)
-                .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+            validate_paddle_checkout_binding(&txn, secret, auth.user_id, org_id).map_err(|e| {
+                PaddleTransactionCompletedError::BadRequest {
+                    message: e.client_message(),
+                    location: std::panic::Location::caller(),
+                }
+            })?;
             true
         } else {
             false
@@ -1619,7 +2002,10 @@ pub async fn paddle_transaction_completed(
         user_email.as_deref(),
         allow_checkout_binding,
     )
-    .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    .map_err(|e| PaddleTransactionCompletedError::BadRequest {
+        message: e.client_message(),
+        location: std::panic::Location::caller(),
+    })?;
 
     upsert_local_payment_method(
         &state.db,
@@ -1630,12 +2016,7 @@ pub async fn paddle_transaction_completed(
         req.card_brand.as_deref(),
     )
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .with_context(Ctx::database())?;
 
     if let Err(e) = sqlx::query(
         "INSERT INTO billing_config (organization_id, paddle_customer_id)
@@ -1647,17 +2028,9 @@ pub async fn paddle_transaction_completed(
     .execute(&state.db)
     .await
     {
-        tracing::error!(
-            "Failed to store paddle_customer_id for org {}: {}",
-            org_id,
-            e
-        );
+        tracing::error!(org_id = %org_id, error = ?e, "Failed to store paddle_customer_id");
     } else {
-        tracing::info!(
-            "Stored paddle_customer_id {} for org {}",
-            customer_id,
-            org_id
-        );
+        tracing::info!("Stored paddle_customer_id for org {}", org_id);
     }
 
     tracing::info!(
@@ -1672,11 +2045,41 @@ pub async fn paddle_transaction_completed(
     })))
 }
 
+/// Failure modes for [`fetch_paddle_transaction`]. All failures are surfaced to
+/// the caller as a generic 502; none reach an HTTP client verbatim.
+#[derive(Debug, thiserror::Error, CtxError)]
+enum FetchPaddleTransactionError {
+    #[error("could not reach the Paddle API [{location}]")]
+    Transport {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Paddle rate limited this server IP [{location}]")]
+    RateLimited { location: Location },
+
+    #[error("Paddle returned an error status [{location}]")]
+    ApiStatus { location: Location },
+
+    #[error("could not parse the Paddle response [{location}]")]
+    Parse {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn fetch_paddle_transaction(
     api_url: &str,
     api_key: &str,
     transaction_id: &str,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, FetchPaddleTransactionError> {
+    use FetchPaddleTransactionError as E;
+    use FetchPaddleTransactionErrorCtx as Ctx;
     let client = reqwest::Client::new();
     let resp = client
         .get(format!("{}/transactions/{}", api_url, transaction_id))
@@ -1684,74 +2087,94 @@ async fn fetch_paddle_transaction(
         .header("Authorization", format!("Bearer {}", api_key))
         .send()
         .await
-        .map_err(|e| format!("Paddle API error: {}", e))?;
+        .with_context(Ctx::transport())?;
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let retry_after = paddle_retry_after_seconds(resp.headers());
-        let body = resp.text().await.unwrap_or_default();
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(match retry_after {
-                Some(seconds) => format!(
-                    "Paddle API rate limited this server IP. Retry after {} seconds.",
-                    seconds
-                ),
-                None => {
-                    "Paddle API rate limited this server IP. Retry after the delay in the Retry-After header.".to_string()
-                }
-            });
-        }
-        if body.is_empty() {
-            return Err(format!("Paddle API returned {}", status));
-        }
-        return Err(format!("Paddle API returned {}: {}", status, body));
+        let rate_limited = status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+        let _body = resp.text().await.unwrap_or_default();
+        return Err(if rate_limited {
+            E::RateLimited {
+                location: std::panic::Location::caller(),
+            }
+        } else {
+            E::ApiStatus {
+                location: std::panic::Location::caller(),
+            }
+        });
     }
 
-    resp.json().await.map_err(|e| format!("Parse error: {}", e))
+    resp.json().await.with_context(Ctx::parse())
 }
 
+/// Failure modes for [`generate_paddle_customer_auth_token`]. Callers log the
+/// failure and fall back; none reach an HTTP client verbatim.
+#[derive(Debug, thiserror::Error, CtxError)]
+enum GeneratePaddleCustomerAuthTokenError {
+    #[error("could not reach the Paddle API [{location}]")]
+    Transport {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Paddle rate limited this server IP [{location}]")]
+    RateLimited { location: Location },
+
+    #[error("Paddle returned an error status [{location}]")]
+    ApiStatus { location: Location },
+
+    #[error("could not parse the Paddle response [{location}]")]
+    Parse {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("response had no customer_auth_token [{location}]")]
+    MissingToken { location: Location },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn generate_paddle_customer_auth_token(
     api_url: &str,
     api_key: &str,
     customer_id: &str,
-) -> Result<String, String> {
+) -> Result<String, GeneratePaddleCustomerAuthTokenError> {
+    use GeneratePaddleCustomerAuthTokenError as E;
+    use GeneratePaddleCustomerAuthTokenErrorCtx as Ctx;
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("{}/customers/{}/auth-token", api_url, customer_id))
         .header("Authorization", format!("Bearer {}", api_key))
         .send()
         .await
-        .map_err(|e| format!("Paddle API error: {}", e))?;
+        .with_context(Ctx::transport())?;
 
     if !resp.status().is_success() {
         let status = resp.status();
-        let retry_after = paddle_retry_after_seconds(resp.headers());
-        let body = resp.text().await.unwrap_or_default();
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(match retry_after {
-                Some(seconds) => format!(
-                    "Paddle API rate limited this server IP. Retry after {} seconds.",
-                    seconds
-                ),
-                None => {
-                    "Paddle API rate limited this server IP. Retry after the delay in the Retry-After header.".to_string()
-                }
-            });
-        }
-        if body.is_empty() {
-            return Err(format!("Paddle API returned {}", status));
-        }
-        return Err(format!("Paddle API returned {}: {}", status, body));
+        let rate_limited = status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+        let _body = resp.text().await.unwrap_or_default();
+        return Err(if rate_limited {
+            E::RateLimited {
+                location: std::panic::Location::caller(),
+            }
+        } else {
+            E::ApiStatus {
+                location: std::panic::Location::caller(),
+            }
+        });
     }
 
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Parse error: {}", e))?;
+    let body: serde_json::Value = resp.json().await.with_context(Ctx::parse())?;
     body["data"]["customer_auth_token"]
         .as_str()
         .map(|token| token.to_string())
-        .ok_or_else(|| "No customer_auth_token in response".to_string())
+        .ok_or_else(|| E::MissingToken {
+            location: std::panic::Location::caller(),
+        })
 }
 
 fn build_credit_purchase_custom_data(
@@ -1769,27 +2192,85 @@ fn build_credit_purchase_custom_data(
     })
 }
 
+/// Categories of credit-purchase transaction validation failure. Each maps to a
+/// fixed client-facing message via
+/// [`ValidateCreditPurchaseTransactionError::client_message`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ValidateCreditPurchaseTransactionErrorKind {
+    PriceMismatch,
+    MissingMetadata,
+    NotCreditPurchase,
+    WrongAccount,
+    WrongUser,
+    AmountMismatch,
+    CreditMismatch,
+}
+
+/// Failure modes for [`validate_credit_purchase_transaction`] (source-less domain
+/// failures; the caller surfaces `client_message` to the client).
+#[derive(Debug, thiserror::Error)]
+#[error("invalid credit purchase transaction ({kind:?}) [{location}]")]
+struct ValidateCreditPurchaseTransactionError {
+    kind: ValidateCreditPurchaseTransactionErrorKind,
+    location: Location,
+}
+
+impl ValidateCreditPurchaseTransactionError {
+    fn client_message(&self) -> &'static str {
+        match self.kind {
+            ValidateCreditPurchaseTransactionErrorKind::PriceMismatch => {
+                "Transaction does not match the selected credit package"
+            }
+            ValidateCreditPurchaseTransactionErrorKind::MissingMetadata => {
+                "Transaction is missing credit purchase metadata"
+            }
+            ValidateCreditPurchaseTransactionErrorKind::NotCreditPurchase => {
+                "Transaction is not a credit purchase"
+            }
+            ValidateCreditPurchaseTransactionErrorKind::WrongAccount => {
+                "Transaction does not belong to this account"
+            }
+            ValidateCreditPurchaseTransactionErrorKind::WrongUser => {
+                "Transaction does not belong to this user"
+            }
+            ValidateCreditPurchaseTransactionErrorKind::AmountMismatch => {
+                "Transaction amount does not match the requested credit purchase"
+            }
+            ValidateCreditPurchaseTransactionErrorKind::CreditMismatch => {
+                "Transaction credit amount does not match the requested package"
+            }
+        }
+    }
+}
+
+#[tracing::instrument(skip_all, err)]
 fn validate_credit_purchase_transaction(
     txn: &serde_json::Value,
     org_id: Uuid,
     user_id: Uuid,
     purchase: &ResolvedCreditPurchase,
-) -> Result<(), String> {
+) -> Result<(), ValidateCreditPurchaseTransactionError> {
+    use ValidateCreditPurchaseTransactionErrorKind as Kind;
+    let invalid = |kind| ValidateCreditPurchaseTransactionError {
+        kind,
+        location: std::panic::Location::caller(),
+    };
+
     if let Some(expected_price_id) = purchase.price_id.as_deref()
         && !transaction_contains_price_id(txn, expected_price_id)
     {
-        return Err("Transaction does not match the selected credit package".to_string());
+        return Err(invalid(Kind::PriceMismatch));
     }
 
     let custom_data = txn["data"]["custom_data"]
         .as_object()
-        .ok_or_else(|| "Transaction is missing credit purchase metadata".to_string())?;
+        .ok_or_else(|| invalid(Kind::MissingMetadata))?;
     if custom_data
         .get("caution_credit_purchase")
         .and_then(|value| value.as_bool())
         != Some(true)
     {
-        return Err("Transaction is not a credit purchase".to_string());
+        return Err(invalid(Kind::NotCreditPurchase));
     }
 
     let org_id_string = org_id.to_string();
@@ -1798,7 +2279,7 @@ fn validate_credit_purchase_transaction(
         .and_then(|value| value.as_str())
         != Some(org_id_string.as_str())
     {
-        return Err("Transaction does not belong to this account".to_string());
+        return Err(invalid(Kind::WrongAccount));
     }
 
     let user_id_string = user_id.to_string();
@@ -1807,7 +2288,7 @@ fn validate_credit_purchase_transaction(
         .and_then(|value| value.as_str())
         != Some(user_id_string.as_str())
     {
-        return Err("Transaction does not belong to this user".to_string());
+        return Err(invalid(Kind::WrongUser));
     }
 
     if custom_data
@@ -1815,7 +2296,7 @@ fn validate_credit_purchase_transaction(
         .and_then(|value| value.as_i64())
         != Some(purchase.purchase_cents)
     {
-        return Err("Transaction amount does not match the requested credit purchase".to_string());
+        return Err(invalid(Kind::AmountMismatch));
     }
 
     if custom_data
@@ -1823,23 +2304,21 @@ fn validate_credit_purchase_transaction(
         .and_then(|value| value.as_i64())
         != Some(purchase.credit_cents)
     {
-        return Err("Transaction credit amount does not match the requested package".to_string());
+        return Err(invalid(Kind::CreditMismatch));
     }
 
     Ok(())
 }
 
-fn build_credit_purchase_transaction_item(
-    purchase: &ResolvedCreditPurchase,
-) -> Result<serde_json::Value, (StatusCode, String)> {
+fn build_credit_purchase_transaction_item(purchase: &ResolvedCreditPurchase) -> serde_json::Value {
     if let Some(price_id) = purchase.price_id.as_ref() {
-        return Ok(serde_json::json!({
+        return serde_json::json!({
             "price_id": price_id,
             "quantity": 1,
-        }));
+        });
     }
 
-    Ok(serde_json::json!({
+    serde_json::json!({
         "quantity": 1,
         "price": {
             "description": format!(
@@ -1857,25 +2336,58 @@ fn build_credit_purchase_transaction_item(
                 "description": "Prepaid usage credits for Caution",
             }
         }
-    }))
+    })
 }
 
+/// Failure modes for [`get_credit_balance`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum GetCreditBalanceError {
+    #[error("could not look up the primary organization [{location}]")]
+    OrgLookup {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("database query failed [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for GetCreditBalanceError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            GetCreditBalanceError::OrgLookup { .. } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to get organization",
+            ),
+            GetCreditBalanceError::Database { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 pub async fn get_credit_balance(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, GetCreditBalanceError> {
+    use GetCreditBalanceErrorCtx as Ctx;
+
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+        .with_context(Ctx::org_lookup())?;
 
     let balance_cents = get_ledger_balance_cents(&state.db, org_id)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-        })?;
+        .with_context(Ctx::database())?;
 
     Ok(Json(serde_json::json!({
         "balance_cents": balance_cents,
@@ -1883,10 +2395,12 @@ pub async fn get_credit_balance(
     })))
 }
 
+/// Lists the configured credit packages. This handler is infallible.
+#[tracing::instrument(skip_all)]
 pub async fn get_credit_packages(
     State(state): State<Arc<AppState>>,
     Extension(_auth): Extension<AuthContext>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Json<serde_json::Value> {
     let credit_packages = build_credit_packages(&state.pricing, &state.paddle_credits_price_ids);
     let packages: Vec<serde_json::Value> = credit_packages
         .iter()
@@ -1902,7 +2416,7 @@ pub async fn get_credit_packages(
         })
         .collect();
 
-    Ok(Json(serde_json::json!({ "packages": packages })))
+    Json(serde_json::json!({ "packages": packages }))
 }
 
 #[derive(Deserialize)]
@@ -1934,24 +2448,61 @@ fn format_currency_amount(cents: i64) -> String {
     format!("{:.2}", cents as f64 / 100.0)
 }
 
+/// Categories of credit-purchase request resolution failure. Each maps to a fixed
+/// client-facing message via [`ResolveCreditPurchaseRequestError::client_message`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ResolveCreditPurchaseRequestErrorKind {
+    BothProvided,
+    NeitherProvided,
+    InvalidIndex,
+    BelowMinimum,
+}
+
+/// Failure modes for [`resolve_credit_purchase_request`] (source-less domain
+/// failures; the caller surfaces `client_message` to the client).
+#[derive(Debug, thiserror::Error)]
+#[error("invalid credit purchase request ({kind:?}) [{location}]")]
+struct ResolveCreditPurchaseRequestError {
+    kind: ResolveCreditPurchaseRequestErrorKind,
+    location: Location,
+}
+
+impl ResolveCreditPurchaseRequestError {
+    fn client_message(&self) -> &'static str {
+        match self.kind {
+            ResolveCreditPurchaseRequestErrorKind::BothProvided => {
+                "Provide either package_index or amount_cents, not both"
+            }
+            ResolveCreditPurchaseRequestErrorKind::NeitherProvided => {
+                "package_index or amount_cents is required"
+            }
+            ResolveCreditPurchaseRequestErrorKind::InvalidIndex => "Invalid package index",
+            ResolveCreditPurchaseRequestErrorKind::BelowMinimum => {
+                "Custom credit purchase must be at least $10.00"
+            }
+        }
+    }
+}
+
+#[tracing::instrument(skip_all, err)]
 fn resolve_credit_purchase_request(
     req: &PurchaseCreditsRequest,
     credit_packages: &[CreditPackage],
     paddle_price_ids: &[Option<String>; 3],
-) -> Result<ResolvedCreditPurchase, (StatusCode, String)> {
+) -> Result<ResolvedCreditPurchase, ResolveCreditPurchaseRequestError> {
+    use ResolveCreditPurchaseRequestErrorKind as Kind;
+    let reject = |kind| ResolveCreditPurchaseRequestError {
+        kind,
+        location: std::panic::Location::caller(),
+    };
+
     match (req.package_index, req.amount_cents) {
-        (Some(_), Some(_)) => Err((
-            StatusCode::BAD_REQUEST,
-            "Provide either package_index or amount_cents, not both".to_string(),
-        )),
-        (None, None) => Err((
-            StatusCode::BAD_REQUEST,
-            "package_index or amount_cents is required".to_string(),
-        )),
+        (Some(_), Some(_)) => Err(reject(Kind::BothProvided)),
+        (None, None) => Err(reject(Kind::NeitherProvided)),
         (Some(package_index), None) => {
             let pkg = credit_packages
                 .get(package_index)
-                .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid package index".to_string()))?;
+                .ok_or_else(|| reject(Kind::InvalidIndex))?;
 
             Ok(ResolvedCreditPurchase {
                 purchase_cents: pkg.purchase_cents,
@@ -1967,13 +2518,7 @@ fn resolve_credit_purchase_request(
         }
         (None, Some(amount_cents)) => {
             if amount_cents < MIN_CUSTOM_CREDIT_PURCHASE_CENTS {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    format!(
-                        "Custom credit purchase must be at least ${}",
-                        format_currency_amount(MIN_CUSTOM_CREDIT_PURCHASE_CENTS)
-                    ),
-                ));
+                return Err(reject(Kind::BelowMinimum));
             }
 
             Ok(ResolvedCreditPurchase {
@@ -1990,31 +2535,137 @@ fn resolve_credit_purchase_request(
     }
 }
 
+/// Failure modes for [`purchase_credits`]. Request/validation rejections carry a
+/// fixed client message; transport and database failures map to generic bodies.
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum PurchaseCreditsError {
+    #[error("request rejected ({message}) [{location}]")]
+    BadRequest {
+        message: &'static str,
+        location: Location,
+    },
+
+    #[error("Paddle not configured ({message}) [{location}]")]
+    NotConfigured {
+        message: &'static str,
+        location: Location,
+    },
+
+    #[error("could not look up the primary organization [{location}]")]
+    OrgLookup {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("database query failed [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not reach the Paddle API [{location}]")]
+    PaddleTransport {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Paddle returned an error status [{location}]")]
+    PaddleStatus { location: Location },
+
+    #[error("missing transaction ID in Paddle response [{location}]")]
+    TxnIdMissing { location: Location },
+
+    #[error("failed to record credit purchase [{location}]")]
+    IntentInsert { location: Location },
+
+    #[error("transaction payment failed [{location}]")]
+    PaymentRequired { location: Location },
+}
+
+impl IntoResponse for PurchaseCreditsError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            PurchaseCreditsError::BadRequest { message, .. } => (StatusCode::BAD_REQUEST, *message),
+            PurchaseCreditsError::NotConfigured { message, .. } => {
+                (StatusCode::SERVICE_UNAVAILABLE, *message)
+            }
+            PurchaseCreditsError::OrgLookup { .. } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to get organization",
+            ),
+            PurchaseCreditsError::Database { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            PurchaseCreditsError::PaddleTransport { .. } => {
+                (StatusCode::BAD_GATEWAY, "payment provider error")
+            }
+            PurchaseCreditsError::PaddleStatus { .. } => {
+                (StatusCode::BAD_GATEWAY, "payment provider error")
+            }
+            PurchaseCreditsError::TxnIdMissing { .. } => (
+                StatusCode::BAD_GATEWAY,
+                "Missing transaction ID in Paddle response",
+            ),
+            PurchaseCreditsError::IntentInsert { .. } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to record credit purchase",
+            ),
+            PurchaseCreditsError::PaymentRequired { .. } => {
+                (StatusCode::PAYMENT_REQUIRED, "transaction payment failed")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 pub async fn purchase_credits(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Json(req): Json<PurchaseCreditsRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, PurchaseCreditsError> {
+    use PurchaseCreditsErrorCtx as Ctx;
+
     let credit_packages = build_credit_packages(&state.pricing, &state.paddle_credits_price_ids);
-    let purchase =
-        resolve_credit_purchase_request(&req, &credit_packages, &state.paddle_credits_price_ids)?;
+    let purchase = match resolve_credit_purchase_request(
+        &req,
+        &credit_packages,
+        &state.paddle_credits_price_ids,
+    ) {
+        Ok(purchase) => purchase,
+        Err(err) => {
+            tracing::warn!(user_id = %auth.user_id, error = %err, "invalid credit purchase request");
+            return Err(PurchaseCreditsError::BadRequest {
+                message: err.client_message(),
+                location: std::panic::Location::caller(),
+            });
+        }
+    };
 
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+        .with_context(Ctx::org_lookup())?;
 
     if req.transaction_id.is_none() {
         let paddle_api_key = state.paddle_api_key.as_ref().ok_or_else(|| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Paddle API not configured".to_string(),
-            )
+            tracing::warn!("Paddle API not configured");
+            PurchaseCreditsError::NotConfigured {
+                message: "Paddle API not configured",
+                location: std::panic::Location::caller(),
+            }
         })?;
         let paddle_client_token = state.paddle_client_token.as_ref().ok_or_else(|| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Paddle checkout not configured".to_string(),
-            )
+            tracing::warn!("Paddle checkout not configured");
+            PurchaseCreditsError::NotConfigured {
+                message: "Paddle checkout not configured",
+                location: std::panic::Location::caller(),
+            }
         })?;
 
         let paddle_customer_id: Option<String> = sqlx::query_scalar(
@@ -2023,12 +2674,7 @@ pub async fn purchase_credits(
         .bind(org_id)
         .fetch_optional(&state.db)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-        })?
+        .with_context(Ctx::database())?
         .flatten();
 
         let customer_auth_token = if let Some(customer_id) = paddle_customer_id.as_deref() {
@@ -2039,19 +2685,14 @@ pub async fn purchase_credits(
                     customer_id,
                 )
                 .await
-                .map_err(|e| {
-                    (
-                        StatusCode::BAD_GATEWAY,
-                        format!("Failed to generate Paddle customer auth token: {}", e),
-                    )
-                })?,
+                .with_context(Ctx::paddle_transport())?,
             )
         } else {
             None
         };
 
         let custom_data = build_credit_purchase_custom_data(org_id, auth.user_id, &purchase);
-        let item = build_credit_purchase_transaction_item(&purchase)?;
+        let item = build_credit_purchase_transaction_item(&purchase);
         let mut body = serde_json::json!({
             "items": [item],
             "collection_mode": "automatic",
@@ -2072,48 +2713,28 @@ pub async fn purchase_credits(
             .json(&body)
             .send()
             .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Paddle API error: {}", e)))?;
+            .with_context(Ctx::paddle_transport())?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let retry_after = paddle_retry_after_seconds(response.headers());
             let err_body = response.text().await.unwrap_or_default();
-            tracing::error!("Paddle transaction failed: {} - {}", status, err_body);
-            return Err((
-                StatusCode::BAD_GATEWAY,
-                if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-                    match retry_after {
-                        Some(seconds) => format!(
-                            "Paddle payment failed: rate limited, retry after {} seconds",
-                            seconds
-                        ),
-                        None => {
-                            "Paddle payment failed: rate limited, retry after the Retry-After delay"
-                                .to_string()
-                        }
-                    }
-                } else {
-                    format!("Paddle payment failed: {}", status)
-                },
-            ));
+            tracing::error!(org_id = %org_id, status = %status, body = %err_body, "Paddle transaction failed");
+            return Err(PurchaseCreditsError::PaddleStatus {
+                location: std::panic::Location::caller(),
+            });
         }
 
-        let resp: serde_json::Value = response.json().await.map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Paddle response parse error: {}", e),
-            )
-        })?;
+        let resp: serde_json::Value = response
+            .json()
+            .await
+            .with_context(Ctx::paddle_transport())?;
 
-        let transaction_id = resp["data"]["id"]
-            .as_str()
-            .ok_or_else(|| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    "Missing transaction ID in Paddle response".to_string(),
-                )
-            })?
-            .to_string();
+        let Some(transaction_id) = resp["data"]["id"].as_str().map(|s| s.to_string()) else {
+            tracing::error!(org_id = %org_id, "missing transaction ID in Paddle response");
+            return Err(PurchaseCreditsError::TxnIdMissing {
+                location: std::panic::Location::caller(),
+            });
+        };
 
         // Record the server-authoritative credit amount before handing the
         // transaction id back to the frontend. Both the completion callback and
@@ -2134,15 +2755,10 @@ pub async fn purchase_credits(
         .execute(&state.db)
         .await
         {
-            tracing::error!(
-                "Failed to record credit purchase intent for transaction {}: {}",
-                transaction_id,
-                e
-            );
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to record credit purchase".to_string(),
-            ));
+            tracing::error!(transaction_id = %transaction_id, error = ?e, "failed to record credit purchase intent");
+            return Err(PurchaseCreditsError::IntentInsert {
+                location: std::panic::Location::caller(),
+            });
         }
 
         tracing::info!(
@@ -2164,10 +2780,11 @@ pub async fn purchase_credits(
     let transaction_id = req.transaction_id.unwrap_or_default();
     let (transaction_status, verified_payment_method_id) = {
         let paddle_api_key = state.paddle_api_key.as_ref().ok_or_else(|| {
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Paddle API not configured".to_string(),
-            )
+            tracing::warn!("Paddle API not configured");
+            PurchaseCreditsError::NotConfigured {
+                message: "Paddle API not configured",
+                location: std::panic::Location::caller(),
+            }
         })?;
 
         let client = reqwest::Client::new();
@@ -2179,34 +2796,30 @@ pub async fn purchase_credits(
             .header("Authorization", format!("Bearer {}", paddle_api_key))
             .send()
             .await
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    format!("Failed to verify transaction: {}", e),
-                )
-            })?;
+            .with_context(Ctx::paddle_transport())?;
 
         if !verify_resp.status().is_success() {
-            tracing::warn!(
-                "Paddle transaction verification failed for txn_id={}: {}",
-                transaction_id,
-                verify_resp.status()
-            );
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "Invalid transaction ID".to_string(),
-            ));
+            tracing::warn!(transaction_id = %transaction_id, status = %verify_resp.status(), "Paddle transaction verification failed");
+            return Err(PurchaseCreditsError::BadRequest {
+                message: "Invalid transaction ID",
+                location: std::panic::Location::caller(),
+            });
         }
 
-        let verify_data: serde_json::Value = verify_resp.json().await.map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Failed to parse Paddle response: {}", e),
-            )
-        })?;
+        let verify_data: serde_json::Value = verify_resp
+            .json()
+            .await
+            .with_context(Ctx::paddle_transport())?;
 
-        validate_credit_purchase_transaction(&verify_data, org_id, auth.user_id, &purchase)
-            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        if let Err(err) =
+            validate_credit_purchase_transaction(&verify_data, org_id, auth.user_id, &purchase)
+        {
+            tracing::warn!(transaction_id = %transaction_id, error = %err, "credit purchase validation failed");
+            return Err(PurchaseCreditsError::BadRequest {
+                message: err.client_message(),
+                location: std::panic::Location::caller(),
+            });
+        }
 
         let txn_customer_id = verify_data["data"]["customer_id"].as_str().unwrap_or("");
         let org_paddle_customer_id: Option<String> = sqlx::query_scalar(
@@ -2215,38 +2828,24 @@ pub async fn purchase_credits(
         .bind(org_id)
         .fetch_optional(&state.db)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-        })?
+        .with_context(Ctx::database())?
         .flatten();
 
         if let Some(ref expected_cid) = org_paddle_customer_id {
             if txn_customer_id != expected_cid.as_str() {
-                tracing::warn!(
-                    "Paddle transaction {} customer_id '{}' does not match user's customer_id '{}'",
-                    transaction_id,
-                    txn_customer_id,
-                    expected_cid
-                );
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "Transaction does not belong to this account".to_string(),
-                ));
+                tracing::warn!(transaction_id = %transaction_id, "Paddle transaction customer_id does not match user's customer_id");
+                return Err(PurchaseCreditsError::BadRequest {
+                    message: "Transaction does not belong to this account",
+                    location: std::panic::Location::caller(),
+                });
             }
         } else {
             if txn_customer_id.is_empty() {
-                tracing::warn!(
-                    "Org {} has no paddle_customer_id on file and transaction {} has no customer_id",
-                    org_id,
-                    transaction_id
-                );
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "No billing account on file".to_string(),
-                ));
+                tracing::warn!(org_id = %org_id, transaction_id = %transaction_id, "no billing account on file");
+                return Err(PurchaseCreditsError::BadRequest {
+                    message: "No billing account on file",
+                    location: std::panic::Location::caller(),
+                });
             }
 
             if let Err(e) = sqlx::query(
@@ -2259,20 +2858,9 @@ pub async fn purchase_credits(
             .execute(&state.db)
             .await
             {
-                tracing::error!(
-                    "Failed to store paddle_customer_id {} for org {} after credit purchase {}: {}",
-                    txn_customer_id,
-                    org_id,
-                    transaction_id,
-                    e
-                );
+                tracing::error!(org_id = %org_id, error = ?e, "failed to store paddle_customer_id");
             } else {
-                tracing::info!(
-                    "Stored paddle_customer_id {} for org {} from credit purchase {}",
-                    txn_customer_id,
-                    org_id,
-                    transaction_id
-                );
+                tracing::info!("Stored paddle_customer_id for org {}", org_id);
             }
         }
 
@@ -2296,12 +2884,7 @@ pub async fn purchase_credits(
         req.card_brand.as_deref(),
     )
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .with_context(Ctx::database())?;
 
     let already_exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM credit_ledger WHERE paddle_transaction_id = $1)",
@@ -2309,22 +2892,12 @@ pub async fn purchase_credits(
     .bind(&transaction_id)
     .fetch_one(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .with_context(Ctx::database())?;
 
     if already_exists {
         let balance_cents = get_ledger_balance_cents(&state.db, org_id)
             .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Database error: {}", e),
-                )
-            })?;
+            .with_context(Ctx::database())?;
 
         return Ok(Json(serde_json::json!({
             "success": true,
@@ -2335,13 +2908,9 @@ pub async fn purchase_credits(
     }
 
     if is_failed_credit_purchase_status(&transaction_status) {
-        return Err((
-            StatusCode::PAYMENT_REQUIRED,
-            format!(
-                "Transaction payment failed (status: {})",
-                transaction_status
-            ),
-        ));
+        return Err(PurchaseCreditsError::PaymentRequired {
+            location: std::panic::Location::caller(),
+        });
     }
 
     if !is_settled_credit_purchase_status(&transaction_status) {
@@ -2369,23 +2938,14 @@ pub async fn purchase_credits(
     .bind(&transaction_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .with_context(Ctx::database())?;
 
     let Some(authoritative_credit_cents) = intent_credit_cents else {
-        tracing::error!(
-            "No credit purchase intent for transaction {} (org {}); refusing to credit",
-            transaction_id,
-            org_id
-        );
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "No matching credit purchase on record".to_string(),
-        ));
+        tracing::error!(transaction_id = %transaction_id, org_id = %org_id, "No credit purchase intent for transaction; refusing to credit");
+        return Err(PurchaseCreditsError::BadRequest {
+            message: "No matching credit purchase on record",
+            location: std::panic::Location::caller(),
+        });
     };
 
     let new_balance = apply_credit(
@@ -2398,12 +2958,7 @@ pub async fn purchase_credits(
         None,
     )
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to apply credit: {}", e),
-        )
-    })?;
+    .with_context(Ctx::database())?;
 
     tracing::info!(
         "Credit purchase: org={}, user={}, txn={}, +{} cents, new_balance={}",
@@ -2438,7 +2993,7 @@ pub async fn purchase_credits(
                     .await
             {
                 tracing::error!(
-                    "Failed to clear credit suspension for org {}: {}",
+                    "Failed to clear credit suspension for org {}: {:?}",
                     org_id,
                     e
                 );
@@ -2455,13 +3010,51 @@ pub async fn purchase_credits(
     })))
 }
 
+/// Failure modes for [`get_credit_ledger`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum GetCreditLedgerError {
+    #[error("could not look up the primary organization [{location}]")]
+    OrgLookup {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("database query failed [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for GetCreditLedgerError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            GetCreditLedgerError::OrgLookup { .. } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to get organization",
+            ),
+            GetCreditLedgerError::Database { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 pub async fn get_credit_ledger(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, GetCreditLedgerError> {
+    use GetCreditLedgerErrorCtx as Ctx;
+
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+        .with_context(Ctx::org_lookup())?;
 
     let rows: Vec<CreditLedgerRow> = sqlx::query_as(
         "SELECT id, delta_cents,
@@ -2475,7 +3068,9 @@ pub async fn get_credit_ledger(
     .bind(org_id)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+
+    .with_context(Ctx::database())?;
 
     let entries: Vec<serde_json::Value> = rows
         .into_iter()
@@ -2497,32 +3092,87 @@ pub async fn get_credit_ledger(
     Ok(Json(serde_json::json!({ "entries": entries })))
 }
 
+/// Failure modes for [`redeem_credit_code`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum RedeemCreditCodeError {
+    #[error("request rejected ({message}) [{location}]")]
+    BadRequest {
+        message: &'static str,
+        location: Location,
+    },
+
+    #[error("invalid or already redeemed code [{location}]")]
+    InvalidCode { location: Location },
+
+    #[error("could not look up the primary organization [{location}]")]
+    OrgLookup {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("database operation failed [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for RedeemCreditCodeError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            RedeemCreditCodeError::BadRequest { message, .. } => {
+                (StatusCode::BAD_REQUEST, *message)
+            }
+            RedeemCreditCodeError::InvalidCode { .. } => {
+                (StatusCode::NOT_FOUND, "Invalid or already redeemed code")
+            }
+            RedeemCreditCodeError::OrgLookup { .. } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to get organization",
+            ),
+            RedeemCreditCodeError::Database { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        (status, body).into_response()
+    }
+}
+
+#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 pub async fn redeem_credit_code(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Json(body): Json<serde_json::Value>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, RedeemCreditCodeError> {
+    use RedeemCreditCodeError as E;
+    use RedeemCreditCodeErrorCtx as Ctx;
+
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .map_err(|e| (e, "Failed to get organization".to_string()))?;
+        .with_context(Ctx::org_lookup())?;
 
-    let code = body
-        .get("code")
-        .and_then(|v| v.as_str())
-        .ok_or((StatusCode::BAD_REQUEST, "Missing 'code' field".to_string()))?
-        .trim()
-        .replace('-', "");
+    let code = match body.get("code").and_then(|v| v.as_str()) {
+        Some(code) => code.trim().replace('-', ""),
+        None => {
+            return Err(E::BadRequest {
+                message: "Missing 'code' field",
+                location: std::panic::Location::caller(),
+            });
+        }
+    };
 
     if code.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "Code cannot be empty".to_string()));
+        return Err(E::BadRequest {
+            message: "Code cannot be empty",
+            location: std::panic::Location::caller(),
+        });
     }
 
-    let mut tx = state.db.begin().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    let mut tx = state.db.begin().await.with_context(Ctx::database())?;
 
     let row: Option<(Uuid, i64)> = sqlx::query_as(
         "SELECT id, amount_cents FROM credit_codes WHERE UPPER(code) = UPPER($1) AND redeemed_by IS NULL FOR UPDATE"
@@ -2530,15 +3180,16 @@ pub async fn redeem_credit_code(
     .bind(&code)
     .fetch_optional(&mut *tx)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Database error: {}", e)))?;
+
+
+    .with_context(Ctx::database())?;
 
     let (code_id, amount_cents) = match row {
         Some(r) => r,
         None => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                "Invalid or already redeemed code".to_string(),
-            ));
+            return Err(E::InvalidCode {
+                location: std::panic::Location::caller(),
+            });
         }
     };
 
@@ -2547,12 +3198,7 @@ pub async fn redeem_credit_code(
         .bind(code_id)
         .execute(&mut *tx)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Database error: {}", e),
-            )
-        })?;
+        .with_context(Ctx::database())?;
 
     sqlx::query(
         "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description)
@@ -2562,28 +3208,13 @@ pub async fn redeem_credit_code(
     .bind(amount_cents)
     .execute(&mut *tx)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to record ledger entry: {}", e),
-        )
-    })?;
+    .with_context(Ctx::database())?;
 
     let new_balance = get_ledger_balance_cents(&mut *tx, org_id)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to compute balance: {}", e),
-            )
-        })?;
+        .with_context(Ctx::database())?;
 
-    tx.commit().await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    tx.commit().await.with_context(Ctx::database())?;
 
     tracing::info!(
         "Credit code redeemed: user={}, code_id={}, +{} cents, new_balance={}",
@@ -2632,7 +3263,44 @@ pub async fn redeem_credit_code(
     })))
 }
 
+/// Failure modes for [`apply_credit`]. All failures carry a source.
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum ApplyCreditError {
+    #[error("could not begin transaction [{location}]")]
+    Begin {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not insert credit ledger entry [{location}]")]
+    Insert {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not compute balance [{location}]")]
+    Balance {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not commit transaction [{location}]")]
+    Commit {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
 /// Atomically insert a credit_ledger row and return the derived balance.
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 pub async fn apply_credit(
     db: &PgPool,
     org_id: Uuid,
@@ -2641,11 +3309,10 @@ pub async fn apply_credit(
     description: &str,
     paddle_txn_id: Option<&str>,
     invoice_id: Option<Uuid>,
-) -> Result<i64, String> {
-    let mut tx = db
-        .begin()
-        .await
-        .map_err(|e| format!("Failed to begin transaction: {}", e))?;
+) -> Result<i64, ApplyCreditError> {
+    use ApplyCreditErrorCtx as Ctx;
+
+    let mut tx = db.begin().await.with_context(Ctx::begin())?;
 
     sqlx::query(
         "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description, paddle_transaction_id, invoice_id)
@@ -2660,15 +3327,13 @@ pub async fn apply_credit(
     .bind(invoice_id)
     .execute(&mut *tx)
     .await
-    .map_err(|e| format!("Failed to insert credit_ledger: {}", e))?;
+    .with_context(Ctx::insert())?;
 
     let new_balance = get_ledger_balance_cents(&mut *tx, org_id)
         .await
-        .map_err(|e| format!("Failed to compute balance: {}", e))?;
+        .with_context(Ctx::balance())?;
 
-    tx.commit()
-        .await
-        .map_err(|e| format!("Failed to commit transaction: {}", e))?;
+    tx.commit().await.with_context(Ctx::commit())?;
 
     Ok(new_balance)
 }
@@ -2844,8 +3509,10 @@ mod tests {
         )
         .expect_err("missing package should be rejected");
 
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert_eq!(err.1, "package_index or amount_cents is required");
+        assert_eq!(
+            err.client_message(),
+            "package_index or amount_cents is required"
+        );
     }
 
     #[test]
@@ -2866,8 +3533,7 @@ mod tests {
         )
         .expect_err("invalid package index should be rejected");
 
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert_eq!(err.1, "Invalid package index");
+        assert_eq!(err.client_message(), "Invalid package index");
     }
 
     #[test]
@@ -2911,8 +3577,10 @@ mod tests {
         )
         .expect_err("custom amount should be rejected");
 
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert_eq!(err.1, "Custom credit purchase must be at least $10.00");
+        assert_eq!(
+            err.client_message(),
+            "Custom credit purchase must be at least $10.00"
+        );
     }
 
     #[test]
@@ -2933,9 +3601,8 @@ mod tests {
         )
         .expect_err("mixed request should be rejected");
 
-        assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert_eq!(
-            err.1,
+            err.client_message(),
             "Provide either package_index or amount_cents, not both"
         );
     }
@@ -3029,7 +3696,10 @@ mod tests {
 
         let err = validate_credit_purchase_transaction(&txn, org_id, user_id, &purchase)
             .expect_err("transaction metadata should be rejected");
-        assert!(err.contains("does not belong to this user"));
+        assert!(
+            err.client_message()
+                .contains("does not belong to this user")
+        );
     }
 
     #[test]
@@ -3082,7 +3752,10 @@ mod tests {
             validate_paddle_setup_transaction(&txn, "pri_setup", Some("ctm_other"), None, false)
                 .expect_err("transaction should be rejected");
 
-        assert!(err.contains("does not belong to this account"));
+        assert!(
+            err.client_message()
+                .contains("does not belong to this account")
+        );
     }
 
     #[test]
@@ -3117,6 +3790,6 @@ mod tests {
         )
         .expect_err("transaction should be rejected");
 
-        assert!(err.contains("setup price"));
+        assert!(err.client_message().contains("setup price"));
     }
 }

@@ -1781,7 +1781,9 @@ mod tests {
         let work_dir = tempfile::tempdir().expect("test temp dir");
         let user_dir = work_dir.path().join("user");
         let enclave_dir = work_dir.path().join("enclave");
-        fs::create_dir_all(&user_dir).await.expect("create user dir");
+        fs::create_dir_all(&user_dir)
+            .await
+            .expect("create user dir");
         fs::create_dir_all(&enclave_dir)
             .await
             .expect("create enclave dir");

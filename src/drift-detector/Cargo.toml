@@ -12,6 +12,7 @@ license = "AGPL-3.0-only OR LicenseRef-Commercial"
 sqlx = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
+dterror = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }

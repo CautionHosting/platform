@@ -2,7 +2,9 @@ use axum::{
     Json,
     extract::{Path, State},
     http::StatusCode,
+    response::{IntoResponse, Response},
 };
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -19,8 +21,29 @@ type StoppedResourceRow = (
     bool,
 );
 
+/// Failure modes for [`call_internal_unsuspend`] (leaf error; callers discard the result).
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum CallInternalUnsuspendError {
+    #[error("could not call internal unsuspend endpoint [{location}]")]
+    Send {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("internal unsuspend endpoint returned a failure status [{location}]")]
+    ResponseStatus { location: Location },
+}
+
 /// Helper: call the internal unsuspend endpoint after a credit purchase.
-pub async fn call_internal_unsuspend(state: &AppState, org_id: Uuid) -> Result<(), String> {
+#[tracing::instrument(skip_all, err)]
+pub async fn call_internal_unsuspend(
+    state: &AppState,
+    org_id: Uuid,
+) -> Result<(), CallInternalUnsuspendError> {
+    use CallInternalUnsuspendErrorCtx as Ctx;
+
     let secret = state.internal_service_secret.as_deref().unwrap_or_default();
     let client = reqwest::Client::new();
     let resp = client
@@ -31,23 +54,46 @@ pub async fn call_internal_unsuspend(state: &AppState, org_id: Uuid) -> Result<(
         .header("x-internal-service-secret", secret)
         .send()
         .await
-        .map_err(|e| format!("Failed to call unsuspend: {}", e))?;
+        .with_context(Ctx::send())?;
 
     if resp.status().is_success() {
         tracing::info!("Unsuspended org {} after credit deposit", org_id);
         Ok(())
     } else {
-        Err(format!("Unsuspend returned {}", resp.status()))
+        Err(CallInternalUnsuspendError::ResponseStatus {
+            location: std::panic::Location::caller(),
+        })
+    }
+}
+
+/// Failure modes for [`suspend_managed_resources`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum SuspendManagedResourcesError {
+    #[error("database query failed [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for SuspendManagedResourcesError {
+    fn into_response(self) -> Response {
+        (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
     }
 }
 
 /// Internal endpoint: suspend only fully-managed resources for an org (credit exhaustion).
 /// Unlike suspend_org_resources which suspends ALL resources, this only suspends resources
 /// that are NOT managed on-prem — credit exhaustion should not affect BYOC deployments.
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 pub async fn suspend_managed_resources(
     State(state): State<Arc<AppState>>,
     Path(org_id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, SuspendManagedResourcesError> {
+    use SuspendManagedResourcesErrorCtx as Ctx;
+
     tracing::info!(
         "Suspending fully-managed resources for org {} (credit exhaustion)",
         org_id
@@ -64,12 +110,7 @@ pub async fn suspend_managed_resources(
     .bind(org_id)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .with_context(Ctx::query())?;
 
     let mut stopped = 0u32;
     let mut errors = Vec::new();
@@ -88,7 +129,7 @@ pub async fn suspend_managed_resources(
                         instances.iter().map(|i| i.instance_id.clone()).collect();
                     if let Err(e) = ec2.stop_instances(&ids).await {
                         tracing::error!("Failed to stop instances for {}: {}", resource_name, e);
-                        errors.push(format!("{}: {}", resource_name, e));
+                        errors.push(format!("{}: {}", resource_name, e.client_message()));
                         continue;
                     }
                     tracing::info!(
@@ -102,7 +143,7 @@ pub async fn suspend_managed_resources(
                 }
                 Err(e) => {
                     tracing::error!("Failed to describe instances for {}: {}", resource_name, e);
-                    errors.push(format!("{}: {}", resource_name, e));
+                    errors.push(format!("{}: {}", resource_name, e.client_message()));
                     continue;
                 }
             }
@@ -147,12 +188,33 @@ pub async fn suspend_managed_resources(
     })))
 }
 
+/// Failure modes for [`suspend_org_resources`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum SuspendOrgResourcesError {
+    #[error("database query failed [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for SuspendOrgResourcesError {
+    fn into_response(self) -> Response {
+        (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+    }
+}
+
 /// Internal endpoint: suspend all running resources for an org (stop EC2 instances).
 /// Called by the metering service during dunning enforcement.
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 pub async fn suspend_org_resources(
     State(state): State<Arc<AppState>>,
     Path(org_id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, SuspendOrgResourcesError> {
+    use SuspendOrgResourcesErrorCtx as Ctx;
+
     tracing::info!("Suspending all running resources for org {}", org_id);
 
     let resources: Vec<(Uuid, String, String)> = sqlx::query_as(
@@ -162,12 +224,7 @@ pub async fn suspend_org_resources(
     .bind(org_id)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .with_context(Ctx::query())?;
 
     let mut stopped = 0u32;
     let mut errors = Vec::new();
@@ -187,7 +244,7 @@ pub async fn suspend_org_resources(
                         instances.iter().map(|i| i.instance_id.clone()).collect();
                     if let Err(e) = ec2.stop_instances(&ids).await {
                         tracing::error!("Failed to stop instances for {}: {}", resource_name, e);
-                        errors.push(format!("{}: {}", resource_name, e));
+                        errors.push(format!("{}: {}", resource_name, e.client_message()));
                         continue;
                     }
                     tracing::info!(
@@ -201,7 +258,7 @@ pub async fn suspend_org_resources(
                 }
                 Err(e) => {
                     tracing::error!("Failed to describe instances for {}: {}", resource_name, e);
-                    errors.push(format!("{}: {}", resource_name, e));
+                    errors.push(format!("{}: {}", resource_name, e.client_message()));
                     continue;
                 }
             }
@@ -257,12 +314,33 @@ pub async fn suspend_org_resources(
     })))
 }
 
+/// Failure modes for [`unsuspend_org_resources`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum UnsuspendOrgResourcesError {
+    #[error("database query failed [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for UnsuspendOrgResourcesError {
+    fn into_response(self) -> Response {
+        (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+    }
+}
+
 /// Internal endpoint: unsuspend org — restart stopped resources and clear dunning state.
 /// Called when payment is resolved (credit deposit, new payment method, etc).
+#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
 pub async fn unsuspend_org_resources(
     State(state): State<Arc<AppState>>,
     Path(org_id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<serde_json::Value>, UnsuspendOrgResourcesError> {
+    use UnsuspendOrgResourcesErrorCtx as Ctx;
+
     tracing::info!("Unsuspending resources for org {}", org_id);
 
     let resources: Vec<StoppedResourceRow> = sqlx::query_as(
@@ -276,12 +354,7 @@ pub async fn unsuspend_org_resources(
     .bind(org_id)
     .fetch_all(&state.db)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Database error: {}", e),
-        )
-    })?;
+    .with_context(Ctx::query())?;
 
     let mut started = 0u32;
     let mut errors = Vec::new();
@@ -311,7 +384,7 @@ pub async fn unsuspend_org_resources(
                         instances.iter().map(|i| i.instance_id.clone()).collect();
                     if let Err(e) = ec2.start_instances(&ids).await {
                         tracing::error!("Failed to start instances for {}: {}", resource_name, e);
-                        errors.push(format!("{}: {}", resource_name, e));
+                        errors.push(format!("{}: {}", resource_name, e.client_message()));
                         continue;
                     }
                     tracing::info!(
@@ -326,7 +399,7 @@ pub async fn unsuspend_org_resources(
                 }
                 Err(e) => {
                     tracing::error!("Failed to describe instances for {}: {}", resource_name, e);
-                    errors.push(format!("{}: {}", resource_name, e));
+                    errors.push(format!("{}: {}", resource_name, e.client_message()));
                     continue;
                 }
             }
@@ -339,7 +412,7 @@ pub async fn unsuspend_org_resources(
                     Ok(public_ip) => recovered_address = Some((public_ip, creds.region.clone())),
                     Err(e) => {
                         tracing::error!("Failed to attach Elastic IP for {}: {}", resource_name, e);
-                        errors.push(resource_name.clone() + ": " + &e.to_string());
+                        errors.push(resource_name.clone() + ": " + e.client_message());
                         continue;
                     }
                 }
@@ -376,7 +449,7 @@ pub async fn unsuspend_org_resources(
                         .await
                     {
                         Ok(()) => None,
-                        Err(stop_error) => Some(stop_error.to_string()),
+                        Err(stop_error) => Some(stop_error.client_message().to_string()),
                     }
                 } else {
                     Some("AWS credentials were unavailable for the compensating stop".to_string())
@@ -384,15 +457,18 @@ pub async fn unsuspend_org_resources(
 
                 if let Some(stop_error) = stop_error {
                     let message = "readiness failed: ".to_string()
-                        + &error
+                        + &error.client_message()
                         + "; automatic stop failed: "
                         + &stop_error;
-                    let sanitized = crate::managed_dns::sanitize_error(&anyhow::anyhow!(message));
+                    let error: Box<dyn std::error::Error + Send + Sync + 'static> = message.into();
+                    let sanitized = crate::managed_dns::sanitize_error(&*error);
                     tracing::error!(resource_id = %resource_id, error = %sanitized, "unsuspend requires operator recovery; recording app as running and metered");
                     degraded_readiness_error = Some(sanitized);
                 } else {
                     tracing::warn!(resource_id = %resource_id, "stopped newly started instances after readiness failure");
-                    errors.push(resource_name.clone() + ": readiness failed: " + &error);
+                    errors.push(
+                        resource_name.clone() + ": readiness failed: " + &error.client_message(),
+                    );
                     continue;
                 }
             }

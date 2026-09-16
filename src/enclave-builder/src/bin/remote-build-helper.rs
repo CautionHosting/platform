@@ -140,7 +140,8 @@ fn key_exchange_from_env() -> Result<String, RemoteBuildError> {
     use RemoteBuildErrorCtx as Ctx;
     let value = std::env::var("CAUTION_KEY_EXCHANGE")
         .unwrap_or_else(|_| enclave_builder::build::DEFAULT_KEY_EXCHANGE.to_string());
-    enclave_builder::build::validate_key_exchange(&value).with_context(Ctx::key_exchange(&value))?;
+    enclave_builder::build::validate_key_exchange(&value)
+        .with_context(Ctx::key_exchange(&value))?;
     Ok(value)
 }
 
@@ -149,9 +150,12 @@ fn enclave_source_from_manifest(
 ) -> Result<(String, String), RemoteBuildError> {
     match &manifest.enclave_source {
         EnclaveSource::GitArchive { urls, commit } => {
-            let url = urls.first().cloned().ok_or_else(|| RemoteBuildError::EmptyEnclaveUrls {
-                location: std::panic::Location::caller(),
-            })?;
+            let url = urls
+                .first()
+                .cloned()
+                .ok_or_else(|| RemoteBuildError::EmptyEnclaveUrls {
+                    location: std::panic::Location::caller(),
+                })?;
             let pinned_url = commit
                 .as_deref()
                 .map(|commit| enclave_builder::pin_archive_url_to_commit(&url, commit))

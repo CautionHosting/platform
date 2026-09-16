@@ -1,3 +1,5 @@
+use crate::error::PatcherError;
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum XPathSegment {
     Block {
@@ -11,19 +13,25 @@ pub(crate) enum XPathSegment {
 ///
 /// The last segment is always an attribute; all preceding segments are blocks.
 /// A leading `/` is optional. Block segments may carry a `.label` suffix.
-pub(crate) fn parse_xpath(input: &str) -> Result<Vec<XPathSegment>, String> {
+#[tracing::instrument(skip_all, err)]
+pub(crate) fn parse_xpath(input: &str) -> Result<Vec<XPathSegment>, PatcherError> {
+    let reject = |message: String| PatcherError::XPathParse {
+        message,
+        location: std::panic::Location::caller(),
+    };
+
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return Err("empty xpath".to_string());
+        return Err(reject("empty xpath".to_string()));
     }
     let stripped = trimmed.strip_prefix('/').unwrap_or(trimmed);
     if stripped.is_empty() {
-        return Err("empty xpath".to_string());
+        return Err(reject("empty xpath".to_string()));
     }
 
     let parts: Vec<&str> = stripped.split('/').collect();
     if parts.is_empty() || parts.iter().any(|p| p.is_empty()) {
-        return Err(format!("invalid xpath: {input}"));
+        return Err(reject(format!("invalid xpath: {input}")));
     }
 
     let mut segments = Vec::new();
@@ -31,12 +39,12 @@ pub(crate) fn parse_xpath(input: &str) -> Result<Vec<XPathSegment>, String> {
         let is_last = i == parts.len() - 1;
         if let Some((ident, label)) = part.split_once('.') {
             if ident.is_empty() || label.is_empty() {
-                return Err(format!("invalid segment in xpath: {part}"));
+                return Err(reject(format!("invalid segment in xpath: {part}")));
             }
             if is_last {
-                return Err(format!(
+                return Err(reject(format!(
                     "last segment {part} has a label suffix; cannot be an attribute"
-                ));
+                )));
             }
             segments.push(XPathSegment::Block {
                 ident: ident.to_string(),
