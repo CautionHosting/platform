@@ -403,6 +403,12 @@ async fn main() -> Result<(), MainError> {
             "X-Fido2-Response".parse().unwrap(),
         ]);
 
+    // The `e2e-testing-unsafe` build appends a route below, so the binding must
+    // stay `mut`; without that feature the compiler cannot see any use of it.
+    #[allow(
+        unused_mut,
+        reason = "auth_routes is appended to based on build configuration"
+    )]
     let mut auth_routes = Router::new()
         .route(
             "/auth/register/begin",
