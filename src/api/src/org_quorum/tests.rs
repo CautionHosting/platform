@@ -307,17 +307,19 @@ fn rejects_shared_recipients_including_notations_and_expired_keys() {
         Some("bundle-id@caution.co"),
     ] {
         for expired in [false, true] {
-            let certs = recipients::shared_recipient(notation, expired);
-            for cert in &certs {
-                assert!(eligible_certificate(cert, None).is_ok());
-            }
-            let keys: Vec<_> = certs
-                .into_iter()
-                .map(|cert| Key::OpenPGP { cert })
-                .collect();
-            for at in [None, Some(SystemTime::now())] {
-                let error = validate_keyring(&keys, at).unwrap_err();
-                assert!(error.message.contains("share an encryption key"));
+            for different_timestamps in [false, true] {
+                let certs = recipients::shared_recipient(notation, expired, different_timestamps);
+                for cert in &certs {
+                    assert!(eligible_certificate(cert, None).is_ok());
+                }
+                let keys: Vec<_> = certs
+                    .into_iter()
+                    .map(|cert| Key::OpenPGP { cert })
+                    .collect();
+                for at in [None, Some(SystemTime::now())] {
+                    let error = validate_keyring(&keys, at).unwrap_err();
+                    assert!(error.message.contains("share an encryption key"));
+                }
             }
         }
     }

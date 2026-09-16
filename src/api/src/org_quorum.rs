@@ -252,7 +252,8 @@ fn validate_keyring(keyring: &[Key], at: Option<SystemTime>) -> Result<(), OrgQu
             .revoked(false)
             .for_storage_encryption()
         {
-            if !encryption_keys.insert(key.key().fingerprint()) {
+            // Fingerprints include creation time, so compare the key material itself.
+            if !encryption_keys.insert(key.key().mpis().clone()) {
                 return Err(OrgQuorumError::invalid(
                     "holders must not share an encryption key",
                 ));

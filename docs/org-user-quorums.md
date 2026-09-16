@@ -58,7 +58,9 @@ Labels use repeated `--label KEY=VALUE`. Omitted or null API labels are stored a
 match; conflicting values are rejected before generation in both API and CLI.
 
 API and direct CLI creation reject duplicate primary identities and shared storage
-encryption subkeys, including expired recipients that Keyfork can still select.
+encryption key material, including expired recipients that Keyfork can still select.
+Different key creation timestamps and fingerprints do not make shared material
+independent quorum holders. Upload validation applies the same material check.
 Eligibility still requires live signing, authentication and storage-encryption
 keys. Both checks recognize the critical `organization-id@caution.co` and
 `bundle-id@caution.co` notations.
@@ -79,8 +81,12 @@ creation, upload, updates and deletion require fresh FIDO2 signed requests at th
 gateway, including in E2E builds. Dashboard deletion signs the canonical
 `/quorum-bundles/{id}` path with an empty body; cancelling the passkey prompt
 sends no deletion. CLI and dashboard renaming/label edits use the existing signing flow. Dashboard
-metadata edits display passkey cancellation errors without sending an update. Downloads and local
-files retain the proof envelope. Readers verify before using the public key.
+metadata edits display passkey cancellation errors without sending an update. Full bundle
+downloads and local bundle files retain the proof envelope. Dashboard public-key and
+shard-file downloads read the V1 payload inside the envelope and also support existing
+legacy stored payloads; the public-key hash uses the same reader. These individual
+file downloads do not include the proof. Readers verify the full bundle before using
+the public key; dashboard compatibility does not add legacy cryptographic verification.
 
 ## Trust and service configuration
 
