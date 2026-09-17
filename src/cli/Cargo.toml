@@ -11,6 +11,7 @@ name = "caution"
 path = "src/bin/caution.rs"
 
 [dependencies]
+webauthn-rs-proto = "0.5.5"
 # Workspace dependencies
 thiserror = { workspace = true }
 dterror = { workspace = true }

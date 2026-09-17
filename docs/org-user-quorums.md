@@ -2,9 +2,9 @@
 
 `caution secret init` (`new` is a visible alias) creates proofed V1 bundles.
 Hosted creation supports PGP, WebAuthn and mixed holders when the corresponding
-services and independent trust files are configured. **WebAuthn/mixed recovery
-is not yet supported** (Locksmith #12); the CLI warns before creation. Do not use
-these quorums for secrets you need to recover now.
+services and independent trust files are configured. WebAuthn/mixed recovery now
+uses the custody enclave with native or browser passkey approval; see
+[share recovery](share-recovery.md) for configuration and the pending Nitro gate.
 
 Hosted creation is CLI → Platform → certificate service (Caution holders only)
 → Keymaker. Platform snapshots registered credentials in credential-ID order and
@@ -232,7 +232,7 @@ The shared models and loader are pinned to the Locksmith revision recorded in
 `Cargo.toml` and `Cargo.lock`. All Bootproof SDK consumers use the historical
 verification revision `821b5c63e80f082f6d67ba3695c11416933489ec`, including the existing
 ES384 encoding fix. No old-remote patch or local path dependency is required.
-The default Locksmith daemon revision is also `af98a3901cfe0ed28e0e8dc4037b7635bfc60946`,
+The default Locksmith daemon revision is also `ad92ed8e8d6bcf9d6030f8c04264882402c37feb`,
 matching the API/CLI loader. `LOCKSMITH_COMMIT` still overrides this default.
 The standalone mock E2E helper uses the same revision. This revision includes
 holder-identity checks during shard submission and shared-signing-key rejection
@@ -261,8 +261,8 @@ requires distinct authenticated holders and share coordinates, and rejects
 conflicting client thresholds and malformed contributions without counting them.
 Before serving a seed it checks the recovered OpenPGP primary key fingerprint
 against the bundle public key. Incorrect recovery fails closed; this does not
-prevent denial of recovery by an authorized holder. Unsupported WebAuthn/mixed
-keyrings fail before the receiver starts listening. Keymaker rejects invalid
+prevent denial of recovery by an authorized holder. Mixed/WebAuthn keyrings use
+the same certificate-based receiver checks. Keymaker rejects invalid
 requests before consuming its reboot permit; valid requests retain the existing
 one-shot lifecycle. These changes require a rebuilt runtime and Keymaker plus
 independently verified measurements; local tests do not establish Nitro readiness.
@@ -283,10 +283,12 @@ independently verified measurements; local tests do not establish Nitro readines
 - [Locksmith #2](https://codeberg.org/caution/locksmith/issues/2): Keymaker
   serialization/reset lifecycle; no Platform queue or semaphore is added.
 - [Locksmith #12](https://codeberg.org/caution/locksmith/issues/12): WebAuthn
-  recryption transport. CLI shard submission rejects WebAuthn/mixed bundles instead
-  of reaching the upstream unimplemented path. Creation does not deliver unlocking.
+  recryption transport is implemented with enclave-owned WebAuthn verification,
+  one-use destination-bound authorization and the existing receiver transport.
+  Local/mock tests pass; consolidated Nitro acceptance remains pending.
 
-Artifact preflight and live deployment validation remain separate Platform work.
+Artifact preflight now checks required bundle, policy and encrypted secrets before
+EIF staging. Live deployment validation remains pending.
 
 ### Trying PGP recovery
 
@@ -463,8 +465,9 @@ certificate order, compact indices, bundle ID, threshold and both holders' bindi
 The creator's two passkeys remain one share. Wrong CA, signature, context, count,
 order, eligibility or proof must result in no Keymaker call and no stored bundle.
 Downloaded bundles are consumed by CLI encryption. An isolated CLI test invokes
-`send_shard` with these exact files and mock application metadata, requiring the
-WebAuthn/mixed recovery-unavailable error before any enclave connection.
+`send_shard` with these exact files and mock application metadata, requiring
+explicit holder selection in noninteractive use. Additional custody HTTP tests
+exercise WebAuthn-only/mixed recovery and threshold/duplicate-holder checks.
 
 The harness also places a loopback proxy before Keymaker, changing a requested
 3-of-5 into 1-of-5 before generation. The API rejects the resulting valid synthetic
@@ -483,8 +486,8 @@ CLI encryption with both direct and downloaded bundles. The existing
 
 These are synthetic-proof integration tests. Real Nitro validation and production
 policy provisioning remain release dependencies. V0 fallback/upgrade remains
-with Locksmith PR #15 and #11; WebAuthn recryption remains with #12. This work does
-not close those tickets or establish WebAuthn recovery.
+with Locksmith PR #15 and #11; real-Nitro WebAuthn recovery acceptance remains
+under #12. This work does not close those tickets.
 
 
 Validation on 2026-09-15 against the published pin: `make test-quorum-mock`
@@ -509,3 +512,7 @@ recovery-unavailable check. No local dependency overrides, deployment, genuine
 certificate-service derivation, real Nitro evidence or recryptor were used.
 Default-feature API/CLI build checks and full locked/offline metadata resolution
 for Platform and the standalone test helper also passed.
+
+The recovery implementation and per-holder `--holder USER=external-pgp` /
+`--holder USER=webauthn` interface are described in [share recovery](share-recovery.md).
+The recovery acceptance gate remains pending; use disposable test secrets.

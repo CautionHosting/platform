@@ -100,6 +100,7 @@ fn options(users: Vec<Uuid>) -> Options {
         no_upload: false,
         name: None,
         labels: vec![],
+        holders: Vec::new(),
         from_org_users: users.into_iter().map(UserSelector::Id).collect(),
         caution_backed: false,
         pgp_keys: vec![],
@@ -318,7 +319,7 @@ fn saved_policy_is_preserved_and_replacement_is_rejected() {
 #[cfg(feature = "e2e-testing-unsafe")]
 #[tokio::test]
 #[ignore = "run make test-quorum-mock"]
-async fn downloaded_caution_bundles_reject_recovery() {
+async fn downloaded_bundles_require_explicit_noninteractive_holder() {
     let work = PathBuf::from(std::env::var("QUORUM_RECOVERY_TEST_DIR").unwrap());
     let base_url = std::env::var("PUBLIC_CERTIFICATE_SERVICE_URL").unwrap();
     let config_path = work.join("recovery-client.json");
@@ -348,14 +349,12 @@ async fn downloaded_caution_bundles_reject_recovery() {
             Some("quorum-test".into()),
             Some(work.join(name)),
             None,
+            crate::share_release::Options::default(),
         )
         .await
         .unwrap_err();
         assert!(
-            matches!(
-                error,
-                crate::secrets::SendShardError::WebAuthnTransportUnavailable { .. }
-            ),
+            matches!(error, crate::secrets::SendShardError::ParseBundle { .. }),
             "{name}: {error}"
         );
     }
@@ -532,5 +531,91 @@ fn unknown_partial_and_ambiguous_names_are_rejected() {
             .unwrap()
             .to_string()
             .contains("ambiguous")
+    );
+}
+
+#[test]
+fn per_holder_custody_is_explicit_and_mixed() {
+    let alice = Uuid::new_v4();
+    let bob = Uuid::new_v4();
+    let members = vec![
+        Member {
+            user_id: alice,
+            username: "alice".into(),
+            pgp_keys: vec![],
+            webauthn_credentials: 1,
+        },
+        Member {
+            user_id: bob,
+            username: "bob".into(),
+            pgp_keys: vec![RegisteredKey {
+                id: Uuid::new_v4(),
+                fingerprint: "bob-key".into(),
+                public_key: "public certificate".into(),
+            }],
+            webauthn_credentials: 1,
+        },
+    ];
+    let mut options = options(vec![]);
+    options.holders = vec!["alice=webauthn".parse().unwrap()];
+    assert_eq!(
+        select_participants(&options, &members, false, false)
+            .unwrap()
+            .0[0]
+            .key_source,
+        "caution_backed_pgp"
+    );
+    options.holders = vec![
+        "alice=webauthn".parse().unwrap(),
+        "bob=external-pgp".parse().unwrap(),
+    ];
+    let (participants, _) = select_participants(&options, &members, false, false).unwrap();
+    assert_eq!(participants.len(), 2);
+    assert_eq!(participants[0].key_source, "caution_backed_pgp");
+    assert_eq!(participants[1].key_source, "existing_pgp");
+    assert_eq!(participants[1].pgp_key_id, Some(members[1].pgp_keys[0].id));
+    options.holders = vec!["alice=external-pgp".parse().unwrap()];
+    assert!(select_participants(&options, &members, false, false).is_err());
+    options.holders = vec![
+        "alice=webauthn".parse().unwrap(),
+        "alice=webauthn".parse().unwrap(),
+    ];
+    assert!(select_participants(&options, &members, false, false).is_err());
+    assert!("alice=pgp".parse::<HolderSelection>().is_err());
+}
+
+#[test]
+fn holder_flags_parse_and_reject_mixed_selector_styles() {
+    assert!(
+        TestCli::try_parse_from([
+            "caution",
+            "init",
+            "--holder",
+            "alice=webauthn",
+            "--holder",
+            "bob=external-pgp"
+        ])
+        .is_ok()
+    );
+    assert!(
+        TestCli::try_parse_from([
+            "caution",
+            "init",
+            "--holder",
+            "alice=webauthn",
+            "--from-org-users",
+            "bob"
+        ])
+        .is_err()
+    );
+    assert!(
+        TestCli::try_parse_from([
+            "caution",
+            "init",
+            "--holder",
+            "alice=webauthn",
+            "--caution-backed"
+        ])
+        .is_err()
     );
 }

@@ -2210,7 +2210,7 @@ async fn create_sign_challenge(
 
 /// Resolve session ID from headers (X-Session-ID or caution_session cookie),
 /// validate it, and enforce CSRF for cookie-based auth. Returns credential_id.
-async fn authenticate_session(
+pub(crate) async fn authenticate_session(
     state: &AppState,
     headers: &axum::http::HeaderMap,
 ) -> Result<Vec<u8>, SignRequestError> {
@@ -2245,7 +2245,7 @@ async fn authenticate_session(
     Ok(credential_id)
 }
 
-fn get_rp_origin() -> String {
+pub(crate) fn get_rp_origin() -> String {
     std::env::var("RP_ORIGINS")
         .unwrap_or_else(|_| "http://localhost:8000".to_string())
         .split(',')

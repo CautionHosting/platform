@@ -30,6 +30,7 @@ mod csrf;
 mod db;
 mod decoy;
 mod handlers;
+mod release_relay;
 mod pgp;
 mod proxy;
 mod rate_limit;
@@ -80,6 +81,7 @@ fn build_frontend_routes(frontend_dir: &Path) -> Router {
         .route_service("/invite", ServeFile::new(frontend_index.clone()))
         .route_service("/dashboard", ServeFile::new(frontend_index.clone()))
         .route_service("/qr-login", ServeFile::new(frontend_index.clone()))
+        .route_service("/qr-release", ServeFile::new(frontend_index.clone()))
         .route_service("/qr-sign", ServeFile::new(frontend_index.clone()))
         .route_service("/verify", ServeFile::new(frontend_index.clone()))
         .route("/verify-e2ee", get(redirect_verify_e2ee))
@@ -315,6 +317,11 @@ async fn main() -> Result<()> {
             "/auth/sign-request",
             post(handlers::begin_sign_request_handler),
         )
+        .route("/auth/qr-release/begin", post(release_relay::begin).layer(axum::extract::DefaultBodyLimit::max(65536)))
+        .route("/auth/qr-release/read", post(release_relay::read))
+        .route("/auth/qr-release/finish", post(release_relay::finish).layer(axum::extract::DefaultBodyLimit::max(16384)))
+        .route("/auth/qr-release/status", post(release_relay::status))
+        .route("/auth/qr-release/cancel", post(release_relay::cancel))
         .route("/auth/qr-sign/begin", post(handlers::qr_sign_begin_handler))
         .route(
             "/auth/qr-sign/status",

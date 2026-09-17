@@ -29,6 +29,7 @@ import Register from './views/Login.vue'
 import AuthLogin from './views/AuthLogin.vue'
 import Dashboard from './views/Dashboard.vue'
 import QrLogin from './views/QrLogin.vue'
+import QrRelease from './views/QrRelease.vue'
 import InviteAccept from './views/InviteAccept.vue'
 import PublicAttestation from './views/PublicAttestation.vue'
 import PublicE2ee from './views/PublicE2ee.vue'
@@ -46,6 +47,7 @@ export default {
     AuthLogin,
     Dashboard,
     QrLogin,
+    QrRelease,
     InviteAccept,
     PublicAttestation,
     PublicE2ee,
@@ -114,6 +116,11 @@ export default {
         title: 'CLI login • Caution',
         description: 'Authenticate a Caution CLI login request.',
         path: '/qr-login'
+      },
+      '/qr-release': {
+        title: 'Approve share recovery • Caution',
+        description: 'Authorize one share for a verified application enclave.',
+        path: '/qr-release'
       },
       '/qr-sign': {
         title: 'CLI signing • Caution',
@@ -384,6 +391,8 @@ export default {
       } else if (path === '/qr-login') {
         // Public route - QR code CLI login (no auth required)
         return 'QrLogin'
+      } else if (path === '/qr-release') {
+        return 'QrRelease'
       } else if (path === '/qr-sign') {
         // Public route - QR code CLI signing (no auth required)
         // Same component as QrLogin — it detects sign vs login from the path

@@ -30,6 +30,7 @@ mod cache;
 mod credentials;
 mod pgp_keys;
 mod quorum_init;
+mod share_release;
 mod secrets;
 mod ssh_keys;
 mod verify;
@@ -782,6 +783,8 @@ enum SecretCommands {
     },
     #[command(about = "Send a shard to a running enclave's locksmith daemon")]
     SendShard {
+        #[command(flatten)]
+        release: share_release::Options,
         #[arg(
             long,
             help = "App ID or resource name (defaults to current deployment)"
@@ -1300,6 +1303,7 @@ pub(crate) enum ReadConfigFromDirError {
     },
 }
 
+#[derive(Clone)]
 struct ApiClient {
     base_url: String,
     client: reqwest::Client,
@@ -3854,11 +3858,12 @@ pub async fn run() -> Result<(), RunError> {
                 }
             },
             SecretCommands::SendShard {
+                release,
                 app,
                 bundle,
                 keyring,
             } => {
-                secrets::send_shard(&client, app, bundle, keyring)
+                secrets::send_shard(&client, app, bundle, keyring, release)
                     .await
                     .with_context(Ctx::command_dispatch())?;
             }

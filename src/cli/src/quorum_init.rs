@@ -37,7 +37,7 @@ pub(crate) struct InitError {
 }
 impl InitError {
     #[track_caller]
-    fn invalid(message: impl Into<String>) -> Self {
+    pub(crate) fn invalid(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             location: std::panic::Location::caller(),
@@ -61,18 +61,17 @@ pub(crate) struct Options {
     pub name: Option<String>,
     #[arg(long = "label", value_name = "KEY=VALUE")]
     pub labels: Vec<String>,
-    /// Organization holders, selected by UUID or username.
+    /// Explicit custody for an organization holder: USER=external-pgp or USER=webauthn.
+    #[arg(long = "holder", value_name = "USER=CUSTODY", conflicts_with_all = ["from_org_users", "caution_backed"])]
+    pub holders: Vec<HolderSelection>,
+    /// Deprecated: organization holders, selected by UUID or username.
     #[arg(long, value_delimiter = ',', value_name = "USER")]
     pub from_org_users: Vec<UserSelector>,
     /// Use WebAuthn for listed users without a --pgp-key override.
     #[arg(long, requires = "from_org_users")]
     pub caution_backed: bool,
     /// Select a registered PGP key for a holder UUID or username.
-    #[arg(
-        long = "pgp-key",
-        requires = "from_org_users",
-        value_name = "USER=KEY_UUID"
-    )]
+    #[arg(long = "pgp-key", value_name = "USER=KEY_UUID")]
     pub pgp_keys: Vec<PgpSelection>,
     /// Call this Keymaker directly (PGP-only); overrides KEYMAKER_URL.
     #[arg(long)]
@@ -80,6 +79,33 @@ pub(crate) struct Options {
     /// Expected Keymaker PCRs, independently established by the operator.
     #[arg(long, value_name = "FILE")]
     pub keymaker_pcr_policy: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct HolderSelection {
+    user: UserSelector,
+    webauthn: bool,
+}
+impl std::str::FromStr for HolderSelection {
+    type Err = InitError;
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let (user, custody) = text
+            .split_once('=')
+            .ok_or_else(|| InitError::invalid("expected USER=external-pgp or USER=webauthn"))?;
+        let webauthn = match custody {
+            "external-pgp" => false,
+            "webauthn" => true,
+            _ => {
+                return Err(InitError::invalid(
+                    "custody must be external-pgp or webauthn",
+                ));
+            }
+        };
+        Ok(Self {
+            user: user.parse()?,
+            webauthn,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -333,9 +359,18 @@ fn select_participants(
     interactive: bool,
     direct: bool,
 ) -> Result<(Vec<Participant>, Vec<String>), InitError> {
-    let selected = options
-        .from_org_users
+    let selectors: Vec<_> = if options.holders.is_empty() {
+        options.from_org_users.iter().collect()
+    } else {
+        options.holders.iter().map(|h| &h.user).collect()
+    };
+    let explicit: HashMap<_, _> = options
+        .holders
         .iter()
+        .map(|h| Ok((h.user.resolve(members)?.user_id, h.webauthn)))
+        .collect::<Result<_, InitError>>()?;
+    let selected = selectors
+        .into_iter()
         .map(|user| user.resolve(members))
         .collect::<Result<Vec<_>, _>>()?;
     let mut seen = HashSet::new();
@@ -353,11 +388,21 @@ fn select_participants(
             ));
         }
     }
+    if explicit
+        .iter()
+        .any(|(id, webauthn)| *webauthn && overrides.contains_key(id))
+    {
+        return Err(InitError::invalid(
+            "--pgp-key conflicts with explicit WebAuthn custody",
+        ));
+    }
     if direct
-        && options.caution_backed
-        && selected
-            .iter()
-            .any(|member| !overrides.contains_key(&member.user_id))
+        && selected.iter().any(|member| {
+            explicit
+                .get(&member.user_id)
+                .copied()
+                .unwrap_or(options.caution_backed && !overrides.contains_key(&member.user_id))
+        })
     {
         return Err(InitError::invalid(DIRECT_WEBAUTHN_ERROR));
     }
@@ -366,7 +411,15 @@ fn select_participants(
     for member in selected {
         let user_id = &member.user_id;
         let mut key_id = overrides.get(user_id).copied();
-        let mut webauthn = options.caution_backed && key_id.is_none();
+        let mut webauthn = explicit
+            .get(user_id)
+            .copied()
+            .unwrap_or(options.caution_backed && key_id.is_none());
+        if explicit.get(user_id) == Some(&false) && member.pgp_keys.is_empty() {
+            return Err(InitError::invalid(
+                "external-pgp holder has no registered PGP key",
+            ));
+        }
         if key_id.is_none() && !webauthn {
             if member.pgp_keys.is_empty() && member.webauthn_credentials == 0 {
                 return Err(InitError::invalid(
@@ -380,7 +433,7 @@ fn select_participants(
                 for (index, key) in member.pgp_keys.iter().enumerate() {
                     eprintln!("  {}: PGP {} ({})", index + 1, key.fingerprint, key.id);
                 }
-                if member.webauthn_credentials > 0 {
+                if member.webauthn_credentials > 0 && !explicit.contains_key(user_id) {
                     eprintln!(
                         "  0: Caution-backed WebAuthn ({} registered passkeys, one share)",
                         member.webauthn_credentials
@@ -388,7 +441,8 @@ fn select_participants(
                 }
                 let index = prompt::select("Selection: ")
                     .with_context(Ctx::new("unable to read custody selection"))?;
-                if index == 0 && member.webauthn_credentials > 0 {
+                if index == 0 && member.webauthn_credentials > 0 && !explicit.contains_key(user_id)
+                {
                     webauthn = true;
                 } else {
                     key_id = Some(
@@ -506,6 +560,17 @@ fn save_policy_if_absent(
 }
 
 pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), InitError> {
+    if !options.holders.is_empty() && (!options.from_org_users.is_empty() || options.caution_backed)
+    {
+        return Err(InitError::invalid(
+            "cannot combine old and new holder selectors",
+        ));
+    }
+    if !options.from_org_users.is_empty() {
+        output::warning(
+            "--from-org-users/--caution-backed are deprecated; use --holder USER=external-pgp or USER=webauthn",
+        );
+    }
     let environment = std::env::var("KEYMAKER_URL").ok();
     let endpoint = endpoint(options.keymaker_url.as_deref(), environment.as_deref())?;
     if endpoint.is_none() && options.no_upload {
@@ -514,7 +579,11 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
         ));
     }
     let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-    let config = if endpoint.is_none() || !options.from_org_users.is_empty() || !options.no_upload {
+    let config = if endpoint.is_none()
+        || !options.from_org_users.is_empty()
+        || !options.holders.is_empty()
+        || !options.no_upload
+    {
         Some(
             client
                 .ensure_authenticated()
@@ -524,7 +593,7 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
     } else {
         None
     };
-    let members: Vec<Member> = if options.from_org_users.is_empty() {
+    let members: Vec<Member> = if options.from_org_users.is_empty() && options.holders.is_empty() {
         Vec::new()
     } else {
         client
@@ -601,8 +670,9 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
         .any(|p| p.key_source == "caution_backed_pgp")
     {
         eprintln!(
-            "Warning: WebAuthn/mixed bundle creation is supported, but recovery is not yet available (Locksmith #12). Do not use this quorum for secrets you need to recover now."
+            "Caution’s enclave holds the PGP private key. Your registered passkey authorizes re-encryption of your share to the verified application enclave. The private key is never released."
         );
+
     }
     if interactive
         && !prompt::confirm("Create this quorum? [y/N] ")

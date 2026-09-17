@@ -1079,3 +1079,8 @@ test-paddle-sandbox:
 	cargo test --package metering -- sandbox --nocapture
 
 test: test-unit test-cli-install
+
+.PHONY: test-share-release-browser
+test-share-release-browser:
+	@npm run build --prefix frontend
+	@node tests/e2e/browser-authenticator/release-approval.mjs

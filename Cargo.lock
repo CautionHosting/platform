@@ -1847,6 +1847,7 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+ "webauthn-rs-proto",
  "zeroize",
 ]
 
@@ -2920,6 +2921,7 @@ dependencies = [
  "bollard",
  "bootproof-sdk",
  "coset 0.3.8",
+ "dterror 0.3.0",
  "flate2",
  "futures-util",
  "hex",
@@ -4464,7 +4466,7 @@ dependencies = [
 [[package]]
 name = "keymaker-models"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=af98a3901cfe0ed28e0e8dc4037b7635bfc60946#af98a3901cfe0ed28e0e8dc4037b7635bfc60946"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=ad92ed8e8d6bcf9d6030f8c04264882402c37feb#ad92ed8e8d6bcf9d6030f8c04264882402c37feb"
 dependencies = [
  "serde",
  "serde_cbor",
@@ -4656,7 +4658,7 @@ dependencies = [
 [[package]]
 name = "locksmith"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=af98a3901cfe0ed28e0e8dc4037b7635bfc60946#af98a3901cfe0ed28e0e8dc4037b7635bfc60946"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=ad92ed8e8d6bcf9d6030f8c04264882402c37feb#ad92ed8e8d6bcf9d6030f8c04264882402c37feb"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
@@ -4697,6 +4699,8 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "webauthn-rs",
+ "webauthn-rs-proto",
  "x25519-dalek",
 ]
 
@@ -5891,7 +5895,7 @@ checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
 [[package]]
 name = "public-certificate-models"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=af98a3901cfe0ed28e0e8dc4037b7635bfc60946#af98a3901cfe0ed28e0e8dc4037b7635bfc60946"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=ad92ed8e8d6bcf9d6030f8c04264882402c37feb#ad92ed8e8d6bcf9d6030f8c04264882402c37feb"
 dependencies = [
  "serde",
 ]

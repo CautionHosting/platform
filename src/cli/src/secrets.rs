@@ -1460,13 +1460,6 @@ pub async fn label_remove(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum SendShardError {
-    #[error(
-        "WebAuthn and mixed bundle unlocking requires the pending Locksmith WebAuthn transport (issue #12) [{location:?}]"
-    )]
-    WebAuthnTransportUnavailable {
-        #[location]
-        location: Location,
-    },
     #[error("Failed to fetch app [{location:?}]")]
     FetchApp {
         #[location]
@@ -1663,6 +1656,7 @@ pub async fn send_shard(
     app: Option<String>,
     bundle_path: Option<PathBuf>,
     private_keyring: Option<PathBuf>,
+    release_options: crate::share_release::Options,
 ) -> Result<(), SendShardError> {
     use SendShardErrorCtx as Ctx;
 
@@ -1797,16 +1791,8 @@ pub async fn send_shard(
     let bundle_text =
         fs::read_to_string(&bundle_file).with_context(Ctx::read_bundle_file(&bundle_file))?;
     let bundle = crate::quorum_init::load_bundle(&bundle_text).with_context(Ctx::parse_bundle())?;
-    if bundle.clone().to_latest().keyring.iter().any(|key| {
-        matches!(
-            key,
-            keymaker_models::generate_quorum::v1::Key::WebAuthn { .. }
-        )
-    }) {
-        return Err(SendShardError::WebAuthnTransportUnavailable {
-            location: std::panic::Location::caller(),
-        });
-    }
+    let (holder, webauthn) = crate::share_release::select_holder(&bundle.clone().to_latest().keyring, release_options.holder.as_deref())
+        .with_context(Ctx::parse_bundle())?;
 
     let address_str = format!("{}:49504", public_ip);
     output::status(format!("Sending shard to enclave at {}...", address_str));
@@ -1814,9 +1800,15 @@ pub async fn send_shard(
         .parse()
         .with_context(Ctx::invalid_address(&address_str))?;
 
-    let status = locksmith::client::send_shard(address, pcrs, &bundle, private_keyring)
-        .await
-        .with_context(Ctx::send_shard(&address_str))?;
+    let status = if webauthn {
+        let proof = serde_json::from_str(&bundle_text).with_context(Ctx::parse_bundle())?;
+        let measurements = pcrs.iter().map(|(&i, v)| (i, hex::encode(v))).collect();
+        crate::share_release::recover(client, &release_options, proof, holder, address, measurements)
+            .await.with_context(Ctx::send_shard(&address_str))?
+    } else {
+        locksmith::client::send_selected_shard(address, pcrs, &bundle, private_keyring, Some(holder))
+            .await.with_context(Ctx::send_shard(&address_str))?
+    };
 
     match status {
         locksmith::models::SendSignedEncryptedShardResponse::Accepted { remaining } => {

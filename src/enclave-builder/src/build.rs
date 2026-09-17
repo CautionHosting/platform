@@ -13,7 +13,7 @@ use crate::EifFile;
 const DEFAULT_ENCLAVEOS_COMMIT: &str = "9582e25239430070667fdd0a6b64d887f1c308df";
 const DEFAULT_BOOTPROOF_COMMIT: &str = "b03721957e3850931f5b53627e7c3d1c302a06fe";
 const DEFAULT_STEVE_COMMIT: &str = "c0b8d2d62e66108689745561242972048f6cfce5";
-const DEFAULT_LOCKSMITH_COMMIT: &str = "af98a3901cfe0ed28e0e8dc4037b7635bfc60946";
+const DEFAULT_LOCKSMITH_COMMIT: &str = "ad92ed8e8d6bcf9d6030f8c04264882402c37feb";
 
 // Kept in sync with the git clone URLs in templates/Containerfile.eif.
 pub const ENCLAVEOS_REPO: &str = "https://codeberg.org/caution/enclaveos.git";
@@ -145,6 +145,9 @@ pub async fn stage_eif_components(
     templates_dir: Option<&Path>,
 ) -> Result<PathBuf> {
     validate_key_exchange(e2e_key_exchange)?;
+    if locksmith {
+        crate::artifacts::check(user_fs_path)?;
+    }
 
     let stage_dir = work_dir.join("eif-stage");
     fs::create_dir_all(&stage_dir).await?;

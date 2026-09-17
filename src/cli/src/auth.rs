@@ -231,7 +231,7 @@ fn is_pin_related_error(error: &dyn std::error::Error) -> bool {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-enum RenderQrCodeError {
+pub(crate) enum RenderQrCodeError {
     #[error("failed to generate QR code [{location:?}]")]
     Generate {
         #[location]
@@ -242,7 +242,7 @@ enum RenderQrCodeError {
     },
 }
 
-fn render_qr_code(url: &str) -> Result<(), RenderQrCodeError> {
+pub(crate) fn render_qr_code(url: &str) -> Result<(), RenderQrCodeError> {
     use RenderQrCodeErrorCtx as Ctx;
     // When not attached to a terminal, skip QR art and print only the URL
     if !output::is_tty_stdout() {
@@ -325,6 +325,7 @@ struct PublicKeyCredentialCreationOptions {
 pub(crate) struct LoginBeginResponse {
     #[serde(rename = "publicKey")]
     pub(crate) public_key: PublicKeyCredentialRequestOptions,
+    #[serde(default)]
     pub(crate) session: String,
 }
 
@@ -352,6 +353,8 @@ pub(crate) struct PublicKeyCredentialRequestOptions {
     timeout: u64,
     #[serde(rename = "allowCredentials", default)]
     allow_credentials: Vec<AllowCredential>,
+    #[serde(rename = "userVerification", default)]
+    user_verification: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -2465,7 +2468,11 @@ fn try_get_assertion(
         origin: base_url.to_string(),
         relying_party_id: opts.rp_id.clone(),
         allow_list,
-        user_verification_req: authenticator::ctap2::server::UserVerificationRequirement::Preferred,
+        user_verification_req: if opts.user_verification.as_deref() == Some("required") {
+            authenticator::ctap2::server::UserVerificationRequirement::Required
+        } else {
+            authenticator::ctap2::server::UserVerificationRequirement::Preferred
+        },
         user_presence_req: true,
         extensions: Default::default(),
         pin,

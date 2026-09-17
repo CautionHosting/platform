@@ -32,6 +32,12 @@ print(pathlib.Path(p["manifest_path"]).parents[2])')
 cargo build --locked --manifest-path "$LOCKSMITH_SOURCE/Cargo.toml" \
     -p keymaker --no-default-features --features unsafe-e2e
 cargo build --locked --manifest-path tests/e2e/soft-authenticator/Cargo.toml
+# Actual WebAuthn verification + selected-share decryption + unchanged receiver
+# transport, with deliberately synthetic Nitro evidence in an isolated process.
+CAUTION_UNSAFE_KEY_SERVICE_E2E=1 cargo test --locked --manifest-path "$LOCKSMITH_SOURCE/Cargo.toml" \
+    -p locksmith --lib --features unsafe-e2e release::tests
+CAUTION_UNSAFE_KEY_SERVICE_E2E=1 cargo test --locked --manifest-path "$LOCKSMITH_SOURCE/Cargo.toml" \
+    -p public-cert-service --lib --features unsafe-e2e release::tests
 # Build from the repository so Cargo sees its private-registry configuration;
 # run the resulting test binary later from the isolated fixture directory.
 RECOVERY_TEST=$(cargo test -p cli --lib --locked --features e2e-testing-unsafe \
@@ -149,4 +155,4 @@ KEYMAKER_PCR_POLICY_PATH="$WORK/policies/keymaker-pcr-policy.json" \
 PUBLIC_CERTIFICATE_SERVICE_URL="$PUBLIC_CERTIFICATE_SERVICE_URL" \
 QUORUM_RECOVERY_TEST_DIR="$WORK" \
     "$RECOVERY_TEST" --ignored --exact \
-    quorum_init::tests::downloaded_caution_bundles_reject_recovery --nocapture
+    quorum_init::tests::downloaded_bundles_require_explicit_noninteractive_holder --nocapture

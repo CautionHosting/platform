@@ -1,0 +1,79 @@
+# WebAuthn and mixed share recovery
+
+**Local and StageX checks pass with a temporary Locksmith source override.
+Dependency/runtime pins now select Locksmith `ad92ed8e8d6bcf9d6030f8c04264882402c37feb`.
+Publish that revision and validate remote fetching before Nitro acceptance.**
+
+Create with explicit per-holder custody:
+
+```sh
+caution secret init --holder alice=external-pgp --holder bob=webauthn \
+  --threshold 2 --keymaker-pcr-policy keymaker-pcr-policy.json
+```
+
+`--pgp-key USER=KEY_ID` selects a registered external key. Missing PGP keys do
+not select WebAuthn. The old selectors remain temporarily with a deprecation
+warning; old and new styles cannot be combined.
+
+Caution’s enclave holds the PGP private key. Your registered passkey authorizes
+re-encryption of your share to the verified application enclave. The private key
+is never released. Multiple registered credentials on a holder remain one share.
+
+After independently verifying the application and custody service measurements:
+
+```sh
+caution secret send-shard --holder CERTIFICATE_FINGERPRINT \
+  --recryptor-url http://CUSTODY_SERVICE:8080 \
+  --recryptor-pcr-policy recryptor-pcr-policy.json
+# Add the global --qr option for phone/local-browser approval:
+caution --qr secret send-shard --holder CERTIFICATE_FINGERPRINT \
+  --recryptor-url http://CUSTODY_SERVICE:8080 \
+  --recryptor-pcr-policy recryptor-pcr-policy.json
+```
+
+The live custody policy has one non-expiring PCR0/1/2 set, in the same JSON shape
+as Keymaker policies. Do not obtain trusted PCRs from the endpoint being verified.
+The CLI displays the bundle, selected certificate, destination key and release
+context hash. Compare browser details with the CLI. Browser approval runs on the
+registered Platform origin; the passkey must already be in the bundle snapshot.
+Native approval requires USB FIDO2 user verification (PIN/biometric), not touch
+alone. External PGP holders may contribute to mixed bundles using `--keyring`
+or their supported OpenPGP smartcard.
+
+The distinct browser relay transports a raw assertion. Gateway login is not
+permission to release. The custody enclave verifies the assertion, consumes its
+three-minute authorization state, and derives/decrypts/re-encrypts one share.
+Cancelling, expiry, replay or losing the destination connection requires a fresh
+attempt. These operations never consume Keymaker.
+
+Locksmith-enabled application images must include non-empty
+`/etc/caution/bundle.json`, `/etc/caution/keymaker-pcr-policy.json`, and encrypted
+`/etc/caution/secrets/*.asc`. The builder checks these before EIF staging.
+Cryptographic proof verification remains the runtime loader's responsibility.
+
+## Acceptance gate
+
+Run affected Rust and frontend tests, `make test-quorum-db`, and
+`make test-quorum-mock`, and `make test-share-release-browser` (install the browser
+harness dependencies/Chromium first, or set `PUPPETEER_EXECUTABLE_PATH`). The mock
+suite includes actual custody HTTP handlers, software-passkey authorization,
+synthetic evidence, WebAuthn-only/mixed threshold recovery, and duplicate-holder
+rejection. The browser test uses the actual Vue page and a Chromium virtual
+platform authenticator, verifies its signature/UV, and exercises cancellation. USB devices, Touch ID and
+cross-device browser behavior still require manual acceptance. StageX API,
+custody-service and Locksmith runtime builds must pass before deployment.
+
+Dependency publication requires separate authorization. Local test overrides
+must never enter committed dependency manifests or lockfiles. The pinned Locksmith commit must be published before other machines can build
+this Platform revision. No local-path dependency is committed.
+
+Then reuse the same external-PGP-bootstrapped custody root and existing WebAuthn
+bundle for the consolidated Nitro test. Verify locked-below-threshold and expected
+plaintext-at-threshold behavior, native/browser approval, replay rejection, one
+share per holder and restart recovery. Generate one mixed bundle with a **fresh
+single-use Keymaker**, updating Platform's endpoint and verified policy first.
+Record source revisions, PCRs, bundle IDs and results. Existing bundle recovery
+and restarts require no Keymaker.
+
+V0/earlier-V1 compatibility, credential rotation, multi-instance coordination and
+production root management remain separate. This does not close #7/#10/#11/#12.
