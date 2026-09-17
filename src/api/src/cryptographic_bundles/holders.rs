@@ -129,13 +129,15 @@ impl Registrations {
         let fp = key
             .and_then(|k| k.get("cert")?.as_str())
             .and_then(fingerprint);
-        let username = fp.as_ref().and_then(|fp| {
-            if custody == "pgp" {
-                unique_owner(self.pgp.get(fp)?).map(|(_, name)| name.clone())
-            } else {
-                self.credential_owner(key?.get("credential")?)
-            }
-        });
+        let username = match custody {
+            "pgp" => fp
+                .as_ref()
+                .and_then(|fp| unique_owner(self.pgp.get(fp)?).map(|(_, name)| name.clone())),
+            "caution_backed" => key
+                .and_then(|key| key.get("credential"))
+                .and_then(|credentials| self.credential_owner(credentials)),
+            _ => None,
+        };
         HolderMetadata {
             custody,
             fingerprint: fp,
@@ -157,7 +159,7 @@ pub(super) async fn enrich(pool: &PgPool, org: Uuid, bundles: &mut [QuorumBundle
         Ok(index) => index,
         Err(error) => {
             tracing::warn!(%error, "quorum downloads remain available without username matches");
-            Registrations::default()
+            return;
         }
     };
     for bundle in bundles {
@@ -170,6 +172,31 @@ pub(super) async fn enrich(pool: &PgPool, org: Uuid, bundles: &mut [QuorumBundle
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn unavailable_registrations_omit_metadata_without_changing_bundle() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@localhost/unused")
+            .unwrap();
+        pool.close().await;
+        let org = Uuid::new_v4();
+        let data = json!({"keyring": [{"OpenPGP": {"cert": "invalid"}}]});
+        let mut bundles = [QuorumBundle {
+            id: Uuid::new_v4(),
+            organization_id: org,
+            data: data.clone(),
+            name: None,
+            labels: json!({}),
+            created_by: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            holders: None,
+        }];
+        enrich(&pool, org, &mut bundles).await;
+        let response = serde_json::to_value(&bundles[0]).unwrap();
+        assert!(response.get("holders").is_none());
+        assert_eq!(response["data"], data);
+    }
 
     #[test]
     fn credential_identity_ignores_counters_but_binds_id_and_key() {
@@ -230,6 +257,22 @@ mod tests {
                 .credential_owner(&json!([credential, "malformed"]))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn passkey_display_identity_does_not_depend_on_certificate_parsing() {
+        let credential = include_str!("../org_quorum/test-credential.json");
+        let mut index = Registrations::default();
+        index.credentials.insert(
+            credential_identity(credential.as_bytes()).unwrap(),
+            HashMap::from([(Uuid::new_v4(), "alice".into())]),
+        );
+        let holder = index.holder(&json!({"WebAuthn": {
+            "cert": "truncated certificate",
+            "credential": [credential]
+        }}));
+        assert_eq!(holder.username.as_deref(), Some("alice"));
+        assert!(holder.fingerprint.is_none());
     }
 
     #[test]

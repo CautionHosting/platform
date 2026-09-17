@@ -165,6 +165,9 @@ mutable counters. Removed, conflicting or missing registrations leave holders
 unnamed. The list/get API adds optional `holders` metadata outside `data`; raw
 credential identifiers are not displayed. Existing authenticated organization
 access controls apply, and metadata failures do not prevent bundle downloads.
+If registration lookup fails, `holders` metadata is omitted. Passkey display
+matches use credential bindings even when the certificate cannot be parsed;
+this does not validate the certificate or authorize recovery.
 
 Direct Keymaker creation saves the verified bundle locally before requesting
 authorization to upload it to Platform (unless `--no-upload` is set). The upload
