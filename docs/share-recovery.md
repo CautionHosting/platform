@@ -118,3 +118,22 @@ suite with `CAUTION_UNSAFE_KEY_SERVICE_E2E=1` both with and without
 `--features e2e-testing-unsafe`; only the feature-enabled build accepts synthetic
 proofs under the exact synthetic PCR policy. These checks are not real Nitro or
 physical-authenticator validation.
+
+## Holder names in the CLI
+
+`secret send-shard --holder USERNAME` accepts an exact current organization
+username or a full certificate fingerprint. Names come from Platform's existing
+bundle metadata only when the complete returned bundle matches the locally
+verified bundle. They are display/selection aliases, not authorization evidence.
+
+The CLI uses an existing valid session for a best-effort lookup (five-second
+timeout), without triggering login for labels. Unavailable or ambiguous names
+fall back to numbered holders and shortened fingerprints; full fingerprints remain
+valid selectors. Named passkey holders display `username · Passkey`; external PGP
+holders also show a shortened fingerprint. Use `--verbose` for the selected full
+fingerprint. Multiple passkeys remain one holder and one share.
+
+A sole candidate is selected automatically. Otherwise choose from the list or
+supply `--holder`; noninteractive ambiguous selection fails. Private-keyring
+inference is unchanged. No username or current registration replaces the
+bundle-bound credentials and certificates used to authorize release.

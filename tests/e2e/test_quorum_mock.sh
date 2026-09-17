@@ -194,3 +194,6 @@ json.loads((plain / '.caution/quorum-bundle.json').read_text())
 assert (plain / '.caution/keymaker-pcr-policy.json').read_bytes() == (work / 'policies/keymaker-pcr-policy.json').read_bytes()
 print('Plain-directory terminal output and persisted artifacts: OK')
 PY
+
+QUORUM_RECOVERY_TEST_DIR="$WORK" "$RECOVERY_TEST" --ignored --exact \
+    share_release::holder_selection_tests::real_api_metadata_names_downloaded_holders --nocapture

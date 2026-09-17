@@ -16,7 +16,7 @@ use std::{io::IsTerminal, path::PathBuf, time::Duration};
 
 #[derive(clap::Args, Debug, Default)]
 pub(crate) struct Options {
-    /// Holder certificate fingerprint; inferred from --keyring when exactly one holder matches.
+    /// Holder username or full certificate fingerprint; inferred when one candidate matches.
     #[arg(long)]
     pub holder: Option<String>,
     /// Custody enclave HTTP endpoint; identity is checked against --recryptor-pcr-policy.
@@ -26,10 +26,69 @@ pub(crate) struct Options {
     #[arg(long)]
     pub recryptor_pcr_policy: Option<PathBuf>,
 }
+pub(crate) type HolderNames = std::collections::BTreeMap<String, String>;
+
+// Names are current registration metadata, never authorization evidence.
+fn matched_names(bundle: &Value, rows: &[Value]) -> Option<HolderNames> {
+    let keys = bundle.get("data").unwrap_or(bundle).get("keyring")?.as_array()?;
+    let mut result = None;
+    for row in rows.iter().filter(|row| row.get("data") == Some(bundle)) {
+        let metadata = row.get("holders")?.as_array()?;
+        if metadata.len() != keys.len() { return None; }
+        let mut names = HolderNames::new();
+        for (key, meta) in keys.iter().zip(metadata) {
+            let (custody, entry) = if let Some(entry) = key.get("OpenPGP") {
+                ("pgp", entry)
+            } else { ("caution_backed", key.get("WebAuthn")?) };
+            let cert = Cert::from_bytes(entry.get("cert")?.as_str()?.as_bytes()).ok()?;
+            let fingerprint = cert.fingerprint().to_string();
+            if meta.get("custody")?.as_str()? != custody
+                || meta.get("fingerprint")?.as_str()? != fingerprint { return None; }
+            if let Some(name) = meta.get("username").and_then(Value::as_str) {
+                // Never render terminal controls received from display metadata.
+                if !name.is_empty() && !name.chars().any(char::is_control) {
+                    names.insert(fingerprint, name.to_owned());
+                }
+            }
+        }
+        if result.as_ref().is_some_and(|previous| previous != &names) { return None; }
+        result = Some(names);
+    }
+    result
+}
+
+pub(crate) async fn holder_names(client: &ApiClient, bundle: &Value) -> HolderNames {
+    let Ok(config) = client.require_existing_authenticated_config() else { return HolderNames::new(); };
+    let lookup = async {
+        let response = client.client.get(format!("{}/api/quorum-bundles", client.base_url))
+            .header("X-Session-ID", &config.session_id).send().await.ok()?
+            .error_for_status().ok()?;
+        let rows: Vec<Value> = response.json().await.ok()?;
+        matched_names(bundle, &rows)
+    };
+    tokio::time::timeout(Duration::from_secs(5), lookup).await.ok().flatten().unwrap_or_default()
+}
+
+pub(crate) fn holder_label(keys: &[Key], holder: &str, webauthn: bool, names: &HolderNames) -> String {
+    let unique_name = names.get(holder).filter(|name| names.values().filter(|other| *other == *name).count() == 1);
+    let kind = if webauthn { "Passkey" } else { "External PGP" };
+    let short = if holder.len() > 12 { format!("{}…{}", &holder[..4], &holder[holder.len()-4..]) } else { holder.to_owned() };
+    if let Some(name) = unique_name {
+        if webauthn { format!("{name} · {kind}") } else { format!("{name} · {kind} · {short}") }
+    } else {
+        let index = keys.iter().position(|key| {
+            let cert = match key { Key::OpenPGP { cert } | Key::WebAuthn { cert, .. } => cert };
+            Cert::from_bytes(cert.as_bytes()).is_ok_and(|cert| cert.fingerprint().to_string() == holder)
+        }).map_or(0, |index| index + 1);
+        format!("Holder {index} · {kind} · {short}")
+    }
+}
+
 pub(crate) fn select_holder(
     keys: &[Key],
     requested: Option<&str>,
     private_keyring: Option<&std::path::Path>,
+    names: &HolderNames,
 ) -> Result<(String, bool), InitError> {
     let mut holders: Vec<_> = keys
         .iter()
@@ -45,12 +104,15 @@ pub(crate) fn select_holder(
         .collect::<Result<_, InitError>>()?;
     if let Some(requested) = requested {
         let normalized = requested.replace(' ', "").to_uppercase();
-        let matched: Vec<_> = holders.iter().filter(|h| h.0 == normalized).collect();
+        let fingerprints: Vec<_> = holders.iter().filter(|h| h.0 == normalized).collect();
+        let matched: Vec<_> = if fingerprints.is_empty() {
+            holders.iter().filter(|h| names.get(&h.0).is_some_and(|name| name == requested)).collect()
+        } else { fingerprints };
         return if matched.len() == 1 {
             Ok(matched[0].clone())
         } else {
             Err(InitError::invalid(
-                "holder fingerprint must match exactly one bundle entry",
+                "holder username or fingerprint must match exactly one bundle entry; use a full certificate fingerprint if names are unavailable or ambiguous",
             ))
         };
     }
@@ -58,28 +120,17 @@ pub(crate) fn select_holder(
         let bytes = std::fs::read(path)
             .with_context(Ctx::new("unable to read private keyring"))?;
         holders = matching_private_holders(holders, &bytes)?;
-        if holders.len() == 1 {
-            let holder = holders.remove(0);
-            output::status(format!("Selected holder {} (external PGP)", holder.0));
-            return Ok(holder);
-        }
+    }
+    if holders.len() == 1 {
+        return Ok(holders.remove(0));
     }
     if !std::io::stdin().is_terminal() {
         return Err(InitError::invalid(
-            "select a holder with --holder CERTIFICATE_FINGERPRINT",
+            "select a holder with --holder USERNAME_OR_CERTIFICATE_FINGERPRINT",
         ));
     }
     for (index, (fingerprint, webauthn)) in holders.iter().enumerate() {
-        eprintln!(
-            "{}: {} ({})",
-            index + 1,
-            fingerprint,
-            if *webauthn {
-                "WebAuthn"
-            } else {
-                "external PGP"
-            }
-        );
+        eprintln!("{}: {}", index + 1, holder_label(keys, fingerprint, *webauthn, names));
     }
     let selected = prompt::select("Holder: ").with_context(Ctx::new("holder selection"))?;
     holders
@@ -213,12 +264,13 @@ pub(crate) async fn recover(
     options: &Options,
     bundle: GenerateQuorumResponse,
     holder: String,
+    holder_display: String,
     address: std::net::SocketAddr,
     destination_policy: Measurements,
     generation_time: Option<std::time::SystemTime>,
 ) -> Result<SendSignedEncryptedShardResponse, InitError> {
     tokio::select! {
-        result = tokio::time::timeout(release::TTL, recover_inner(client, options, bundle, holder, address, destination_policy, generation_time)) =>
+        result = tokio::time::timeout(release::TTL, recover_inner(client, options, bundle, holder, holder_display, address, destination_policy, generation_time)) =>
             result.with_context(Ctx::new("release attempt expired; start a fresh attempt"))?,
         _ = tokio::signal::ctrl_c() => Err(InitError::invalid("release cancelled")),
     }
@@ -228,6 +280,7 @@ async fn recover_inner(
     options: &Options,
     bundle: GenerateQuorumResponse,
     holder: String,
+    holder_display: String,
     address: std::net::SocketAddr,
     destination_policy: Measurements,
     generation_time: Option<std::time::SystemTime>,
@@ -317,7 +370,7 @@ async fn recover_inner(
     output::status(format!(
         "Release one share: bundle {}; holder {}",
         hex::encode(prepared.context.bundle_id),
-        holder
+        holder_display
     ));
     output::status(format!(
         "Verified destination {address}; key {}",
@@ -384,6 +437,108 @@ mod holder_selection_tests {
     use super::*;
     use sequoia_openpgp::{cert::CertBuilder, serialize::Serialize};
 
+    fn fixture() -> (Vec<Key>, Value, Value) {
+        let mut keys = Vec::new();
+        let mut metadata = Vec::new();
+        for (name, webauthn) in [("alice", false), ("bob", true)] {
+            let (cert, _) = CertBuilder::general_purpose(None, Some(name)).generate().unwrap();
+            let mut armor = Vec::new();
+            cert.armored().serialize(&mut armor).unwrap();
+            let cert_text = String::from_utf8(armor).unwrap();
+            keys.push(if webauthn { Key::WebAuthn { cert: cert_text, credential: vec!["first".into(), "second".into()] } } else { Key::OpenPGP { cert: cert_text } });
+            metadata.push(json!({"custody":if webauthn {"caution_backed"} else {"pgp"},"fingerprint":cert.fingerprint().to_string(),"username":name}));
+        }
+        let bundle = json!({"data":{"keyring":keys},"necroproof":"proof"});
+        let row = json!({"data":bundle,"holders":metadata});
+        (keys, bundle, row)
+    }
+
+    #[test]
+    fn names_select_exact_entries_and_labels_hide_passkey_fingerprints() {
+        let (keys, bundle, row) = fixture();
+        let names = matched_names(&bundle, &[row]).unwrap();
+        let (fp, webauthn) = select_holder(&keys, Some("bob"), None, &names).unwrap();
+        assert!(webauthn);
+        assert_eq!(holder_label(&keys, &fp, true, &names), "bob · Passkey");
+        assert_eq!(select_holder(&keys, Some(&fp), None, &names).unwrap(), (fp.clone(), true));
+        assert!(select_holder(&keys, Some("Bob"), None, &names).is_err());
+        let pgp = select_holder(&keys, Some("alice"), None, &names).unwrap();
+        assert!(holder_label(&keys, &pgp.0, false, &names).starts_with("alice · External PGP · "));
+        let duplicate = names.keys().map(|key| (key.clone(), "same".into())).collect();
+        assert!(select_holder(&keys, Some("same"), None, &duplicate).is_err());
+        assert!(holder_label(&keys, &fp, true, &duplicate).starts_with("Holder 2 · Passkey · "));
+        assert_eq!(select_holder(&keys[1..], None, None, &HolderNames::new()).unwrap(), (fp, true));
+    }
+
+    #[test]
+    fn metadata_must_match_complete_bundle_and_each_holder() {
+        let (_, bundle, row) = fixture();
+        for field in ["custody", "fingerprint"] {
+            let mut altered = row.clone();
+            altered["holders"][0][field] = json!("wrong");
+            assert!(matched_names(&bundle, &[altered]).is_none());
+        }
+        let mut altered = row.clone();
+        altered["data"]["necroproof"] = json!("different proof");
+        assert!(matched_names(&bundle, &[altered]).is_none());
+        let mut altered = row.clone();
+        altered["holders"].as_array_mut().unwrap().pop();
+        assert!(matched_names(&bundle, &[altered]).is_none());
+        let mut absent = row.clone();
+        absent.as_object_mut().unwrap().remove("holders");
+        assert!(matched_names(&bundle, &[absent]).is_none());
+        let mut removed = row.clone();
+        removed["holders"][0]["username"] = Value::Null;
+        assert_eq!(matched_names(&bundle, &[removed]).unwrap().len(), 1);
+        let mut renamed = row.clone();
+        renamed["holders"][0]["username"] = json!("different");
+        assert!(matched_names(&bundle, &[row, renamed]).is_none());
+    }
+
+    #[tokio::test]
+    async fn names_are_optional_without_session_or_when_api_fails() {
+        use std::io::{Read, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let client = ApiClient {
+            base_url: base_url.clone(), client: reqwest::Client::new(),
+            config_path: dir.path().join("config.json"), deployment_path: None,
+            verbose: false, qr: false, workdir: None,
+        };
+        assert!(holder_names(&client, &json!({})).await.is_empty());
+        std::fs::write(&client.config_path, json!({"session_id":"test", "expires_at":"2099-01-01T00:00:00Z", "server_url":base_url}).to_string()).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            let mut request = [0; 4096];
+            let n = stream.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..n]).starts_with("GET /api/quorum-bundles "));
+            stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        assert!(holder_names(&client, &json!({})).await.is_empty());
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "run make test-quorum-mock"]
+    async fn real_api_metadata_names_downloaded_holders() {
+        let work = PathBuf::from(std::env::var("QUORUM_RECOVERY_TEST_DIR").unwrap());
+        for file in ["webauthn.json", "mixed.json"] {
+            let bundle: Value = serde_json::from_slice(&std::fs::read(work.join(file)).unwrap()).unwrap();
+            let rows: Vec<Value> = serde_json::from_slice(&std::fs::read(work.join(format!("{file}.holders"))).unwrap()).unwrap();
+            let names = matched_names(&bundle, &rows).unwrap();
+            assert!(!names.is_empty());
+            let keys: Vec<Key> = serde_json::from_value(bundle["data"]["keyring"].clone()).unwrap();
+            for (fp, name) in &names {
+                let selected = select_holder(&keys, Some(name), None, &names);
+                if names.values().filter(|other| *other == name).count() == 1 {
+                    assert_eq!(&selected.unwrap().0, fp);
+                } else { assert!(selected.is_err()); }
+            }
+        }
+    }
+
     #[test]
     fn keyring_filters_external_private_identities_and_preserves_ambiguity() {
         let (a, _) = CertBuilder::general_purpose(None, Some("a@example.test")).generate().unwrap();
@@ -413,8 +568,8 @@ mod holder_selection_tests {
         let path = directory.path().join("private.asc");
         std::fs::write(&path, secret).unwrap();
         let expected = (cert.fingerprint().to_string(), false);
-        assert_eq!(select_holder(&keys, None, Some(&path)).unwrap(), expected);
-        assert_eq!(select_holder(&keys, Some(&expected.0), Some(&directory.path().join("absent"))).unwrap(), expected);
-        assert!(select_holder(&keys, Some("DEADBEEF"), Some(&path)).is_err());
+        assert_eq!(select_holder(&keys, None, Some(&path), &HolderNames::new()).unwrap(), expected);
+        assert_eq!(select_holder(&keys, Some(&expected.0), Some(&directory.path().join("absent")), &HolderNames::new()).unwrap(), expected);
+        assert!(select_holder(&keys, Some("DEADBEEF"), Some(&path), &HolderNames::new()).is_err());
     }
 }

@@ -225,6 +225,8 @@ pub(super) fn run(session: &mut Session<'_>, work: &Path, pgp: &str) -> Result<(
         );
         let name = if mixed { "mixed.json" } else { "webauthn.json" };
         fs::write(work.join(name), serde_json::to_vec(&downloaded["data"])?)?;
+        let named_rows: Value = checked(session.get("/quorum-bundles")?)?.json()?;
+        fs::write(work.join(format!("{name}.holders")), serde_json::to_vec(&named_rows)?)?;
         let encrypted = Command::new(std::env::var("QUORUM_CLI")?)
             .current_dir(work)
             .stdin(Stdio::null())
