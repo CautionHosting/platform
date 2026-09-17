@@ -8,7 +8,11 @@ use sequoia_openpgp::{
 };
 use std::time::{Duration, SystemTime};
 
-pub fn shared_recipient(notation: Option<&str>, expired: bool) -> Vec<String> {
+pub fn shared_recipient(
+    notation: Option<&str>,
+    expired: bool,
+    different_timestamps: bool,
+) -> Vec<String> {
     let created = SystemTime::now() - Duration::from_secs(86400);
     let (donor, _) = CertBuilder::new()
         .set_creation_time(created)
@@ -24,7 +28,18 @@ pub fn shared_recipient(notation: Option<&str>, expired: bool) -> Vec<String> {
         .clone()
         .parts_into_public();
     (0..2)
-        .map(|_| {
+        .map(|index| {
+            let mut recipient = shared.clone();
+            if different_timestamps {
+                recipient
+                    .set_creation_time(created + Duration::from_secs(index))
+                    .unwrap();
+            }
+            assert_eq!(recipient.mpis(), shared.mpis());
+            assert_eq!(
+                recipient.fingerprint() != shared.fingerprint(),
+                different_timestamps && index != 0
+            );
             // Each holder also has an independent live recipient, so expiration of
             // the shared recipient must not cause an eligibility failure.
             let (cert, _) = CertBuilder::new()
@@ -53,10 +68,10 @@ pub fn shared_recipient(notation: Option<&str>, expired: bool) -> Vec<String> {
                 binding = binding.add_notation(name, "test", None, true).unwrap();
             }
             let signature = binding
-                .sign_subkey_binding(&mut signer, None, &shared)
+                .sign_subkey_binding(&mut signer, None, &recipient)
                 .unwrap();
             let cert = cert
-                .insert_packets([Packet::from(shared.clone()), Packet::from(signature)])
+                .insert_packets([Packet::from(recipient), Packet::from(signature)])
                 .unwrap();
             let mut bytes = Vec::new();
             cert.armored().serialize(&mut bytes).unwrap();

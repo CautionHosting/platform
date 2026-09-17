@@ -379,6 +379,17 @@ Elastic IP tagged to that app. Redeployment is not required.
 
 ## Reference
 
+### API build dependencies
+
+The API image fetches locked Cargo dependencies before compiling with
+`--frozen` and `--network=none`. Git dependencies are retained in the fetch
+layer, rather than a mutable BuildKit cache, so the compile step has the exact
+fetched revisions. Registry and compilation caches remain enabled.
+
+If an older build fails with `can't checkout ... offline mode (--frozen)` after
+a successful fetch, update to the corrected Containerfile and rerun
+`make build-api`. Do not remove the frozen/offline compilation checks.
+
 ### Limitations
 
 - AWS Nitro Enclaves only
