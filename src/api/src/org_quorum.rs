@@ -17,7 +17,7 @@ use sqlx::PgPool;
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use uuid::Uuid;
 use webauthn_rs::prelude::SecurityKey;
@@ -148,9 +148,9 @@ pub async fn list_participants(
 
 fn validate_request(request: &GenerateOrgQuorumBundleRequest) -> Result<(), OrgQuorumError> {
     let count = request.participants.len() + request.pgp_certificates.len();
-    if count == 0 || count > 255 {
+    if count == 0 || count > 254 {
         return Err(OrgQuorumError::invalid(
-            "select between 1 and 255 quorum holders",
+            "select between 1 and 254 quorum holders",
         ));
     }
     if request.threshold == 0 || usize::from(request.threshold) > count {
@@ -190,7 +190,7 @@ fn validate_request(request: &GenerateOrgQuorumBundleRequest) -> Result<(), OrgQ
     Ok(())
 }
 
-fn eligible_certificate(armored: &str) -> Result<Cert, OrgQuorumError> {
+fn eligible_certificate(armored: &str, at: Option<SystemTime>) -> Result<Cert, OrgQuorumError> {
     let mut parser =
         sequoia_openpgp::cert::CertParser::from_bytes(armored.as_bytes()).with_context(
             Ctx::new(StatusCode::BAD_REQUEST, "invalid OpenPGP certificate"),
@@ -211,7 +211,7 @@ fn eligible_certificate(armored: &str) -> Result<Cert, OrgQuorumError> {
     policy.good_critical_notations(&["organization-id@caution.co", "bundle-id@caution.co"]);
     let keys = || {
         cert.keys()
-            .with_policy(&policy, None)
+            .with_policy(&policy, at)
             .supported()
             .alive()
             .revoked(false)
@@ -228,13 +228,16 @@ fn eligible_certificate(armored: &str) -> Result<Cert, OrgQuorumError> {
     Ok(cert)
 }
 
-fn validate_keyring(keyring: &[Key]) -> Result<(), OrgQuorumError> {
+fn validate_keyring(keyring: &[Key], at: Option<SystemTime>) -> Result<(), OrgQuorumError> {
     let mut primary_keys = HashSet::new();
     let mut encryption_keys = HashSet::new();
     for key in keyring {
-        let cert = eligible_certificate(match key {
-            Key::OpenPGP { cert } | Key::WebAuthn { cert, .. } => cert,
-        })?;
+        let cert = eligible_certificate(
+            match key {
+                Key::OpenPGP { cert } | Key::WebAuthn { cert, .. } => cert,
+            },
+            at,
+        )?;
         if !primary_keys.insert(cert.fingerprint()) {
             return Err(OrgQuorumError::invalid(
                 "duplicate effective OpenPGP holder",
@@ -244,12 +247,13 @@ fn validate_keyring(keyring: &[Key]) -> Result<(), OrgQuorumError> {
         policy.good_critical_notations(&["organization-id@caution.co", "bundle-id@caution.co"]);
         for key in cert
             .keys()
-            .with_policy(&policy, None)
+            .with_policy(&policy, at)
             .supported()
             .revoked(false)
             .for_storage_encryption()
         {
-            if !encryption_keys.insert(key.key().fingerprint()) {
+            // Fingerprints include creation time, so compare the key material itself.
+            if !encryption_keys.insert(key.key().mpis().clone()) {
                 return Err(OrgQuorumError::invalid(
                     "holders must not share an encryption key",
                 ));
@@ -340,7 +344,7 @@ async fn resolve_holders(
             _ => None,
         })
         .collect();
-    validate_keyring(&external)?;
+    validate_keyring(&external, None)?;
     Ok(holders)
 }
 
@@ -453,7 +457,7 @@ fn assemble_request(
             "unexpected derived holder certificate",
         ));
     }
-    validate_keyring(&keyring)?;
+    validate_keyring(&keyring, None)?;
     let mut label = HashMap::new();
     if let Some(name) = &request.name {
         label.insert("name".to_owned(), name.clone());
@@ -577,16 +581,17 @@ pub(crate) fn verify_upload(data: &serde_json::Value) -> Result<(), OrgQuorumErr
         Ctx::new(StatusCode::BAD_REQUEST, "expected proofed v1 quorum bundle"),
     )?;
     let policy = load_policy(Path::new(&configured("KEYMAKER_PCR_POLICY_PATH")?))?;
-    let bundle = locksmith::bundle::load_response(response, &policy)
+    let (bundle, at) = locksmith::bundle::load_response_with_timestamp(response, &policy)
         .with_context(Ctx::new(
             StatusCode::BAD_REQUEST,
             "uploaded quorum proof verification failed",
-        ))?
-        .to_latest();
-    if bundle.keyring.is_empty() || bundle.keyring.len() > 255 || bundle.shardfile.is_empty() {
+        ))?;
+    let bundle = bundle.to_latest();
+    if bundle.keyring.is_empty() || bundle.keyring.len() > 254 || bundle.shardfile.is_empty() {
         return Err(OrgQuorumError::invalid("invalid uploaded quorum"));
     }
-    validate_keyring(&bundle.keyring)?;
+    // Only the explicitly gated synthetic test proof has no authenticated time.
+    validate_keyring(&bundle.keyring, at)?;
     Cert::from_bytes(bundle.public_key.as_bytes()).with_context(Ctx::new(
         StatusCode::BAD_REQUEST,
         "invalid quorum public key",

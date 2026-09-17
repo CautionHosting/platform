@@ -13,6 +13,7 @@ use sequoia_openpgp::{
     Cert, cert::CertParser, parse::Parse, policy::StandardPolicy, serialize::Serialize as _,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -265,7 +266,8 @@ fn unique_certificates(certificates: &[String]) -> Result<(), InitError> {
             .revoked(false)
             .for_storage_encryption()
         {
-            if !encryption_keys.insert(key.key().fingerprint()) {
+            // Fingerprints include creation time, so compare the key material itself.
+            if !encryption_keys.insert(key.key().mpis().clone()) {
                 return Err(InitError::invalid(
                     "holders must not share an encryption key",
                 ));
@@ -738,22 +740,47 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
         fs::write(".caution/quorum-bundle.json", &json)
             .with_context(Ctx::new("unable to save proofed bundle"))?;
         output::status("Saved .caution/quorum-bundle.json and .caution/keymaker-pcr-policy.json");
-    } else {
+    }
+    if !in_repo || !output::is_tty_stdout() {
         output::data(&json).with_context(Ctx::new("unable to output bundle"))?;
     }
     if !uploaded && !options.no_upload {
         let body = serde_json::json!({"data": response, "name": options.name, "labels": labels});
+        let body_json = serde_json::to_vec(&body)
+            .with_context(Ctx::new("unable to serialize bundle upload"))?;
+        output::status(format!(
+            "\nAuthorize Platform upload: bundle {}; {} of {} holders",
+            Uuid::from_bytes(bundle.bundle_id),
+            bundle.threshold,
+            bundle.max,
+        ));
+        for cert in &actual_pgp {
+            let cert = Cert::from_bytes(cert.as_bytes())
+                .with_context(Ctx::new("invalid holder certificate"))?;
+            output::status(format!("  PGP {}", cert.fingerprint()));
+        }
+        output::status(format!(
+            "Payload SHA-256: {}\nThe signature covers the complete bundle upload, including certificates, encrypted shares and attestation proof.",
+            hex::encode(Sha256::digest(&body_json)),
+        ));
         let response = client
-            .signed_post(
+            .signed_request(
                 &config.as_ref().expect("authenticated").session_id,
                 "/api/quorum-bundles",
-                &body,
+                reqwest::Method::POST,
+                body_json,
             )
             .await
             .with_context(Ctx::new(
                 "bundle created; upload failed, do not regenerate it",
             ))?;
         checked_response(client, response).await?;
+        output::status("Bundle uploaded to Platform.");
+        if in_repo {
+            output::status(
+                "Local files: .caution/quorum-bundle.json and .caution/keymaker-pcr-policy.json",
+            );
+        }
     }
     Ok(())
 }

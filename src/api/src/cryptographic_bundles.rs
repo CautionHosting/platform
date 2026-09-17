@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
+mod holders;
+
 #[derive(Debug, Serialize, FromRow)]
 pub struct QuorumBundle {
     pub id: Uuid,
@@ -16,6 +18,9 @@ pub struct QuorumBundle {
     pub created_by: Option<Uuid>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    #[sqlx(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holders: Option<Vec<holders::HolderMetadata>>,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -64,7 +69,7 @@ pub async fn list_quorum_bundles(
 ) -> Result<Vec<QuorumBundle>, ListQuorumBundlesError> {
     use ListQuorumBundlesErrorCtx as Ctx;
 
-    let rows = sqlx::query_as::<_, QuorumBundle>(
+    let mut rows = sqlx::query_as::<_, QuorumBundle>(
         "SELECT id, organization_id, data, name, labels, created_by, created_at, updated_at
          FROM quorum_bundles
          WHERE organization_id = $1
@@ -75,6 +80,7 @@ pub async fn list_quorum_bundles(
     .await
     .with_context(Ctx::database(org_id))?;
 
+    holders::enrich(pool, org_id, &mut rows).await;
     Ok(rows)
 }
 
@@ -100,7 +106,7 @@ pub async fn get_quorum_bundle(
 ) -> Result<Option<QuorumBundle>, GetQuorumBundleError> {
     use GetQuorumBundleErrorCtx as Ctx;
 
-    let row = sqlx::query_as::<_, QuorumBundle>(
+    let mut row = sqlx::query_as::<_, QuorumBundle>(
         "SELECT id, organization_id, data, name, labels, created_by, created_at, updated_at
          FROM quorum_bundles
          WHERE organization_id = $1 AND id = $2",
@@ -111,6 +117,9 @@ pub async fn get_quorum_bundle(
     .await
     .with_context(Ctx::database(org_id, bundle_id))?;
 
+    if let Some(bundle) = &mut row {
+        holders::enrich(pool, org_id, std::slice::from_mut(bundle)).await;
+    }
     Ok(row)
 }
 

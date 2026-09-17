@@ -228,6 +228,7 @@ pub fn run(
     );
     let direct: Value =
         serde_json::from_slice(&fs::read(work.join(".caution/quorum-bundle.json"))?)?;
+    assert_eq!(serde_json::from_slice::<Value>(&result.stdout)?, direct);
     assert_eq!(direct["data"]["keyring"][0]["OpenPGP"]["cert"], cert);
     // Resolve a real organization username and PGP override through participant discovery.
     let registered: Value = checked(session.signed_at(

@@ -240,16 +240,18 @@ fn rejects_shared_recipients_including_notations_and_expired_keys() {
         Some("bundle-id@caution.co"),
     ] {
         for expired in [false, true] {
-            let certs = recipients::shared_recipient(notation, expired);
-            for cert in &certs {
-                assert!(public_certificates(cert).is_ok());
+            for different_timestamps in [false, true] {
+                let certs = recipients::shared_recipient(notation, expired, different_timestamps);
+                for cert in &certs {
+                    assert!(public_certificates(cert).is_ok());
+                }
+                assert!(
+                    unique_certificates(&certs)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("share an encryption key")
+                );
             }
-            assert!(
-                unique_certificates(&certs)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("share an encryption key")
-            );
         }
     }
 }
