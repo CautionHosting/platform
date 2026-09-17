@@ -348,8 +348,15 @@ fn check_quorum_parameters(
 }
 
 pub(crate) fn load_bundle(text: &str) -> Result<GenerateQuorumBundle, InitError> {
+    load_bundle_with_timestamp(text).map(|(bundle, _)| bundle)
+}
+
+pub(crate) fn load_bundle_with_timestamp(
+    text: &str,
+) -> Result<(GenerateQuorumBundle, Option<std::time::SystemTime>), InitError> {
     let policy = load_policy(&policy_path(None))?;
-    locksmith::bundle::load_json(text, &policy)
+    let response = serde_json::from_str(text).with_context(Ctx::new("invalid quorum bundle JSON"))?;
+    locksmith::bundle::load_response_with_timestamp(response, &policy)
         .with_context(Ctx::new("unable to verify proofed v1 quorum bundle"))
 }
 

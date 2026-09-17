@@ -1,7 +1,7 @@
 # WebAuthn and mixed share recovery
 
 **Local and StageX checks pass with a temporary Locksmith source override.
-Dependency/runtime pins now select Locksmith `ad92ed8e8d6bcf9d6030f8c04264882402c37feb`.
+Dependency/runtime pins now select Locksmith `4851791bda5f8f392f88e474ed5731b287ecd4bc`.
 Publish that revision and validate remote fetching before Nitro acceptance.**
 
 Create with explicit per-holder custody:
@@ -77,3 +77,14 @@ and restarts require no Keymaker.
 
 V0/earlier-V1 compatibility, credential rotation, multi-instance coordination and
 production root management remain separate. This does not close #7/#10/#11/#12.
+
+## Snapshot lifetimes
+
+WebAuthn custody keys remain authorized by their unchanged proof-bound bundle.
+The CLI passes the authenticated generation timestamp to the shared Locksmith
+verifier: certificate/subkey eligibility is checked at generation, while the
+current transport signature is checked without backdating. External-PGP behavior
+is unchanged. Configured Caution CA primary keys are explicit durable anchors;
+snapshot expiry alone does not invalidate later certificates. Signature,
+revocation, algorithm and certified context checks still apply. Later revocation
+discovery and credential/root rotation remain separate work.

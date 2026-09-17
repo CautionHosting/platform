@@ -89,15 +89,15 @@ sequoia-openpgp = { version = "1" }
 # Shared quorum contracts and verification from Locksmith PR #15.
 [workspace.dependencies.locksmith]
 git = "https://codeberg.org/caution/locksmith.git"
-rev = "ad92ed8e8d6bcf9d6030f8c04264882402c37feb"
+rev = "4851791bda5f8f392f88e474ed5731b287ecd4bc"
 
 [workspace.dependencies.keymaker-models]
 git = "https://codeberg.org/caution/locksmith.git"
-rev = "ad92ed8e8d6bcf9d6030f8c04264882402c37feb"
+rev = "4851791bda5f8f392f88e474ed5731b287ecd4bc"
 
 [workspace.dependencies.public-certificate-models]
 git = "https://codeberg.org/caution/locksmith.git"
-rev = "ad92ed8e8d6bcf9d6030f8c04264882402c37feb"
+rev = "4851791bda5f8f392f88e474ed5731b287ecd4bc"
 
 # The generated EC2 SDK exhausts LLVM memory when release-optimized as one
 # codegen unit. The drift detector is network-bound, so optimize its code but

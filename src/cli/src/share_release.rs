@@ -184,9 +184,10 @@ pub(crate) async fn recover(
     holder: String,
     address: std::net::SocketAddr,
     destination_policy: Measurements,
+    generation_time: Option<std::time::SystemTime>,
 ) -> Result<SendSignedEncryptedShardResponse, InitError> {
     tokio::select! {
-        result = tokio::time::timeout(release::TTL, recover_inner(client, options, bundle, holder, address, destination_policy)) =>
+        result = tokio::time::timeout(release::TTL, recover_inner(client, options, bundle, holder, address, destination_policy, generation_time)) =>
             result.with_context(Ctx::new("release attempt expired; start a fresh attempt"))?,
         _ = tokio::signal::ctrl_c() => Err(InitError::invalid("release cancelled")),
     }
@@ -198,6 +199,7 @@ async fn recover_inner(
     holder: String,
     address: std::net::SocketAddr,
     destination_policy: Measurements,
+    generation_time: Option<std::time::SystemTime>,
 ) -> Result<SendSignedEncryptedShardResponse, InitError> {
     let url = options
         .recryptor_url
@@ -335,7 +337,9 @@ async fn recover_inner(
     else {
         return Err(InitError::invalid("unexpected release holder"));
     };
-    release::crypto::verify_request(cert, &encrypted)
+    let generation_time = locksmith::custody::generation_time(generation_time)
+        .with_context(Ctx::new("authenticated bundle generation time required"))?;
+    release::crypto::verify_request(cert, &encrypted, generation_time)
         .with_context(Ctx::new("verify holder signature"))?;
     destination
         .send(encrypted)

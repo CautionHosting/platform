@@ -1790,7 +1790,7 @@ pub async fn send_shard(
     // Parse the quorum bundle
     let bundle_text =
         fs::read_to_string(&bundle_file).with_context(Ctx::read_bundle_file(&bundle_file))?;
-    let bundle = crate::quorum_init::load_bundle(&bundle_text).with_context(Ctx::parse_bundle())?;
+    let (bundle, generation_time) = crate::quorum_init::load_bundle_with_timestamp(&bundle_text).with_context(Ctx::parse_bundle())?;
     let (holder, webauthn) = crate::share_release::select_holder(&bundle.clone().to_latest().keyring, release_options.holder.as_deref())
         .with_context(Ctx::parse_bundle())?;
 
@@ -1803,7 +1803,7 @@ pub async fn send_shard(
     let status = if webauthn {
         let proof = serde_json::from_str(&bundle_text).with_context(Ctx::parse_bundle())?;
         let measurements = pcrs.iter().map(|(&i, v)| (i, hex::encode(v))).collect();
-        crate::share_release::recover(client, &release_options, proof, holder, address, measurements)
+        crate::share_release::recover(client, &release_options, proof, holder, address, measurements, generation_time)
             .await.with_context(Ctx::send_shard(&address_str))?
     } else {
         locksmith::client::send_selected_shard(address, pcrs, &bundle, private_keyring, Some(holder))
