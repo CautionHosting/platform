@@ -148,6 +148,39 @@ When stdout is redirected, `secret init`/`new` emits the proofed bundle JSON eve
 inside a project, in addition to saving `.caution/quorum-bundle.json`. Outside a
 project it always emits the JSON. Status messages go to stderr.
 
+The dashboard's **Download bundle** action exports the complete stored
+bundle, including its proof envelope and credential bindings, without Platform's
+database or display metadata. Public-key and shard-file `.asc` downloads remain
+available. Use the JSON with `caution secret encrypt --bundle FILE`; the CLI still
+requires the independently established Keymaker PCR policy. Downloading does not
+establish trust or upgrade a legacy bundle format.
+
+Compact bundle rows show the threshold, custody counts, creation date and bundle
+ID. **Download bundle** immediately saves the complete JSON; its adjacent dropdown
+contains available `.asc` alternatives. The overflow menu contains Rename and
+Delete, retaining their existing signed authorization and cancellation behavior.
+
+Rows start collapsed and expand independently to show labels and one entry per
+holder regardless of passkey count. Certificate fingerprints and **Public key
+SHA-256** are abbreviated for display, with controls to reveal or copy the full
+value. Missing legacy metadata shows **Unavailable**. Menus close on selection,
+outside click, Escape or leaving Secrets; Escape returns focus to the trigger.
+The section stacks at narrow widths, although the dashboard's existing mobile
+access gate remains unchanged.
+
+The expandable holder list shows certificate
+fingerprints and current organization usernames only when registrations match
+unambiguously. Names are display hints, not proofed historical identity or release
+authorization. PGP matches use primary fingerprints; passkey matches require every
+credential ID/public key to resolve to the same active organization member, ignoring
+mutable counters. Removed, conflicting or missing registrations leave holders
+unnamed. The list/get API adds optional `holders` metadata outside `data`; raw
+credential identifiers are not displayed. Existing authenticated organization
+access controls apply, and metadata failures do not prevent bundle downloads.
+If registration lookup fails, `holders` metadata is omitted. Passkey display
+matches use credential bindings even when the certificate cannot be parsed;
+this does not validate the certificate or authorize recovery.
+
 Direct Keymaker creation saves the verified bundle locally before requesting
 authorization to upload it to Platform (unless `--no-upload` is set). The upload
 prompt displays the bundle ID, threshold, holder fingerprints and SHA-256 of the
