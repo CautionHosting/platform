@@ -90,6 +90,16 @@ pub fn run(
     id: &str,
     work: &Path,
 ) -> Result<()> {
+    // An authenticated requester must not disguise a real login challenge as release approval.
+    let mut login: Value = checked(http.post(format!("{base}/auth/login/begin"))
+        .json(&json!({"username":"quorummock"})).send()?)?.json()?;
+    login["publicKey"]["userVerification"] = json!("required");
+    let forged = json!({"options":login, "context":{"holder":"victim"}, "context_hash":"invented"});
+    let response = http.post(format!("{base}/auth/qr-release/begin"))
+        .header("X-Session-ID", id).json(&forged).send()?;
+    assert_eq!(response.status().as_u16(), 422, "unattested login challenge must not create an approval URL");
+    println!("PASS: authenticated relay rejects a substituted real login challenge");
+
     let (cert, _) = CertBuilder::new()
         .add_userid("temporary quorum holder")
         .add_signing_subkey()

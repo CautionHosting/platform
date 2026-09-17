@@ -2406,6 +2406,13 @@ enum TryGetAssertionError {
     },
 }
 
+fn assertion_client_data(challenge: &str, origin: &str) -> Result<Vec<u8>, TryGetAssertionError> {
+    serde_json::to_vec(&serde_json::json!({
+        "type": "webauthn.get", "challenge": challenge, "origin": origin,
+    }))
+    .with_context(TryGetAssertionErrorCtx::serialize_client_data())
+}
+
 fn try_get_assertion(
     client: &ApiClient,
     options: &LoginBeginResponse,
@@ -2455,16 +2462,10 @@ fn try_get_assertion(
         format!("Allow list has {} credentials", allow_list.len()),
     );
 
+    // Keep the exact bytes hashed by the authenticator for the returned assertion.
+    let client_data_json_bytes = assertion_client_data(&opts.challenge, base_url)?;
     let args = SignArgs {
-        client_data_hash: Sha256::digest(
-            serde_json::to_vec(&serde_json::json!({
-            "type": "webauthn.get",
-            "challenge": opts.challenge,
-            "origin": base_url,
-            }))
-            .with_context(Ctx::serialize_client_data())?,
-        )
-        .into(),
+        client_data_hash: Sha256::digest(&client_data_json_bytes).into(),
         origin: base_url.to_string(),
         relying_party_id: opts.rp_id.clone(),
         allow_list,
@@ -2580,14 +2581,6 @@ fn try_get_assertion(
             } else {
                 result.with_context(Ctx::assertion_failed())
             }?;
-
-            let client_data_json = serde_json::json!({
-                "type": "webauthn.get",
-                "challenge": opts.challenge,
-                "origin": client.base_url.clone(),
-            });
-            let client_data_json_bytes =
-                serde_json::to_vec(&client_data_json).with_context(Ctx::serialize_client_data())?;
 
             let cred_id_bytes = &sign_result
                 .assertion
@@ -2753,5 +2746,27 @@ mod tests {
         let obj = body.as_object().unwrap();
         assert_eq!(obj.len(), 1);
         assert_eq!(obj.get("username").and_then(|v| v.as_str()), Some("grace"));
+    }
+}
+
+#[cfg(test)]
+mod assertion_origin_tests {
+    use super::*;
+    #[test]
+    fn native_assertion_preserves_frontend_origin_when_api_origin_differs() {
+        let api = "https://api.example.com";
+        let frontend = "https://app.example.com";
+        let bytes = assertion_client_data("challenge", frontend).unwrap();
+        let signed_hash = Sha256::digest(&bytes);
+        let encoded = general_purpose::URL_SAFE_NO_PAD.encode(&bytes);
+        let returned = general_purpose::URL_SAFE_NO_PAD.decode(encoded).unwrap();
+        assert_eq!(signed_hash, Sha256::digest(&returned));
+        let data: serde_json::Value = serde_json::from_slice(&returned).unwrap();
+        assert_eq!(data["origin"], frontend);
+        assert_ne!(data["origin"], api);
+        assert_ne!(
+            signed_hash,
+            Sha256::digest(assertion_client_data("challenge", api).unwrap())
+        );
     }
 }

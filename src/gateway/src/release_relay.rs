@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Caution-Commercial
-//! Opaque browser assertion relay. This service cannot authorize or perform share release.
+//! Relay only custody-authenticated approval challenges. The enclave authorizes release.
 use crate::types::AppState;
 use axum::{
-    Json,
     extract::State,
     http::{HeaderMap, StatusCode},
+    Json,
 };
+use locksmith::release::{self, Attested, Measurements, Prepared};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     sync::{Mutex, OnceLock},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use uuid::Uuid;
 
@@ -37,20 +38,74 @@ pub struct Finish {
     assertion: Option<Value>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Approval {
+    prepared: Attested<Prepared>,
+    nonce: String,
+}
+
+// Trust is configured by the operator, never supplied by the relay requester.
+fn trusted_measurements() -> Result<Measurements, StatusCode> {
+    let path =
+        std::env::var("RECRYPTOR_PCR_POLICY_PATH").map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let text = std::fs::read_to_string(path).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let policy = locksmith::bundle::KeymakerPcrPolicy::from_json(&text)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    if policy.sets.len() != 1 || policy.sets[0].expires_at_unix_seconds.is_some() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let pcrs = policy.sets[0]
+        .pcrs
+        .iter()
+        .map(|(&i, bytes)| (i, hex::encode(bytes)))
+        .collect();
+    release::pcrs(&pcrs).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    Ok(pcrs)
+}
+
+fn verified_request(
+    approval: &Approval,
+    trusted: &Measurements,
+    rp_id: &str,
+) -> Result<(Value, Duration), StatusCode> {
+    release::verify_response(&approval.prepared, trusted, &approval.nonce)
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let prepared = &approval.prepared.data;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .as_secs();
+    let remaining = prepared
+        .context
+        .expires_at_unix_seconds
+        .checked_sub(now)
+        .filter(|&seconds| seconds > 0 && seconds <= 180)
+        .ok_or(StatusCode::GONE)?;
+    let options = serde_json::to_value(&prepared.options).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if options["publicKey"]["userVerification"] != "required"
+        || options["publicKey"]["rpId"] != rp_id
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let context_hash = release::hash(prepared).map_err(|_| StatusCode::BAD_REQUEST)?;
+    Ok((
+        json!({"options": options, "context": prepared.context,
+        "destination_key": prepared.destination_key, "context_hash": context_hash}),
+        Duration::from_secs(remaining),
+    ))
+}
+
 pub async fn begin(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<Value>,
+    Json(approval): Json<Approval>,
 ) -> Result<Json<Value>, StatusCode> {
     crate::handlers::authenticate_session(&state, &headers)
         .await
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
-    if request["options"]["publicKey"]["userVerification"] != "required"
-        || !request["options"]["publicKey"]["challenge"].is_string()
-        || !request["context"].is_object()
-    {
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    let (request, lifetime) =
+        verified_request(&approval, &trusted_measurements()?, &state.relying_party_id)?;
     let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let browser = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let mut pending = store()
@@ -64,7 +119,7 @@ pub async fn begin(
         token.clone(),
         Pending {
             browser: browser.clone(),
-            deadline: Instant::now() + Duration::from_secs(180),
+            deadline: Instant::now() + lifetime,
             request,
             result: None,
         },
@@ -139,41 +194,33 @@ mod tests {
     #[tokio::test]
     async fn capabilities_are_separate_and_assertion_is_delivered_once() {
         let (requester, browser) = pending();
-        assert!(
-            status(Json(Token {
-                token: browser.clone()
-            }))
-            .await
-            .is_err()
-        );
-        assert!(
-            read(Json(Token {
-                token: requester.clone()
-            }))
-            .await
-            .is_err()
-        );
-        assert!(
-            read(Json(Token {
-                token: browser.clone()
-            }))
-            .await
-            .is_ok()
-        );
+        assert!(status(Json(Token {
+            token: browser.clone()
+        }))
+        .await
+        .is_err());
+        assert!(read(Json(Token {
+            token: requester.clone()
+        }))
+        .await
+        .is_err());
+        assert!(read(Json(Token {
+            token: browser.clone()
+        }))
+        .await
+        .is_ok());
         finish(Json(Finish {
             token: browser.clone(),
             assertion: Some(json!({"raw":"assertion"})),
         }))
         .await
         .unwrap();
-        assert!(
-            finish(Json(Finish {
-                token: browser,
-                assertion: Some(json!({}))
-            }))
-            .await
-            .is_err()
-        );
+        assert!(finish(Json(Finish {
+            token: browser,
+            assertion: Some(json!({}))
+        }))
+        .await
+        .is_err());
         let result = status(Json(Token {
             token: requester.clone(),
         }))
@@ -205,5 +252,123 @@ mod tests {
             .deadline = Instant::now();
         assert!(read(Json(Token { token: browser })).await.is_err());
         assert!(status(Json(Token { token: requester })).await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod verification_tests {
+    use super::*;
+
+    fn fixture() -> (Approval, Measurements) {
+        let expiry = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 120;
+        let prepared: Prepared = serde_json::from_value(json!({
+            "request_hash": "request", "session_id": "custody-session",
+            "context": {"version":"V1", "bundle_hash":"bundle", "bundle_id":vec![1;16],
+                "organization_id":vec![2;16], "holder":"holder", "holder_position":0,
+                "certificate_index":0, "destination_policy":{"0":"ab".repeat(48),"1":"ab".repeat(48),"2":"ab".repeat(48)},
+                "transport_nonce":"12".repeat(32), "expires_at_unix_seconds":expiry},
+            "destination_attestation_hash":"destination", "destination_key":vec![3;32],
+            "options":{"publicKey":{"challenge":"Y3VzdG9keS1jaGFsbGVuZ2U", "rpId":"example.com",
+                "allowCredentials":[], "userVerification":"required", "timeout":120000}}
+        })).unwrap();
+        let mut approval = Approval {
+            prepared: Attested {
+                data: prepared,
+                attestation: vec![],
+            },
+            nonce: "34".repeat(32),
+        };
+        synthetic_proof(&mut approval);
+        (approval, (0..=2).map(|i| (i, "ab".repeat(48))).collect())
+    }
+    fn synthetic_proof(approval: &mut Approval) {
+        let mut proof = b"caution-release-test-v1:".to_vec();
+        proof.extend(
+            serde_json::to_vec(&(
+                &approval.nonce,
+                release::hash(&approval.prepared.data).unwrap().as_bytes(),
+            ))
+            .unwrap(),
+        );
+        approval.prepared.attestation = proof;
+    }
+    #[test]
+    fn login_options_and_invented_context_cannot_enter_relay() {
+        let login = json!({"options":{"publicKey":{"challenge":"login-challenge","userVerification":"required"}},
+            "context":{"holder":"victim"}, "context_hash":"invented"});
+        assert!(serde_json::from_value::<Approval>(login).is_err());
+        let (mut approval, pcrs) = fixture();
+        approval.prepared.attestation.clear();
+        assert!(verified_request(&approval, &pcrs, "example.com").is_err());
+    }
+    #[test]
+    fn attestation_binds_challenge_display_and_expiry_with_all_synthetic_gates() {
+        let enabled = cfg!(feature = "e2e-testing-unsafe")
+            && std::env::var("CAUTION_UNSAFE_KEY_SERVICE_E2E").as_deref() == Ok("1");
+        let (approval, pcrs) = fixture();
+        let result = verified_request(&approval, &pcrs, "example.com");
+        if !enabled {
+            assert!(result.is_err());
+            return;
+        }
+        let (display, ttl) = result.unwrap();
+        assert_eq!(
+            display["context_hash"],
+            release::hash(&approval.prepared.data).unwrap()
+        );
+        assert_eq!(display["context"]["holder"], "holder");
+        assert!(ttl.as_secs() <= 120);
+        for field in [
+            "challenge",
+            "holder",
+            "destination",
+            "nonce",
+            "proof",
+            "expiry",
+            "rp",
+            "uv",
+        ] {
+            let (mut changed, pcrs) = fixture();
+            match field {
+                "challenge" => {
+                    let mut options = serde_json::to_value(&changed.prepared.data.options).unwrap();
+                    options["publicKey"]["challenge"] = json!("bG9naW4tY2hhbGxlbmdl");
+                    changed.prepared.data.options = serde_json::from_value(options).unwrap();
+                }
+                "holder" => changed.prepared.data.context.holder = "victim".into(),
+                "destination" => changed.prepared.data.destination_key = [4; 32],
+                "nonce" => changed.nonce = "56".repeat(32),
+                "proof" => changed.prepared.attestation[0] ^= 1,
+                "expiry" => {
+                    changed.prepared.data.context.expires_at_unix_seconds = 0;
+                    synthetic_proof(&mut changed);
+                }
+                "rp" | "uv" => {
+                    let mut options = serde_json::to_value(&changed.prepared.data.options).unwrap();
+                    options["publicKey"][if field == "rp" {
+                        "rpId"
+                    } else {
+                        "userVerification"
+                    }] = json!(if field == "rp" {
+                        "wrong.example"
+                    } else {
+                        "preferred"
+                    });
+                    changed.prepared.data.options = serde_json::from_value(options).unwrap();
+                    synthetic_proof(&mut changed);
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                verified_request(&changed, &pcrs, "example.com").is_err(),
+                "{field}"
+            );
+        }
+        let wrong = (0..=2).map(|i| (i, "cd".repeat(48))).collect();
+        assert!(verified_request(&approval, &wrong, "example.com").is_err());
     }
 }

@@ -111,13 +111,14 @@ async fn post<T: Serialize, R: DeserializeOwned>(
 }
 async fn browser_assertion(
     client: &ApiClient,
-    prepared: &Prepared,
+    prepared: &Attested<Prepared>,
+    nonce: &str,
 ) -> Result<webauthn_rs_proto::PublicKeyCredential, InitError> {
     let config = client
         .ensure_authenticated()
         .await
         .with_context(Ctx::new("release relay authentication"))?;
-    let request = json!({"options":prepared.options,"context":prepared.context,"destination_key":prepared.destination_key,"context_hash":release::hash(prepared).with_context(Ctx::new("release context hash"))?});
+    let request = json!({"prepared": prepared, "nonce": nonce});
     let response = client
         .client
         .post(format!("{}/auth/qr-release/begin", client.base_url))
@@ -281,7 +282,8 @@ async fn recover_inner(
     {
         return Err(InitError::invalid("release context was substituted"));
     }
-    let prepared = prepared.data;
+    let attested_prepared = prepared;
+    let prepared = &attested_prepared.data;
     output::status(format!(
         "Release one share: bundle {}; holder {}",
         hex::encode(prepared.context.bundle_id),
@@ -297,7 +299,7 @@ async fn recover_inner(
     ));
     let approval = async {
         if client.qr {
-            browser_assertion(client, &prepared).await
+            browser_assertion(client, &attested_prepared, &prepare.client_nonce).await
         } else {
             let client = client.clone();
             let options: auth::LoginBeginResponse = serde_json::from_value(
@@ -321,7 +323,7 @@ async fn recover_inner(
     };
     let complete = CompleteRequest {
         version: Version::V1,
-        session_id: prepared.session_id,
+        session_id: prepared.session_id.clone(),
         assertion,
     };
     let encrypted = post(

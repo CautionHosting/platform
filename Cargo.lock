@@ -3267,6 +3267,7 @@ dependencies = [
  "futures",
  "hex",
  "hmac 0.12.1",
+ "locksmith",
  "percent-encoding",
  "rand 0.10.2",
  "rand 0.8.7",

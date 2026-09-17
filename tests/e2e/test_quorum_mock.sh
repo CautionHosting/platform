@@ -25,6 +25,10 @@ cd "$ROOT"
 export CARGO_TARGET_DIR="$ROOT/target/quorum-e2e"
 cargo build --locked -p api -p cli -p gateway \
     --features api/e2e-testing-unsafe,cli/e2e-testing-unsafe,gateway/e2e-testing-unsafe
+# Browser approval must reject arbitrary/login challenges and production builds
+# must reject synthetic custody evidence even when the runtime flag is enabled.
+CAUTION_UNSAFE_KEY_SERVICE_E2E=1 cargo test --locked -p gateway release_relay
+CAUTION_UNSAFE_KEY_SERVICE_E2E=1 cargo test --locked -p gateway --features e2e-testing-unsafe release_relay
 LOCKSMITH_SOURCE=$(cargo metadata --locked --format-version 1 | python3 -c '
 import json,sys,pathlib
 p=next(p for p in json.load(sys.stdin)["packages"] if p["name"]=="keymaker-models")

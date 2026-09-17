@@ -88,3 +88,33 @@ is unchanged. Configured Caution CA primary keys are explicit durable anchors;
 snapshot expiry alone does not invalidate later certificates. Signature,
 revocation, algorithm and certified context checks still apply. Later revocation
 discovery and credential/root rotation remain separate work.
+
+## Authenticated browser approval
+
+Before enabling `--qr`, place the independently verified custody-service policy at
+`~/.config/caution/policies/recryptor-pcr-policy.json` on the Platform host and set
+`RECRYPTOR_PCR_POLICY_PATH=/run/config/recryptor-pcr-policy.json` for the gateway.
+The Makefile and systemd gateway launchers mount this directory read-only. Use the
+same `{ "sets": [{ "pcrs": { "0": "...", "1": "...", "2": "..." } }] }`
+format as the CLI: exactly one non-expiring set of non-debug PCR0/1/2 values.
+Missing or invalid configuration disables browser release approval, not login.
+Upgrade CLI and gateway together; the old unattested relay request is rejected.
+
+The CLI forwards the complete custody-attested Prepare response and its nonce.
+The gateway verifies the live Nitro proof, PCRs, response hash, expiry, RP ID and
+required user verification before publishing any approval. Displayed bundle,
+holder, destination and context hash are derived only from that verified response.
+Requester-provided login challenges and invented display context are rejected.
+The gateway relays the resulting assertion; the custody enclave still verifies it
+and atomically authorizes the share release.
+
+Native approval serializes client data once, using the frontend origin, and returns
+the exact bytes whose hash the authenticator signed, including when `FRONTEND_URL`
+and the API URL differ.
+
+Regression checks: `cargo test -p gateway release_relay` and
+`cargo test -p cli native_assertion_preserves_frontend_origin`. Repeat the relay
+suite with `CAUTION_UNSAFE_KEY_SERVICE_E2E=1` both with and without
+`--features e2e-testing-unsafe`; only the feature-enabled build accepts synthetic
+proofs under the exact synthetic PCR policy. These checks are not real Nitro or
+physical-authenticator validation.
