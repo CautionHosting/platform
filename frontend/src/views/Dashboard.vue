@@ -1363,11 +1363,32 @@ make build-cli
               </span>
             </div>
             <div class="bundle-details" v-if="bundle.data">
+              <div class="bundle-detail-row" v-if="getQuorumBundleSummary(bundle).threshold">
+                <span class="bundle-label">Threshold</span>
+                <span>{{ getQuorumBundleSummary(bundle).threshold }}</span>
+              </div>
+              <div class="bundle-detail-row" v-if="getQuorumBundleSummary(bundle).custody">
+                <span class="bundle-label">Custody</span>
+                <span>{{ getQuorumBundleSummary(bundle).custody }}</span>
+              </div>
+              <details v-if="bundle.holders?.length">
+                <summary>Holders</summary>
+                <p class="text-muted">Names match current organization key registrations.</p>
+                <div v-for="(holder, index) in bundle.holders" :key="index" class="bundle-detail-row">
+                  <span>{{ holder.username || `Holder ${index + 1}` }} · {{ holder.custody === 'pgp' ? 'PGP' : holder.custody === 'caution_backed' ? 'Passkey-backed' : 'Unknown custody' }}</span>
+                  <code style="overflow-wrap: anywhere">{{ holder.fingerprint || 'Fingerprint unavailable' }}</code>
+                </div>
+              </details>
               <div class="bundle-detail-row" v-if="bundleKeyHashes[bundle.id]">
                 <span class="bundle-label">Public key hash</span>
                 <code class="bundle-hash">{{ bundleKeyHashes[bundle.id] }}</code>
               </div>
               <div class="bundle-actions">
+                <button
+                  v-if="serializeQuorumBundle(bundle)"
+                  class="btn-sm btn-primary"
+                  @click="downloadFile(serializeQuorumBundle(bundle), bundle.id + '_quorum-bundle.json', 'application/json')"
+                >Download bundle (.json)</button>
                 <button
                   v-if="getQuorumBundleFiles(bundle).publicKey"
                   class="btn-sm btn-download"
@@ -2086,7 +2107,7 @@ import {
 import { formatLocalDate, formatLocalTime } from "../utils/dateTime.js";
 import { getSubscriptionPlanAction } from "../utils/subscriptionPlan.js";
 import { getCurrentTheme } from "../utils/theme.js";
-import { getQuorumBundleFiles } from "../utils/quorumBundle.js";
+import { getQuorumBundleFiles, getQuorumBundleSummary, serializeQuorumBundle } from "../utils/quorumBundle.js";
 
 async function sha256Hex(message) {
   const msgBuffer = new TextEncoder().encode(message);
@@ -4572,8 +4593,8 @@ export default {
       }
     };
 
-    const downloadFile = (content, filename) => {
-      const blob = new Blob([content], { type: 'application/octet-stream' });
+    const downloadFile = (content, filename, type = 'application/octet-stream') => {
+      const blob = new Blob([content], { type });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -5301,6 +5322,8 @@ export default {
       saveLabel,
       removeLabel,
       getQuorumBundleFiles,
+      getQuorumBundleSummary,
+      serializeQuorumBundle,
       downloadFile,
       credentials,
       loadingCreds,

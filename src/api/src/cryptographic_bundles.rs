@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
+mod holders;
+
 #[derive(Debug, Serialize, FromRow)]
 pub struct QuorumBundle {
     pub id: Uuid,
@@ -16,6 +18,9 @@ pub struct QuorumBundle {
     pub created_by: Option<Uuid>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    #[sqlx(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holders: Option<Vec<holders::HolderMetadata>>,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -48,7 +53,7 @@ pub async fn list_quorum_bundles(
     pool: &PgPool,
     org_id: Uuid,
 ) -> Result<Vec<QuorumBundle>, (StatusCode, String)> {
-    let rows = sqlx::query_as::<_, QuorumBundle>(
+    let mut rows = sqlx::query_as::<_, QuorumBundle>(
         "SELECT id, organization_id, data, name, labels, created_by, created_at, updated_at
          FROM quorum_bundles
          WHERE organization_id = $1
@@ -59,6 +64,7 @@ pub async fn list_quorum_bundles(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    holders::enrich(pool, org_id, &mut rows).await;
     Ok(rows)
 }
 
@@ -67,7 +73,7 @@ pub async fn get_quorum_bundle(
     org_id: Uuid,
     bundle_id: Uuid,
 ) -> Result<Option<QuorumBundle>, (StatusCode, String)> {
-    let row = sqlx::query_as::<_, QuorumBundle>(
+    let mut row = sqlx::query_as::<_, QuorumBundle>(
         "SELECT id, organization_id, data, name, labels, created_by, created_at, updated_at
          FROM quorum_bundles
          WHERE organization_id = $1 AND id = $2",
@@ -78,6 +84,9 @@ pub async fn get_quorum_bundle(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    if let Some(bundle) = &mut row {
+        holders::enrich(pool, org_id, std::slice::from_mut(bundle)).await;
+    }
     Ok(row)
 }
 

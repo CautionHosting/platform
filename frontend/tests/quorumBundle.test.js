@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { compile } from 'vue'
 import { parse } from 'vue/compiler-sfc'
-import { getQuorumBundleFiles } from '../src/utils/quorumBundle.js'
+import { getQuorumBundleFiles, getQuorumBundleSummary, serializeQuorumBundle } from '../src/utils/quorumBundle.js'
 
 const dashboard = readFileSync(new URL('../src/views/Dashboard.vue', import.meta.url), 'utf8')
 const { descriptor } = parse(dashboard)
@@ -18,7 +18,10 @@ function findDetails(node) {
     if (found) return found
   }
 }
-const renderDetails = compile(findDetails(descriptor.template.ast).loc.source, { hoistStatic: false })
+const compiledDetails = compile(findDetails(descriptor.template.ast).loc.source, { hoistStatic: false })
+const renderDetails = (context, cache = []) => compiledDetails({
+  getQuorumBundleSummary, serializeQuorumBundle, ...context,
+}, cache)
 function buttons(node) {
   if (node?.type === 'button') return [node]
   return Array.isArray(node?.children) ? node.children.flatMap(buttons) : []
@@ -55,14 +58,17 @@ for (const [name, data] of [
 
     const rendered = renderDetails({ bundle, bundleKeyHashes: bundleKeyHashes.value, getQuorumBundleFiles, downloadFile, truncateId: id => id }, [])
     const actions = buttons(rendered)
-    assert.equal(actions.length, 2)
+    assert.equal(actions.length, 3)
     for (const action of actions) action.props.onClick()
     assert.deepEqual(downloads, [
-      ['blob:1', 'bundle-id_public_key.asc'],
-      ['blob:2', 'bundle-id_shardfile.asc'],
+      ['blob:1', 'bundle-id_quorum-bundle.json'],
+      ['blob:2', 'bundle-id_public_key.asc'],
+      ['blob:3', 'bundle-id_shardfile.asc'],
     ])
-    assert.deepEqual(await Promise.all(blobs.map(blob => blob.text())), [publicKey, shardfile])
-    assert.deepEqual(revoked, ['blob:1', 'blob:2'])
+    assert.deepEqual(await Promise.all(blobs.map(blob => blob.text())), [JSON.stringify(data, null, 2), publicKey, shardfile])
+    assert.equal(blobs[0].type, 'application/json')
+    assert.deepEqual(JSON.parse(await blobs[0].text()), data)
+    assert.deepEqual(revoked, ['blob:1', 'blob:2', 'blob:3'])
     assert.deepEqual(bundle, original)
   })
 }
@@ -71,7 +77,7 @@ test('missing or non-string files do not render download buttons', () => {
   for (const data of [undefined, null, {}, { data: { version: 'V1' }, necroproof: [] }, { shardfile: {}, public_key: [] }]) {
     const bundle = { id: 'empty', data }
     assert.deepEqual(getQuorumBundleFiles(bundle), { publicKey: '', shardfile: '' })
-    assert.equal(buttons(renderDetails({ bundle, bundleKeyHashes: {}, getQuorumBundleFiles }, [])).length, 0)
+    assert.equal(buttons(renderDetails({ bundle, bundleKeyHashes: {}, getQuorumBundleFiles }, [])).length, serializeQuorumBundle(bundle) ? 1 : 0)
   }
   assert.deepEqual(getQuorumBundleFiles(undefined), { publicKey: '', shardfile: '' })
 })
@@ -80,7 +86,38 @@ test('a shard-only bundle keeps its shard download', () => {
   const bundle = { id: 'shards', data: { data: { version: 'V1', shardfile }, necroproof: [] } }
   const downloads = []
   const actions = buttons(renderDetails({ bundle, bundleKeyHashes: {}, getQuorumBundleFiles, downloadFile: (...args) => downloads.push(args), truncateId: id => id }, []))
-  assert.equal(actions.length, 1)
-  actions[0].props.onClick()
+  assert.equal(actions.length, 2)
+  actions[1].props.onClick()
   assert.deepEqual(downloads, [[shardfile, 'shards_shardfile.asc']])
+})
+
+ test('summary counts holders, not credentials, and leaves unknown legacy metadata absent', () => {
+  const keyring = [{ OpenPGP: { cert: publicKey } }, { WebAuthn: { cert: publicKey, credential: ['one', 'two'] } }]
+  const bundle = { data: { data: { version: 'V1', threshold: 2, max: 2, keyring }, necroproof: [1] } }
+  assert.deepEqual(getQuorumBundleSummary(bundle), { threshold: '2 of 2 holders', custody: '1 PGP · 1 passkey-backed' })
+  bundle.data.data.keyring = [keyring[1], keyring[1]]
+  assert.equal(getQuorumBundleSummary(bundle).custody, '2 passkey-backed')
+  assert.deepEqual(getQuorumBundleSummary({ data: { shardfile } }), { threshold: '', custody: '' })
+  bundle.data.data.threshold = 3
+  assert.equal(getQuorumBundleSummary(bundle).threshold, '')
+})
+
+test('download preserves proof and bindings but excludes database and display metadata', () => {
+  const data = { data: { version: 'V1', keyring: [{ WebAuthn: { credential: ['private-display-id'], cert: publicKey } }] }, necroproof: [0, 127, 255] }
+  const bundle = { id: 'id', organization_id: 'org', holders: [{ username: 'alice' }], data }
+  assert.deepEqual(JSON.parse(serializeQuorumBundle(bundle)), data)
+  assert.equal(serializeQuorumBundle({ data: null }), null)
+})
+
+test('holder display uses metadata in bundle order without rendering credential identifiers', () => {
+  const bundle = { id: 'id', data: { data: { keyring: [{ WebAuthn: { credential: ['HIDDEN-CREDENTIAL'], cert: publicKey } }] } },
+    holders: [{ custody: 'caution_backed', username: '<alice>', fingerprint: 'ABC123' }, { custody: 'pgp', username: null, fingerprint: 'DEF456' }] }
+  const rendered = renderDetails({ bundle, bundleKeyHashes: {}, getQuorumBundleFiles, downloadFile() {}, truncateId: id => id })
+  const text = node => typeof node === 'string' ? node : typeof node?.children === 'string' ? node.children : Array.isArray(node?.children) ? node.children.map(text).join(' ') : ''
+  const display = text(rendered)
+  assert.ok(display.includes('<alice>'))
+  assert.ok(display.includes('Holder 2'))
+  assert.ok(display.includes('ABC123'))
+  assert.ok(display.indexOf('ABC123') < display.indexOf('DEF456'))
+  assert.ok(!display.includes('HIDDEN-CREDENTIAL'))
 })

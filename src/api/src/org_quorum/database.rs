@@ -419,5 +419,104 @@ async fn database_contracts() {
     credentials(&pool, org, other, bob).await;
     storage_roundtrip(&pool, org, other, alice).await;
     hosted_pgp(&pool, org, alice).await;
+    holder_display_metadata(&pool).await;
     pool.close().await;
+}
+
+async fn holder_display_metadata(pool: &PgPool) {
+    let org = organization(pool).await;
+    let other = organization(pool).await;
+    let alice = member(pool, org).await;
+    let outsider = member(pool, other).await;
+    let cert = certificate();
+    let pgp_id = register_pgp(pool, alice, &cert).await;
+    register_pgp(pool, outsider, &cert).await;
+    let credential: Value = serde_json::from_str(include_str!("test-credential.json")).unwrap();
+    let mut current = credential.clone();
+    current["cred"]["counter"] = json!(500);
+    sqlx::query(
+        "INSERT INTO fido2_credentials(user_id, credential_id, public_key) VALUES ($1, $2, $3)",
+    )
+    .bind(alice)
+    .bind(Uuid::new_v4().as_bytes().to_vec())
+    .bind(serde_json::to_vec(&current).unwrap())
+    .execute(pool)
+    .await
+    .unwrap();
+    let data = json!({"data": {"version": "V1", "threshold": 2, "max": 2, "keyring": [
+        {"OpenPGP": {"cert": cert}},
+        {"WebAuthn": {"cert": cert, "credential": [serde_json::to_string(&credential).unwrap()]}}
+    ]}, "necroproof": [1, 2, 3]});
+    let saved = storage::create_quorum_bundle(
+        pool,
+        org,
+        alice,
+        storage::CreateBundleRequest {
+            data: data.clone(),
+            name: None,
+            labels: None,
+        },
+    )
+    .await
+    .unwrap();
+    let loaded = storage::get_quorum_bundle(pool, org, saved.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.data, data);
+    let metadata = serde_json::to_value(&loaded).unwrap();
+    assert_eq!(metadata["holders"][0]["username"], alice.to_string());
+    assert_eq!(metadata["holders"][1]["username"], alice.to_string());
+    assert_eq!(metadata["holders"][1]["custody"], "caution_backed");
+    assert_eq!(
+        metadata["holders"][0]["fingerprint"],
+        Cert::from_bytes(cert.as_bytes())
+            .unwrap()
+            .fingerprint()
+            .to_string()
+    );
+    let listed = storage::list_quorum_bundles(pool, org).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&listed[0]).unwrap()["holders"],
+        metadata["holders"]
+    );
+    assert!(
+        storage::get_quorum_bundle(pool, other, saved.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let bob = member(pool, org).await;
+    let bob_key = register_pgp(pool, bob, &cert).await;
+    let loaded = storage::get_quorum_bundle(pool, org, saved.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(serde_json::to_value(loaded).unwrap()["holders"][0]["username"].is_null());
+    sqlx::query("UPDATE pgp_keys SET removed_at = now() WHERE id IN ($1, $2)")
+        .bind(pgp_id)
+        .bind(bob_key)
+        .execute(pool)
+        .await
+        .unwrap();
+    let loaded = storage::get_quorum_bundle(pool, org, saved.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let metadata = serde_json::to_value(loaded).unwrap();
+    assert!(metadata["holders"][0]["username"].is_null());
+    assert_eq!(metadata["holders"][1]["username"], alice.to_string());
+    sqlx::query("UPDATE users SET is_active = false WHERE id = $1")
+        .bind(alice)
+        .execute(pool)
+        .await
+        .unwrap();
+    let loaded = storage::get_quorum_bundle(pool, org, saved.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let metadata = serde_json::to_value(loaded).unwrap();
+    assert!(metadata["holders"][0]["username"].is_null());
+    assert!(metadata["holders"][1]["username"].is_null());
+    assert_eq!(metadata["data"], data);
 }
