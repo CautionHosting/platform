@@ -137,16 +137,18 @@ PCR policy JSON follows Locksmith's shared contract:
 Obtain measurements independently from the operator's reviewed build. Missing,
 incomplete and debug policies fail closed. Never populate policy from the service
 response. For `secret init`, policy precedence is `--keymaker-pcr-policy`, then
-`KEYMAKER_PCR_POLICY_PATH`, then `.caution/keymaker-pcr-policy.json`. In a project,
+`KEYMAKER_PCR_POLICY_PATH`, then `.caution/keymaker-pcr-policy.json`. In every directory,
 initialization saves the accepted policy beside `.caution/quorum-bundle.json` only
 when no saved policy exists. Before generation, a differing or malformed saved
 policy causes an error: explicitly repair or replace that file to change trust.
 Equivalent parsed policies preserve the existing file, including its formatting.
 Every PCR value must decode to exactly 48 bytes.
 
-When stdout is redirected, `secret init`/`new` emits the proofed bundle JSON even
-inside a project, in addition to saving `.caution/quorum-bundle.json`. Outside a
-project it always emits the JSON. Status messages go to stderr.
+When stdout is redirected, `secret init`/`new` emits the proofed bundle JSON including
+outside a project, in addition to always saving `.caution/quorum-bundle.json` and
+its accepted PCR policy. Interactive terminals show only a saved-file confirmation.
+Status messages go to stderr. Files are saved before optional Platform upload, so
+an upload failure does not require generating another bundle.
 
 The dashboard's **Download bundle** action exports the complete stored
 bundle, including its proof envelope and credential bindings, without Platform's
@@ -516,3 +518,9 @@ for Platform and the standalone test helper also passed.
 The recovery implementation and per-holder `--holder USER=external-pgp` /
 `--holder USER=webauthn` interface are described in [share recovery](share-recovery.md).
 The recovery acceptance gate remains pending; use disposable test secrets.
+
+With `secret send-shard --keyring FILE`, omitting `--holder` automatically selects
+the unique external-PGP holder matching a private certificate in that file. Multiple
+matches prompt among those holders only (or require `--holder` without a terminal).
+No match is an error; public-only certificates do not qualify. Explicit `--holder`
+keeps precedence and all existing decryption/signature checks still apply.

@@ -740,7 +740,8 @@ enum SecretCommands {
     },
     #[command(
         visible_alias = "new",
-        about = "Initialize a cryptographic quorum bundle"
+        about = "Initialize a cryptographic quorum bundle",
+        after_help = "Always saves .caution/quorum-bundle.json and .caution/keymaker-pcr-policy.json in the current directory. Redirected stdout also receives the bundle JSON."
     )]
     Init(quorum_init::Options),
     #[command(about = "Encrypt env file values into .caution/secrets/*.asc")]

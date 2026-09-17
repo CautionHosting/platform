@@ -545,10 +545,8 @@ fn encrypt_env_file(
     Ok(count)
 }
 
-/// Keymaker-eligibility of a single certificate, with per-subkey detail so we can tell the
-/// user exactly which subkey is missing instead of an opaque "no eligible certificates".
+/// Key roles used to determine Keymaker eligibility of a single certificate.
 struct CertEligibility {
-    user_id: String,
     has_sign: bool,
     has_auth: bool,
     has_enc: bool,
@@ -557,21 +555,6 @@ struct CertEligibility {
 impl CertEligibility {
     fn is_eligible(&self) -> bool {
         self.has_sign && self.has_auth && self.has_enc
-    }
-
-    /// Human-readable list of the missing subkey roles, in keygen order.
-    fn missing(&self) -> Vec<&'static str> {
-        let mut missing = Vec::new();
-        if !self.has_sign {
-            missing.push("signing");
-        }
-        if !self.has_auth {
-            missing.push("authentication");
-        }
-        if !self.has_enc {
-            missing.push("storage-encryption");
-        }
-        missing
     }
 }
 
@@ -623,14 +606,8 @@ fn keymaker_cert_eligibility(
         let valid_cert = cert
             .with_policy(&policy, None)
             .with_context(Ctx::invalid_cert())?;
-        let user_id = valid_cert
-            .userids()
-            .next()
-            .map(|uid| String::from_utf8_lossy(uid.userid().value()).into_owned())
-            .unwrap_or_else(|| valid_cert.fingerprint().to_string());
 
         certs.push(CertEligibility {
-            user_id,
             has_sign: valid_cert.keys().for_signing().next().is_some(),
             has_auth: valid_cert.keys().for_authentication().next().is_some(),
             has_enc: valid_cert.keys().for_storage_encryption().next().is_some(),
@@ -1791,7 +1768,7 @@ pub async fn send_shard(
     let bundle_text =
         fs::read_to_string(&bundle_file).with_context(Ctx::read_bundle_file(&bundle_file))?;
     let (bundle, generation_time) = crate::quorum_init::load_bundle_with_timestamp(&bundle_text).with_context(Ctx::parse_bundle())?;
-    let (holder, webauthn) = crate::share_release::select_holder(&bundle.clone().to_latest().keyring, release_options.holder.as_deref())
+    let (holder, webauthn) = crate::share_release::select_holder(&bundle.clone().to_latest().keyring, release_options.holder.as_deref(), private_keyring.as_deref())
         .with_context(Ctx::parse_bundle())?;
 
     let address_str = format!("{}:49504", public_ip);
@@ -1836,7 +1813,6 @@ mod tests {
         parse_env_assignments, resolve_quorum_parameters,
     };
     use openpgp::cert::prelude::*;
-    use openpgp::parse::Parse;
     use openpgp::serialize::SerializeInto;
     use tempfile::tempdir;
 
@@ -1992,14 +1968,11 @@ UNREQUESTED=nope\n",
         let certs = keymaker_cert_eligibility(&keyring).unwrap();
         assert_eq!(certs.len(), 1);
         assert!(certs[0].is_eligible());
-        assert!(certs[0].missing().is_empty());
-        assert_eq!(certs[0].user_id, "alice@example.org");
     }
 
-    // A3: a default-style cert without an authentication subkey is reported as ineligible,
-    // naming exactly the missing role.
+    // A3: a default-style cert without an authentication subkey is ineligible.
     #[test]
-    fn cert_eligibility_reports_missing_authentication_subkey() {
+    fn cert_eligibility_rejects_missing_authentication_subkey() {
         let keyring = cert_armor(
             CertBuilder::new()
                 .add_userid("bob@example.org")
@@ -2010,6 +1983,5 @@ UNREQUESTED=nope\n",
         let certs = keymaker_cert_eligibility(&keyring).unwrap();
         assert_eq!(certs.len(), 1);
         assert!(!certs[0].is_eligible());
-        assert_eq!(certs[0].missing(), vec!["authentication"]);
     }
 }

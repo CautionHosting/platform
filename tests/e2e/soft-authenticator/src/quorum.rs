@@ -214,7 +214,9 @@ pub fn run(
     );
 
     let cli = std::env::var("QUORUM_CLI")?;
-    fs::write(work.join("Procfile"), "web: true\n")?;
+    // A plain directory must persist the bundle and policy too.
+    assert!(!work.join("Procfile").exists());
+    assert!(!work.join("caution.hcl").exists());
     let result = Command::new(&cli)
         .current_dir(work)
         .stdin(Stdio::null())
@@ -342,8 +344,8 @@ pub fn run(
             .output()?;
         assert!(!rejected.status.success());
         assert!(
-            String::from_utf8_lossy(&rejected.stderr).contains("saved repository PCR policy")
-                || String::from_utf8_lossy(&rejected.stderr).contains("saved repository policy")
+            String::from_utf8_lossy(&rejected.stderr).contains("saved local PCR policy")
+                || String::from_utf8_lossy(&rejected.stderr).contains("saved local policy")
         );
         assert_eq!(fs::read(&saved_policy_path)?, contents);
         assert_eq!(

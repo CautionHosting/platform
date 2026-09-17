@@ -533,14 +533,14 @@ fn check_saved_policy(path: &Path, selected: &KeymakerPcrPolicy) -> Result<(), I
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        result => result.with_context(Ctx::new("unable to read saved repository PCR policy"))?,
+        result => result.with_context(Ctx::new("unable to read saved local PCR policy"))?,
     };
     let saved = parse_policy(&text).with_context(Ctx::new(
-        "saved repository PCR policy is invalid; explicitly repair it before generating a quorum",
+        "saved local PCR policy is invalid; explicitly repair it before generating a quorum",
     ))?;
     if saved != *selected {
         return Err(InitError::invalid(
-            "selected PCR policy differs from the saved repository policy; explicitly replace the saved policy before generating a quorum",
+            "selected PCR policy differs from the saved local policy; explicitly replace the saved policy before generating a quorum",
         ));
     }
     Ok(())
@@ -641,13 +641,8 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
     let policy_text = fs::read_to_string(&policy_file)
         .with_context(Ctx::new("unable to read Keymaker PCR policy"))?;
     let policy = parse_policy(&policy_text)?;
-    let in_repo = Path::new("caution.hcl").exists()
-        || Path::new("Procfile").exists()
-        || Path::new(".caution/deployment.json").exists();
     let saved_policy_path = Path::new(".caution/keymaker-pcr-policy.json");
-    if in_repo {
-        check_saved_policy(saved_policy_path, &policy)?;
-    }
+    check_saved_policy(saved_policy_path, &policy)?;
     eprintln!(
         "Initialize quorum: {threshold} of {count}; {}",
         endpoint.as_deref().unwrap_or("Platform-hosted Keymaker")
@@ -809,16 +804,14 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
     }
     let json = serde_json::to_string_pretty(&response)
         .with_context(Ctx::new("unable to encode proofed bundle"))?;
-    if in_repo {
-        fs::create_dir_all(".caution")
-            .with_context(Ctx::new("unable to create .caution directory"))?;
-        // Save the accepted policy before the bundle; readers never trust policy from a response.
-        save_policy_if_absent(saved_policy_path, &policy_text, &policy)?;
-        fs::write(".caution/quorum-bundle.json", &json)
-            .with_context(Ctx::new("unable to save proofed bundle"))?;
-        output::status("Saved .caution/quorum-bundle.json and .caution/keymaker-pcr-policy.json");
-    }
-    if !in_repo || !output::is_tty_stdout() {
+    fs::create_dir_all(".caution")
+        .with_context(Ctx::new("unable to create .caution directory"))?;
+    // Save the accepted policy before the bundle; readers never trust policy from a response.
+    save_policy_if_absent(saved_policy_path, &policy_text, &policy)?;
+    fs::write(".caution/quorum-bundle.json", &json)
+        .with_context(Ctx::new("unable to save proofed bundle"))?;
+    output::status("Saved .caution/quorum-bundle.json and .caution/keymaker-pcr-policy.json");
+    if !output::is_tty_stdout() {
         output::data(&json).with_context(Ctx::new("unable to output bundle"))?;
     }
     if !uploaded && !options.no_upload {
@@ -853,11 +846,9 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
             ))?;
         checked_response(client, response).await?;
         output::status("Bundle uploaded to Platform.");
-        if in_repo {
-            output::status(
-                "Local files: .caution/quorum-bundle.json and .caution/keymaker-pcr-policy.json",
-            );
-        }
+        output::status(
+            "Local files: .caution/quorum-bundle.json and .caution/keymaker-pcr-policy.json",
+        );
     }
     Ok(())
 }

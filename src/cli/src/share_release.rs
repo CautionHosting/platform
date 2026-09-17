@@ -9,14 +9,14 @@ use locksmith::{
     models::SendSignedEncryptedShardResponse,
     release::{self, *},
 };
-use sequoia_openpgp::{Cert, parse::Parse};
+use sequoia_openpgp::{Cert, cert::CertParser, parse::Parse};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{io::IsTerminal, path::PathBuf, time::Duration};
 
 #[derive(clap::Args, Debug, Default)]
 pub(crate) struct Options {
-    /// Certificate fingerprint of the holder contributing one share.
+    /// Holder certificate fingerprint; inferred from --keyring when exactly one holder matches.
     #[arg(long)]
     pub holder: Option<String>,
     /// Custody enclave HTTP endpoint; identity is checked against --recryptor-pcr-policy.
@@ -29,8 +29,9 @@ pub(crate) struct Options {
 pub(crate) fn select_holder(
     keys: &[Key],
     requested: Option<&str>,
+    private_keyring: Option<&std::path::Path>,
 ) -> Result<(String, bool), InitError> {
-    let holders: Vec<_> = keys
+    let mut holders: Vec<_> = keys
         .iter()
         .map(|key| {
             let (cert, webauthn) = match key {
@@ -52,6 +53,16 @@ pub(crate) fn select_holder(
                 "holder fingerprint must match exactly one bundle entry",
             ))
         };
+    }
+    if let Some(path) = private_keyring {
+        let bytes = std::fs::read(path)
+            .with_context(Ctx::new("unable to read private keyring"))?;
+        holders = matching_private_holders(holders, &bytes)?;
+        if holders.len() == 1 {
+            let holder = holders.remove(0);
+            output::status(format!("Selected holder {} (external PGP)", holder.0));
+            return Ok(holder);
+        }
     }
     if !std::io::stdin().is_terminal() {
         return Err(InitError::invalid(
@@ -76,6 +87,25 @@ pub(crate) fn select_holder(
         .cloned()
         .ok_or_else(|| InitError::invalid("invalid holder selection"))
 }
+fn matching_private_holders(
+    holders: Vec<(String, bool)>,
+    bytes: &[u8],
+) -> Result<Vec<(String, bool)>, InitError> {
+    let certs = CertParser::from_bytes(bytes)
+        .with_context(Ctx::new("invalid private keyring"))?
+        .collect::<sequoia_openpgp::Result<Vec<_>>>()
+        .with_context(Ctx::new("invalid private keyring"))?;
+    let matches: Vec<_> = holders.into_iter().filter(|(fingerprint, webauthn)| {
+        !webauthn && certs.iter().any(|cert| {
+            cert.is_tsk() && cert.fingerprint().to_string() == *fingerprint
+        })
+    }).collect();
+    if matches.is_empty() {
+        return Err(InitError::invalid("private keyring matches no external-PGP holder in this bundle"));
+    }
+    Ok(matches)
+}
+
 async fn post<T: Serialize, R: DeserializeOwned>(
     client: &reqwest::Client,
     url: &str,
@@ -347,4 +377,44 @@ async fn recover_inner(
         .send(encrypted)
         .await
         .with_context(Ctx::new("send recrypted share"))
+}
+
+#[cfg(test)]
+mod holder_selection_tests {
+    use super::*;
+    use sequoia_openpgp::{cert::CertBuilder, serialize::Serialize};
+
+    #[test]
+    fn keyring_filters_external_private_identities_and_preserves_ambiguity() {
+        let (a, _) = CertBuilder::general_purpose(None, Some("a@example.test")).generate().unwrap();
+        let (b, _) = CertBuilder::general_purpose(None, Some("b@example.test")).generate().unwrap();
+        let holders = vec![(a.fingerprint().to_string(), false), (b.fingerprint().to_string(), false)];
+        let mut bytes = Vec::new();
+        a.as_tsk().serialize(&mut bytes).unwrap();
+        assert_eq!(matching_private_holders(holders.clone(), &bytes).unwrap(), vec![holders[0].clone()]);
+        b.as_tsk().serialize(&mut bytes).unwrap();
+        assert_eq!(matching_private_holders(holders.clone(), &bytes).unwrap(), holders);
+        assert!(matching_private_holders(vec![(a.fingerprint().to_string(), true)], &bytes).is_err());
+        let mut public = Vec::new();
+        a.serialize(&mut public).unwrap();
+        assert!(matching_private_holders(holders.clone(), &public).is_err());
+        assert!(matching_private_holders(holders, b"malformed").is_err());
+    }
+
+    #[test]
+    fn unique_keyring_match_needs_no_prompt_and_explicit_holder_has_precedence() {
+        let (cert, _) = CertBuilder::general_purpose(None, Some("holder@example.test")).generate().unwrap();
+        let mut public = Vec::new();
+        cert.armored().serialize(&mut public).unwrap();
+        let keys = vec![Key::OpenPGP { cert: String::from_utf8(public).unwrap() }];
+        let mut secret = Vec::new();
+        cert.as_tsk().serialize(&mut secret).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("private.asc");
+        std::fs::write(&path, secret).unwrap();
+        let expected = (cert.fingerprint().to_string(), false);
+        assert_eq!(select_holder(&keys, None, Some(&path)).unwrap(), expected);
+        assert_eq!(select_holder(&keys, Some(&expected.0), Some(&directory.path().join("absent"))).unwrap(), expected);
+        assert!(select_holder(&keys, Some("DEADBEEF"), Some(&path)).is_err());
+    }
 }

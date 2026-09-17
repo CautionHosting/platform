@@ -160,3 +160,37 @@ PUBLIC_CERTIFICATE_SERVICE_URL="$PUBLIC_CERTIFICATE_SERVICE_URL" \
 QUORUM_RECOVERY_TEST_DIR="$WORK" \
     "$RECOVERY_TEST" --ignored --exact \
     quorum_init::tests::downloaded_bundles_require_explicit_noninteractive_holder --nocapture
+# A terminal receives no JSON dump, even in a directory without app metadata.
+"${COMMON[@]}" python3 - "$CARGO_TARGET_DIR/debug/caution" "$WORK" <<'PY'
+import errno, json, os, pathlib, pty, subprocess, sys
+cli, work = sys.argv[1], pathlib.Path(sys.argv[2])
+plain = work / 'plain-terminal'
+plain.mkdir()
+master, slave = pty.openpty()
+process = subprocess.Popen([
+    cli, 'secret', 'init', str(work / 'holder.asc'), '--threshold', '1',
+    '--no-upload', '--keymaker-url', os.environ['KEYMAKER_URL'],
+    '--keymaker-pcr-policy', str(work / 'policies/keymaker-pcr-policy.json'),
+], cwd=plain, stdin=subprocess.DEVNULL, stdout=slave, stderr=subprocess.PIPE)
+os.close(slave)
+# Drain stdout while the process runs so a regression cannot fill the PTY buffer.
+output = bytearray()
+try:
+    while True:
+        chunk = os.read(master, 65536)
+        if not chunk:
+            break
+        output.extend(chunk)
+except OSError as error:
+    if error.errno != errno.EIO:
+        raise
+finally:
+    os.close(master)
+_, stderr = process.communicate(timeout=60)
+assert process.returncode == 0, stderr.decode()
+assert not output, 'terminal received bundle JSON'
+assert b'Saved .caution/quorum-bundle.json' in stderr
+json.loads((plain / '.caution/quorum-bundle.json').read_text())
+assert (plain / '.caution/keymaker-pcr-policy.json').read_bytes() == (work / 'policies/keymaker-pcr-policy.json').read_bytes()
+print('Plain-directory terminal output and persisted artifacts: OK')
+PY
