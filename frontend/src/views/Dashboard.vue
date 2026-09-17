@@ -1369,17 +1369,17 @@ make build-cli
               </div>
               <div class="bundle-actions">
                 <button
-                  v-if="bundle.data.secret_recipient_public_key"
+                  v-if="getQuorumBundleFiles(bundle).publicKey"
                   class="btn-sm btn-download"
-                  @click="downloadFile(bundle.data.secret_recipient_public_key, truncateId(bundle.id) + '_public_key.asc')"
+                  @click="downloadFile(getQuorumBundleFiles(bundle).publicKey, truncateId(bundle.id) + '_public_key.asc')"
                 >
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                   Public key
                 </button>
                 <button
-                  v-if="bundle.data.shardfile"
+                  v-if="getQuorumBundleFiles(bundle).shardfile"
                   class="btn-sm btn-download"
-                  @click="downloadFile(bundle.data.shardfile, truncateId(bundle.id) + '_shardfile.asc')"
+                  @click="downloadFile(getQuorumBundleFiles(bundle).shardfile, truncateId(bundle.id) + '_shardfile.asc')"
                 >
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                   Shard file
@@ -2086,6 +2086,7 @@ import {
 import { formatLocalDate, formatLocalTime } from "../utils/dateTime.js";
 import { getSubscriptionPlanAction } from "../utils/subscriptionPlan.js";
 import { getCurrentTheme } from "../utils/theme.js";
+import { getQuorumBundleFiles } from "../utils/quorumBundle.js";
 
 async function sha256Hex(message) {
   const msgBuffer = new TextEncoder().encode(message);
@@ -4454,9 +4455,10 @@ export default {
 
     const computeBundleHashes = async () => {
       for (const bundle of quorumBundles.value) {
-        if (bundle.data?.secret_recipient_public_key) {
+        const { publicKey } = getQuorumBundleFiles(bundle);
+        if (publicKey) {
           try {
-            const encoded = new TextEncoder().encode(bundle.data.secret_recipient_public_key);
+            const encoded = new TextEncoder().encode(publicKey);
             const hashBuffer = await crypto.subtle.digest('SHA-256', encoded);
             const hashArray = Array.from(new Uint8Array(hashBuffer));
             const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
@@ -5298,6 +5300,7 @@ export default {
       cancelAddLabel,
       saveLabel,
       removeLabel,
+      getQuorumBundleFiles,
       downloadFile,
       credentials,
       loadingCreds,

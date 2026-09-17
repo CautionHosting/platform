@@ -50,12 +50,17 @@ Automatic custody selection rejects members with neither registered PGP keys nor
 passkeys with a "no usable custody" error before prompting. Register a PGP key
 before selecting such a member.
 The threshold defaults to one; `--max`, if supplied, must equal the holder count.
+API and CLI creation support 1–254 holders in total, including local certificates
+and organization selections. Larger selections fail before key-service requests;
+bundle uploads enforce the same holder limit.
 Labels use repeated `--label KEY=VALUE`. Omitted or null API labels are stored as
 `{}`; supplied objects are preserved. An explicit name and a `name` label must
 match; conflicting values are rejected before generation in both API and CLI.
 
 API and direct CLI creation reject duplicate primary identities and shared storage
-encryption subkeys, including expired recipients that Keyfork can still select.
+encryption key material, including expired recipients that Keyfork can still select.
+Different key creation timestamps and fingerprints do not make shared material
+independent quorum holders. Upload validation applies the same material check.
 Eligibility still requires live signing, authentication and storage-encryption
 keys. Both checks recognize the critical `organization-id@caution.co` and
 `bundle-id@caution.co` notations.
@@ -76,8 +81,12 @@ creation, upload, updates and deletion require fresh FIDO2 signed requests at th
 gateway, including in E2E builds. Dashboard deletion signs the canonical
 `/quorum-bundles/{id}` path with an empty body; cancelling the passkey prompt
 sends no deletion. CLI and dashboard renaming/label edits use the existing signing flow. Dashboard
-metadata edits display passkey cancellation errors without sending an update. Downloads and local
-files retain the proof envelope. Readers verify before using the public key.
+metadata edits display passkey cancellation errors without sending an update. Full bundle
+downloads and local bundle files retain the proof envelope. Dashboard public-key and
+shard-file downloads read the V1 payload inside the envelope and also support existing
+legacy stored payloads; the public-key hash uses the same reader. These individual
+file downloads do not include the proof. Readers verify the full bundle before using
+the public key; dashboard compatibility does not add legacy cryptographic verification.
 
 ## Trust and service configuration
 
@@ -135,6 +144,26 @@ policy causes an error: explicitly repair or replace that file to change trust.
 Equivalent parsed policies preserve the existing file, including its formatting.
 Every PCR value must decode to exactly 48 bytes.
 
+When stdout is redirected, `secret init`/`new` emits the proofed bundle JSON even
+inside a project, in addition to saving `.caution/quorum-bundle.json`. Outside a
+project it always emits the JSON. Status messages go to stderr.
+
+Direct Keymaker creation saves the verified bundle locally before requesting
+authorization to upload it to Platform (unless `--no-upload` is set). The upload
+prompt displays the bundle ID, threshold, holder fingerprints and SHA-256 of the
+exact request body instead of dumping certificates and attestation bytes. The
+signature still covers the complete upload body. Successful upload prints a
+confirmation and repeats the local file paths. An upload failure does not require
+regenerating the bundle or calling another Keymaker.
+
+Uploads of existing proofed V1 bundles validate holder certificate eligibility at
+the authenticated generation timestamp; new bundles require eligibility today.
+For example, a January bundle can still be restored after one holder's key expires
+in June, provided that key was eligible in January. This preserves the original
+proof-bound certificates; it does not renew expired keys or guarantee recovery.
+The explicitly gated synthetic test proofs have no authenticated timestamp and
+retain current-time holder validation.
+
 For existing proofed V1 bundles, `secret encrypt` and `secret send-shard` require
 an independently provisioned policy too. These commands have no
 `--keymaker-pcr-policy` flag: set `KEYMAKER_PCR_POLICY_PATH` to the policy's host
@@ -170,8 +199,12 @@ The shared models and loader are pinned to the Locksmith revision recorded in
 `Cargo.toml` and `Cargo.lock`. All Bootproof SDK consumers use the historical
 verification revision `821b5c63e80f082f6d67ba3695c11416933489ec`, including the existing
 ES384 encoding fix. No old-remote patch or local path dependency is required.
-The default Locksmith daemon revision is also `93229565410d212a525e91fc2e3d7f3df249ef58`,
+The default Locksmith daemon revision is also `af98a3901cfe0ed28e0e8dc4037b7635bfc60946`,
 matching the API/CLI loader. `LOCKSMITH_COMMIT` still overrides this default.
+The standalone mock E2E helper uses the same revision. This revision includes
+holder-identity checks during shard submission and shared-signing-key rejection
+in Keymaker. `LOCKSMITH_COMMIT` selects the deployed daemon only; it does not
+override the API/CLI Cargo dependencies. Keep both pins aligned when upgrading.
 Existing deployed images require a rebuild/redeployment to use it. Legacy
 bundle fallback remains unimplemented.
 

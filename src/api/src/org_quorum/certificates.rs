@@ -167,7 +167,7 @@ fn verify_certificates(
     let org = hex::encode(organization_id);
     let id = hex::encode(bundle.bundle_id);
     for (index, armored) in bundle.certificates.iter().enumerate() {
-        let cert = eligible_certificate(armored).with_context(Ctx::new(
+        let cert = eligible_certificate(armored, None).with_context(Ctx::new(
             StatusCode::BAD_GATEWAY,
             "ineligible derived holder certificate",
         ))?;
@@ -217,7 +217,7 @@ fn verify_certificates(
         .iter()
         .map(|cert| Key::OpenPGP { cert: cert.clone() })
         .collect();
-    validate_keyring(&keys).with_context(Ctx::new(
+    validate_keyring(&keys, None).with_context(Ctx::new(
         StatusCode::BAD_GATEWAY,
         "duplicate derived recipients",
     ))?;

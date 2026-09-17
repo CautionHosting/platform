@@ -676,7 +676,7 @@ pub enum ResolveQuorumParametersError {
     },
 
     #[error(
-        "keyring contains more than 255 Keymaker-eligible public certificates (found {eligible_certs}) [{location:?}]"
+        "keyring contains more than 254 Keymaker-eligible public certificates (found {eligible_certs}) [{location:?}]"
     )]
     TooManyCerts {
         eligible_certs: usize,
@@ -685,7 +685,7 @@ pub enum ResolveQuorumParametersError {
         location: Location,
 
         #[source]
-        source: BoxError,
+        source: Option<BoxError>,
     },
 
     #[error(
@@ -720,16 +720,20 @@ pub(crate) fn resolve_quorum_parameters(
     max: Option<u8>,
     eligible_certs: usize,
 ) -> Result<(u8, u8), ResolveQuorumParametersError> {
-    use ResolveQuorumParametersErrorCtx as Ctx;
-
     if eligible_certs == 0 {
         return Err(ResolveQuorumParametersError::NoEligibleCerts {
             location: std::panic::Location::caller(),
         });
     }
 
-    let inferred_max =
-        u8::try_from(eligible_certs).with_context(Ctx::too_many_certs(eligible_certs))?;
+    if eligible_certs > 254 {
+        return Err(ResolveQuorumParametersError::TooManyCerts {
+            eligible_certs,
+            location: std::panic::Location::caller(),
+            source: None,
+        });
+    }
+    let inferred_max = eligible_certs as u8;
     let threshold = threshold.unwrap_or(1);
     let max = max.unwrap_or(inferred_max);
 
@@ -1936,6 +1940,24 @@ UNREQUESTED=nope\n",
     #[test]
     fn resolve_quorum_parameters_infers_max_from_keyring() {
         assert_eq!(resolve_quorum_parameters(None, None, 10).unwrap(), (1, 10));
+    }
+
+    #[test]
+    fn resolve_quorum_parameters_enforces_keymaker_holder_limit() {
+        assert!(resolve_quorum_parameters(None, None, 0).is_err());
+        assert_eq!(
+            resolve_quorum_parameters(Some(254), None, 254).unwrap(),
+            (254, 254)
+        );
+        for count in [255, 256] {
+            let error = resolve_quorum_parameters(None, None, count).unwrap_err();
+            assert!(matches!(
+                error,
+                super::ResolveQuorumParametersError::TooManyCerts { .. }
+            ));
+            assert!(error.to_string().contains("more than 254"));
+        }
+        assert!(resolve_quorum_parameters(Some(255), Some(255), 255).is_err());
     }
 
     #[test]
