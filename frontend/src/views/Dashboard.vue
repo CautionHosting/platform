@@ -1294,24 +1294,24 @@ make build-cli
     <div v-if="activeTab === 'keys'" class="content-card content-card--dashboard-tab">
       <div class="content-header">
         <div class="content-header-text">
-          <h2 class="content-header-title">Secrets</h2>
-          <p class="content-header-description">
-            Manage quorum bundles created via <code>caution secret new</code>.
-          </p>
+          <h2 class="content-header-title">Secrets <span v-if="!loadingBundles" class="bundle-count">{{ quorumBundles.length }} bundles</span></h2>
+          <p class="content-header-description">Quorum bundles and their holders. Create with <code>caution secret init</code>.</p>
         </div>
       </div>
-
       <div class="items-list">
         <div v-if="loadingBundles" class="loading">Loading bundles...</div>
         <div v-else-if="quorumBundles.length === 0" class="list-item-empty dashboard-tab-empty">
-          <p class="list-item-empty-copy">
-            No secret bundles yet. Create one with <code>caution secret new</code>.
-          </p>
+          <p class="list-item-empty-copy">No secret bundles yet. Create one with <code>caution secret init</code>.</p>
         </div>
-        <div v-else>
+        <div v-else class="bundle-list">
+          <div class="bundle-columns" aria-hidden="true"><span>Bundle</span><span>Quorum</span><span>Custody</span><span>Actions</span></div>
           <div v-for="bundle in quorumBundles" :key="bundle.id" class="bundle-card">
-            <div class="bundle-header">
-              <div class="item-info">
+            <div class="bundle-row">
+              <div class="bundle-identity">
+                <button class="bundle-toggle" :aria-label="`${expandedBundles[bundle.id] ? 'Collapse' : 'Expand'} ${bundle.name || truncateId(bundle.id)}`" :aria-expanded="!!expandedBundles[bundle.id]" :aria-controls="`bundle-details-${bundle.id}`" @click="expandedBundles[bundle.id] = !expandedBundles[bundle.id]">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" :class="{ 'is-expanded': expandedBundles[bundle.id] }"><path d="m9 5 7 7-7 7"/></svg>
+                </button>
+                <div class="bundle-title">
                 <div v-if="editingBundleName === bundle.id" class="bundle-name-edit">
                   <input
                     v-model="editBundleNameValue"
@@ -1323,32 +1323,56 @@ make build-cli
                   <button class="btn-sm btn-primary" @click="saveBundleName(bundle.id)">Save</button>
                   <button class="btn-sm btn-secondary" @click="cancelEditBundleName()">Cancel</button>
                 </div>
-                <div v-else class="bundle-name-display">
-                  <span class="item-name">{{ bundle.name || truncateId(bundle.id) }}</span>
-                  <button class="btn-icon" @click="startEditBundleName(bundle)" title="Rename bundle">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-                      <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-                    </svg>
-                  </button>
+                  <div v-else class="bundle-name-display"><span class="item-name">{{ bundle.name || truncateId(bundle.id) }}</span></div>
+                  <div class="bundle-subtitle"><span v-if="bundle.name">{{ truncateId(bundle.id) }} · </span>{{ formatDate(bundle.created_at) }}</div>
                 </div>
-                <span v-if="bundle.name" class="item-meta-id">{{ truncateId(bundle.id) }}</span>
-                <span class="item-meta">Created {{ formatDate(bundle.created_at) }}</span>
               </div>
-              <div class="item-actions">
-                <button
-                  @click="deleteBundle(bundle.id)"
-                  class="btn-danger"
-                  :disabled="deletingBundle === bundle.id"
-                >
-                  <svg v-if="deletingBundle === bundle.id" class="spinner" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <circle cx="12" cy="12" r="10" stroke-opacity="0.25"/>
-                    <path d="M12 2a10 10 0 0 1 10 10" stroke-linecap="round"/>
-                  </svg>
-                  {{ deletingBundle === bundle.id ? "Deleting..." : "Delete" }}
-                </button>
+              <div class="bundle-field"><span class="bundle-mobile-label">Quorum</span>{{ getQuorumBundleSummary(bundle).threshold || 'Unavailable' }}</div>
+              <div class="bundle-field"><span class="bundle-mobile-label">Custody</span>{{ getQuorumBundleSummary(bundle).custody || 'Unavailable' }}</div>
+              <div class="bundle-actions" @click="handleBundleMenuSelection">
+                <div class="bundle-download-group">
+                  <button v-if="serializeQuorumBundle(bundle)" class="bundle-download" @click="downloadFile(serializeQuorumBundle(bundle), bundle.id + '_quorum-bundle.json', 'application/json')">Download bundle</button>
+                  <div v-if="getQuorumBundleFiles(bundle).publicKey || getQuorumBundleFiles(bundle).shardfile" class="bundle-menu-anchor">
+                    <button class="bundle-download bundle-download-chevron" :aria-label="`Other downloads for ${bundle.name || truncateId(bundle.id)}`" :aria-expanded="bundleMenu === bundle.id + ':downloads'" :aria-controls="`bundle-downloads-${bundle.id}`" @click="toggleBundleMenu(bundle.id + ':downloads', $event)">⌄</button>
+                    <div v-if="bundleMenu === bundle.id + ':downloads'" :id="`bundle-downloads-${bundle.id}`" class="bundle-menu">
+                      <button v-if="getQuorumBundleFiles(bundle).publicKey" @click="downloadFile(getQuorumBundleFiles(bundle).publicKey, truncateId(bundle.id) + '_public_key.asc')">Public key (.asc)</button>
+                      <button v-if="getQuorumBundleFiles(bundle).shardfile" @click="downloadFile(getQuorumBundleFiles(bundle).shardfile, truncateId(bundle.id) + '_shardfile.asc')">Shard file (.asc)</button>
+                    </div>
+                  </div>
+                </div>
+                <div class="bundle-menu-anchor">
+                  <button class="bundle-overflow" :aria-label="`Actions for ${bundle.name || truncateId(bundle.id)}`" :aria-expanded="bundleMenu === bundle.id + ':actions'" :aria-controls="`bundle-actions-${bundle.id}`" @click="toggleBundleMenu(bundle.id + ':actions', $event)">⋯</button>
+                  <div v-if="bundleMenu === bundle.id + ':actions'" :id="`bundle-actions-${bundle.id}`" class="bundle-menu">
+                    <button @click="startEditBundleName(bundle)">Rename</button>
+                    <button class="bundle-delete" :disabled="deletingBundle === bundle.id" @click="deleteBundle(bundle.id)">{{ deletingBundle === bundle.id ? 'Deleting...' : 'Delete' }}</button>
+                  </div>
+                </div>
               </div>
             </div>
+            <div v-if="expandedBundles[bundle.id]" class="bundle-details" :id="`bundle-details-${bundle.id}`">
+              <h3 class="bundle-section-title">Holders</h3>
+              <p class="bundle-registration-note">Names match current organization key registrations.</p>
+              <p v-if="!bundle.holders?.length" class="bundle-label">Unavailable</p>
+              <div v-for="(holder, index) in bundle.holders" :key="index" class="bundle-holder">
+                <span class="bundle-holder-name">{{ holder.username || `Holder ${index + 1}` }}</span>
+                <span class="bundle-custody">{{ holder.custody === 'pgp' ? 'PGP' : holder.custody === 'caution_backed' ? 'Passkey-backed' : 'Unknown custody' }}</span>
+                <div class="bundle-fingerprint">
+                  <span class="bundle-label">Certificate fingerprint</span>
+                  <code>{{ holder.fingerprint ? (revealedBundleValues[bundle.id + ':' + index] ? holder.fingerprint : abbreviateBundleValue(holder.fingerprint)) : 'Unavailable' }}</code>
+                  <template v-if="holder.fingerprint">
+                    <button class="bundle-text-button" :aria-label="`Toggle full certificate fingerprint for holder ${index + 1}`" :aria-expanded="!!revealedBundleValues[bundle.id + ':' + index]" @click="revealedBundleValues[bundle.id + ':' + index] = !revealedBundleValues[bundle.id + ':' + index]">{{ revealedBundleValues[bundle.id + ':' + index] ? 'Hide' : 'Reveal' }}</button>
+                    <button class="bundle-text-button" :aria-label="`Copy certificate fingerprint for holder ${index + 1}`" @click="copyToClipboard(holder.fingerprint, 'Certificate fingerprint')">Copy</button>
+                  </template>
+                </div>
+              </div>
+              <div class="bundle-hash-row">
+                <span class="bundle-label">Public key SHA-256</span>
+                <code>{{ bundleKeyHashes[bundle.id] ? (revealedBundleValues[bundle.id + ':hash'] ? bundleKeyHashes[bundle.id] : abbreviateBundleValue(bundleKeyHashes[bundle.id])) : 'Unavailable' }}</code>
+                <template v-if="bundleKeyHashes[bundle.id]">
+                  <button class="bundle-text-button" aria-label="Toggle full public key SHA-256" :aria-expanded="!!revealedBundleValues[bundle.id + ':hash']" @click="revealedBundleValues[bundle.id + ':hash'] = !revealedBundleValues[bundle.id + ':hash']">{{ revealedBundleValues[bundle.id + ':hash'] ? 'Hide' : 'Reveal' }}</button>
+                  <button class="bundle-text-button" aria-label="Copy public key SHA-256" @click="copyToClipboard(bundleKeyHashes[bundle.id], 'Public key SHA-256')">Copy</button>
+                </template>
+              </div>
             <div class="bundle-labels">
               <span v-for="(v, k) in (bundle.labels || {})" :key="k" class="bundle-label-tag">
                 {{ k }}: {{ v }}
@@ -1362,50 +1386,6 @@ make build-cli
                 <button class="btn-sm btn-secondary" @click="cancelAddLabel()">Cancel</button>
               </span>
             </div>
-            <div class="bundle-details" v-if="bundle.data">
-              <div class="bundle-detail-row" v-if="getQuorumBundleSummary(bundle).threshold">
-                <span class="bundle-label">Threshold</span>
-                <span>{{ getQuorumBundleSummary(bundle).threshold }}</span>
-              </div>
-              <div class="bundle-detail-row" v-if="getQuorumBundleSummary(bundle).custody">
-                <span class="bundle-label">Custody</span>
-                <span>{{ getQuorumBundleSummary(bundle).custody }}</span>
-              </div>
-              <details v-if="bundle.holders?.length">
-                <summary>Holders</summary>
-                <p class="text-muted">Names match current organization key registrations.</p>
-                <div v-for="(holder, index) in bundle.holders" :key="index" class="bundle-detail-row">
-                  <span>{{ holder.username || `Holder ${index + 1}` }} · {{ holder.custody === 'pgp' ? 'PGP' : holder.custody === 'caution_backed' ? 'Passkey-backed' : 'Unknown custody' }}</span>
-                  <code style="overflow-wrap: anywhere">{{ holder.fingerprint || 'Fingerprint unavailable' }}</code>
-                </div>
-              </details>
-              <div class="bundle-detail-row" v-if="bundleKeyHashes[bundle.id]">
-                <span class="bundle-label">Public key hash</span>
-                <code class="bundle-hash">{{ bundleKeyHashes[bundle.id] }}</code>
-              </div>
-              <div class="bundle-actions">
-                <button
-                  v-if="serializeQuorumBundle(bundle)"
-                  class="btn-sm btn-primary"
-                  @click="downloadFile(serializeQuorumBundle(bundle), bundle.id + '_quorum-bundle.json', 'application/json')"
-                >Download bundle (.json)</button>
-                <button
-                  v-if="getQuorumBundleFiles(bundle).publicKey"
-                  class="btn-sm btn-download"
-                  @click="downloadFile(getQuorumBundleFiles(bundle).publicKey, truncateId(bundle.id) + '_public_key.asc')"
-                >
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                  Public key
-                </button>
-                <button
-                  v-if="getQuorumBundleFiles(bundle).shardfile"
-                  class="btn-sm btn-download"
-                  @click="downloadFile(getQuorumBundleFiles(bundle).shardfile, truncateId(bundle.id) + '_shardfile.asc')"
-                >
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                  Shard file
-                </button>
-              </div>
             </div>
           </div>
         </div>
@@ -2457,6 +2437,29 @@ export default {
     const newCredIsDefault = ref(false);
 
     // Quorum bundles state
+    const expandedBundles = ref({});
+    const revealedBundleValues = ref({});
+    const bundleMenu = ref(null);
+    let bundleMenuTrigger = null;
+    const abbreviateBundleValue = value => value.length > 20 ? `${value.slice(0, 12)}…${value.slice(-8)}` : value;
+    const closeBundleMenu = () => { bundleMenu.value = null; };
+    const toggleBundleMenu = (menu, event) => {
+      bundleMenu.value = bundleMenu.value === menu ? null : menu;
+      bundleMenuTrigger = event.currentTarget;
+    };
+    const handleBundleMenuSelection = event => {
+      if (event.target.closest('.bundle-menu button, .bundle-download:not(.bundle-download-chevron)')) closeBundleMenu();
+    };
+    const handleBundleMenuOutsideClick = event => {
+      if (!event.target.closest('.bundle-menu-anchor')) closeBundleMenu();
+    };
+    const handleBundleMenuKeydown = event => {
+      if (event.key === 'Escape' && bundleMenu.value) {
+        closeBundleMenu();
+        bundleMenuTrigger?.focus();
+      }
+    };
+    watch(activeTab, closeBundleMenu);
     const quorumBundles = ref([]);
     const loadingBundles = ref(true);
     const deletingBundle = ref(null);
@@ -4483,7 +4486,7 @@ export default {
             const hashBuffer = await crypto.subtle.digest('SHA-256', encoded);
             const hashArray = Array.from(new Uint8Array(hashBuffer));
             const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-            bundleKeyHashes.value[bundle.id] = hashHex.substring(0, 16);
+            bundleKeyHashes.value[bundle.id] = hashHex;
           } catch {
             // skip hash computation on error
           }
@@ -5127,6 +5130,8 @@ export default {
     };
 
     onMounted(async () => {
+      document.addEventListener("click", handleBundleMenuOutsideClick);
+      document.addEventListener("keydown", handleBundleMenuKeydown);
       const initialTab = getTabFromLocation();
       activeTab.value = initialTab;
 
@@ -5171,6 +5176,8 @@ export default {
     });
 
     onUnmounted(() => {
+      document.removeEventListener("click", handleBundleMenuOutsideClick);
+      document.removeEventListener("keydown", handleBundleMenuKeydown);
       window.removeEventListener("keydown", handleKeyDown);
       document.removeEventListener("click", handleDnsTooltipOutsideClick);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
@@ -5304,6 +5311,12 @@ export default {
       removePgpKey,
       cancelPgpKeyForm,
       formatPgpFingerprint,
+      expandedBundles,
+      revealedBundleValues,
+      bundleMenu,
+      abbreviateBundleValue,
+      toggleBundleMenu,
+      handleBundleMenuSelection,
       quorumBundles,
       loadingBundles,
       deletingBundle,
@@ -7414,9 +7427,44 @@ export default {
   cursor: not-allowed;
 }
 
-/* Quorum bundle cards */
+/* Compact quorum bundle list */
+.bundle-count {
+  font-size: .85rem;
+  font-weight: 400;
+  color: var(--theme-text-muted);
+  margin-left: 12px;
+  white-space: nowrap;
+}
+
+.bundle-list {
+  border: 1px solid var(--theme-border);
+  border-radius: 12px;
+}
+
+.bundle-columns, .bundle-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(115px, .5fr) minmax(140px, .6fr) 220px;
+  gap: 20px;
+  align-items: center;
+}
+
+.bundle-columns {
+  padding: 14px 20px;
+  font-size: .75rem;
+  color: var(--theme-text-muted);
+  border-bottom: 1px solid var(--theme-border);
+}
+
+.bundle-columns > :first-child {
+  padding-left: 28px;
+}
+
+.bundle-columns > :last-child {
+  text-align: right;
+}
+
 .bundle-card {
-  padding: 16px 20px;
+  padding: 20px;
   border-bottom: 1px solid var(--theme-border);
 }
 
@@ -7424,60 +7472,289 @@ export default {
   border-bottom: none;
 }
 
-.bundle-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.bundle-details {
-  padding-top: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.bundle-detail-row {
+.bundle-identity {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
+  min-width: 0;
 }
 
-.bundle-label {
-  font-size: 0.8rem;
+.bundle-title {
+  min-width: 0;
+}
+
+.bundle-title .item-name {
+  overflow-wrap: anywhere;
+}
+
+.bundle-subtitle {
+  font-size: .78rem;
   color: var(--theme-text-muted);
+  margin-top: 6px;
 }
 
-.bundle-hash {
-  font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", monospace;
-  font-size: 0.8rem;
-  color: var(--theme-text-secondary);
-  background: var(--theme-surface-muted);
-  padding: 2px 6px;
-  border-radius: 3px;
+.bundle-toggle, .bundle-overflow {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  background: none;
+  border: 0;
+  color: var(--theme-text-muted);
+  cursor: pointer;
+  padding: 8px;
+  flex-shrink: 0;
+  border-radius: 6px;
+}
+
+.bundle-toggle {
+  margin-left: -8px;
+}
+
+.bundle-toggle svg {
+  transition: transform .15s;
+}
+
+.bundle-toggle svg.is-expanded {
+  transform: rotate(90deg);
+}
+
+.bundle-field {
+  font-size: .85rem;
+  line-height: 1.5;
+}
+
+.bundle-mobile-label {
+  display: none;
 }
 
 .bundle-actions {
   display: flex;
   gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
 }
 
-.btn-download {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 10px;
-  font-size: 0.8rem;
-  color: var(--theme-text-muted);
+.bundle-download-group {
+  display: flex;
+}
+
+.bundle-download {
+  background: var(--theme-text-primary);
+  color: var(--theme-surface);
+  border: 1px solid var(--theme-border);
+  border-radius: 6px;
+  font: inherit;
+  font-size: .8rem;
+  font-weight: 600;
+  padding: 9px 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.bundle-download-group:has(.bundle-download-chevron) > .bundle-download {
+  border-radius: 6px 0 0 6px;
+}
+
+.bundle-download-chevron {
+  border-radius: 0 6px 6px 0;
+  padding-inline: 9px;
+}
+
+.bundle-menu-anchor {
+  position: relative;
+}
+
+.bundle-overflow {
+  font-size: 1.3rem;
+}
+
+.bundle-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 20;
+  width: 185px;
+  max-width: calc(100vw - 48px);
   background: var(--theme-surface);
   border: 1px solid var(--theme-border);
+  border-radius: 8px;
+  padding: 5px;
+  box-shadow: 0 8px 24px #0003;
+}
+
+.bundle-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: .85rem;
+  padding: 10px;
   border-radius: 4px;
   cursor: pointer;
 }
-.btn-download:hover {
-  border-color: var(--theme-text-faint);
+
+.bundle-menu button:hover, .bundle-toggle:hover, .bundle-overflow:hover {
+  background: var(--theme-surface-muted);
+}
+
+.bundle-menu .bundle-delete {
+  color: var(--theme-danger, #e05260);
+}
+
+.bundle-details {
+  margin: 20px 0 0 36px;
+  padding-top: 20px;
+  border-top: 1px solid var(--theme-border);
+}
+
+.bundle-section-title {
+  font-size: .9rem;
+  margin: 0;
+}
+
+.bundle-registration-note {
+  font-size: .78rem;
+  color: var(--theme-text-muted);
+  margin: 6px 0 16px;
+}
+
+.bundle-holder {
+  display: grid;
+  grid-template-columns: minmax(100px, 1fr) 140px minmax(240px, 2fr);
+  align-items: center;
+  gap: 16px;
+  padding: 12px 0;
+}
+
+.bundle-holder-name {
+  overflow-wrap: anywhere;
+  font-size: .9rem;
+}
+
+.bundle-custody {
+  font-size: .75rem;
   color: var(--theme-text-secondary);
-  background: var(--theme-surface-subtle);
+}
+
+.bundle-fingerprint, .bundle-hash-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.bundle-fingerprint .bundle-label {
+  flex-basis: 100%;
+  font-size: .7rem;
+}
+
+.bundle-details code {
+  overflow-wrap: anywhere;
+  min-width: 0;
+  font-size: .78rem;
+  color: var(--theme-text-secondary);
+}
+
+.bundle-label {
+  font-size: .8rem;
+  color: var(--theme-text-muted);
+}
+
+.bundle-hash-row {
+  border-top: 1px solid var(--theme-border);
+  margin-top: 12px;
+  padding-top: 16px;
+}
+
+.bundle-text-button {
+  border: 0;
+  background: none;
+  padding: 4px;
+  color: var(--theme-text-muted);
+  font-size: .75rem;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.bundle-list button:focus-visible {
+  outline: 2px solid var(--theme-text-secondary);
+  outline-offset: 3px;
+}
+
+.bundle-name-edit {
+  flex-wrap: wrap;
+}
+
+.bundle-name-edit .bundle-name-input {
+  width: 100%;
+  min-width: 0;
+}
+
+@media (max-width: 1200px) {
+  .bundle-columns {
+    display: none;
+  }
+
+  .bundle-row {
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+
+  .bundle-identity {
+    grid-column: 1 / -1;
+  }
+
+  .bundle-mobile-label {
+    display: block;
+    color: var(--theme-text-muted);
+    font-size: .7rem;
+    margin-bottom: 4px;
+  }
+
+  .bundle-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+
+  .bundle-holder {
+    grid-template-columns: 1fr auto;
+  }
+
+  .bundle-fingerprint {
+    grid-column: 1 / -1;
+  }
+
+  .bundle-details {
+    margin-left: 0;
+  }
+
+}
+@media (max-width: 600px) {
+  .bundle-card {
+    padding: 16px;
+  }
+
+  .bundle-count {
+    display: inline-block;
+    margin-left: 6px;
+  }
+
+  .bundle-holder {
+    gap: 8px;
+  }
+
+  .bundle-download {
+    padding-inline: 8px;
+  }
+
+  .bundle-actions > .bundle-menu-anchor {
+    margin-left: auto;
+  }
+
 }
 
 .bundle-name-display {
