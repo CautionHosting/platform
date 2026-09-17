@@ -16,6 +16,9 @@ use std::{
 };
 use uuid::Uuid;
 
+#[path = "release_relay_metadata.rs"]
+mod metadata;
+
 struct Pending {
     browser: String,
     deadline: Instant,
@@ -43,6 +46,8 @@ pub struct Finish {
 pub struct Approval {
     prepared: Attested<Prepared>,
     nonce: String,
+    #[serde(default)]
+    display: Option<metadata::DisplayContext>,
 }
 
 // Trust is configured by the operator, never supplied by the relay requester.
@@ -91,7 +96,9 @@ fn verified_request(
     let context_hash = release::hash(prepared).map_err(|_| StatusCode::BAD_REQUEST)?;
     Ok((
         json!({"options": options, "context": prepared.context,
-        "destination_key": prepared.destination_key, "context_hash": context_hash}),
+        "destination_key": prepared.destination_key, "context_hash": context_hash,
+        "destination_attestation_hash":prepared.destination_attestation_hash,
+        "custody_policy":trusted, "approval_origin":crate::handlers::get_rp_origin()}),
         Duration::from_secs(remaining),
     ))
 }
@@ -101,11 +108,20 @@ pub async fn begin(
     headers: HeaderMap,
     Json(approval): Json<Approval>,
 ) -> Result<Json<Value>, StatusCode> {
-    crate::handlers::authenticate_session(&state, &headers)
+    let credential = crate::handlers::authenticate_session(&state, &headers)
         .await
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
-    let (request, lifetime) =
+    if approval.display.as_ref().is_some_and(|display| !display.valid()) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let started = Instant::now();
+    let (mut request, lifetime) =
         verified_request(&approval, &trusted_measurements()?, &state.relying_party_id)?;
+    if let Ok(user) = crate::db::get_user_id_by_credential(&state.db, &credential).await {
+        request["metadata"] = metadata::load(&state, user, &approval.prepared.data, approval.display.as_ref()).await;
+    }
+    request["reported"] = serde_json::to_value(&approval.display).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if started.elapsed() >= lifetime { return Err(StatusCode::GONE); }
     let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let browser = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let mut pending = store()
@@ -119,7 +135,7 @@ pub async fn begin(
         token.clone(),
         Pending {
             browser: browser.clone(),
-            deadline: Instant::now() + lifetime,
+            deadline: started + lifetime,
             request,
             result: None,
         },
@@ -259,7 +275,7 @@ mod tests {
 mod verification_tests {
     use super::*;
 
-    fn fixture() -> (Approval, Measurements) {
+    pub(super) fn fixture() -> (Approval, Measurements) {
         let expiry = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
@@ -281,6 +297,7 @@ mod verification_tests {
                 attestation: vec![],
             },
             nonce: "34".repeat(32),
+            display: None,
         };
         synthetic_proof(&mut approval);
         (approval, (0..=2).map(|i| (i, "ab".repeat(48))).collect())
@@ -322,6 +339,14 @@ mod verification_tests {
         );
         assert_eq!(display["context"]["holder"], "holder");
         assert!(ttl.as_secs() <= 120);
+        assert_eq!(display["destination_attestation_hash"], "destination");
+        assert_eq!(display["custody_policy"], serde_json::to_value(&pcrs).unwrap());
+        let (mut descriptive, _) = fixture();
+        descriptive.display = Some(metadata::DisplayContext { application_id: Uuid::new_v4(),
+            destination_address: "203.0.113.42:49504".parse().unwrap(), custody_url: "https://custody.example.test".into() });
+        let original = verified_request(&descriptive, &pcrs, "example.com").unwrap().0;
+        descriptive.display.as_mut().unwrap().application_id = Uuid::new_v4();
+        assert_eq!(verified_request(&descriptive, &pcrs, "example.com").unwrap().0, original);
         for field in [
             "challenge",
             "holder",

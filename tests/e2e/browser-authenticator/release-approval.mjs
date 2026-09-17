@@ -9,13 +9,15 @@ import assert from 'node:assert/strict'
 
 const root = resolve(import.meta.dirname, '../../../frontend/dist')
 let options, finish
+let expires = Math.floor(Date.now()/1000) + 120
+let includeMetadata = true
 const server = createServer(async (request, response) => {
   const path = new URL(request.url, 'http://localhost').pathname
   if (path.startsWith('/auth/qr-release/')) {
     let body = ''; for await (const chunk of request) body += chunk
     const input = JSON.parse(body)
     response.setHeader('content-type', 'application/json')
-    if (path.endsWith('/read')) return response.end(JSON.stringify({ options, context: { bundle_id: Array(16).fill(1), holder: 'test-holder', destination_policy: { 0: 'ab'.repeat(48), 1: 'ab'.repeat(48), 2: 'ab'.repeat(48) } }, destination_key: Array(32).fill(2), context_hash: 'test-context-hash' }))
+    if (path.endsWith('/read')) return response.end(JSON.stringify({ options, context: { bundle_id: Array(16).fill(1), holder: 'test-holder', expires_at_unix_seconds: expires, organization_id: Array(16).fill(3), version: 'V1', destination_policy: { 0: 'ab'.repeat(48), 1: 'ab'.repeat(48), 2: 'ab'.repeat(48) } }, destination_key: Array(32).fill(2), context_hash: 'edcd12bf40e1c288' + '0'.repeat(48), metadata: includeMetadata ? { application: { name: '<img src=x onerror=alert(1)>', id: 'test-app', public_ip: '203.0.113.43', domain: 'app.example.test', state: 'running' }, bundle: { username: 'alice', threshold: 2, holders: 3, eligible_passkeys: 2 } } : null, reported: { destination_address: '203.0.113.42:49504', custody_url: 'https://custody.example.test' } }))
     finish = input
     return response.end('{}')
   }
@@ -49,7 +51,21 @@ try {
   options = { publicKey: { challenge, rpId: 'localhost', timeout: 30000, userVerification: 'required', allowCredentials: [{ type: 'public-key', id: registration.id }] } }
   await page.goto(`${origin}/qr-release#approval-test`)
   await page.waitForFunction(() => [...document.querySelectorAll('button')].some(b => b.textContent.includes('Approve with passkey')), { timeout: 10000 }).catch(async error => { console.error(await page.evaluate(() => document.body.innerText)); throw error })
-  assert.ok((await page.content()).includes('test-context-hash'))
+  assert.ok((await page.content()).includes('EDCD 12BF 40E1 C288'))
+  assert.equal(await page.$eval('details', e => e.open), false)
+  assert.ok((await page.evaluate(() => document.body.innerText)).includes('<img src=x onerror=alert(1)>'))
+  assert.equal(await page.$('main img'), null)
+  if (process.env.RELEASE_SCREENSHOT_PATH) {
+    await page.setViewport({ width: 1360, height: 1100 })
+    await page.screenshot({ path: process.env.RELEASE_SCREENSHOT_PATH, fullPage: true })
+  }
+  await page.setViewport({ width: 390, height: 844 })
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
+  await page.evaluate(() => { window.copiedValue = null; Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async text => { window.copiedValue = text } } }) })
+  await page.click('[aria-label="Copy application ID"]')
+  assert.equal(await page.evaluate(() => window.copiedValue), 'test-app')
+  const text = await page.evaluate(() => document.body.innerText)
+  assert.ok(text.includes('203.0.113.42:49504') && text.includes('203.0.113.43'))
   await page.evaluate(() => [...document.querySelectorAll('button')].find(b => b.textContent.includes('Approve with passkey')).click())
   await page.waitForFunction(() => document.body.textContent.includes('Assertion sent to the CLI'), { timeout: 10000 }).catch(async error => { console.error(await page.evaluate(() => document.body.innerText)); throw error })
   const assertion = finish.assertion
@@ -65,7 +81,22 @@ try {
   await page.evaluate(() => [...document.querySelectorAll('button')].find(b => b.textContent === 'Cancel').click())
   await page.waitForFunction(() => document.body.textContent.includes('Cancelled.'))
   assert.equal(finish.assertion, null)
-  console.log('PASS: real browser/platform-passkey approval, raw signature/UV and cancellation (mock relay; no Nitro)')
+  includeMetadata = false
+  expires = Math.floor(Date.now()/1000) + 2
+  await page.goto(`${origin}/qr-release?attempt=expired#expiry-test`)
+  await page.waitForFunction(() => document.body.textContent.includes('Unavailable'))
+  // Keep a WebAuthn request pending until expiry to verify it is aborted.
+  await page.evaluate(() => {
+    window.approvalAborted = false
+    Object.defineProperty(navigator.credentials, 'get', { value: ({ signal }) => new Promise((resolve, reject) => {
+      signal.addEventListener('abort', () => { window.approvalAborted = true; reject(new DOMException('Aborted', 'AbortError')) })
+    }) })
+  })
+  await page.evaluate(() => [...document.querySelectorAll('button')].find(b => b.textContent.includes('Approve with passkey')).click())
+  await page.waitForFunction(() => document.body.textContent.includes('Release request expired.'))
+  assert.equal(await page.evaluate(() => window.approvalAborted), true)
+  assert.equal(finish.assertion, null)
+  console.log('PASS: browser approval, raw signature/UV, cancellation, pending-request expiry, metadata escaping, copy and mobile layout (mock relay; no Nitro)')
 } finally {
   await browser?.close()
   await new Promise(resolve => server.close(resolve))

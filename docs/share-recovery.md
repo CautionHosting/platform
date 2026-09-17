@@ -137,3 +137,39 @@ A sole candidate is selected automatically. Otherwise choose from the list or
 supply `--holder`; noninteractive ambiguous selection fails. Private-keyring
 inference is unchanged. No username or current registration replaces the
 bundle-bound credentials and certificates used to authorize release.
+
+## Approval context and field provenance
+
+The browser shows the destination application, contribution and custody service,
+with technical evidence under **Verification details** (collapsed by default).
+The CLI and browser display the same grouped 16-hex-character prefix of the full
+release-context hash. This compares authenticated release context only; it does
+not authenticate descriptive app labels or CLI-reported addresses.
+
+- **Authenticated release context:** organization/bundle IDs, holder fingerprint
+  and position, certificate index, bundle hash, destination session key,
+  attestation hash, approved destination PCRs, protocol and expiry. The gateway
+  verifies custody evidence before publishing the approval screen. Its accepted
+  custody PCR policy is displayed separately.
+- **Platform metadata:** accessible organization/app names, app ID/domain/recorded
+  IP/state, and current holder username. Bundle threshold, holder count and eligible
+  passkey count are displayed only after matching the stored bundle's deterministic
+  hash and selected certificate/position to the authenticated context. Multiple
+  passkeys still represent one share. Labels are not attested app identities.
+- **CLI-reported context:** actual destination socket address and custody URL.
+  These describe the connection attempt; the enclave evidence does not establish
+  the hostname or a unique Platform app identity. Recorded IP and reported socket
+  are displayed separately, including when they differ.
+
+Optional display fields are passed only to the existing gateway relay. It resolves
+records using the authenticated requester and the release organization, retains
+an immutable display snapshot for that pending request, and never passes metadata
+into authorization. Inaccessible or unavailable records show **Unavailable**;
+older CLIs can omit display context. Metadata lookups have a four-second overall
+budget and never extend the release's expiry. No secret material, relay tokens or
+raw credential snapshots are displayed. A display-only lookup failure does not
+prevent otherwise valid approval.
+
+The countdown disables approval and aborts a pending browser credential operation
+at expiry. Cancellation and “assertion sent” statuses do not claim share delivery
+or application unlock. The destination's threshold must still be reached.

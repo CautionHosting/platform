@@ -1786,7 +1786,7 @@ pub async fn send_shard(
     let status = if webauthn {
         let proof = serde_json::from_str(&bundle_text).with_context(Ctx::parse_bundle())?;
         let measurements = pcrs.iter().map(|(&i, v)| (i, hex::encode(v))).collect();
-        crate::share_release::recover(client, &release_options, proof, holder, holder_display, address, measurements, generation_time)
+        crate::share_release::recover(client, &release_options, proof, holder, holder_display, app_info.id.clone(), address, measurements, generation_time)
             .await.with_context(Ctx::send_shard(&address_str))?
     } else {
         locksmith::client::send_selected_shard(address, pcrs, &bundle, private_keyring, Some(holder))

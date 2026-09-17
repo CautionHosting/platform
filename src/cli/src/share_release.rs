@@ -190,16 +190,22 @@ async fn post<T: Serialize, R: DeserializeOwned>(
     }
     serde_json::from_slice(&bytes).with_context(Ctx::new("invalid release response"))
 }
+fn comparison_code(hash: &str) -> String {
+    hash.as_bytes().iter().take(16).copied().collect::<Vec<_>>().chunks(4)
+        .map(|part| String::from_utf8_lossy(part).to_uppercase()).collect::<Vec<_>>().join(" ")
+}
+
 async fn browser_assertion(
     client: &ApiClient,
     prepared: &Attested<Prepared>,
     nonce: &str,
+    display: &Value,
 ) -> Result<webauthn_rs_proto::PublicKeyCredential, InitError> {
     let config = client
         .ensure_authenticated()
         .await
         .with_context(Ctx::new("release relay authentication"))?;
-    let request = json!({"prepared": prepared, "nonce": nonce});
+    let request = json!({"prepared": prepared, "nonce": nonce, "display":display});
     let response = client
         .client
         .post(format!("{}/auth/qr-release/begin", client.base_url))
@@ -265,12 +271,13 @@ pub(crate) async fn recover(
     bundle: GenerateQuorumResponse,
     holder: String,
     holder_display: String,
+    application_id: String,
     address: std::net::SocketAddr,
     destination_policy: Measurements,
     generation_time: Option<std::time::SystemTime>,
 ) -> Result<SendSignedEncryptedShardResponse, InitError> {
     tokio::select! {
-        result = tokio::time::timeout(release::TTL, recover_inner(client, options, bundle, holder, holder_display, address, destination_policy, generation_time)) =>
+        result = tokio::time::timeout(release::TTL, recover_inner(client, options, bundle, holder, holder_display, application_id, address, destination_policy, generation_time)) =>
             result.with_context(Ctx::new("release attempt expired; start a fresh attempt"))?,
         _ = tokio::signal::ctrl_c() => Err(InitError::invalid("release cancelled")),
     }
@@ -281,6 +288,7 @@ async fn recover_inner(
     bundle: GenerateQuorumResponse,
     holder: String,
     holder_display: String,
+    application_id: String,
     address: std::net::SocketAddr,
     destination_policy: Measurements,
     generation_time: Option<std::time::SystemTime>,
@@ -380,9 +388,15 @@ async fn recover_inner(
         "Release context hash: {}",
         release::hash(&prepared).with_context(Ctx::new("approval hash"))?
     ));
+    let context_hash = release::hash(&prepared).with_context(Ctx::new("approval hash"))?;
+    let comparison = comparison_code(&context_hash);
+    output::status(format!("Compare with browser: {comparison} (release context only; excludes descriptive app labels)"));
+    output::status(format!("Application: {application_id}; CLI-reported destination: {address}; custody URL: {url}"));
     let approval = async {
         if client.qr {
-            browser_assertion(client, &attested_prepared, &prepare.client_nonce).await
+            browser_assertion(client, &attested_prepared, &prepare.client_nonce, &json!({
+                "application_id":application_id, "destination_address":address.to_string(), "custody_url":url,
+            })).await
         } else {
             let client = client.clone();
             let options: auth::LoginBeginResponse = serde_json::from_value(
@@ -436,6 +450,11 @@ async fn recover_inner(
 mod holder_selection_tests {
     use super::*;
     use sequoia_openpgp::{cert::CertBuilder, serialize::Serialize};
+
+    #[test]
+    fn comparison_prefix_matches_browser_format() {
+        assert_eq!(comparison_code(&format!("edcd12bf40e1c288{}", "0".repeat(48))), "EDCD 12BF 40E1 C288");
+    }
 
     fn fixture() -> (Vec<Key>, Value, Value) {
         let mut keys = Vec::new();

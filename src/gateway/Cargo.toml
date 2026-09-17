@@ -36,6 +36,7 @@ tempfile = { workspace = true }
 sequoia-openpgp = { workspace = true }
 
 locksmith.workspace = true
+keymaker-models.workspace = true
 
 # Gateway-specific dependencies
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation", "conditional-ui", "danger-credential-internals"] }
