@@ -35,3 +35,23 @@ export const getQuorumBundleSummary = (bundle) => {
     custody,
   }
 }
+
+// The embedded UUID identifies the bundle; the API record ID identifies its storage row.
+export const getEmbeddedBundleId = bundle => {
+  const bytes = bundle?.data?.data?.bundle_id
+  if (!Array.isArray(bytes) || bytes.length !== 16 || !bytes.every(b => Number.isInteger(b) && b >= 0 && b <= 255)) return null
+  const value = bytes.map(b => b.toString(16).padStart(2, '0')).join('')
+  return `${value.slice(0,8)}-${value.slice(8,12)}-${value.slice(12,16)}-${value.slice(16,20)}-${value.slice(20)}`
+}
+export const bundleTitle = bundle => {
+  const id = getEmbeddedBundleId(bundle)
+  const identity = id ? id.slice(0, 8) : `Platform record ${(bundle?.id || '').slice(0, 8)}`
+  return bundle?.name ? `${bundle.name} · ${identity}` : id ? `Bundle ${identity}` : identity
+}
+export const abbreviateBundleValue = value => value.length > 16 ? `${value.slice(0, 8)}…${value.slice(-8)}` : value
+export const bundleIdentifiers = (bundle, publicKeyHash) => [
+  { label: 'Bundle ID', value: getEmbeddedBundleId(bundle) },
+  { label: 'Bundle hash', value: bundle.bundle_hash },
+  { label: 'Public key SHA-256', value: publicKeyHash },
+  { label: 'Platform record ID', value: bundle.id },
+].filter(item => typeof item.value === 'string' && item.value)

@@ -1,8 +1,10 @@
 # WebAuthn and mixed share recovery
 
-**Local and StageX checks pass with a temporary Locksmith source override.
-Dependency/runtime pins now select Locksmith `4851791bda5f8f392f88e474ed5731b287ecd4bc`.
-Publish that revision and validate remote fetching before Nitro acceptance.**
+Shared Rust dependencies select Locksmith `cd0f5fd44e252114c3bd160edd84c119b99263d0`,
+including the external-PGP signing hash fallback. Rebuild/install the CLI to use
+this fix with existing bundles. The enclave runtime pin remains `4851791bda5f8f392f88e474ed5731b287ecd4bc`;
+this client-side fix does not require a service redeployment. The new dependency
+revision is local until explicitly published; remote builds require publication.
 
 Create with explicit per-holder custody:
 
@@ -143,9 +145,12 @@ bundle-bound credentials and certificates used to authorize release.
 
 ## Approval context and field provenance
 
-The browser shows the destination application, contribution and custody service,
-with check explanations under **Verification details** and full evidence in nested
-**Technical values** (both collapsed by default).
+The browser groups the destination and your contribution in one approval card,
+with a prominent four-group comparison code and approval controls.
+**Verification & technical details** opens a drawer, closed by default, with
+Destination, Custody and Bundle tabs. Each tab explains the checks and groups its
+related values. The drawer fills the screen on phones; Escape or Close returns
+to approval without cancelling it.
 The CLI and browser display the same grouped 16-hex-character prefix of the full
 release-context hash, computed from the prepared response data (excluding its
 attestation wrapper). This compares authenticated release context only; it does
@@ -185,8 +190,14 @@ or application unlock. The destination's threshold must still be reached.
 The approval page shows a compact application/holder/destination summary and a
 four-group comparison code above the action. Compare all four groups with the
 CLI. The code covers authenticated release context, not Platform labels or
-CLI-reported addresses. Verification details explain the checks; nested technical
-values retain full copyable identifiers and policies for independent comparison.
+CLI-reported addresses. The drawer groups technical values for independent
+comparison; internal holder-position and certificate-index values are not displayed. Hashes and fingerprints are shortened by default: Reveal/Hide toggles
+the full value, while Copy always copies the complete value. Copy controls are
+reserved for identifiers, cryptographic values, URLs and addresses. Descriptive
+fields such as state, lifetime and passkey count use plain text. Compare full PCRs
+with an independently trusted policy. Keyboard tabs stay inside the drawer; arrow
+keys, Home and End switch categories. Terminal session states close the drawer
+and clear its contents.
 Missing optional metadata is omitted, and differing recorded/reported addresses
 are highlighted. Labels never determine authorization.
 
@@ -222,3 +233,69 @@ application readiness. If the destination closes the connection without a result
 acceptance is unknown: the application may already be unlocked, but the command
 remains a failure. Check its status before retrying. Holder-selection errors are
 reported as selection errors rather than malformed bundle JSON.
+
+### Inspect a saved bundle
+
+```sh
+caution secret inspect
+caution secret inspect --bundle /path/quorum-bundle.json \
+  --keymaker-pcr-policy /path/keymaker-pcr-policy.json
+caution --verbose secret inspect
+# Explicitly view unauthenticated contents, without Platform lookup:
+caution secret inspect --unverified
+```
+
+Inspection is read-only and does not send a share. It defaults to
+`.caution/quorum-bundle.json`; policy precedence is the explicit flag, then
+`KEYMAKER_PCR_POLICY_PATH`, then `.caution/keymaker-pcr-policy.json`.
+Missing policies and invalid proofs fail; there is no automatic unverified fallback.
+`--unverified` cannot be combined with an explicit policy flag.
+
+The compact summary shows the embedded bundle ID prefix, saved name/labels,
+threshold, custody and a holder table with shortened certificate fingerprints
+and included passkey counts. Multiple passkeys represent one share.
+Verified output includes the authenticated generation time: this proves historical
+provenance, not live authorization or current application state. Synthetic test
+proofs are explicitly marked TEST ONLY and provide no authenticated timestamp.
+
+Verified inspection uses an existing Platform session for best-effort holder names
+only when the complete bundle and holder metadata match. It never prompts for login;
+offline or unavailable names fall back to Holder N. Names reflect current organization
+registrations, not authorization evidence. Dashboard record names/edited labels and
+record creation dates are not substituted for saved bundle contents.
+
+`--verbose` replaces shortened fingerprints with full values and adds an
+Identifiers & verification section: full Bundle ID, deterministic bundle hash,
+public-key SHA-256 and policy path. The public-key hash covers the exact UTF-8
+public-key text, matching the Dashboard. Raw proofs, certificates and credential snapshots are not printed. Human-readable
+inspection output goes to stderr, following the CLI's existing output convention.
+
+### Matching CLI and Dashboard bundles
+
+Both interfaces identify V1 bundles by their embedded UUID: `Bundle 9fd6da23`, or
+`Name · 9fd6da23`. Verified CLI inspection uses the current Platform record name from the same
+exact-bundle lookup used for holder names, labelled as descriptive metadata. It
+falls back to the saved name label or Bundle ID when offline, unnamed or when
+duplicate matching records have conflicting names. Unverified inspection uses only
+local contents. Renaming never rewrites the bundle or changes its proof/hash.
+The Dashboard's Identifiers section exposes full Bundle ID, Bundle hash,
+Public key SHA-256 and Platform record ID with Reveal/Copy controls. Hashes and
+fingerprints abbreviate to eight leading and eight trailing characters; Copy
+always uses the complete value. A Platform record ID identifies a database row,
+not the bundle contents. Older records without an embedded ID explicitly use
+`Platform record …` as their fallback title.
+
+The API adds optional `bundle_hash` display metadata to existing list/get responses,
+using the same canonical Rust hashing function as the CLI. Unsupported records omit
+it. Computing/displaying this hash does not verify a proof, and this metadata is not
+included in downloaded bundles. Updates and deletes still use the Platform record ID.
+
+Inspection and recovery explain why holder names are unavailable: missing/unreadable
+or expired session, mismatched server, failed/timed-out API lookup, unmatched bundle,
+or unavailable/inconsistent holder metadata. These are display failures, separate
+from local proof verification. A server mismatch prints both servers and suggests an
+explicit `--url` command, even without `--verbose`. The CLI never switches servers,
+sends the session to a different server, or prompts for login just to retrieve names.
+Metadata requests reject redirects rather than forwarding the session.
+Unverified inspection skips all metadata lookup. Inspection also skips irrelevant
+USB/FIDO2 dependency diagnostics; existing environment warnings remain unchanged.

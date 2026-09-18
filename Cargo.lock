@@ -4472,7 +4472,7 @@ dependencies = [
 [[package]]
 name = "keymaker-models"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=4851791bda5f8f392f88e474ed5731b287ecd4bc#4851791bda5f8f392f88e474ed5731b287ecd4bc"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=cd0f5fd44e252114c3bd160edd84c119b99263d0#cd0f5fd44e252114c3bd160edd84c119b99263d0"
 dependencies = [
  "serde",
  "serde_cbor",
@@ -4664,7 +4664,7 @@ dependencies = [
 [[package]]
 name = "locksmith"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=4851791bda5f8f392f88e474ed5731b287ecd4bc#4851791bda5f8f392f88e474ed5731b287ecd4bc"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=cd0f5fd44e252114c3bd160edd84c119b99263d0#cd0f5fd44e252114c3bd160edd84c119b99263d0"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
@@ -5907,7 +5907,7 @@ checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
 [[package]]
 name = "public-certificate-models"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=4851791bda5f8f392f88e474ed5731b287ecd4bc#4851791bda5f8f392f88e474ed5731b287ecd4bc"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=cd0f5fd44e252114c3bd160edd84c119b99263d0#cd0f5fd44e252114c3bd160edd84c119b99263d0"
 dependencies = [
  "serde",
 ]
