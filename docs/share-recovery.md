@@ -45,6 +45,20 @@ Native approval requires USB FIDO2 user verification (PIN/biometric), not touch
 alone. External PGP holders may contribute to mixed bundles using `--keyring`
 or their supported OpenPGP smartcard.
 
+`send-shard` checks live destination attestation against
+`.caution/trusted_hashes.json` before showing the interactive holder chooser or
+requesting a smartcard/passkey. This extra connection has a 30-second budget and
+sends no share. The actual release still verifies a fresh, nonce-bound attestation
+on its own submission connection. Noninteractive invocations validate holder
+selection first so missing or invalid `--holder` arguments remain actionable.
+
+A **destination PCR mismatch** concerns the application, not the custody service's
+`--recryptor-pcr-policy`. No share is sent. If the deployment changed intentionally,
+complete `caution verify` from the intended application checkout, then retry;
+do not copy measurements from the failing endpoint into the trusted policy.
+Connection and invalid-attestation failures are reported separately. Rebuild/install
+the CLI for this preflight; no service redeployment or bundle change is needed.
+
 The distinct browser relay transports a raw assertion. Gateway login is not
 permission to release. The custody enclave verifies the assertion, consumes its
 three-minute authorization state, and derives/decrypts/re-encrypts one share.
