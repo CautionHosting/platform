@@ -1594,6 +1594,22 @@ pub enum SendShardError {
         source: BoxError,
     },
 
+    #[error("Unable to select share holder [{location:?}]")]
+    SelectHolder {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Connection closed during share recovery; share acceptance was not confirmed. The application may already be unlocked; check its status before retrying [{location:?}]")]
+    ConnectionClosed {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
     #[error("Invalid address: {address} [{location:?}]")]
     InvalidAddress {
         #[context(borrow = str)]
@@ -1625,6 +1641,25 @@ pub enum SendShardError {
         #[location]
         location: Location,
     },
+}
+
+fn connection_closed(mut error: &(dyn std::error::Error + 'static)) -> bool {
+    loop {
+        if let Some(io) = error.downcast_ref::<std::io::Error>() {
+            if matches!(io.kind(), std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::BrokenPipe) {
+                return true;
+            }
+        }
+        match error.source() { Some(source) => error = source, None => return false }
+    }
+}
+
+fn share_acceptance_message(remaining: u8) -> String {
+    match remaining {
+        0 => "Quorum reconstructed successfully.".to_owned(),
+        1 => "Share accepted. 1 more share required.".to_owned(),
+        n => format!("Share accepted. {n} more shares required."),
+    }
 }
 
 /// Send a shard to a running enclave's locksmith daemon.
@@ -1760,9 +1795,11 @@ pub async fn send_shard(
         ),
     ]);
 
+    output::status("Loaded destination policy from .caution/trusted_hashes.json");
     if let Some(verified_at) = hashes["verified_at"].as_str() {
-        output::status(format!("Using trusted hashes from {}", verified_at));
+        output::verbose(client.verbose, format!("Recorded verification time: {} (stored metadata)", crate::share_release::terminal_label(verified_at)));
     }
+    output::verbose(client.verbose, format!("Destination PCR policy: {:?}", pcrs.iter().map(|(i, value)| (*i, hex::encode(value))).collect::<std::collections::BTreeMap<_, _>>()));
 
     // Parse the quorum bundle
     let bundle_text =
@@ -1772,33 +1809,53 @@ pub async fn send_shard(
     let names = crate::share_release::holder_names(client, &proof).await;
     let keys = &bundle.clone().to_latest().keyring;
     let (holder, webauthn) = crate::share_release::select_holder(keys, release_options.holder.as_deref(), private_keyring.as_deref(), &names)
-        .with_context(Ctx::parse_bundle())?;
+        .with_context(Ctx::select_holder())?;
     let holder_display = crate::share_release::holder_label(keys, &holder, webauthn, &names);
-    output::status(format!("Selected {holder_display}"));
     output::verbose(client.verbose, format!("Holder certificate: {holder}"));
 
     let address_str = format!("{}:49504", public_ip);
-    output::status(format!("Sending shard to enclave at {}...", address_str));
     let address: std::net::SocketAddr = address_str
         .parse()
         .with_context(Ctx::invalid_address(&address_str))?;
 
-    let status = if webauthn {
+    let latest = bundle.clone().to_latest();
+    let summary = crate::share_release::ReleaseSummary {
+        application_id: app_info.id.clone(),
+        application_name: app_info.resource_name,
+        holder: holder_display,
+        address,
+        threshold: latest.threshold,
+        holders: latest.max,
+        method: match (webauthn, client.qr, private_keyring.is_some()) {
+            (true, true, _) => "Browser passkey",
+            (true, false, _) => "Native passkey",
+            (false, _, true) => "Private-key file",
+            (false, _, false) => "OpenPGP smartcard",
+        },
+    };
+    output::verbose(client.verbose, format!("Application ID: {}; bundle ID: {}", crate::share_release::terminal_label(&app_info.id), hex::encode(latest.bundle_id)));
+    let status: Result<_, BoxError> = if webauthn {
         let proof = serde_json::from_str(&bundle_text).with_context(Ctx::parse_bundle())?;
         let measurements = pcrs.iter().map(|(&i, v)| (i, hex::encode(v))).collect();
-        crate::share_release::recover(client, &release_options, proof, holder, holder_display, app_info.id.clone(), address, measurements, generation_time)
-            .await.with_context(Ctx::send_shard(&address_str))?
+        crate::share_release::recover(client, &release_options, proof, holder, summary, measurements, generation_time)
+            .await.map_err(|error| Box::new(error) as BoxError)
     } else {
+        summary.print(None);
+        output::status("Connecting to the destination for attestation and share submission…");
         locksmith::client::send_selected_shard(address, pcrs, &bundle, private_keyring, Some(holder))
-            .await.with_context(Ctx::send_shard(&address_str))?
+            .await.map_err(|error| Box::new(error) as BoxError)
     };
+    let status = status.map_err(|source| {
+        if connection_closed(source.as_ref()) {
+            SendShardError::ConnectionClosed { location: std::panic::Location::caller(), source }
+        } else {
+            SendShardError::SendShard { address: address_str, location: std::panic::Location::caller(), source }
+        }
+    })?;
 
     match status {
         locksmith::models::SendSignedEncryptedShardResponse::Accepted { remaining } => {
-            output::success(format!(
-                "Shard accepted, {} remaining shards until reconstitution",
-                remaining
-            ));
+            output::success(share_acceptance_message(remaining));
         }
         locksmith::models::SendSignedEncryptedShardResponse::Rejected { reason } => {
             return Err(SendShardError::ShardRejected {
@@ -1813,6 +1870,41 @@ pub async fn send_shard(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn share_results_distinguish_acceptance_from_reconstruction() {
+        assert_eq!(super::share_acceptance_message(0), "Quorum reconstructed successfully.");
+        assert_eq!(super::share_acceptance_message(1), "Share accepted. 1 more share required.");
+        assert_eq!(super::share_acceptance_message(2), "Share accepted. 2 more shares required.");
+        let io = std::io::Error::other("unexpected end of file");
+        assert!(!super::connection_closed(&io), "do not classify errors by their text");
+        let selected = super::SendShardError::SelectHolder {
+            location: std::panic::Location::caller(), source: Box::new(io),
+        };
+        assert!(selected.to_string().contains("Unable to select share holder"));
+        assert!(!selected.to_string().contains("parse bundle"));
+    }
+
+    #[tokio::test]
+    async fn destination_eof_is_detected_through_real_locksmith_error_chain() {
+        use tokio::io::AsyncReadExt;
+        use keymaker_models::generate_quorum::{GenerateQuorumBundle, v1};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let receiver = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 4096];
+            stream.read(&mut bytes).await.unwrap();
+            // Close after the client's attestation request, before any share is sent.
+        });
+        let bundle = GenerateQuorumBundle::V1(v1::GenerateQuorumResponse {
+            bundle_id: [0; 16], label: Default::default(), keyring: vec![],
+            threshold: 1, max: 1, shardfile: String::new(), public_key: String::new(),
+        });
+        let error = locksmith::client::send_selected_shard(address, Default::default(), &bundle, None, None).await.unwrap_err();
+        assert!(super::connection_closed(&error), "{error:?}");
+        receiver.await.unwrap();
+    }
+
     use super::openpgp;
     use super::{
         encrypt_env_file, encrypt_secret_value, keymaker_cert_eligibility, load_recipient_cert,

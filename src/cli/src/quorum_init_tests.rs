@@ -354,7 +354,7 @@ async fn downloaded_bundles_require_explicit_noninteractive_holder() {
         .await
         .unwrap_err();
         assert!(
-            matches!(error, crate::secrets::SendShardError::ParseBundle { .. }),
+            matches!(error, crate::secrets::SendShardError::SelectHolder { .. }),
             "{name}: {error}"
         );
     }

@@ -795,7 +795,7 @@ enum SecretCommands {
         bundle: Option<PathBuf>,
         #[arg(
             long,
-            help = "Path for private OpenPGP Keyring (if not using smartcards)"
+            help = "Private OpenPGP keyring; a unique holder match is selected automatically. Omit for an OpenPGP smartcard"
         )]
         keyring: Option<PathBuf>,
     },

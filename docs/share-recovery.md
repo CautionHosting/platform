@@ -192,3 +192,29 @@ assertion relayed by the browser is not confirmation of share acceptance or
 application readiness: follow the terminal result. A failed submission response
 may mean delivery is unknown; the page does not retry it. Inactive links show only
 an explanation, while network/server errors are reported separately.
+
+### Terminal approval and results
+
+`send-shard` prints the application, selected holder, destination, quorum and
+method (private-key file, OpenPGP smartcard, native passkey or browser passkey).
+QR requests reuse the gateway's optional display metadata snapshot; old gateways
+remain usable without it. Native/PGP requests use the existing application record
+and verified bundle without extra login for labels. Terminal control characters
+in metadata are escaped. Full identifiers, evidence hashes and policy values and
+paths are available with `--verbose`; browser comparison instructions appear only
+for QR approval, after the QR/link so the code remains visible while waiting.
+
+`--holder USERNAME_OR_FINGERPRINT` skips the chooser. A private-keyring file with
+one matching external-PGP holder is inferred; an OpenPGP smartcard still uses the
+selected holder. No custody choice or cryptographic checks are changed.
+
+The destination policy is loaded from `.caution/trusted_hashes.json`; its recorded
+verification timestamp is metadata, not proof that the file was never edited.
+After redeploying, complete `caution verify` to establish the expected measurements.
+
+The CLI reports share acceptance and the remaining count, or **Quorum reconstructed
+successfully** when the receiver confirms reconstruction. This does not establish
+application readiness. If the destination closes the connection without a result,
+acceptance is unknown: the application may already be unlocked, but the command
+remains a failure. Check its status before retrying. Holder-selection errors are
+reported as selection errors rather than malformed bundle JSON.

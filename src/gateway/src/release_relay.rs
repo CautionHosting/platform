@@ -131,6 +131,7 @@ pub async fn begin(
     if pending.len() >= 128 {
         return Err(StatusCode::TOO_MANY_REQUESTS);
     }
+    let metadata = request.get("metadata").cloned();
     pending.insert(
         token.clone(),
         Pending {
@@ -142,7 +143,7 @@ pub async fn begin(
     );
     // Browser and requester capabilities are distinct. Assertions are delivered only to the requester.
     Ok(Json(
-        json!({"token":token,"url":format!("{}/qr-release#{}",crate::handlers::get_rp_origin(),browser)}),
+        json!({"token":token,"url":format!("{}/qr-release#{}",crate::handlers::get_rp_origin(),browser),"metadata":metadata}),
     ))
 }
 pub async fn read(Json(token): Json<Token>) -> Result<Json<Value>, StatusCode> {

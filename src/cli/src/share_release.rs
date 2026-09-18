@@ -16,7 +16,8 @@ use std::{io::IsTerminal, path::PathBuf, time::Duration};
 
 #[derive(clap::Args, Debug, Default)]
 pub(crate) struct Options {
-    /// Holder username or full certificate fingerprint; inferred when one candidate matches.
+    /// Holder username or full certificate fingerprint; skips the chooser.
+    /// Without this option, a unique private-keyring match or sole holder is selected.
     #[arg(long)]
     pub holder: Option<String>,
     /// Custody enclave HTTP endpoint; identity is checked against --recryptor-pcr-policy.
@@ -74,7 +75,7 @@ pub(crate) fn holder_label(keys: &[Key], holder: &str, webauthn: bool, names: &H
     let kind = if webauthn { "Passkey" } else { "External PGP" };
     let short = if holder.len() > 12 { format!("{}…{}", &holder[..4], &holder[holder.len()-4..]) } else { holder.to_owned() };
     if let Some(name) = unique_name {
-        if webauthn { format!("{name} · {kind}") } else { format!("{name} · {kind} · {short}") }
+        if webauthn { format!("{} · {kind}", terminal_label(name)) } else { format!("{} · {kind} · {short}", terminal_label(name)) }
     } else {
         let index = keys.iter().position(|key| {
             let cert = match key { Key::OpenPGP { cert } | Key::WebAuthn { cert, .. } => cert };
@@ -190,6 +191,55 @@ async fn post<T: Serialize, R: DeserializeOwned>(
     }
     serde_json::from_slice(&bytes).with_context(Ctx::new("invalid release response"))
 }
+/// Display metadata is never an input to release authorization.
+pub(crate) struct ReleaseSummary {
+    pub application_id: String,
+    pub application_name: Option<String>,
+    pub holder: String,
+    pub address: std::net::SocketAddr,
+    pub threshold: u8,
+    pub holders: u8,
+    pub method: &'static str,
+}
+
+// Escape terminal controls, including bidirectional formatting controls, in labels.
+pub(crate) fn terminal_label(value: &str) -> String {
+    value.chars().flat_map(|c| {
+        if c.is_control() || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
+            c.escape_unicode().collect::<Vec<_>>()
+        } else { vec![c] }
+    }).collect()
+}
+
+impl ReleaseSummary {
+    fn render(&self, metadata: Option<&Value>) -> String {
+        let app = metadata.and_then(|m| m.get("application"))
+            .filter(|app| app["id"].as_str() == Some(self.application_id.as_str()));
+        let name = app.and_then(|app| app["name"].as_str())
+            .or(self.application_name.as_deref()).filter(|s| !s.is_empty())
+            .unwrap_or("Application name unavailable");
+        let mut text = format!("\nRelease one share\n\nApplication  {}\n", terminal_label(name));
+        if let Some(org) = metadata.and_then(|m| m["organization"]["name"].as_str()).filter(|s| !s.is_empty()) {
+            text.push_str(&format!("Organization {}\n", terminal_label(org)));
+        }
+        text.push_str(&format!("Holder       {}\nDestination  {}\nQuorum       {} of {} holders required\nMethod       {}\n\nApplication labels are Platform metadata; destination is CLI-reported.", terminal_label(&self.holder), self.address, self.threshold, self.holders, self.method));
+        if let Some(recorded) = app.and_then(|a| a["public_ip"].as_str()) {
+            if recorded.parse::<std::net::IpAddr>().ok() != Some(self.address.ip()) {
+                text.push_str(&format!("\nRecorded address {} differs from the connection destination.", terminal_label(recorded)));
+            }
+        }
+        text
+    }
+
+    pub(crate) fn print(&self, metadata: Option<&Value>) {
+        output::status(self.render(metadata));
+    }
+}
+
+fn comparison_block(hash: &str) -> String {
+    format!("\nCOMPARE WITH YOUR BROWSER\n\n    {}\n\nCompare all four groups. Approve only if they match.\nThe code covers release context, not descriptive application labels or addresses.\n\nWaiting for passkey approval…", comparison_code(hash))
+}
+
 fn comparison_code(hash: &str) -> String {
     hash.as_bytes().iter().take(16).copied().collect::<Vec<_>>().chunks(4)
         .map(|part| String::from_utf8_lossy(part).to_uppercase()).collect::<Vec<_>>().join(" ")
@@ -200,6 +250,7 @@ async fn browser_assertion(
     prepared: &Attested<Prepared>,
     nonce: &str,
     display: &Value,
+    summary: &ReleaseSummary,
 ) -> Result<webauthn_rs_proto::PublicKeyCredential, InitError> {
     let config = client
         .ensure_authenticated()
@@ -233,10 +284,12 @@ async fn browser_assertion(
     )) {
         return Err(InitError::invalid("unexpected approval origin"));
     }
+    summary.print(response.get("metadata"));
     auth::render_qr_code(url).with_context(Ctx::new("render release QR"))?;
     output::status(format!(
-        "Approve on your phone or open in your browser: {url}"
+        "Approve on your phone or open in your browser: {}", terminal_label(url)
     ));
+    output::status(comparison_block(&release::hash(prepared).with_context(Ctx::new("approval hash"))?));
     let result = async {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -270,14 +323,12 @@ pub(crate) async fn recover(
     options: &Options,
     bundle: GenerateQuorumResponse,
     holder: String,
-    holder_display: String,
-    application_id: String,
-    address: std::net::SocketAddr,
+    summary: ReleaseSummary,
     destination_policy: Measurements,
     generation_time: Option<std::time::SystemTime>,
 ) -> Result<SendSignedEncryptedShardResponse, InitError> {
     tokio::select! {
-        result = tokio::time::timeout(release::TTL, recover_inner(client, options, bundle, holder, holder_display, application_id, address, destination_policy, generation_time)) =>
+        result = tokio::time::timeout(release::TTL, recover_inner(client, options, bundle, holder, summary, destination_policy, generation_time)) =>
             result.with_context(Ctx::new("release attempt expired; start a fresh attempt"))?,
         _ = tokio::signal::ctrl_c() => Err(InitError::invalid("release cancelled")),
     }
@@ -287,12 +338,11 @@ async fn recover_inner(
     options: &Options,
     bundle: GenerateQuorumResponse,
     holder: String,
-    holder_display: String,
-    application_id: String,
-    address: std::net::SocketAddr,
+    summary: ReleaseSummary,
     destination_policy: Measurements,
     generation_time: Option<std::time::SystemTime>,
 ) -> Result<SendSignedEncryptedShardResponse, InitError> {
+    let address = summary.address;
     let url = options
         .recryptor_url
         .clone()
@@ -375,29 +425,19 @@ async fn recover_inner(
     }
     let attested_prepared = prepared;
     let prepared = &attested_prepared.data;
-    output::status(format!(
-        "Release one share: bundle {}; holder {}",
-        hex::encode(prepared.context.bundle_id),
-        holder_display
-    ));
-    output::status(format!(
-        "Verified destination {address}; key {}",
-        hex::encode(prepared.destination_key)
-    ));
-    output::status(format!(
-        "Release context hash: {}",
-        release::hash(&prepared).with_context(Ctx::new("approval hash"))?
-    ));
     let context_hash = release::hash(&prepared).with_context(Ctx::new("approval hash"))?;
-    let comparison = comparison_code(&context_hash);
-    output::status(format!("Compare with browser: {comparison} (release context only; excludes descriptive app labels)"));
-    output::status(format!("Application: {application_id}; CLI-reported destination: {address}; custody URL: {url}"));
+    output::verbose(client.verbose, format!("Application ID: {}; holder certificate: {}; bundle ID: {}; bundle hash: {}", terminal_label(&summary.application_id), prepared.context.holder, hex::encode(prepared.context.bundle_id), prepared.context.bundle_hash));
+    output::verbose(client.verbose, format!("Destination session key: {}; attestation hash: {}; release context hash: {context_hash}", hex::encode(prepared.destination_key), prepared.destination_attestation_hash));
+    output::verbose(client.verbose, format!("Destination PCR policy: {:?}; custody PCR policy: {:?}; custody policy file: {}; custody URL: {}", prepared.context.destination_policy, trusted, terminal_label(&policy_path.display().to_string()), terminal_label(&url)));
+    output::verbose(client.verbose, format!("Protocol: {:?}; organization ID: {}; holder position: {}; certificate index: {}; expiry: {}", prepared.context.version, hex::encode(prepared.context.organization_id), prepared.context.holder_position, prepared.context.certificate_index, prepared.context.expires_at_unix_seconds));
     let approval = async {
         if client.qr {
             browser_assertion(client, &attested_prepared, &prepare.client_nonce, &json!({
-                "application_id":application_id, "destination_address":address.to_string(), "custody_url":url,
-            })).await
+                "application_id":summary.application_id, "destination_address":address.to_string(), "custody_url":url,
+            }), &summary).await
         } else {
+            summary.print(None);
+            output::status("Waiting for passkey approval…");
             let client = client.clone();
             let options: auth::LoginBeginResponse = serde_json::from_value(
                 serde_json::to_value(&prepared.options)
@@ -418,6 +458,7 @@ async fn recover_inner(
         result=approval=>result?,
         _=destination.disconnected()=>return Err(InitError::invalid("destination disconnected; start a fresh attempt")),
     };
+    output::status("Approval received. Requesting share re-encryption…");
     let complete = CompleteRequest {
         version: Version::V1,
         session_id: prepared.session_id.clone(),
@@ -440,6 +481,7 @@ async fn recover_inner(
         .with_context(Ctx::new("authenticated bundle generation time required"))?;
     release::crypto::verify_request(cert, &encrypted, generation_time)
         .with_context(Ctx::new("verify holder signature"))?;
+    output::status("Submitting encrypted share to the destination…");
     destination
         .send(encrypted)
         .await
@@ -450,6 +492,39 @@ async fn recover_inner(
 mod holder_selection_tests {
     use super::*;
     use sequoia_openpgp::{cert::CertBuilder, serialize::Serialize};
+
+    #[test]
+    fn summaries_use_descriptive_labels_and_preserve_authoritative_selection() {
+        let summary = ReleaseSummary {
+            application_id: "app-id".into(), application_name: Some("local-name".into()),
+            holder: "alice · Passkey".into(), address: "203.0.113.42:49504".parse().unwrap(),
+            threshold: 3, holders: 3, method: "Browser passkey",
+        };
+        let metadata = json!({"application":{"id":"app-id","name":"server-name","public_ip":"203.0.113.43"},"organization":{"name":"My org"},"bundle":{"username":"wrong-holder","threshold":1}});
+        let text = summary.render(Some(&metadata));
+        assert!(text.contains("server-name") && text.contains("My org"));
+        assert!(text.contains("alice · Passkey") && text.contains("3 of 3"));
+        assert!(!text.contains("wrong-holder"));
+        assert!(text.contains("differs from the connection destination"));
+        let mismatched = json!({"application":{"id":"other","name":"wrong-app"}});
+        assert!(!summary.render(Some(&mismatched)).contains("wrong-app"));
+        assert!(summary.render(None).contains("local-name"));
+        let native = ReleaseSummary { method: "Native passkey", application_name: None, ..summary };
+        let text = native.render(None);
+        assert!(text.contains("Application name unavailable"));
+        assert!(!text.contains("COMPARE") && !text.contains("app-id"));
+    }
+
+    #[test]
+    fn labels_cannot_inject_terminal_controls_or_bidirectional_overrides() {
+        let escaped = terminal_label("name\x1b[2J\n\r\u{202e}secret");
+        assert!(!escaped.chars().any(char::is_control));
+        assert!(!escaped.contains('\u{202e}'));
+        assert_eq!(terminal_label("vkobel · Passkey"), "vkobel · Passkey");
+        let block = comparison_block(&format!("edcd12bf40e1c288{}", "0".repeat(48)));
+        assert!(block.contains("\n    EDCD 12BF 40E1 C288\n"));
+        assert!(block.ends_with("Waiting for passkey approval…"));
+    }
 
     #[test]
     fn comparison_prefix_matches_browser_format() {
