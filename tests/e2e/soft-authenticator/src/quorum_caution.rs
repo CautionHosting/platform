@@ -232,6 +232,9 @@ pub(super) fn run(session: &mut Session<'_>, work: &Path, pgp: &str) -> Result<(
         );
         let name = if mixed { "mixed.json" } else { "webauthn.json" };
         fs::write(work.join(name), serde_json::to_vec(&downloaded["data"])?)?;
+        let renamed: Value = checked(session.signed(Method::PATCH, &path,
+            &json!({"name":"Renamed custody bootstrap"}).to_string())?)?.json()?;
+        assert_eq!(renamed["data"], downloaded["data"]);
         let named_rows: Value = checked(session.get("/quorum-bundles")?)?.json()?;
         fs::write(work.join(format!("{name}.holders")), serde_json::to_vec(&named_rows)?)?;
         for unverified in [false, true] {
@@ -246,6 +249,8 @@ pub(super) fn run(session: &mut Session<'_>, work: &Path, pgp: &str) -> Result<(
             anyhow::ensure!(text.contains(downloaded["bundle_hash"].as_str().context("API bundle hash")?));
             anyhow::ensure!(text.contains("PASSKEYS") && text.contains("one share per holder"));
             anyhow::ensure!(text.contains("quorummock") == !unverified, "holder names: {text}");
+            anyhow::ensure!(text.contains("Renamed custody bootstrap · ") == !unverified, "bundle name: {text}");
+            assert_eq!(serde_json::from_slice::<Value>(&fs::read(work.join(name))?)?, downloaded["data"]);
             anyhow::ensure!(text.contains(if mixed { "2 of 3 holders" } else { "2 of 2 holders" }));
             anyhow::ensure!(text.contains(if unverified { "UNVERIFIED" } else { "TEST ONLY" }));
         }

@@ -271,8 +271,11 @@ inspection output goes to stderr, following the CLI's existing output convention
 ### Matching CLI and Dashboard bundles
 
 Both interfaces identify V1 bundles by their embedded UUID: `Bundle 9fd6da23`, or
-`Name · 9fd6da23`. The CLI uses the saved bundle name label; the Dashboard may use
-its editable record name. Names can differ; match the embedded ID and full hash.
+`Name · 9fd6da23`. Verified CLI inspection uses the current Platform record name from the same
+exact-bundle lookup used for holder names, labelled as descriptive metadata. It
+falls back to the saved name label or Bundle ID when offline, unnamed or when
+duplicate matching records have conflicting names. Unverified inspection uses only
+local contents. Renaming never rewrites the bundle or changes its proof/hash.
 The Dashboard's Identifiers section exposes full Bundle ID, Bundle hash,
 Public key SHA-256 and Platform record ID with Reveal/Copy controls. Hashes and
 fingerprints abbreviate to eight leading and eight trailing characters; Copy

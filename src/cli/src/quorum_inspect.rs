@@ -50,13 +50,15 @@ fn summary(
     options: &Options,
     verbose: bool,
     platform: Option<&str>,
+    platform_name: Option<&str>,
 ) -> Result<String, InitError> {
     let GenerateQuorumBundle::V1(data) = bundle;
     if data.threshold == 0 || data.threshold > data.max || usize::from(data.max) != data.keyring.len() {
         return Err(InitError::invalid("invalid bundle threshold or holder count"));
     }
     let id = uuid::Uuid::from_bytes(data.bundle_id).to_string();
-    let title = data.label.get("name").filter(|name| !name.is_empty())
+    let platform_name = platform_name.filter(|_| !options.unverified).filter(|name| !name.trim().is_empty());
+    let title = platform_name.or_else(|| data.label.get("name").map(String::as_str)).filter(|name| !name.is_empty())
         .map(|name| format!("{} · {}", terminal_label(name), &id[..8]))
         .unwrap_or_else(|| format!("Bundle {}", &id[..8]));
     let status = if options.unverified {
@@ -67,6 +69,7 @@ fn summary(
         "TEST ONLY — synthetic proof accepted; no authenticated generation time."
     };
     let mut lines = vec![format!("{title}\n{status}\n")];
+    if platform_name.is_some() { lines.push("Bundle name from Platform (descriptive metadata).".into()); }
     let pgp = data.keyring.iter().filter(|key| matches!(key, Key::OpenPGP { .. })).count();
     let custody = [(pgp, "External PGP"), (data.keyring.len() - pgp, "Passkey")]
         .into_iter().filter(|(count, _)| *count > 0).map(|(count, kind)| format!("{count} {kind}")).collect::<Vec<_>>().join(" · ");
@@ -117,14 +120,14 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
     let text =
         std::fs::read_to_string(&options.bundle).with_context(Ctx::new("read quorum bundle"))?;
     let (bundle, at) = load(&text, &options)?;
-    let names = if options.unverified {
-        HolderNames::new()
+    let display = if options.unverified {
+        share_release::BundleDisplay::default()
     } else {
         let envelope =
             serde_json::from_str(&text).with_context(Ctx::new("invalid quorum bundle JSON"))?;
-        share_release::holder_names_for(client, &envelope, "inspect").await
+        share_release::bundle_display(client, &envelope, "inspect").await
     };
-    output::status(summary(&bundle, at, &names, &options, client.verbose, Some(&client.base_url))?);
+    output::status(summary(&bundle, at, &display.holders, &options, client.verbose, Some(&client.base_url), display.name.as_deref())?);
     Ok(())
 }
 
@@ -188,7 +191,7 @@ mod tests {
                     credential: vec!["snapshot".into(); 2],
                 };
             }
-            let text = summary(&bundle, None, &HolderNames::new(), &options(), false, None).unwrap();
+            let text = summary(&bundle, None, &HolderNames::new(), &options(), false, None, None).unwrap();
             assert!(text.contains("UNVERIFIED"));
             assert!(text.contains("01010101"));
             assert!(!text.contains("0 External PGP") && !text.contains("0 Passkey"));
@@ -223,7 +226,7 @@ mod tests {
         let mut opts = options();
         opts.unverified = false;
         opts.keymaker_pcr_policy = Some("trusted.json".into());
-        let text = summary(&bundle, Some(SystemTime::UNIX_EPOCH), &names, &opts, true, Some("https://platform.test")).unwrap();
+        let text = summary(&bundle, Some(SystemTime::UNIX_EPOCH), &names, &opts, true, Some("https://platform.test"), None).unwrap();
         assert!(text.contains("Proof verified — historical"));
         assert!(text.contains("01 Jan 1970, 00:00:00 UTC (authenticated)"));
         assert!(text.contains(&fingerprint));
@@ -235,7 +238,7 @@ mod tests {
         assert!(text.contains("Verification policy: trusted.json"));
         assert!(text.contains("Bundle hash:"));
         assert!(
-            summary(&bundle, None, &names, &opts, false, None)
+            summary(&bundle, None, &names, &opts, false, None, None)
                 .unwrap()
                 .contains("TEST ONLY")
         );
@@ -246,10 +249,24 @@ mod tests {
             &options(),
             true,
             None,
+            None,
         )
         .unwrap();
         assert!(!unverified.contains("(authenticated)"));
         assert!(!unverified.contains("Verification policy"));
+    }
+
+    #[test]
+    fn platform_title_overrides_saved_name_only_in_verified_mode() {
+        let bundle = fixture();
+        let mut opts = options(); opts.unverified = false;
+        let text = summary(&bundle, None, &HolderNames::new(), &opts, false, None, Some("Current\x1bname")).unwrap();
+        assert!(text.starts_with("Current\\u{1b}name · 01010101"));
+        assert!(text.contains("Bundle name from Platform (descriptive metadata)."));
+        let fallback = summary(&bundle, None, &HolderNames::new(), &opts, false, None, None).unwrap();
+        assert!(fallback.starts_with("test\\u{1b}"));
+        opts.unverified = true;
+        assert!(!summary(&bundle, None, &HolderNames::new(), &opts, false, None, Some("Current")).unwrap().contains("Current"));
     }
 
     #[test]
@@ -264,7 +281,7 @@ mod tests {
         let mut bundle = fixture();
         let GenerateQuorumBundle::V1(data) = &mut bundle;
         data.threshold = 0;
-        assert!(summary(&bundle, None, &HolderNames::new(), &options(), false, None).is_err());
+        assert!(summary(&bundle, None, &HolderNames::new(), &options(), false, None, None).is_err());
     }
 
     #[test]

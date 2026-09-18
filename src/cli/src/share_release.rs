@@ -58,9 +58,15 @@ fn matched_names(bundle: &Value, rows: &[Value]) -> Option<HolderNames> {
     result
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct BundleDisplay {
+    pub holders: HolderNames,
+    pub name: Option<String>,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum NameLookup {
-    Found(HolderNames),
+    Found(BundleDisplay),
     MissingSession,
     InvalidSession,
     ExpiredSession,
@@ -98,8 +104,11 @@ fn names_from_rows(bundle: &Value, rows: &[Value]) -> NameLookup {
     if matching.iter().any(|row| !row.get("holders").is_some_and(Value::is_array)) {
         return NameLookup::UnavailableMetadata;
     }
+    // Duplicate uploads can have different record names; do not choose arbitrarily.
+    let name = matching[0].get("name").and_then(Value::as_str).filter(|name| !name.trim().is_empty());
+    let name = name.filter(|name| matching.iter().all(|row| row.get("name").and_then(Value::as_str) == Some(*name))).map(str::to_owned);
     match matched_names(bundle, rows) {
-        Some(names) if !names.is_empty() => NameLookup::Found(names),
+        Some(names) if !names.is_empty() || name.is_some() => NameLookup::Found(BundleDisplay { holders: names, name }),
         Some(_) => NameLookup::UnavailableMetadata,
         None => NameLookup::InconsistentMetadata,
     }
@@ -130,14 +139,14 @@ async fn lookup_names(client: &ApiClient, bundle: &Value) -> NameLookup {
     tokio::time::timeout(Duration::from_secs(5), lookup).await.unwrap_or(NameLookup::Timeout)
 }
 
-pub(crate) async fn holder_names_for(client: &ApiClient, bundle: &Value, command: &str) -> HolderNames {
+pub(crate) async fn bundle_display(client: &ApiClient, bundle: &Value, command: &str) -> BundleDisplay {
     let outcome = lookup_names(client, bundle).await;
     if let Some(message) = outcome.message(command) { output::warning(message); }
-    match outcome { NameLookup::Found(names) => names, _ => HolderNames::new() }
+    match outcome { NameLookup::Found(display) => display, _ => BundleDisplay::default() }
 }
 
 pub(crate) async fn holder_names(client: &ApiClient, bundle: &Value) -> HolderNames {
-    holder_names_for(client, bundle, "send-shard").await
+    bundle_display(client, bundle, "send-shard").await.holders
 }
 
 pub(crate) fn short_fingerprint(value: &str) -> String {
@@ -686,6 +695,20 @@ mod holder_selection_tests {
         let mut renamed = row.clone();
         renamed["holders"][0]["username"] = json!("different");
         assert!(matched_names(&bundle, &[row, renamed]).is_none());
+    }
+
+    #[test]
+    fn platform_name_requires_exact_unambiguous_bundle_match() {
+        let (_, bundle, mut row) = fixture();
+        row["name"] = json!("Renamed bootstrap");
+        let NameLookup::Found(display) = names_from_rows(&bundle, &[row.clone()]) else { panic!("matching bundle") };
+        assert_eq!(display.name.as_deref(), Some("Renamed bootstrap"));
+        assert!(!display.holders.is_empty());
+        let mut other = row.clone(); other["name"] = json!("Another name");
+        let NameLookup::Found(display) = names_from_rows(&bundle, &[row.clone(), other]) else { panic!("matching holders") };
+        assert_eq!(display.name, None);
+        row["data"]["necroproof"] = json!("different");
+        assert_eq!(names_from_rows(&bundle, &[row]), NameLookup::UnmatchedBundle);
     }
 
     #[test]
