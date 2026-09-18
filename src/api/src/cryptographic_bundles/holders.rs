@@ -191,6 +191,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             holders: None,
+            bundle_hash: None,
         }];
         enrich(&pool, org, &mut bundles).await;
         let response = serde_json::to_value(&bundles[0]).unwrap();

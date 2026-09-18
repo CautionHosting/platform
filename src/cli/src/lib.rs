@@ -31,6 +31,7 @@ mod credentials;
 mod env_notice;
 mod pgp_keys;
 mod quorum_init;
+mod quorum_inspect;
 mod share_release;
 mod secrets;
 mod ssh_keys;
@@ -750,6 +751,8 @@ enum SecretCommands {
         after_help = "Always saves .caution/quorum-bundle.json and .caution/keymaker-pcr-policy.json in the current directory. Redirected stdout also receives the bundle JSON."
     )]
     Init(quorum_init::Options),
+    #[command(about = "Inspect a saved quorum bundle (verifies its proof by default)")]
+    Inspect(quorum_inspect::Options),
     #[command(about = "Encrypt env file values into .caution/secrets/*.asc")]
     Encrypt {
         #[arg(help = "Env keys to encrypt (defaults to every key in the env file)")]
@@ -3566,7 +3569,8 @@ pub async fn run() -> Result<(), RunError> {
 
     env_notice::gate(cli.verbose);
 
-    if let Err(e) = check_dependencies(cli.verbose) {
+    if !matches!(&cli.command, Commands::Secret { command: SecretCommands::Inspect(_) })
+        && let Err(e) = check_dependencies(cli.verbose) {
         output::error(format!("Dependency check failed: {}", e));
         return Err(RunError::DependencyCheck {
             location: std::panic::Location::caller(),
@@ -3862,6 +3866,11 @@ pub async fn run() -> Result<(), RunError> {
                     shoot_self_in_foot,
                 )
                 .with_context(Ctx::command_dispatch())?;
+            }
+            SecretCommands::Inspect(options) => {
+                quorum_inspect::run(&client, options)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
             }
             SecretCommands::Init(options) => {
                 quorum_init::run(&client, options)

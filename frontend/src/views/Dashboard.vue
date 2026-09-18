@@ -1308,7 +1308,7 @@ make build-cli
           <div v-for="bundle in quorumBundles" :key="bundle.id" class="bundle-card">
             <div class="bundle-row">
               <div class="bundle-identity">
-                <button class="bundle-toggle" :aria-label="`${expandedBundles[bundle.id] ? 'Collapse' : 'Expand'} ${bundle.name || truncateId(bundle.id)}`" :aria-expanded="!!expandedBundles[bundle.id]" :aria-controls="`bundle-details-${bundle.id}`" @click="expandedBundles[bundle.id] = !expandedBundles[bundle.id]">
+                <button class="bundle-toggle" :aria-label="`${expandedBundles[bundle.id] ? 'Collapse' : 'Expand'} ${bundleTitle(bundle)}`" :aria-expanded="!!expandedBundles[bundle.id]" :aria-controls="`bundle-details-${bundle.id}`" @click="expandedBundles[bundle.id] = !expandedBundles[bundle.id]">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" :class="{ 'is-expanded': expandedBundles[bundle.id] }"><path d="m9 5 7 7-7 7"/></svg>
                 </button>
                 <div class="bundle-title">
@@ -1323,8 +1323,8 @@ make build-cli
                   <button class="btn-sm btn-primary" @click="saveBundleName(bundle.id)">Save</button>
                   <button class="btn-sm btn-secondary" @click="cancelEditBundleName()">Cancel</button>
                 </div>
-                  <div v-else class="bundle-name-display"><span class="item-name">{{ bundle.name || truncateId(bundle.id) }}</span></div>
-                  <div class="bundle-subtitle"><span v-if="bundle.name">{{ truncateId(bundle.id) }} · </span>{{ formatDate(bundle.created_at) }}</div>
+                  <div v-else class="bundle-name-display"><span class="item-name">{{ bundleTitle(bundle) }}</span></div>
+                  <div class="bundle-subtitle">{{ formatDate(bundle.created_at) }}</div>
                 </div>
               </div>
               <div class="bundle-field"><span class="bundle-mobile-label">Quorum</span>{{ getQuorumBundleSummary(bundle).threshold || 'Unavailable' }}</div>
@@ -1333,7 +1333,7 @@ make build-cli
                 <div class="bundle-download-group">
                   <button v-if="serializeQuorumBundle(bundle)" class="bundle-download" @click="downloadFile(serializeQuorumBundle(bundle), bundle.id + '_quorum-bundle.json', 'application/json')">Download bundle</button>
                   <div v-if="getQuorumBundleFiles(bundle).publicKey || getQuorumBundleFiles(bundle).shardfile" class="bundle-menu-anchor">
-                    <button class="bundle-download bundle-download-chevron" :aria-label="`Other downloads for ${bundle.name || truncateId(bundle.id)}`" :aria-expanded="bundleMenu === bundle.id + ':downloads'" :aria-controls="`bundle-downloads-${bundle.id}`" @click="toggleBundleMenu(bundle.id + ':downloads', $event)">⌄</button>
+                    <button class="bundle-download bundle-download-chevron" :aria-label="`Other downloads for ${bundleTitle(bundle)}`" :aria-expanded="bundleMenu === bundle.id + ':downloads'" :aria-controls="`bundle-downloads-${bundle.id}`" @click="toggleBundleMenu(bundle.id + ':downloads', $event)">⌄</button>
                     <div v-if="bundleMenu === bundle.id + ':downloads'" :id="`bundle-downloads-${bundle.id}`" class="bundle-menu">
                       <button v-if="getQuorumBundleFiles(bundle).publicKey" @click="downloadFile(getQuorumBundleFiles(bundle).publicKey, truncateId(bundle.id) + '_public_key.asc')">Public key (.asc)</button>
                       <button v-if="getQuorumBundleFiles(bundle).shardfile" @click="downloadFile(getQuorumBundleFiles(bundle).shardfile, truncateId(bundle.id) + '_shardfile.asc')">Shard file (.asc)</button>
@@ -1341,7 +1341,7 @@ make build-cli
                   </div>
                 </div>
                 <div class="bundle-menu-anchor">
-                  <button class="bundle-overflow" :aria-label="`Actions for ${bundle.name || truncateId(bundle.id)}`" :aria-expanded="bundleMenu === bundle.id + ':actions'" :aria-controls="`bundle-actions-${bundle.id}`" @click="toggleBundleMenu(bundle.id + ':actions', $event)">⋯</button>
+                  <button class="bundle-overflow" :aria-label="`Actions for ${bundleTitle(bundle)}`" :aria-expanded="bundleMenu === bundle.id + ':actions'" :aria-controls="`bundle-actions-${bundle.id}`" @click="toggleBundleMenu(bundle.id + ':actions', $event)">⋯</button>
                   <div v-if="bundleMenu === bundle.id + ':actions'" :id="`bundle-actions-${bundle.id}`" class="bundle-menu">
                     <button @click="startEditBundleName(bundle)">Rename</button>
                     <button class="bundle-delete" :disabled="deletingBundle === bundle.id" @click="deleteBundle(bundle.id)">{{ deletingBundle === bundle.id ? 'Deleting...' : 'Delete' }}</button>
@@ -1365,13 +1365,12 @@ make build-cli
                   </template>
                 </div>
               </div>
-              <div class="bundle-hash-row">
-                <span class="bundle-label">Public key SHA-256</span>
-                <code>{{ bundleKeyHashes[bundle.id] ? (revealedBundleValues[bundle.id + ':hash'] ? bundleKeyHashes[bundle.id] : abbreviateBundleValue(bundleKeyHashes[bundle.id])) : 'Unavailable' }}</code>
-                <template v-if="bundleKeyHashes[bundle.id]">
-                  <button class="bundle-text-button" aria-label="Toggle full public key SHA-256" :aria-expanded="!!revealedBundleValues[bundle.id + ':hash']" @click="revealedBundleValues[bundle.id + ':hash'] = !revealedBundleValues[bundle.id + ':hash']">{{ revealedBundleValues[bundle.id + ':hash'] ? 'Hide' : 'Reveal' }}</button>
-                  <button class="bundle-text-button" aria-label="Copy public key SHA-256" @click="copyToClipboard(bundleKeyHashes[bundle.id], 'Public key SHA-256')">Copy</button>
-                </template>
+              <h3 class="bundle-section-title">Identifiers</h3>
+              <div v-for="item in bundleIdentifiers(bundle, bundleKeyHashes[bundle.id])" :key="item.label" class="bundle-hash-row">
+                <span class="bundle-label">{{ item.label }}</span>
+                <code>{{ revealedBundleValues[bundle.id + ':' + item.label] ? item.value : abbreviateBundleValue(item.value) }}</code>
+                <button class="bundle-text-button" :aria-label="`Toggle full ${item.label}`" :aria-expanded="!!revealedBundleValues[bundle.id + ':' + item.label]" @click="revealedBundleValues[bundle.id + ':' + item.label] = !revealedBundleValues[bundle.id + ':' + item.label]">{{ revealedBundleValues[bundle.id + ':' + item.label] ? 'Hide' : 'Reveal' }}</button>
+                <button class="bundle-text-button" :aria-label="`Copy ${item.label}`" @click="copyToClipboard(item.value, item.label)">Copy</button>
               </div>
             <div class="bundle-labels">
               <span v-for="(v, k) in (bundle.labels || {})" :key="k" class="bundle-label-tag">
@@ -2087,7 +2086,7 @@ import {
 import { formatLocalDate, formatLocalTime } from "../utils/dateTime.js";
 import { getSubscriptionPlanAction } from "../utils/subscriptionPlan.js";
 import { getCurrentTheme } from "../utils/theme.js";
-import { getQuorumBundleFiles, getQuorumBundleSummary, serializeQuorumBundle } from "../utils/quorumBundle.js";
+import { getQuorumBundleFiles, getQuorumBundleSummary, serializeQuorumBundle, bundleTitle, bundleIdentifiers, abbreviateBundleValue } from "../utils/quorumBundle.js";
 
 async function sha256Hex(message) {
   const msgBuffer = new TextEncoder().encode(message);
@@ -2441,7 +2440,6 @@ export default {
     const revealedBundleValues = ref({});
     const bundleMenu = ref(null);
     let bundleMenuTrigger = null;
-    const abbreviateBundleValue = value => value.length > 20 ? `${value.slice(0, 12)}…${value.slice(-8)}` : value;
     const closeBundleMenu = () => { bundleMenu.value = null; };
     const toggleBundleMenu = (menu, event) => {
       bundleMenu.value = bundleMenu.value === menu ? null : menu;
@@ -5315,6 +5313,8 @@ export default {
       revealedBundleValues,
       bundleMenu,
       abbreviateBundleValue,
+      bundleTitle,
+      bundleIdentifiers,
       toggleBundleMenu,
       handleBundleMenuSelection,
       quorumBundles,
