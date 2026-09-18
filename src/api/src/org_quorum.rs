@@ -391,21 +391,22 @@ async fn post<T: Serialize, R: serde::de::DeserializeOwned>(
     url: &str,
     body: &T,
 ) -> Result<R, OrgQuorumError> {
-    let response = client
-        .post(url)
-        .json(body)
-        .send()
-        .await
-        .map_err(|source| OrgQuorumError {
-            status: if source.is_timeout() {
-                StatusCode::GATEWAY_TIMEOUT
-            } else {
-                StatusCode::BAD_GATEWAY
-            },
-            message: "key-service request failed; generation was not retried",
-            location: std::panic::Location::caller(),
-            source: Some(source.into()),
-        })?;
+    send(client.post(url).json(body)).await
+}
+
+async fn send<R: serde::de::DeserializeOwned>(
+    request: reqwest::RequestBuilder,
+) -> Result<R, OrgQuorumError> {
+    let response = request.send().await.map_err(|source| OrgQuorumError {
+        status: if source.is_timeout() {
+            StatusCode::GATEWAY_TIMEOUT
+        } else {
+            StatusCode::BAD_GATEWAY
+        },
+        message: "key-service request failed; generation was not retried",
+        location: std::panic::Location::caller(),
+        source: Some(source.into()),
+    })?;
     if !response.status().is_success() {
         let status = match response.status().as_u16() {
             429 => StatusCode::TOO_MANY_REQUESTS,

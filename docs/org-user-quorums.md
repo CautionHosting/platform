@@ -101,12 +101,15 @@ the public key; dashboard compatibility does not add legacy cryptographic verifi
 ## Trust and service configuration
 
 Platform requires `KEYMAKER_URL` and `KEYMAKER_PCR_POLICY_PATH`. WebAuthn/mixed creation additionally requires `PUBLIC_CERTIFICATE_SERVICE_URL`,
-`PUBLIC_CERTIFICATE_PCR_POLICY_PATH` and `CAUTION_CA_CERT_PATH`. PGP-only creation
+`PUBLIC_CERTIFICATE_PCR_POLICY_PATH`, `CAUTION_CA_CERT_PATH` and backend-only
+`PUBLIC_CERTIFICATE_SERVICE_TOKEN` (32 random bytes encoded as 64 hex characters). PGP-only creation
 does not require certificate-service configuration.
 Store `certificate-pcr-policy.json` and the public `caution-ca.asc` alongside the
 Keymaker policy in `~/.config/caution/policies/`; the existing `/run/config`
-read-only mount exposes them to the API. Set the three certificate-service
-variables in `env.example`. Obtain both the service PCRs and Caution CA independently;
+read-only mount exposes them to the API. Set the certificate-service variables in `env.example`. The token must match the
+custody service vault secret. It is sent only to `/v1/public-certificates`, over
+HTTPS, without redirects; do not expose it in frontend configuration or logs.
+Loopback HTTP requires the explicit unsafe E2E build and runtime flag. Obtain both the service PCRs and Caution CA independently;
 neither is learned from a service response. Missing configuration only fails
 Caution-backed creation; PGP creation and unrelated operations remain available.
 

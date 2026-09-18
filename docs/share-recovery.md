@@ -299,3 +299,26 @@ sends the session to a different server, or prompts for login just to retrieve n
 Metadata requests reject redirects rather than forwarding the session.
 Unverified inspection skips all metadata lookup. Inspection also skips irrelevant
 USB/FIDO2 dependency diagnostics; existing environment warnings remain unchanged.
+
+## Public-service hardening
+
+Certificate issuance now requires backend-only `PUBLIC_CERTIFICATE_SERVICE_TOKEN`,
+shared with the custody enclave through `env::vault`. The encrypted token replaces
+the dummy `CERTIFICATE_BOOTSTRAP` marker in the deployment example. Keep the same
+root quorum and CA; update packaging/startup/preflight together before deployment.
+Platform sends the token only to the HTTPS certificate endpoint, without redirects.
+The TLS terminator is trusted with that credential; attestation response verification
+does not hide the token from it. PGP-only creation does not require the token.
+
+The custody service caches readiness for two seconds, coalesces health refreshes,
+and admits four blocking release workers with a 60-second request budget. Workers
+retain permits through actual completion, including after timeout or disconnect.
+Sessions retain their three-minute expiry and global 64 limit, plus eight per
+authenticated organization/bundle; preparation retains the reservation. Overload
+returns 503. Release routes remain public and require the existing WebAuthn
+authorization to release a share. These bounds do not guarantee availability under
+sustained flooding.
+
+See Locksmith's `docs/service-hardening.md` for exact token provisioning, deployment,
+PCR-policy updates and manual acceptance commands. See
+[the validation record](service-hardening-validation.md) for local test evidence.
