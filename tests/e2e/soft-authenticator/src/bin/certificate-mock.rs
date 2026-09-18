@@ -92,6 +92,9 @@ fn serve(mut stream: TcpStream, work: &Path, ca: &Cert, wrong_ca: &Cert) -> Resu
     ensure!(length <= 4096, "oversized mock request");
     let (status, body) = if first.starts_with("GET /health ") {
         (200, serde_json::json!({"status":"ready"}))
+    } else if first.starts_with("GET /api/quorum-bundles ") {
+        // Optional CLI display metadata is unavailable on this app-only mock.
+        (404, serde_json::json!({"error":"metadata unavailable"}))
     } else if first.starts_with("GET /api/resources/quorum-test ") {
         // Only used to reach the CLI's mixed-bundle rejection; no enclave exists.
         (

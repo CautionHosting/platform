@@ -13,7 +13,7 @@ use crate::EifFile;
 const DEFAULT_ENCLAVEOS_COMMIT: &str = "9582e25239430070667fdd0a6b64d887f1c308df";
 const DEFAULT_BOOTPROOF_COMMIT: &str = "b03721957e3850931f5b53627e7c3d1c302a06fe";
 const DEFAULT_STEVE_COMMIT: &str = "c0b8d2d62e66108689745561242972048f6cfce5";
-const DEFAULT_LOCKSMITH_COMMIT: &str = "af98a3901cfe0ed28e0e8dc4037b7635bfc60946";
+const DEFAULT_LOCKSMITH_COMMIT: &str = "4851791bda5f8f392f88e474ed5731b287ecd4bc";
 
 // Kept in sync with the git clone URLs in templates/Containerfile.eif.
 pub const ENCLAVEOS_REPO: &str = "https://codeberg.org/caution/enclaveos.git";
@@ -175,6 +175,14 @@ pub enum StageEifComponentsError {
         source: dterror::BoxError,
     },
 
+    #[error("could not verify locksmith artifacts [{location}]")]
+    CheckArtifacts {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
     #[error("could not create directory {path} [{location}]")]
     CreateDir {
         #[context(borrow = Path)]
@@ -306,6 +314,9 @@ pub async fn stage_eif_components(
     use StageEifComponentsErrorCtx as Ctx;
 
     validate_key_exchange(e2e_key_exchange).with_context(Ctx::validate_key_exchange())?;
+    if locksmith {
+        crate::artifacts::check(user_fs_path).with_context(Ctx::check_artifacts())?;
+    }
 
     let stage_dir = work_dir.join("eif-stage");
     fs::create_dir_all(&stage_dir)

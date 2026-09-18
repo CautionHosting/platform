@@ -80,7 +80,7 @@ fn direct_rejects_mixed_and_webauthn() {
 }
 
 #[test]
-fn pgp_override_accepts_user_selector_and_requires_key_uuid() {
+fn pgp_override_accepts_user_selector_and_registration_uuid() {
     assert!("bad=value".parse::<PgpSelection>().is_err());
     let user = Uuid::new_v4();
     let key = Uuid::new_v4();
@@ -89,7 +89,97 @@ fn pgp_override_accepts_user_selector_and_requires_key_uuid() {
         .parse::<PgpSelection>()
         .unwrap();
     assert_eq!(parsed.user, UserSelector::Id(user));
-    assert_eq!(parsed.key, key);
+    assert_eq!(parsed.key, PgpKeySelector::Id(key));
+}
+
+#[test]
+fn fingerprints_resolve_to_the_same_registration_uuid_payload() {
+    for size in [40, 64] {
+        let fingerprint = "aB".repeat(size / 2);
+        let member = Member {
+            user_id: Uuid::new_v4(), username: "alice".into(), webauthn_credentials: 2,
+            pgp_keys: vec![RegisteredKey { id: Uuid::new_v4(), fingerprint: fingerprint.clone(), public_key: "selected certificate".into() }],
+        };
+        let mut opts = options(vec![member.user_id]);
+        let expected = select_participants(&opts, &[member.clone()], false, false).unwrap();
+        let spaced = fingerprint.as_bytes().chunks(4).map(|c| std::str::from_utf8(c).unwrap()).collect::<Vec<_>>().join(" ");
+        for selector in [member.pgp_keys[0].id.to_string(), fingerprint.to_uppercase(), fingerprint.to_lowercase(), format!(" \t{spaced}\n")] {
+            opts.pgp_keys = vec![format!("alice={selector}").parse().unwrap()];
+            let actual = select_participants(&opts, &[member.clone()], false, false).unwrap();
+            assert_eq!(serde_json::to_value(&actual.0).unwrap(), serde_json::to_value(&expected.0).unwrap());
+            assert_eq!(actual.1, expected.1);
+            assert_eq!(actual.0[0].pgp_key_id, Some(member.pgp_keys[0].id));
+        }
+    }
+    for invalid in ["", "abcd", "a".repeat(39).as_str(), "a".repeat(41).as_str(), "g".repeat(40).as_str(), "0x0123456789012345678901234567890123456789"] {
+        assert!(format!("alice={invalid}").parse::<PgpSelection>().is_err());
+    }
+}
+
+#[test]
+fn fingerprint_selection_is_user_scoped_and_requires_one_active_match() {
+    let alice = Member {
+        user_id: Uuid::new_v4(), username: "alice".into(), webauthn_credentials: 1,
+        pgp_keys: vec![RegisteredKey { id: Uuid::new_v4(), fingerprint: "ab".repeat(20), public_key: "alice cert".into() }],
+    };
+    let bob = Member { user_id: Uuid::new_v4(), username: "bob".into(), pgp_keys: vec![RegisteredKey {
+        id: Uuid::new_v4(), fingerprint: "cd".repeat(20), public_key: "bob cert".into(),
+    }], ..alice.clone() };
+    let mut opts = options(vec![alice.user_id]);
+    for wrong in [bob.pgp_keys[0].fingerprint.clone(), bob.pgp_keys[0].id.to_string(), "ef".repeat(20)] {
+        opts.pgp_keys = vec![format!("alice={wrong}").parse().unwrap()];
+        assert!(select_participants(&opts, &[alice.clone(), bob.clone()], false, false).is_err());
+    }
+    opts.pgp_keys = vec![format!("alice={}", alice.pgp_keys[0].fingerprint).parse().unwrap()];
+    let mut removed = alice.clone();
+    removed.pgp_keys.clear(); // Discovery omits removed registrations.
+    assert!(select_participants(&opts, &[removed], false, false).is_err());
+    let mut ambiguous = alice.clone();
+    ambiguous.pgp_keys.push(RegisteredKey { id: Uuid::new_v4(), ..alice.pgp_keys[0].clone() });
+    assert!(select_participants(&opts, &[ambiguous.clone()], false, false).unwrap_err().to_string().contains("ambiguous"));
+    opts.pgp_keys = vec![format!("alice={}", alice.pgp_keys[0].id).parse().unwrap()];
+    assert!(select_participants(&opts, &[ambiguous.clone()], false, false).is_ok());
+    ambiguous.pgp_keys[1].id = ambiguous.pgp_keys[0].id;
+    assert!(select_participants(&opts, &[ambiguous], false, false).is_err());
+}
+
+#[test]
+fn creation_summary_uses_names_custody_and_fingerprints() {
+    let member = Member {
+        user_id: Uuid::new_v4(), username: "alice".into(), webauthn_credentials: 2,
+        pgp_keys: vec![RegisteredKey { id: Uuid::new_v4(), fingerprint: "AB".repeat(20), public_key: "cert".into() }],
+    };
+    let mut participant = Participant { user_id: member.user_id, key_source: "existing_pgp", pgp_key_id: Some(member.pgp_keys[0].id) };
+    assert_eq!(participant_summary(&member, &participant), format!("alice · External PGP · {}", "AB".repeat(20)));
+    participant.key_source = "caution_backed_pgp";
+    participant.pgp_key_id = None;
+    assert_eq!(participant_summary(&member, &participant), "alice · Passkey");
+    let explicit = pgp_selection_menu(&member, Some(false));
+    assert!(explicit.starts_with("Select PGP key for alice:"));
+    assert!(!explicit.contains("WebAuthn"));
+    let legacy = pgp_selection_menu(&member, None);
+    assert!(legacy.starts_with("Select custody for alice:") && legacy.contains("WebAuthn"));
+}
+
+#[test]
+fn multiple_registered_keys_prompt_without_a_selector() {
+    let member = Member {
+        user_id: Uuid::new_v4(), username: "alice".into(), webauthn_credentials: 2,
+        pgp_keys: ["ab", "cd"].into_iter().map(|prefix| RegisteredKey {
+            id: Uuid::new_v4(), fingerprint: prefix.repeat(20), public_key: prefix.into(),
+        }).collect(),
+    };
+    let mut opts = options(vec![]);
+    opts.holders = vec!["alice=external-pgp".parse().unwrap()];
+    let mut prompts = 0;
+    let (selected, certificates) = select_participants_with_choice(&opts, &[member.clone()], true, false, |_| {
+        prompts += 1;
+        Ok(2)
+    }).unwrap();
+    assert_eq!(prompts, 1);
+    assert_eq!(selected[0].pgp_key_id, Some(member.pgp_keys[1].id));
+    assert_eq!(certificates, vec!["cd"]);
+    assert!(select_participants_with_choice(&opts, &[member], false, false, |_| panic!("noninteractive prompt")).is_err());
 }
 
 fn options(users: Vec<Uuid>) -> Options {
@@ -100,6 +190,7 @@ fn options(users: Vec<Uuid>) -> Options {
         no_upload: false,
         name: None,
         labels: vec![],
+        holders: Vec::new(),
         from_org_users: users.into_iter().map(UserSelector::Id).collect(),
         caution_backed: false,
         pgp_keys: vec![],
@@ -132,12 +223,12 @@ fn selection_requires_explicit_webauthn_and_pgp_ownership() {
     });
     opts.pgp_keys.push(PgpSelection {
         user: UserSelector::Id(user),
-        key,
+        key: PgpKeySelector::Id(key),
     });
     let (holders, certs) = select_participants(&opts, &[member.clone()], false, false).unwrap();
     assert_eq!(holders[0].key_source, "existing_pgp");
     assert_eq!(certs, vec!["test certificate"]);
-    opts.pgp_keys[0].key = Uuid::new_v4();
+    opts.pgp_keys[0].key = PgpKeySelector::Id(Uuid::new_v4());
     assert!(select_participants(&opts, &[member], false, false).is_err());
 }
 
@@ -174,7 +265,7 @@ fn duplicate_users_and_overrides_are_rejected() {
     opts.pgp_keys = vec![
         PgpSelection {
             user: UserSelector::Id(user),
-            key: Uuid::new_v4()
+            key: PgpKeySelector::Id(Uuid::new_v4())
         };
         2
     ];
@@ -318,7 +409,7 @@ fn saved_policy_is_preserved_and_replacement_is_rejected() {
 #[cfg(feature = "e2e-testing-unsafe")]
 #[tokio::test]
 #[ignore = "run make test-quorum-mock"]
-async fn downloaded_caution_bundles_reject_recovery() {
+async fn downloaded_bundles_require_explicit_noninteractive_holder() {
     let work = PathBuf::from(std::env::var("QUORUM_RECOVERY_TEST_DIR").unwrap());
     let base_url = std::env::var("PUBLIC_CERTIFICATE_SERVICE_URL").unwrap();
     let config_path = work.join("recovery-client.json");
@@ -348,14 +439,12 @@ async fn downloaded_caution_bundles_reject_recovery() {
             Some("quorum-test".into()),
             Some(work.join(name)),
             None,
+            crate::share_release::Options::default(),
         )
         .await
         .unwrap_err();
         assert!(
-            matches!(
-                error,
-                crate::secrets::SendShardError::WebAuthnTransportUnavailable { .. }
-            ),
+            matches!(error, crate::secrets::SendShardError::SelectHolder { .. }),
             "{name}: {error}"
         );
     }
@@ -438,7 +527,7 @@ fn username_resolution_preserves_order_and_uuid_payloads() {
     ];
     names.pgp_keys = vec![PgpSelection {
         user: "bob".parse().unwrap(),
-        key: members[1].pgp_keys[0].id,
+        key: PgpKeySelector::Id(members[1].pgp_keys[0].id),
     }];
     let expected = select_participants(&ids, &members, false, false).unwrap();
     let actual = select_participants(&names, &members, false, false).unwrap();
@@ -451,7 +540,7 @@ fn username_resolution_preserves_order_and_uuid_payloads() {
     names.caution_backed = true;
     names.pgp_keys.push(PgpSelection {
         user: "ALICE".parse().unwrap(),
-        key: members[0].pgp_keys[0].id,
+        key: PgpKeySelector::Id(members[0].pgp_keys[0].id),
     });
     assert!(select_participants(&names, &members, true, true).is_ok());
     names.pgp_keys.pop();
@@ -471,7 +560,7 @@ fn username_resolution_preserves_order_and_uuid_payloads() {
     names.from_org_users.pop();
     names.pgp_keys.push(PgpSelection {
         user: UserSelector::Id(members[1].user_id),
-        key: members[1].pgp_keys[0].id,
+        key: PgpKeySelector::Id(members[1].pgp_keys[0].id),
     });
     assert!(
         select_participants(&names, &members, false, false)
@@ -489,7 +578,7 @@ fn username_resolution_preserves_order_and_uuid_payloads() {
     );
     names.pgp_keys = vec![PgpSelection {
         user: "alice".parse().unwrap(),
-        key: members[1].pgp_keys[0].id,
+        key: PgpKeySelector::Id(members[1].pgp_keys[0].id),
     }];
     assert!(
         select_participants(&names, &members, false, false)
@@ -532,5 +621,91 @@ fn unknown_partial_and_ambiguous_names_are_rejected() {
             .unwrap()
             .to_string()
             .contains("ambiguous")
+    );
+}
+
+#[test]
+fn per_holder_custody_is_explicit_and_mixed() {
+    let alice = Uuid::new_v4();
+    let bob = Uuid::new_v4();
+    let members = vec![
+        Member {
+            user_id: alice,
+            username: "alice".into(),
+            pgp_keys: vec![],
+            webauthn_credentials: 1,
+        },
+        Member {
+            user_id: bob,
+            username: "bob".into(),
+            pgp_keys: vec![RegisteredKey {
+                id: Uuid::new_v4(),
+                fingerprint: "bob-key".into(),
+                public_key: "public certificate".into(),
+            }],
+            webauthn_credentials: 1,
+        },
+    ];
+    let mut options = options(vec![]);
+    options.holders = vec!["alice=webauthn".parse().unwrap()];
+    assert_eq!(
+        select_participants(&options, &members, false, false)
+            .unwrap()
+            .0[0]
+            .key_source,
+        "caution_backed_pgp"
+    );
+    options.holders = vec![
+        "alice=webauthn".parse().unwrap(),
+        "bob=external-pgp".parse().unwrap(),
+    ];
+    let (participants, _) = select_participants(&options, &members, false, false).unwrap();
+    assert_eq!(participants.len(), 2);
+    assert_eq!(participants[0].key_source, "caution_backed_pgp");
+    assert_eq!(participants[1].key_source, "existing_pgp");
+    assert_eq!(participants[1].pgp_key_id, Some(members[1].pgp_keys[0].id));
+    options.holders = vec!["alice=external-pgp".parse().unwrap()];
+    assert!(select_participants(&options, &members, false, false).is_err());
+    options.holders = vec![
+        "alice=webauthn".parse().unwrap(),
+        "alice=webauthn".parse().unwrap(),
+    ];
+    assert!(select_participants(&options, &members, false, false).is_err());
+    assert!("alice=pgp".parse::<HolderSelection>().is_err());
+}
+
+#[test]
+fn holder_flags_parse_and_reject_mixed_selector_styles() {
+    assert!(
+        TestCli::try_parse_from([
+            "caution",
+            "init",
+            "--holder",
+            "alice=webauthn",
+            "--holder",
+            "bob=external-pgp"
+        ])
+        .is_ok()
+    );
+    assert!(
+        TestCli::try_parse_from([
+            "caution",
+            "init",
+            "--holder",
+            "alice=webauthn",
+            "--from-org-users",
+            "bob"
+        ])
+        .is_err()
+    );
+    assert!(
+        TestCli::try_parse_from([
+            "caution",
+            "init",
+            "--holder",
+            "alice=webauthn",
+            "--caution-backed"
+        ])
+        .is_err()
     );
 }

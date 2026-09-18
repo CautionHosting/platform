@@ -30,6 +30,7 @@ mod cache;
 mod credentials;
 mod pgp_keys;
 mod quorum_init;
+mod share_release;
 mod secrets;
 mod ssh_keys;
 mod verify;
@@ -739,7 +740,8 @@ enum SecretCommands {
     },
     #[command(
         visible_alias = "new",
-        about = "Initialize a cryptographic quorum bundle"
+        about = "Initialize a cryptographic quorum bundle",
+        after_help = "Always saves .caution/quorum-bundle.json and .caution/keymaker-pcr-policy.json in the current directory. Redirected stdout also receives the bundle JSON."
     )]
     Init(quorum_init::Options),
     #[command(about = "Encrypt env file values into .caution/secrets/*.asc")]
@@ -782,6 +784,8 @@ enum SecretCommands {
     },
     #[command(about = "Send a shard to a running enclave's locksmith daemon")]
     SendShard {
+        #[command(flatten)]
+        release: share_release::Options,
         #[arg(
             long,
             help = "App ID or resource name (defaults to current deployment)"
@@ -791,7 +795,7 @@ enum SecretCommands {
         bundle: Option<PathBuf>,
         #[arg(
             long,
-            help = "Path for private OpenPGP Keyring (if not using smartcards)"
+            help = "Private OpenPGP keyring; a unique holder match is selected automatically. Omit for an OpenPGP smartcard"
         )]
         keyring: Option<PathBuf>,
     },
@@ -1300,6 +1304,7 @@ pub(crate) enum ReadConfigFromDirError {
     },
 }
 
+#[derive(Clone)]
 struct ApiClient {
     base_url: String,
     client: reqwest::Client,
@@ -3854,11 +3859,12 @@ pub async fn run() -> Result<(), RunError> {
                 }
             },
             SecretCommands::SendShard {
+                release,
                 app,
                 bundle,
                 keyring,
             } => {
-                secrets::send_shard(&client, app, bundle, keyring)
+                secrets::send_shard(&client, app, bundle, keyring, release)
                     .await
                     .with_context(Ctx::command_dispatch())?;
             }

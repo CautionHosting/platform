@@ -90,6 +90,16 @@ pub fn run(
     id: &str,
     work: &Path,
 ) -> Result<()> {
+    // An authenticated requester must not disguise a real login challenge as release approval.
+    let mut login: Value = checked(http.post(format!("{base}/auth/login/begin"))
+        .json(&json!({"username":"quorummock"})).send()?)?.json()?;
+    login["publicKey"]["userVerification"] = json!("required");
+    let forged = json!({"options":login, "context":{"holder":"victim"}, "context_hash":"invented"});
+    let response = http.post(format!("{base}/auth/qr-release/begin"))
+        .header("X-Session-ID", id).json(&forged).send()?;
+    assert_eq!(response.status().as_u16(), 422, "unattested login challenge must not create an approval URL");
+    println!("PASS: authenticated relay rejects a substituted real login challenge");
+
     let (cert, _) = CertBuilder::new()
         .add_userid("temporary quorum holder")
         .add_signing_subkey()
@@ -204,7 +214,9 @@ pub fn run(
     );
 
     let cli = std::env::var("QUORUM_CLI")?;
-    fs::write(work.join("Procfile"), "web: true\n")?;
+    // A plain directory must persist the bundle and policy too.
+    assert!(!work.join("Procfile").exists());
+    assert!(!work.join("caution.hcl").exists());
     let result = Command::new(&cli)
         .current_dir(work)
         .stdin(Stdio::null())
@@ -266,46 +278,60 @@ pub fn run(
             .to_string(),
         )?;
     }
-    let result = Command::new(&cli)
-        .current_dir(work)
-        .stdin(Stdio::null())
-        .env("HOME", &home)
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .args([
-            "--url",
-            base,
-            "secret",
-            "init",
-            "--from-org-users",
-            username,
-            "--pgp-key",
-            &format!("{username}={key_id}"),
-            "--threshold",
-            "1",
-            "--no-upload",
-            "--keymaker-url",
-            &std::env::var("KEYMAKER_URL")?,
-            "--keymaker-pcr-policy",
-            "policies/keymaker-pcr-policy.json",
-        ])
-        .output()?;
-    anyhow::ensure!(
-        result.status.success(),
-        "username CLI: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert!(String::from_utf8_lossy(&result.stderr).contains(&format!(
-        "{} ({})",
-        username,
-        member["user_id"].as_str().unwrap()
-    )));
-    let named: Value =
-        serde_json::from_slice(&fs::read(work.join(".caution/quorum-bundle.json"))?)?;
-    assert_eq!(
-        named["data"]["keyring"][0]["OpenPGP"]["cert"],
-        member["pgp_keys"][0]["public_key"]
-    );
+    let fingerprint = member["pgp_keys"][0]["fingerprint"].as_str().context("registered fingerprint")?;
+    let grouped = fingerprint.to_lowercase().as_bytes().chunks(4)
+        .map(|part| std::str::from_utf8(part).unwrap().to_owned()).collect::<Vec<_>>().join(" ");
+    for selector in [key_id.to_owned(), fingerprint.to_owned(), grouped] {
+        let result = Command::new(&cli)
+            .current_dir(work)
+            .stdin(Stdio::null())
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .args([
+                "--url",
+                base,
+                "secret",
+                "init",
+                "--from-org-users",
+                username,
+                "--pgp-key",
+                &format!("{username}={selector}"),
+                "--threshold",
+                "1",
+                "--no-upload",
+                "--keymaker-url",
+                &std::env::var("KEYMAKER_URL")?,
+                "--keymaker-pcr-policy",
+                "policies/keymaker-pcr-policy.json",
+            ])
+            .output()?;
+        anyhow::ensure!(
+            result.status.success(),
+            "username CLI: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let output = String::from_utf8_lossy(&result.stderr);
+        assert!(output.contains(&format!("{username} · External PGP · {fingerprint}")));
+        assert!(!output.contains("existing_pgp"));
+        assert!(!output.contains(key_id));
+        assert!(!output.contains(member["user_id"].as_str().unwrap()));
+        let named: Value =
+            serde_json::from_slice(&fs::read(work.join(".caution/quorum-bundle.json"))?)?;
+        assert_eq!(
+            named["data"]["keyring"][0]["OpenPGP"]["cert"],
+            member["pgp_keys"][0]["public_key"]
+        );
+    }
     checked(session.signed_at(Method::DELETE, &format!("/pgp-keys/{key_id}"), "", "")?)?;
+    // Removed keys disappear from discovery and fail before the unreachable generator.
+    let rejected = Command::new(&cli).current_dir(work).stdin(Stdio::null())
+        .env("HOME", &home).env("XDG_CONFIG_HOME", home.join(".config"))
+        .args(["--url", base, "secret", "init", "--holder", &format!("{username}=external-pgp"),
+            "--pgp-key", &format!("{username}={fingerprint}"), "--threshold", "1", "--no-upload",
+            "--keymaker-url", "http://127.0.0.1:9", "--keymaker-pcr-policy", "policies/keymaker-pcr-policy.json"])
+        .output()?;
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("active registered keys"));
     // The CLI must reject conflicting local inputs before contacting even an unavailable Keymaker.
     let saved_policy_path = work.join(".caution/keymaker-pcr-policy.json");
     let saved_policy = fs::read(&saved_policy_path)?;
@@ -332,8 +358,8 @@ pub fn run(
             .output()?;
         assert!(!rejected.status.success());
         assert!(
-            String::from_utf8_lossy(&rejected.stderr).contains("saved repository PCR policy")
-                || String::from_utf8_lossy(&rejected.stderr).contains("saved repository policy")
+            String::from_utf8_lossy(&rejected.stderr).contains("saved local PCR policy")
+                || String::from_utf8_lossy(&rejected.stderr).contains("saved local policy")
         );
         assert_eq!(fs::read(&saved_policy_path)?, contents);
         assert_eq!(

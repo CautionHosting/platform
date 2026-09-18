@@ -54,6 +54,7 @@ pub(crate) fn build_frontend_routes(frontend_dir: &Path) -> Router {
         .route_service("/reset", ServeFile::new(frontend_index.clone()))
         .route_service("/dashboard", ServeFile::new(frontend_index.clone()))
         .route_service("/qr-login", ServeFile::new(frontend_index.clone()))
+        .route_service("/qr-release", ServeFile::new(frontend_index.clone()))
         .route_service("/qr-sign", ServeFile::new(frontend_index.clone()))
         .route_service("/verify", ServeFile::new(frontend_index.clone()))
         .route("/verify-e2ee", get(redirect_verify_e2ee))

@@ -231,7 +231,7 @@ fn is_pin_related_error(error: &dyn std::error::Error) -> bool {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-enum RenderQrCodeError {
+pub(crate) enum RenderQrCodeError {
     #[error("failed to generate QR code [{location:?}]")]
     Generate {
         #[location]
@@ -242,7 +242,7 @@ enum RenderQrCodeError {
     },
 }
 
-fn render_qr_code(url: &str) -> Result<(), RenderQrCodeError> {
+pub(crate) fn render_qr_code(url: &str) -> Result<(), RenderQrCodeError> {
     use RenderQrCodeErrorCtx as Ctx;
     // When not attached to a terminal, skip QR art and print only the URL
     if !output::is_tty_stdout() {
@@ -325,6 +325,7 @@ struct PublicKeyCredentialCreationOptions {
 pub(crate) struct LoginBeginResponse {
     #[serde(rename = "publicKey")]
     pub(crate) public_key: PublicKeyCredentialRequestOptions,
+    #[serde(default)]
     pub(crate) session: String,
 }
 
@@ -352,6 +353,8 @@ pub(crate) struct PublicKeyCredentialRequestOptions {
     timeout: u64,
     #[serde(rename = "allowCredentials", default)]
     allow_credentials: Vec<AllowCredential>,
+    #[serde(rename = "userVerification", default)]
+    user_verification: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -2403,6 +2406,13 @@ enum TryGetAssertionError {
     },
 }
 
+fn assertion_client_data(challenge: &str, origin: &str) -> Result<Vec<u8>, TryGetAssertionError> {
+    serde_json::to_vec(&serde_json::json!({
+        "type": "webauthn.get", "challenge": challenge, "origin": origin,
+    }))
+    .with_context(TryGetAssertionErrorCtx::serialize_client_data())
+}
+
 fn try_get_assertion(
     client: &ApiClient,
     options: &LoginBeginResponse,
@@ -2452,20 +2462,18 @@ fn try_get_assertion(
         format!("Allow list has {} credentials", allow_list.len()),
     );
 
+    // Keep the exact bytes hashed by the authenticator for the returned assertion.
+    let client_data_json_bytes = assertion_client_data(&opts.challenge, base_url)?;
     let args = SignArgs {
-        client_data_hash: Sha256::digest(
-            serde_json::to_vec(&serde_json::json!({
-            "type": "webauthn.get",
-            "challenge": opts.challenge,
-            "origin": base_url,
-            }))
-            .with_context(Ctx::serialize_client_data())?,
-        )
-        .into(),
+        client_data_hash: Sha256::digest(&client_data_json_bytes).into(),
         origin: base_url.to_string(),
         relying_party_id: opts.rp_id.clone(),
         allow_list,
-        user_verification_req: authenticator::ctap2::server::UserVerificationRequirement::Preferred,
+        user_verification_req: if opts.user_verification.as_deref() == Some("required") {
+            authenticator::ctap2::server::UserVerificationRequirement::Required
+        } else {
+            authenticator::ctap2::server::UserVerificationRequirement::Preferred
+        },
         user_presence_req: true,
         extensions: Default::default(),
         pin,
@@ -2573,14 +2581,6 @@ fn try_get_assertion(
             } else {
                 result.with_context(Ctx::assertion_failed())
             }?;
-
-            let client_data_json = serde_json::json!({
-                "type": "webauthn.get",
-                "challenge": opts.challenge,
-                "origin": client.base_url.clone(),
-            });
-            let client_data_json_bytes =
-                serde_json::to_vec(&client_data_json).with_context(Ctx::serialize_client_data())?;
 
             let cred_id_bytes = &sign_result
                 .assertion
@@ -2746,5 +2746,27 @@ mod tests {
         let obj = body.as_object().unwrap();
         assert_eq!(obj.len(), 1);
         assert_eq!(obj.get("username").and_then(|v| v.as_str()), Some("grace"));
+    }
+}
+
+#[cfg(test)]
+mod assertion_origin_tests {
+    use super::*;
+    #[test]
+    fn native_assertion_preserves_frontend_origin_when_api_origin_differs() {
+        let api = "https://api.example.com";
+        let frontend = "https://app.example.com";
+        let bytes = assertion_client_data("challenge", frontend).unwrap();
+        let signed_hash = Sha256::digest(&bytes);
+        let encoded = general_purpose::URL_SAFE_NO_PAD.encode(&bytes);
+        let returned = general_purpose::URL_SAFE_NO_PAD.decode(encoded).unwrap();
+        assert_eq!(signed_hash, Sha256::digest(&returned));
+        let data: serde_json::Value = serde_json::from_slice(&returned).unwrap();
+        assert_eq!(data["origin"], frontend);
+        assert_ne!(data["origin"], api);
+        assert_ne!(
+            signed_hash,
+            Sha256::digest(assertion_client_data("challenge", api).unwrap())
+        );
     }
 }

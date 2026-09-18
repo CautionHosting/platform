@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+mod artifacts;
+
 const ENCLAVE_SOURCE_BASE: &str = "https://codeberg.org/caution/enclaveos/archive";
 pub const FRAMEWORK_SOURCE: &str = "https://codeberg.org/caution/platform/archive/main.tar.gz";
 const PLATFORM_CODEBERG_ARCHIVE_PREFIX: &str = "https://codeberg.org/caution/platform/archive/";
