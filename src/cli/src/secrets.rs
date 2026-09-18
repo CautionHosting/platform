@@ -545,10 +545,8 @@ fn encrypt_env_file(
     Ok(count)
 }
 
-/// Keymaker-eligibility of a single certificate, with per-subkey detail so we can tell the
-/// user exactly which subkey is missing instead of an opaque "no eligible certificates".
+/// Key roles used to determine Keymaker eligibility of a single certificate.
 struct CertEligibility {
-    user_id: String,
     has_sign: bool,
     has_auth: bool,
     has_enc: bool,
@@ -557,21 +555,6 @@ struct CertEligibility {
 impl CertEligibility {
     fn is_eligible(&self) -> bool {
         self.has_sign && self.has_auth && self.has_enc
-    }
-
-    /// Human-readable list of the missing subkey roles, in keygen order.
-    fn missing(&self) -> Vec<&'static str> {
-        let mut missing = Vec::new();
-        if !self.has_sign {
-            missing.push("signing");
-        }
-        if !self.has_auth {
-            missing.push("authentication");
-        }
-        if !self.has_enc {
-            missing.push("storage-encryption");
-        }
-        missing
     }
 }
 
@@ -623,14 +606,8 @@ fn keymaker_cert_eligibility(
         let valid_cert = cert
             .with_policy(&policy, None)
             .with_context(Ctx::invalid_cert())?;
-        let user_id = valid_cert
-            .userids()
-            .next()
-            .map(|uid| String::from_utf8_lossy(uid.userid().value()).into_owned())
-            .unwrap_or_else(|| valid_cert.fingerprint().to_string());
 
         certs.push(CertEligibility {
-            user_id,
             has_sign: valid_cert.keys().for_signing().next().is_some(),
             has_auth: valid_cert.keys().for_authentication().next().is_some(),
             has_enc: valid_cert.keys().for_storage_encryption().next().is_some(),
@@ -1460,13 +1437,6 @@ pub async fn label_remove(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum SendShardError {
-    #[error(
-        "WebAuthn and mixed bundle unlocking requires the pending Locksmith WebAuthn transport (issue #12) [{location:?}]"
-    )]
-    WebAuthnTransportUnavailable {
-        #[location]
-        location: Location,
-    },
     #[error("Failed to fetch app [{location:?}]")]
     FetchApp {
         #[location]
@@ -1624,6 +1594,22 @@ pub enum SendShardError {
         source: BoxError,
     },
 
+    #[error("Unable to select share holder [{location:?}]")]
+    SelectHolder {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Connection closed during share recovery; share acceptance was not confirmed. The application may already be unlocked; check its status before retrying [{location:?}]")]
+    ConnectionClosed {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
     #[error("Invalid address: {address} [{location:?}]")]
     InvalidAddress {
         #[context(borrow = str)]
@@ -1657,12 +1643,32 @@ pub enum SendShardError {
     },
 }
 
+fn connection_closed(mut error: &(dyn std::error::Error + 'static)) -> bool {
+    loop {
+        if let Some(io) = error.downcast_ref::<std::io::Error>() {
+            if matches!(io.kind(), std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::BrokenPipe) {
+                return true;
+            }
+        }
+        match error.source() { Some(source) => error = source, None => return false }
+    }
+}
+
+fn share_acceptance_message(remaining: u8) -> String {
+    match remaining {
+        0 => "Quorum reconstructed successfully.".to_owned(),
+        1 => "Share accepted. 1 more share required.".to_owned(),
+        n => format!("Share accepted. {n} more shares required."),
+    }
+}
+
 /// Send a shard to a running enclave's locksmith daemon.
 pub async fn send_shard(
     client: &ApiClient,
     app: Option<String>,
     bundle_path: Option<PathBuf>,
     private_keyring: Option<PathBuf>,
+    release_options: crate::share_release::Options,
 ) -> Result<(), SendShardError> {
     use SendShardErrorCtx as Ctx;
 
@@ -1789,41 +1795,67 @@ pub async fn send_shard(
         ),
     ]);
 
+    output::status("Loaded destination policy from .caution/trusted_hashes.json");
     if let Some(verified_at) = hashes["verified_at"].as_str() {
-        output::status(format!("Using trusted hashes from {}", verified_at));
+        output::verbose(client.verbose, format!("Recorded verification time: {} (stored metadata)", crate::share_release::terminal_label(verified_at)));
     }
+    output::verbose(client.verbose, format!("Destination PCR policy: {:?}", pcrs.iter().map(|(i, value)| (*i, hex::encode(value))).collect::<std::collections::BTreeMap<_, _>>()));
 
     // Parse the quorum bundle
     let bundle_text =
         fs::read_to_string(&bundle_file).with_context(Ctx::read_bundle_file(&bundle_file))?;
-    let bundle = crate::quorum_init::load_bundle(&bundle_text).with_context(Ctx::parse_bundle())?;
-    if bundle.clone().to_latest().keyring.iter().any(|key| {
-        matches!(
-            key,
-            keymaker_models::generate_quorum::v1::Key::WebAuthn { .. }
-        )
-    }) {
-        return Err(SendShardError::WebAuthnTransportUnavailable {
-            location: std::panic::Location::caller(),
-        });
-    }
+    let (bundle, generation_time) = crate::quorum_init::load_bundle_with_timestamp(&bundle_text).with_context(Ctx::parse_bundle())?;
+    let proof: serde_json::Value = serde_json::from_str(&bundle_text).with_context(Ctx::parse_bundle())?;
+    let names = crate::share_release::holder_names(client, &proof).await;
+    let keys = &bundle.clone().to_latest().keyring;
+    let (holder, webauthn) = crate::share_release::select_holder(keys, release_options.holder.as_deref(), private_keyring.as_deref(), &names)
+        .with_context(Ctx::select_holder())?;
+    let holder_display = crate::share_release::holder_label(keys, &holder, webauthn, &names);
+    output::verbose(client.verbose, format!("Holder certificate: {holder}"));
 
     let address_str = format!("{}:49504", public_ip);
-    output::status(format!("Sending shard to enclave at {}...", address_str));
     let address: std::net::SocketAddr = address_str
         .parse()
         .with_context(Ctx::invalid_address(&address_str))?;
 
-    let status = locksmith::client::send_shard(address, pcrs, &bundle, private_keyring)
-        .await
-        .with_context(Ctx::send_shard(&address_str))?;
+    let latest = bundle.clone().to_latest();
+    let summary = crate::share_release::ReleaseSummary {
+        application_id: app_info.id.clone(),
+        application_name: app_info.resource_name,
+        holder: holder_display,
+        address,
+        threshold: latest.threshold,
+        holders: latest.max,
+        method: match (webauthn, client.qr, private_keyring.is_some()) {
+            (true, true, _) => "Browser passkey",
+            (true, false, _) => "Native passkey",
+            (false, _, true) => "Private-key file",
+            (false, _, false) => "OpenPGP smartcard",
+        },
+    };
+    output::verbose(client.verbose, format!("Application ID: {}; bundle ID: {}", crate::share_release::terminal_label(&app_info.id), hex::encode(latest.bundle_id)));
+    let status: Result<_, BoxError> = if webauthn {
+        let proof = serde_json::from_str(&bundle_text).with_context(Ctx::parse_bundle())?;
+        let measurements = pcrs.iter().map(|(&i, v)| (i, hex::encode(v))).collect();
+        crate::share_release::recover(client, &release_options, proof, holder, summary, measurements, generation_time)
+            .await.map_err(|error| Box::new(error) as BoxError)
+    } else {
+        summary.print(None);
+        output::status("Connecting to the destination for attestation and share submission…");
+        locksmith::client::send_selected_shard(address, pcrs, &bundle, private_keyring, Some(holder))
+            .await.map_err(|error| Box::new(error) as BoxError)
+    };
+    let status = status.map_err(|source| {
+        if connection_closed(source.as_ref()) {
+            SendShardError::ConnectionClosed { location: std::panic::Location::caller(), source }
+        } else {
+            SendShardError::SendShard { address: address_str, location: std::panic::Location::caller(), source }
+        }
+    })?;
 
     match status {
         locksmith::models::SendSignedEncryptedShardResponse::Accepted { remaining } => {
-            output::success(format!(
-                "Shard accepted, {} remaining shards until reconstitution",
-                remaining
-            ));
+            output::success(share_acceptance_message(remaining));
         }
         locksmith::models::SendSignedEncryptedShardResponse::Rejected { reason } => {
             return Err(SendShardError::ShardRejected {
@@ -1838,13 +1870,47 @@ pub async fn send_shard(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn share_results_distinguish_acceptance_from_reconstruction() {
+        assert_eq!(super::share_acceptance_message(0), "Quorum reconstructed successfully.");
+        assert_eq!(super::share_acceptance_message(1), "Share accepted. 1 more share required.");
+        assert_eq!(super::share_acceptance_message(2), "Share accepted. 2 more shares required.");
+        let io = std::io::Error::other("unexpected end of file");
+        assert!(!super::connection_closed(&io), "do not classify errors by their text");
+        let selected = super::SendShardError::SelectHolder {
+            location: std::panic::Location::caller(), source: Box::new(io),
+        };
+        assert!(selected.to_string().contains("Unable to select share holder"));
+        assert!(!selected.to_string().contains("parse bundle"));
+    }
+
+    #[tokio::test]
+    async fn destination_eof_is_detected_through_real_locksmith_error_chain() {
+        use tokio::io::AsyncReadExt;
+        use keymaker_models::generate_quorum::{GenerateQuorumBundle, v1};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let receiver = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 4096];
+            stream.read(&mut bytes).await.unwrap();
+            // Close after the client's attestation request, before any share is sent.
+        });
+        let bundle = GenerateQuorumBundle::V1(v1::GenerateQuorumResponse {
+            bundle_id: [0; 16], label: Default::default(), keyring: vec![],
+            threshold: 1, max: 1, shardfile: String::new(), public_key: String::new(),
+        });
+        let error = locksmith::client::send_selected_shard(address, Default::default(), &bundle, None, None).await.unwrap_err();
+        assert!(super::connection_closed(&error), "{error:?}");
+        receiver.await.unwrap();
+    }
+
     use super::openpgp;
     use super::{
         encrypt_env_file, encrypt_secret_value, keymaker_cert_eligibility, load_recipient_cert,
         parse_env_assignments, resolve_quorum_parameters,
     };
     use openpgp::cert::prelude::*;
-    use openpgp::parse::Parse;
     use openpgp::serialize::SerializeInto;
     use tempfile::tempdir;
 
@@ -2000,14 +2066,11 @@ UNREQUESTED=nope\n",
         let certs = keymaker_cert_eligibility(&keyring).unwrap();
         assert_eq!(certs.len(), 1);
         assert!(certs[0].is_eligible());
-        assert!(certs[0].missing().is_empty());
-        assert_eq!(certs[0].user_id, "alice@example.org");
     }
 
-    // A3: a default-style cert without an authentication subkey is reported as ineligible,
-    // naming exactly the missing role.
+    // A3: a default-style cert without an authentication subkey is ineligible.
     #[test]
-    fn cert_eligibility_reports_missing_authentication_subkey() {
+    fn cert_eligibility_rejects_missing_authentication_subkey() {
         let keyring = cert_armor(
             CertBuilder::new()
                 .add_userid("bob@example.org")
@@ -2018,6 +2081,5 @@ UNREQUESTED=nope\n",
         let certs = keymaker_cert_eligibility(&keyring).unwrap();
         assert_eq!(certs.len(), 1);
         assert!(!certs[0].is_eligible());
-        assert_eq!(certs[0].missing(), vec!["authentication"]);
     }
 }

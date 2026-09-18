@@ -37,7 +37,7 @@ pub(crate) struct InitError {
 }
 impl InitError {
     #[track_caller]
-    fn invalid(message: impl Into<String>) -> Self {
+    pub(crate) fn invalid(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             location: std::panic::Location::caller(),
@@ -61,18 +61,18 @@ pub(crate) struct Options {
     pub name: Option<String>,
     #[arg(long = "label", value_name = "KEY=VALUE")]
     pub labels: Vec<String>,
-    /// Organization holders, selected by UUID or username.
+    /// Explicit custody for an organization holder: USER=external-pgp or USER=webauthn.
+    #[arg(long = "holder", value_name = "USER=CUSTODY", conflicts_with_all = ["from_org_users", "caution_backed"])]
+    pub holders: Vec<HolderSelection>,
+    /// Deprecated: organization holders, selected by UUID or username.
     #[arg(long, value_delimiter = ',', value_name = "USER")]
     pub from_org_users: Vec<UserSelector>,
     /// Use WebAuthn for listed users without a --pgp-key override.
     #[arg(long, requires = "from_org_users")]
     pub caution_backed: bool,
-    /// Select a registered PGP key for a holder UUID or username.
-    #[arg(
-        long = "pgp-key",
-        requires = "from_org_users",
-        value_name = "USER=KEY_UUID"
-    )]
+    /// Select an active registered PGP key by registration UUID or full fingerprint.
+    /// Fingerprints accept 40 or 64 hex characters, ignoring case and whitespace.
+    #[arg(long = "pgp-key", value_name = "USER=KEY")]
     pub pgp_keys: Vec<PgpSelection>,
     /// Call this Keymaker directly (PGP-only); overrides KEYMAKER_URL.
     #[arg(long)]
@@ -80,6 +80,33 @@ pub(crate) struct Options {
     /// Expected Keymaker PCRs, independently established by the operator.
     #[arg(long, value_name = "FILE")]
     pub keymaker_pcr_policy: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct HolderSelection {
+    user: UserSelector,
+    webauthn: bool,
+}
+impl std::str::FromStr for HolderSelection {
+    type Err = InitError;
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let (user, custody) = text
+            .split_once('=')
+            .ok_or_else(|| InitError::invalid("expected USER=external-pgp or USER=webauthn"))?;
+        let webauthn = match custody {
+            "external-pgp" => false,
+            "webauthn" => true,
+            _ => {
+                return Err(InitError::invalid(
+                    "custody must be external-pgp or webauthn",
+                ));
+            }
+        };
+        Ok(Self {
+            user: user.parse()?,
+            webauthn,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -127,20 +154,48 @@ impl UserSelector {
 #[derive(Clone, Debug)]
 pub(crate) struct PgpSelection {
     user: UserSelector,
-    key: Uuid,
+    key: PgpKeySelector,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PgpKeySelector {
+    Id(Uuid),
+    Fingerprint(String),
+}
+
+fn normalized_fingerprint(text: &str) -> Option<String> {
+    let normalized: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    (matches!(normalized.len(), 40 | 64) && normalized.bytes().all(|c| c.is_ascii_hexdigit()))
+        .then(|| normalized.to_ascii_uppercase())
+}
+
+impl PgpKeySelector {
+    fn resolve(&self, member: &Member) -> Result<Uuid, InitError> {
+        let mut matches = member.pgp_keys.iter().filter(|key| match self {
+            Self::Id(id) => key.id == *id,
+            Self::Fingerprint(fingerprint) => normalized_fingerprint(&key.fingerprint).as_ref() == Some(fingerprint),
+        });
+        match (matches.next(), matches.next()) {
+            (Some(key), None) => Ok(key.id),
+            (None, _) => Err(InitError::invalid("PGP key does not belong to the selected user’s active registered keys")),
+            _ => Err(InitError::invalid("ambiguous registered PGP key; select a unique registration UUID")),
+        }
+    }
+}
+
 impl std::str::FromStr for PgpSelection {
     type Err = InitError;
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         let (user, key) = text.split_once('=').ok_or_else(|| {
-            InitError::invalid("--pgp-key requires USER=KEY_UUID (holder UUID or username)")
+            InitError::invalid("--pgp-key requires USER=KEY (registration UUID or full PGP fingerprint)")
         })?;
         Ok(Self {
             user: user.parse()?,
-            key: key
-                .trim()
-                .parse()
-                .with_context(Ctx::new("invalid PGP key UUID"))?,
+            key: match Uuid::parse_str(key.trim()) {
+                Ok(id) => PgpKeySelector::Id(id),
+                Err(_) => PgpKeySelector::Fingerprint(normalized_fingerprint(key).ok_or_else(||
+                    InitError::invalid("PGP key must be a registration UUID or a full 40- or 64-character hexadecimal fingerprint"))?),
+            },
         })
     }
 }
@@ -322,9 +377,39 @@ fn check_quorum_parameters(
 }
 
 pub(crate) fn load_bundle(text: &str) -> Result<GenerateQuorumBundle, InitError> {
+    load_bundle_with_timestamp(text).map(|(bundle, _)| bundle)
+}
+
+pub(crate) fn load_bundle_with_timestamp(
+    text: &str,
+) -> Result<(GenerateQuorumBundle, Option<std::time::SystemTime>), InitError> {
     let policy = load_policy(&policy_path(None))?;
-    locksmith::bundle::load_json(text, &policy)
+    let response = serde_json::from_str(text).with_context(Ctx::new("invalid quorum bundle JSON"))?;
+    locksmith::bundle::load_response_with_timestamp(response, &policy)
         .with_context(Ctx::new("unable to verify proofed v1 quorum bundle"))
+}
+
+fn pgp_selection_menu(member: &Member, explicit: Option<bool>) -> String {
+    let choice = if explicit == Some(false) { "PGP key" } else { "custody" };
+    let mut menu = format!("Select {choice} for {}:", crate::share_release::terminal_label(&member.username));
+    for (index, key) in member.pgp_keys.iter().enumerate() {
+        menu.push_str(&format!("\n  {}: PGP {} ({})", index + 1, crate::share_release::terminal_label(&key.fingerprint), key.id));
+    }
+    if member.webauthn_credentials > 0 && explicit.is_none() {
+        menu.push_str(&format!("\n  0: Caution-backed WebAuthn ({} registered passkeys, one share)", member.webauthn_credentials));
+    }
+    menu
+}
+
+fn participant_summary(member: &Member, participant: &Participant) -> String {
+    let name = crate::share_release::terminal_label(&member.username);
+    match participant.pgp_key_id {
+        Some(id) => {
+            let key = member.pgp_keys.iter().find(|key| key.id == id).expect("resolved registered key");
+            format!("{name} · External PGP · {}", crate::share_release::terminal_label(&key.fingerprint))
+        }
+        None => format!("{name} · Passkey"),
+    }
 }
 
 fn select_participants(
@@ -333,9 +418,30 @@ fn select_participants(
     interactive: bool,
     direct: bool,
 ) -> Result<(Vec<Participant>, Vec<String>), InitError> {
-    let selected = options
-        .from_org_users
+    select_participants_with_choice(options, members, interactive, direct, |question| {
+        prompt::select(question).with_context(Ctx::new("unable to read custody selection"))
+    })
+}
+
+fn select_participants_with_choice(
+    options: &Options,
+    members: &[Member],
+    interactive: bool,
+    direct: bool,
+    mut choose: impl FnMut(&str) -> Result<usize, InitError>,
+) -> Result<(Vec<Participant>, Vec<String>), InitError> {
+    let selectors: Vec<_> = if options.holders.is_empty() {
+        options.from_org_users.iter().collect()
+    } else {
+        options.holders.iter().map(|h| &h.user).collect()
+    };
+    let explicit: HashMap<_, _> = options
+        .holders
         .iter()
+        .map(|h| Ok((h.user.resolve(members)?.user_id, h.webauthn)))
+        .collect::<Result<_, InitError>>()?;
+    let selected = selectors
+        .into_iter()
         .map(|user| user.resolve(members))
         .collect::<Result<Vec<_>, _>>()?;
     let mut seen = HashSet::new();
@@ -346,18 +452,25 @@ fn select_participants(
     }
     let mut overrides = HashMap::new();
     for selection in &options.pgp_keys {
-        let user_id = selection.user.resolve(members)?.user_id;
-        if !seen.contains(&user_id) || overrides.insert(user_id, selection.key).is_some() {
+        let member = selection.user.resolve(members)?;
+        let user_id = member.user_id;
+        if !seen.contains(&user_id) || overrides.contains_key(&user_id) {
             return Err(InitError::invalid(
                 "PGP overrides must name distinct selected users",
             ));
         }
+        if explicit.get(&user_id) == Some(&true) {
+            return Err(InitError::invalid("--pgp-key conflicts with explicit WebAuthn custody"));
+        }
+        overrides.insert(user_id, selection.key.resolve(member)?);
     }
     if direct
-        && options.caution_backed
-        && selected
-            .iter()
-            .any(|member| !overrides.contains_key(&member.user_id))
+        && selected.iter().any(|member| {
+            explicit
+                .get(&member.user_id)
+                .copied()
+                .unwrap_or(options.caution_backed && !overrides.contains_key(&member.user_id))
+        })
     {
         return Err(InitError::invalid(DIRECT_WEBAUTHN_ERROR));
     }
@@ -366,7 +479,15 @@ fn select_participants(
     for member in selected {
         let user_id = &member.user_id;
         let mut key_id = overrides.get(user_id).copied();
-        let mut webauthn = options.caution_backed && key_id.is_none();
+        let mut webauthn = explicit
+            .get(user_id)
+            .copied()
+            .unwrap_or(options.caution_backed && key_id.is_none());
+        if explicit.get(user_id) == Some(&false) && member.pgp_keys.is_empty() {
+            return Err(InitError::invalid(
+                "external-pgp holder has no registered PGP key",
+            ));
+        }
         if key_id.is_none() && !webauthn {
             if member.pgp_keys.is_empty() && member.webauthn_credentials == 0 {
                 return Err(InitError::invalid(
@@ -376,19 +497,10 @@ fn select_participants(
             if member.pgp_keys.len() == 1 {
                 key_id = Some(member.pgp_keys[0].id);
             } else if interactive {
-                eprintln!("Select custody for {}:", member.username);
-                for (index, key) in member.pgp_keys.iter().enumerate() {
-                    eprintln!("  {}: PGP {} ({})", index + 1, key.fingerprint, key.id);
-                }
-                if member.webauthn_credentials > 0 {
-                    eprintln!(
-                        "  0: Caution-backed WebAuthn ({} registered passkeys, one share)",
-                        member.webauthn_credentials
-                    );
-                }
-                let index = prompt::select("Selection: ")
-                    .with_context(Ctx::new("unable to read custody selection"))?;
-                if index == 0 && member.webauthn_credentials > 0 {
+                eprintln!("{}", pgp_selection_menu(member, explicit.get(user_id).copied()));
+                let index = choose("Selection: ")?;
+                if index == 0 && member.webauthn_credentials > 0 && !explicit.contains_key(user_id)
+                {
                     webauthn = true;
                 } else {
                     key_id = Some(
@@ -401,7 +513,7 @@ fn select_participants(
                 }
             } else {
                 return Err(InitError::invalid(
-                    "ambiguous custody: specify --pgp-key USER=KEY_UUID or explicitly select --caution-backed",
+                    "multiple keys or custody choices: specify --pgp-key USER=KEY (registration UUID or full fingerprint), or explicitly select WebAuthn custody",
                 ));
             }
         }
@@ -472,14 +584,14 @@ fn check_saved_policy(path: &Path, selected: &KeymakerPcrPolicy) -> Result<(), I
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        result => result.with_context(Ctx::new("unable to read saved repository PCR policy"))?,
+        result => result.with_context(Ctx::new("unable to read saved local PCR policy"))?,
     };
     let saved = parse_policy(&text).with_context(Ctx::new(
-        "saved repository PCR policy is invalid; explicitly repair it before generating a quorum",
+        "saved local PCR policy is invalid; explicitly repair it before generating a quorum",
     ))?;
     if saved != *selected {
         return Err(InitError::invalid(
-            "selected PCR policy differs from the saved repository policy; explicitly replace the saved policy before generating a quorum",
+            "selected PCR policy differs from the saved local policy; explicitly replace the saved policy before generating a quorum",
         ));
     }
     Ok(())
@@ -506,6 +618,17 @@ fn save_policy_if_absent(
 }
 
 pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), InitError> {
+    if !options.holders.is_empty() && (!options.from_org_users.is_empty() || options.caution_backed)
+    {
+        return Err(InitError::invalid(
+            "cannot combine old and new holder selectors",
+        ));
+    }
+    if !options.from_org_users.is_empty() {
+        output::warning(
+            "--from-org-users/--caution-backed are deprecated; use --holder USER=external-pgp or USER=webauthn",
+        );
+    }
     let environment = std::env::var("KEYMAKER_URL").ok();
     let endpoint = endpoint(options.keymaker_url.as_deref(), environment.as_deref())?;
     if endpoint.is_none() && options.no_upload {
@@ -514,7 +637,11 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
         ));
     }
     let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-    let config = if endpoint.is_none() || !options.from_org_users.is_empty() || !options.no_upload {
+    let config = if endpoint.is_none()
+        || !options.from_org_users.is_empty()
+        || !options.holders.is_empty()
+        || !options.no_upload
+    {
         Some(
             client
                 .ensure_authenticated()
@@ -524,7 +651,7 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
     } else {
         None
     };
-    let members: Vec<Member> = if options.from_org_users.is_empty() {
+    let members: Vec<Member> = if options.from_org_users.is_empty() && options.holders.is_empty() {
         Vec::new()
     } else {
         client
@@ -565,13 +692,8 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
     let policy_text = fs::read_to_string(&policy_file)
         .with_context(Ctx::new("unable to read Keymaker PCR policy"))?;
     let policy = parse_policy(&policy_text)?;
-    let in_repo = Path::new("caution.hcl").exists()
-        || Path::new("Procfile").exists()
-        || Path::new(".caution/deployment.json").exists();
     let saved_policy_path = Path::new(".caution/keymaker-pcr-policy.json");
-    if in_repo {
-        check_saved_policy(saved_policy_path, &policy)?;
-    }
+    check_saved_policy(saved_policy_path, &policy)?;
     eprintln!(
         "Initialize quorum: {threshold} of {count}; {}",
         endpoint.as_deref().unwrap_or("Platform-hosted Keymaker")
@@ -586,23 +708,16 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
             .iter()
             .find(|m| m.user_id == p.user_id)
             .expect("resolved participant");
-        eprintln!(
-            "  {} ({}): {}{}",
-            member.username,
-            p.user_id,
-            p.key_source,
-            p.pgp_key_id
-                .map(|id| [" ", &id.to_string()].concat())
-                .unwrap_or_default()
-        );
+        eprintln!("  {}", participant_summary(member, p));
     }
     if participants
         .iter()
         .any(|p| p.key_source == "caution_backed_pgp")
     {
         eprintln!(
-            "Warning: WebAuthn/mixed bundle creation is supported, but recovery is not yet available (Locksmith #12). Do not use this quorum for secrets you need to recover now."
+            "Caution’s enclave holds the PGP private key. Your registered passkey authorizes re-encryption of your share to the verified application enclave. The private key is never released."
         );
+
     }
     if interactive
         && !prompt::confirm("Create this quorum? [y/N] ")
@@ -732,16 +847,14 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
     }
     let json = serde_json::to_string_pretty(&response)
         .with_context(Ctx::new("unable to encode proofed bundle"))?;
-    if in_repo {
-        fs::create_dir_all(".caution")
-            .with_context(Ctx::new("unable to create .caution directory"))?;
-        // Save the accepted policy before the bundle; readers never trust policy from a response.
-        save_policy_if_absent(saved_policy_path, &policy_text, &policy)?;
-        fs::write(".caution/quorum-bundle.json", &json)
-            .with_context(Ctx::new("unable to save proofed bundle"))?;
-        output::status("Saved .caution/quorum-bundle.json and .caution/keymaker-pcr-policy.json");
-    }
-    if !in_repo || !output::is_tty_stdout() {
+    fs::create_dir_all(".caution")
+        .with_context(Ctx::new("unable to create .caution directory"))?;
+    // Save the accepted policy before the bundle; readers never trust policy from a response.
+    save_policy_if_absent(saved_policy_path, &policy_text, &policy)?;
+    fs::write(".caution/quorum-bundle.json", &json)
+        .with_context(Ctx::new("unable to save proofed bundle"))?;
+    output::status("Saved .caution/quorum-bundle.json and .caution/keymaker-pcr-policy.json");
+    if !output::is_tty_stdout() {
         output::data(&json).with_context(Ctx::new("unable to output bundle"))?;
     }
     if !uploaded && !options.no_upload {
@@ -776,11 +889,9 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
             ))?;
         checked_response(client, response).await?;
         output::status("Bundle uploaded to Platform.");
-        if in_repo {
-            output::status(
-                "Local files: .caution/quorum-bundle.json and .caution/keymaker-pcr-policy.json",
-            );
-        }
+        output::status(
+            "Local files: .caution/quorum-bundle.json and .caution/keymaker-pcr-policy.json",
+        );
     }
     Ok(())
 }

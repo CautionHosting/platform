@@ -151,19 +151,10 @@ fn verify_certificates(
     }
     let mut policy = StandardPolicy::new();
     policy.good_critical_notations(&[ORG_NOTATION, BUNDLE_NOTATION]);
-    if !ca
-        .keys()
-        .with_policy(&policy, at)
-        .supported()
-        .alive()
-        .revoked(false)
-        .for_certification()
-        .any(|key| key.fingerprint() == ca.fingerprint())
-    {
-        return Err(rejected(
-            "Caution CA is not valid at certificate generation time",
-        ));
-    }
+    locksmith::custody::validate_ca_anchor(ca, at).with_context(Ctx::new(
+        StatusCode::BAD_GATEWAY,
+        "invalid or revoked configured Caution CA anchor",
+    ))?;
     let org = hex::encode(organization_id);
     let id = hex::encode(bundle.bundle_id);
     for (index, armored) in bundle.certificates.iter().enumerate() {

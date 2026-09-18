@@ -511,7 +511,7 @@ run-api: guard-direct-api network postgres
 
 run-gateway: guard-direct-gateway network
 	@docker rm -f gateway 2>/dev/null || true
-	@mkdir -p $(CAUTION_DATA_DIR)/git-repos
+	@mkdir -p $(CAUTION_DATA_DIR)/git-repos "$(KEYMAKER_POLICY_DIR)"
 	@docker run -d \
 		--name gateway \
 		--network $(NETWORK) \
@@ -520,6 +520,7 @@ run-gateway: guard-direct-gateway network
 		--env-file $(HOME)/.config/caution/.env \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
+		-v "$(KEYMAKER_POLICY_DIR):/run/config:ro" \
 		caution-gateway
 	@echo "Gateway started on port 8000 (HTTP) and 2222 (SSH)"
 
@@ -731,7 +732,7 @@ run-api-test: network
 
 run-gateway-test: network
 	@docker rm -f gateway 2>/dev/null || true
-	@mkdir -p $(CAUTION_DATA_DIR)/git-repos
+	@mkdir -p $(CAUTION_DATA_DIR)/git-repos "$(KEYMAKER_POLICY_DIR)"
 	@docker run -d \
 		--name gateway \
 		--network $(NETWORK) \
@@ -742,6 +743,7 @@ run-gateway-test: network
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		$(GATEWAY_EXTRA_ENV) \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
+		-v "$(KEYMAKER_POLICY_DIR):/run/config:ro" \
 		caution-gateway
 	@echo "Gateway started on 127.0.0.1:8000 (HTTP) and 127.0.0.1:2222 (SSH)"
 
@@ -1104,3 +1106,8 @@ test-paddle-sandbox:
 	cargo test --package metering -- sandbox --nocapture
 
 test: test-unit test-cli-install
+
+.PHONY: test-share-release-browser
+test-share-release-browser:
+	@npm run build --prefix frontend
+	@node tests/e2e/browser-authenticator/release-approval.mjs

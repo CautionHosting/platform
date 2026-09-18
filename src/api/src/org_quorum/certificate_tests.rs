@@ -14,6 +14,8 @@ use sequoia_openpgp::{
 
 fn test_ca() -> Cert {
     CertBuilder::new()
+        .set_creation_time(SystemTime::now() - Duration::from_secs(3 * 86400))
+        .set_validity_period(Duration::from_secs(86400))
         .add_userid("temporary Caution CA")
         .generate()
         .unwrap()
@@ -92,38 +94,51 @@ fn data(certificates: Vec<String>) -> PublicCertificateBundle {
 #[test]
 fn accepts_ca_certified_ordered_context_and_rejects_substitutions() {
     let ca = test_ca();
+    // A later-issued holder remains valid under an expired configured CA snapshot.
+    let anchor = ca.clone().strip_secret_key_material();
     let certs: Vec<_> = (0..2)
         .map(|i| certificate(&ca, i, [1; 16], [2; 16], "valid"))
         .collect();
     let count = NonZeroU8::new(2).unwrap();
     let at = SystemTime::now();
     assert_eq!(
-        verify_certificates(data(certs.clone()), [1; 16], count, &ca, at).unwrap(),
+        verify_certificates(data(certs.clone()), [1; 16], count, &anchor, at).unwrap(),
         ([2; 16], certs.clone())
     );
-    assert!(verify_certificates(data(certs.clone()), [3; 16], count, &ca, at).is_err());
+    assert!(verify_certificates(data(certs.clone()), [3; 16], count, &anchor, at).is_err());
     assert!(
         verify_certificates(
             data(certs.clone()),
             [1; 16],
             NonZeroU8::new(1).unwrap(),
-            &ca,
+            &anchor,
             at
         )
         .is_err()
     );
-    assert!(verify_certificates(data(certs.clone()), [1; 16], count, &test_ca(), at).is_err());
+    assert!(
+        verify_certificates(
+            data(certs.clone()),
+            [1; 16],
+            count,
+            &test_ca().strip_secret_key_material(),
+            at
+        )
+        .is_err()
+    );
     assert!(
         verify_certificates(
             data(vec![certs[1].clone(), certs[0].clone()]),
             [1; 16],
             count,
-            &ca,
+            &anchor,
             at
         )
         .is_err()
     );
-    assert!(verify_certificates(data(vec![certs[0].clone(); 2]), [1; 16], count, &ca, at).is_err());
+    assert!(
+        verify_certificates(data(vec![certs[0].clone(); 2]), [1; 16], count, &anchor, at).is_err()
+    );
     for (org, id, index, mode) in [
         ([3; 16], [2; 16], 0, "valid"),
         ([1; 16], [3; 16], 0, "valid"),
@@ -139,7 +154,7 @@ fn accepts_ca_certified_ordered_context_and_rejects_substitutions() {
                 bundle,
                 [1; 16],
                 NonZeroU8::new(1).unwrap(),
-                &ca,
+                &anchor,
                 SystemTime::now()
             )
             .is_err(),
@@ -151,7 +166,7 @@ fn accepts_ca_certified_ordered_context_and_rejects_substitutions() {
             data(vec!["not a certificate".into()]),
             [1; 16],
             NonZeroU8::new(1).unwrap(),
-            &ca,
+            &anchor,
             at
         )
         .is_err()
@@ -279,4 +294,38 @@ fn synthetic_proof_gate() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+#[test]
+fn revoked_ca_anchor_rejects_later_certificates() {
+    use sequoia_openpgp::{cert::CertRevocationBuilder, types::ReasonForRevocation};
+    let ca = test_ca();
+    let cert = certificate(&ca, 0, [1; 16], [2; 16], "valid");
+    let mut signer = ca
+        .primary_key()
+        .key()
+        .clone()
+        .parts_into_secret()
+        .unwrap()
+        .into_keypair()
+        .unwrap();
+    let revocation = CertRevocationBuilder::new()
+        .set_reason_for_revocation(ReasonForRevocation::KeyCompromised, b"test")
+        .unwrap()
+        .build(&mut signer, &ca, None)
+        .unwrap();
+    let ca = ca
+        .insert_packets(revocation)
+        .unwrap()
+        .strip_secret_key_material();
+    assert!(
+        verify_certificates(
+            data(vec![cert]),
+            [1; 16],
+            NonZeroU8::new(1).unwrap(),
+            &ca,
+            SystemTime::now()
+        )
+        .is_err()
+    );
 }
