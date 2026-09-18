@@ -23,6 +23,7 @@ mod csrf;
 mod db;
 mod decoy;
 mod handlers;
+mod release_relay;
 mod pgp;
 mod rate_limit;
 mod request_id;
@@ -450,6 +451,11 @@ async fn main() -> Result<(), MainError> {
             "/auth/sign-request",
             post(handlers::begin_sign_request_handler),
         )
+        .route("/auth/qr-release/begin", post(release_relay::begin).layer(axum::extract::DefaultBodyLimit::max(65536)))
+        .route("/auth/qr-release/read", post(release_relay::read))
+        .route("/auth/qr-release/finish", post(release_relay::finish).layer(axum::extract::DefaultBodyLimit::max(16384)))
+        .route("/auth/qr-release/status", post(release_relay::status))
+        .route("/auth/qr-release/cancel", post(release_relay::cancel))
         .route("/auth/qr-sign/begin", post(handlers::qr_sign_begin_handler))
         .route(
             "/auth/qr-sign/status",

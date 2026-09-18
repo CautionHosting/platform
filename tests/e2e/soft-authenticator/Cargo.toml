@@ -29,7 +29,7 @@ anyhow = "1"
 base64 = "0.22"
 sha2 = "0.10"
 sequoia-openpgp = "1"
-public-certificate-models = { git = "https://codeberg.org/caution/locksmith.git", rev = "af98a3901cfe0ed28e0e8dc4037b7635bfc60946" }
+public-certificate-models = { git = "https://codeberg.org/caution/locksmith.git", rev = "4851791bda5f8f392f88e474ed5731b287ecd4bc" }
 serde_cbor = "0.11"
 hex = "0.4"
 uuid = { version = "1", features = ["v4"] }

@@ -474,7 +474,7 @@ pub(crate) async fn authenticate_session(
 }
 
 #[tracing::instrument(skip_all)]
-fn get_rp_origin() -> String {
+pub(crate) fn get_rp_origin() -> String {
     std::env::var("RP_ORIGINS")
         .unwrap_or_else(|_| "http://localhost:8000".to_string())
         .split(',')

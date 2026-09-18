@@ -1848,6 +1848,7 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+ "webauthn-rs-proto",
  "zeroize",
 ]
 
@@ -3267,6 +3268,8 @@ dependencies = [
  "futures",
  "hex",
  "hmac 0.12.1",
+ "keymaker-models",
+ "locksmith",
  "percent-encoding",
  "rand 0.10.2",
  "rand 0.8.7",
@@ -4469,7 +4472,7 @@ dependencies = [
 [[package]]
 name = "keymaker-models"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=af98a3901cfe0ed28e0e8dc4037b7635bfc60946#af98a3901cfe0ed28e0e8dc4037b7635bfc60946"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=4851791bda5f8f392f88e474ed5731b287ecd4bc#4851791bda5f8f392f88e474ed5731b287ecd4bc"
 dependencies = [
  "serde",
  "serde_cbor",
@@ -4661,7 +4664,7 @@ dependencies = [
 [[package]]
 name = "locksmith"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=af98a3901cfe0ed28e0e8dc4037b7635bfc60946#af98a3901cfe0ed28e0e8dc4037b7635bfc60946"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=4851791bda5f8f392f88e474ed5731b287ecd4bc#4851791bda5f8f392f88e474ed5731b287ecd4bc"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
@@ -4686,6 +4689,7 @@ dependencies = [
  "keymaker-models",
  "openpgp-card 0.6.1",
  "openpgp-card-rpgp",
+ "openpgp-card-sequoia",
  "pgp",
  "rand 0.8.7",
  "rpgpie",
@@ -4702,6 +4706,8 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "webauthn-rs",
+ "webauthn-rs-proto",
  "x25519-dalek",
 ]
 
@@ -5901,7 +5907,7 @@ checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
 [[package]]
 name = "public-certificate-models"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=af98a3901cfe0ed28e0e8dc4037b7635bfc60946#af98a3901cfe0ed28e0e8dc4037b7635bfc60946"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=4851791bda5f8f392f88e474ed5731b287ecd4bc#4851791bda5f8f392f88e474ed5731b287ecd4bc"
 dependencies = [
  "serde",
 ]

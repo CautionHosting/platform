@@ -25,6 +25,10 @@ cd "$ROOT"
 export CARGO_TARGET_DIR="$ROOT/target/quorum-e2e"
 cargo build --locked -p api -p cli -p gateway \
     --features api/e2e-testing-unsafe,cli/e2e-testing-unsafe,gateway/e2e-testing-unsafe
+# Browser approval must reject arbitrary/login challenges and production builds
+# must reject synthetic custody evidence even when the runtime flag is enabled.
+CAUTION_UNSAFE_KEY_SERVICE_E2E=1 cargo test --locked -p gateway release_relay
+CAUTION_UNSAFE_KEY_SERVICE_E2E=1 cargo test --locked -p gateway --features e2e-testing-unsafe release_relay
 LOCKSMITH_SOURCE=$(cargo metadata --locked --format-version 1 | python3 -c '
 import json,sys,pathlib
 p=next(p for p in json.load(sys.stdin)["packages"] if p["name"]=="keymaker-models")
@@ -32,6 +36,12 @@ print(pathlib.Path(p["manifest_path"]).parents[2])')
 cargo build --locked --manifest-path "$LOCKSMITH_SOURCE/Cargo.toml" \
     -p keymaker --no-default-features --features unsafe-e2e
 cargo build --locked --manifest-path tests/e2e/soft-authenticator/Cargo.toml
+# Actual WebAuthn verification + selected-share decryption + unchanged receiver
+# transport, with deliberately synthetic Nitro evidence in an isolated process.
+CAUTION_UNSAFE_KEY_SERVICE_E2E=1 cargo test --locked --manifest-path "$LOCKSMITH_SOURCE/Cargo.toml" \
+    -p locksmith --lib --features unsafe-e2e release::tests
+CAUTION_UNSAFE_KEY_SERVICE_E2E=1 cargo test --locked --manifest-path "$LOCKSMITH_SOURCE/Cargo.toml" \
+    -p public-cert-service --lib --features unsafe-e2e release::tests
 # Build from the repository so Cargo sees its private-registry configuration;
 # run the resulting test binary later from the isolated fixture directory.
 RECOVERY_TEST=$(cargo test -p cli --lib --locked --features e2e-testing-unsafe \
@@ -149,4 +159,41 @@ KEYMAKER_PCR_POLICY_PATH="$WORK/policies/keymaker-pcr-policy.json" \
 PUBLIC_CERTIFICATE_SERVICE_URL="$PUBLIC_CERTIFICATE_SERVICE_URL" \
 QUORUM_RECOVERY_TEST_DIR="$WORK" \
     "$RECOVERY_TEST" --ignored --exact \
-    quorum_init::tests::downloaded_caution_bundles_reject_recovery --nocapture
+    quorum_init::tests::downloaded_bundles_require_explicit_noninteractive_holder --nocapture
+# A terminal receives no JSON dump, even in a directory without app metadata.
+"${COMMON[@]}" python3 - "$CARGO_TARGET_DIR/debug/caution" "$WORK" <<'PY'
+import errno, json, os, pathlib, pty, subprocess, sys
+cli, work = sys.argv[1], pathlib.Path(sys.argv[2])
+plain = work / 'plain-terminal'
+plain.mkdir()
+master, slave = pty.openpty()
+process = subprocess.Popen([
+    cli, 'secret', 'init', str(work / 'holder.asc'), '--threshold', '1',
+    '--no-upload', '--keymaker-url', os.environ['KEYMAKER_URL'],
+    '--keymaker-pcr-policy', str(work / 'policies/keymaker-pcr-policy.json'),
+], cwd=plain, stdin=subprocess.DEVNULL, stdout=slave, stderr=subprocess.PIPE)
+os.close(slave)
+# Drain stdout while the process runs so a regression cannot fill the PTY buffer.
+output = bytearray()
+try:
+    while True:
+        chunk = os.read(master, 65536)
+        if not chunk:
+            break
+        output.extend(chunk)
+except OSError as error:
+    if error.errno != errno.EIO:
+        raise
+finally:
+    os.close(master)
+_, stderr = process.communicate(timeout=60)
+assert process.returncode == 0, stderr.decode()
+assert not output, 'terminal received bundle JSON'
+assert b'Saved .caution/quorum-bundle.json' in stderr
+json.loads((plain / '.caution/quorum-bundle.json').read_text())
+assert (plain / '.caution/keymaker-pcr-policy.json').read_bytes() == (work / 'policies/keymaker-pcr-policy.json').read_bytes()
+print('Plain-directory terminal output and persisted artifacts: OK')
+PY
+
+QUORUM_RECOVERY_TEST_DIR="$WORK" "$RECOVERY_TEST" --ignored --exact \
+    share_release::holder_selection_tests::real_api_metadata_names_downloaded_holders --nocapture
