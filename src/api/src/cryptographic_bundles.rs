@@ -21,6 +21,9 @@ pub struct QuorumBundle {
     #[sqlx(skip)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub holders: Option<Vec<holders::HolderMetadata>>,
+    #[sqlx(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle_hash: Option<String>,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -45,6 +48,13 @@ pub struct UpdateBundleRequest {
     pub data: Option<serde_json::Value>,
     pub name: Option<String>,
     pub labels: Option<serde_json::Value>,
+}
+
+// Derived display metadata only: computing this hash does not verify the proof.
+fn canonical_hash(data: &serde_json::Value) -> Option<String> {
+    use keymaker_models::generate_quorum::{GenerateQuorumResponse, deterministic_bundle_hash};
+    let response: GenerateQuorumResponse = serde_json::from_value(data.clone()).ok()?;
+    deterministic_bundle_hash(&response.data).ok().map(hex::encode)
 }
 
 // -- Quorum Bundles --
@@ -80,6 +90,7 @@ pub async fn list_quorum_bundles(
     .await
     .with_context(Ctx::database(org_id))?;
 
+    for bundle in &mut rows { bundle.bundle_hash = canonical_hash(&bundle.data); }
     holders::enrich(pool, org_id, &mut rows).await;
     Ok(rows)
 }
@@ -118,6 +129,7 @@ pub async fn get_quorum_bundle(
     .with_context(Ctx::database(org_id, bundle_id))?;
 
     if let Some(bundle) = &mut row {
+        bundle.bundle_hash = canonical_hash(&bundle.data);
         holders::enrich(pool, org_id, std::slice::from_mut(bundle)).await;
     }
     Ok(row)
@@ -416,4 +428,25 @@ pub async fn delete_secrets_bundle(
         .with_context(Ctx::database(org_id, bundle_id))?;
 
     Ok(result.rows_affected() > 0)
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn canonical_hash_matches_shared_hash_and_ignores_json_order() {
+        use keymaker_models::generate_quorum::{GenerateQuorumResponse, deterministic_bundle_hash};
+        let data = json!({"data":{"version":"V1","bundle_id":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],"label":{"a":"1","b":"2"},"keyring":[],"threshold":1,"max":1,"shardfile":"shares","public_key":"key"},"necroproof":[]});
+        let response: GenerateQuorumResponse = serde_json::from_value(data.clone()).unwrap();
+        assert_eq!(canonical_hash(&data), Some(hex::encode(deterministic_bundle_hash(&response.data).unwrap())));
+        let mut reordered = data.clone();
+        reordered["data"]["label"] = serde_json::from_str(r#"{"b":"2","a":"1"}"#).unwrap();
+        assert_eq!(canonical_hash(&data), canonical_hash(&reordered));
+        reordered["data"]["public_key"] = json!("different");
+        assert_ne!(canonical_hash(&data), canonical_hash(&reordered));
+        assert_eq!(canonical_hash(&json!({})), None);
+        assert_eq!(canonical_hash(&json!({"version":"V0"})), None);
+    }
 }

@@ -401,6 +401,18 @@ pub fn run(
         "QUORUM_TEST_SECRET=temporary-secret\n",
     )?;
     for source in ["downloaded.json", ".caution/quorum-bundle.json"] {
+        for unverified in [false, true] {
+            let mut command = Command::new(&cli);
+            command.current_dir(work).stdin(Stdio::null())
+                .args(["secret", "inspect", "--bundle", source]);
+            if unverified { command.arg("--unverified"); }
+            let inspected = command.output()?;
+            let text = String::from_utf8_lossy(&inspected.stderr);
+            anyhow::ensure!(inspected.status.success(), "CLI inspection: {text}");
+            anyhow::ensure!(text.contains("Quorum       ") && text.contains("CERTIFICATE"));
+            anyhow::ensure!(text.contains(if unverified { "UNVERIFIED" } else { "TEST ONLY" }));
+            anyhow::ensure!(!text.contains("BEGIN PGP") && !text.contains("necroproof"));
+        }
         let result = Command::new(&cli)
             .current_dir(work)
             .stdin(Stdio::null())
