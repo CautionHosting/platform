@@ -141,7 +141,8 @@ bundle-bound credentials and certificates used to authorize release.
 ## Approval context and field provenance
 
 The browser shows the destination application, contribution and custody service,
-with technical evidence under **Verification details** (collapsed by default).
+with check explanations under **Verification details** and full evidence in nested
+**Technical values** (both collapsed by default).
 The CLI and browser display the same grouped 16-hex-character prefix of the full
 release-context hash. This compares authenticated release context only; it does
 not authenticate descriptive app labels or CLI-reported addresses.
@@ -164,12 +165,30 @@ not authenticate descriptive app labels or CLI-reported addresses.
 Optional display fields are passed only to the existing gateway relay. It resolves
 records using the authenticated requester and the release organization, retains
 an immutable display snapshot for that pending request, and never passes metadata
-into authorization. Inaccessible or unavailable records show **Unavailable**;
+into authorization. Missing optional records are omitted; an unresolved app shows
+**Application name unavailable**;
 older CLIs can omit display context. Metadata lookups have a four-second overall
 budget and never extend the release's expiry. No secret material, relay tokens or
 raw credential snapshots are displayed. A display-only lookup failure does not
 prevent otherwise valid approval.
 
 The countdown disables approval and aborts a pending browser credential operation
-at expiry. Cancellation and “assertion sent” statuses do not claim share delivery
+at expiry. Cancellation and “approval sent” statuses do not claim share delivery
 or application unlock. The destination's threshold must still be reached.
+
+### Browser approval states
+
+The approval page shows a compact application/holder/destination summary and a
+four-group comparison code above the action. Compare all four groups with the
+CLI. The code covers authenticated release context, not Platform labels or
+CLI-reported addresses. Verification details explain the checks; nested technical
+values retain full copyable identifiers and policies for independent comparison.
+Missing optional metadata is omitted, and differing recorded/reported addresses
+are highlighted. Labels never determine authorization.
+
+Only a pending approval displays request details. Cancellation, expiry and
+successful assertion relay clear those details and stop the countdown. An
+assertion relayed by the browser is not confirmation of share acceptance or
+application readiness: follow the terminal result. A failed submission response
+may mean delivery is unknown; the page does not retry it. Inactive links show only
+an explanation, while network/server errors are reported separately.
