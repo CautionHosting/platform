@@ -70,8 +70,9 @@ pub(crate) struct Options {
     /// Use WebAuthn for listed users without a --pgp-key override.
     #[arg(long, requires = "from_org_users")]
     pub caution_backed: bool,
-    /// Select a registered PGP key for a holder UUID or username.
-    #[arg(long = "pgp-key", value_name = "USER=KEY_UUID")]
+    /// Select an active registered PGP key by registration UUID or full fingerprint.
+    /// Fingerprints accept 40 or 64 hex characters, ignoring case and whitespace.
+    #[arg(long = "pgp-key", value_name = "USER=KEY")]
     pub pgp_keys: Vec<PgpSelection>,
     /// Call this Keymaker directly (PGP-only); overrides KEYMAKER_URL.
     #[arg(long)]
@@ -153,20 +154,48 @@ impl UserSelector {
 #[derive(Clone, Debug)]
 pub(crate) struct PgpSelection {
     user: UserSelector,
-    key: Uuid,
+    key: PgpKeySelector,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PgpKeySelector {
+    Id(Uuid),
+    Fingerprint(String),
+}
+
+fn normalized_fingerprint(text: &str) -> Option<String> {
+    let normalized: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    (matches!(normalized.len(), 40 | 64) && normalized.bytes().all(|c| c.is_ascii_hexdigit()))
+        .then(|| normalized.to_ascii_uppercase())
+}
+
+impl PgpKeySelector {
+    fn resolve(&self, member: &Member) -> Result<Uuid, InitError> {
+        let mut matches = member.pgp_keys.iter().filter(|key| match self {
+            Self::Id(id) => key.id == *id,
+            Self::Fingerprint(fingerprint) => normalized_fingerprint(&key.fingerprint).as_ref() == Some(fingerprint),
+        });
+        match (matches.next(), matches.next()) {
+            (Some(key), None) => Ok(key.id),
+            (None, _) => Err(InitError::invalid("PGP key does not belong to the selected user’s active registered keys")),
+            _ => Err(InitError::invalid("ambiguous registered PGP key; select a unique registration UUID")),
+        }
+    }
+}
+
 impl std::str::FromStr for PgpSelection {
     type Err = InitError;
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         let (user, key) = text.split_once('=').ok_or_else(|| {
-            InitError::invalid("--pgp-key requires USER=KEY_UUID (holder UUID or username)")
+            InitError::invalid("--pgp-key requires USER=KEY (registration UUID or full PGP fingerprint)")
         })?;
         Ok(Self {
             user: user.parse()?,
-            key: key
-                .trim()
-                .parse()
-                .with_context(Ctx::new("invalid PGP key UUID"))?,
+            key: match Uuid::parse_str(key.trim()) {
+                Ok(id) => PgpKeySelector::Id(id),
+                Err(_) => PgpKeySelector::Fingerprint(normalized_fingerprint(key).ok_or_else(||
+                    InitError::invalid("PGP key must be a registration UUID or a full 40- or 64-character hexadecimal fingerprint"))?),
+            },
         })
     }
 }
@@ -360,11 +389,46 @@ pub(crate) fn load_bundle_with_timestamp(
         .with_context(Ctx::new("unable to verify proofed v1 quorum bundle"))
 }
 
+fn pgp_selection_menu(member: &Member, explicit: Option<bool>) -> String {
+    let choice = if explicit == Some(false) { "PGP key" } else { "custody" };
+    let mut menu = format!("Select {choice} for {}:", crate::share_release::terminal_label(&member.username));
+    for (index, key) in member.pgp_keys.iter().enumerate() {
+        menu.push_str(&format!("\n  {}: PGP {} ({})", index + 1, crate::share_release::terminal_label(&key.fingerprint), key.id));
+    }
+    if member.webauthn_credentials > 0 && explicit.is_none() {
+        menu.push_str(&format!("\n  0: Caution-backed WebAuthn ({} registered passkeys, one share)", member.webauthn_credentials));
+    }
+    menu
+}
+
+fn participant_summary(member: &Member, participant: &Participant) -> String {
+    let name = crate::share_release::terminal_label(&member.username);
+    match participant.pgp_key_id {
+        Some(id) => {
+            let key = member.pgp_keys.iter().find(|key| key.id == id).expect("resolved registered key");
+            format!("{name} · External PGP · {}", crate::share_release::terminal_label(&key.fingerprint))
+        }
+        None => format!("{name} · Passkey"),
+    }
+}
+
 fn select_participants(
     options: &Options,
     members: &[Member],
     interactive: bool,
     direct: bool,
+) -> Result<(Vec<Participant>, Vec<String>), InitError> {
+    select_participants_with_choice(options, members, interactive, direct, |question| {
+        prompt::select(question).with_context(Ctx::new("unable to read custody selection"))
+    })
+}
+
+fn select_participants_with_choice(
+    options: &Options,
+    members: &[Member],
+    interactive: bool,
+    direct: bool,
+    mut choose: impl FnMut(&str) -> Result<usize, InitError>,
 ) -> Result<(Vec<Participant>, Vec<String>), InitError> {
     let selectors: Vec<_> = if options.holders.is_empty() {
         options.from_org_users.iter().collect()
@@ -388,20 +452,17 @@ fn select_participants(
     }
     let mut overrides = HashMap::new();
     for selection in &options.pgp_keys {
-        let user_id = selection.user.resolve(members)?.user_id;
-        if !seen.contains(&user_id) || overrides.insert(user_id, selection.key).is_some() {
+        let member = selection.user.resolve(members)?;
+        let user_id = member.user_id;
+        if !seen.contains(&user_id) || overrides.contains_key(&user_id) {
             return Err(InitError::invalid(
                 "PGP overrides must name distinct selected users",
             ));
         }
-    }
-    if explicit
-        .iter()
-        .any(|(id, webauthn)| *webauthn && overrides.contains_key(id))
-    {
-        return Err(InitError::invalid(
-            "--pgp-key conflicts with explicit WebAuthn custody",
-        ));
+        if explicit.get(&user_id) == Some(&true) {
+            return Err(InitError::invalid("--pgp-key conflicts with explicit WebAuthn custody"));
+        }
+        overrides.insert(user_id, selection.key.resolve(member)?);
     }
     if direct
         && selected.iter().any(|member| {
@@ -436,18 +497,8 @@ fn select_participants(
             if member.pgp_keys.len() == 1 {
                 key_id = Some(member.pgp_keys[0].id);
             } else if interactive {
-                eprintln!("Select custody for {}:", member.username);
-                for (index, key) in member.pgp_keys.iter().enumerate() {
-                    eprintln!("  {}: PGP {} ({})", index + 1, key.fingerprint, key.id);
-                }
-                if member.webauthn_credentials > 0 && !explicit.contains_key(user_id) {
-                    eprintln!(
-                        "  0: Caution-backed WebAuthn ({} registered passkeys, one share)",
-                        member.webauthn_credentials
-                    );
-                }
-                let index = prompt::select("Selection: ")
-                    .with_context(Ctx::new("unable to read custody selection"))?;
+                eprintln!("{}", pgp_selection_menu(member, explicit.get(user_id).copied()));
+                let index = choose("Selection: ")?;
                 if index == 0 && member.webauthn_credentials > 0 && !explicit.contains_key(user_id)
                 {
                     webauthn = true;
@@ -462,7 +513,7 @@ fn select_participants(
                 }
             } else {
                 return Err(InitError::invalid(
-                    "ambiguous custody: specify --pgp-key USER=KEY_UUID or explicitly select --caution-backed",
+                    "multiple keys or custody choices: specify --pgp-key USER=KEY (registration UUID or full fingerprint), or explicitly select WebAuthn custody",
                 ));
             }
         }
@@ -657,15 +708,7 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
             .iter()
             .find(|m| m.user_id == p.user_id)
             .expect("resolved participant");
-        eprintln!(
-            "  {} ({}): {}{}",
-            member.username,
-            p.user_id,
-            p.key_source,
-            p.pgp_key_id
-                .map(|id| [" ", &id.to_string()].concat())
-                .unwrap_or_default()
-        );
+        eprintln!("  {}", participant_summary(member, p));
     }
     if participants
         .iter()

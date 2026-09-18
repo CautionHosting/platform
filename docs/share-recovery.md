@@ -11,7 +11,10 @@ caution secret init --holder alice=external-pgp --holder bob=webauthn \
   --threshold 2 --keymaker-pcr-policy keymaker-pcr-policy.json
 ```
 
-`--pgp-key USER=KEY_ID` selects a registered external key. Missing PGP keys do
+`--pgp-key USER=KEY` selects one active registered external key by registration
+UUID or full fingerprint (40 or 64 hexadecimal characters, case/whitespace
+ignored). For example: `--pgp-key alice=0123456789ABCDEF0123456789ABCDEF01234567`.
+Missing PGP keys do
 not select WebAuthn. The old selectors remain temporarily with a deprecation
 warning; old and new styles cannot be combined.
 

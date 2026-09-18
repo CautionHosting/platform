@@ -25,11 +25,14 @@ caution secret init public-keyring.asc --threshold 2 \
 ```
 
 Holder selectors in `--from-org-users` and the left side of `--pgp-key` accept
-UUIDs or usernames; KEY placeholders remain key UUIDs. For example:
+UUIDs or usernames. KEY accepts a registration UUID or a full 40- or 64-character
+hexadecimal PGP fingerprint. Fingerprint case and whitespace are ignored; quote
+selectors containing spaces. For example:
 
 ```sh
-caution secret init --from-org-users alice,bob --threshold 2 \
-  --pgp-key alice=KEY_UUID --keymaker-pcr-policy keymaker-policy.json
+caution secret init --holder alice=external-pgp --holder bob=webauthn --threshold 2 \
+  --pgp-key "alice=0123 4567 89AB CDEF 0123 4567 89AB CDEF 0123 4567" \
+  --keymaker-pcr-policy keymaker-policy.json
 ```
 
 Selectors are trimmed; usernames match in full, case-insensitively. UUID-shaped
@@ -37,12 +40,19 @@ selectors are always treated as UUIDs, never as usernames. Unknown or ambiguous
 names fail; use a UUID to disambiguate. Duplicates are rejected after resolution,
 including a username and UUID for the same holder or repeated PGP overrides.
 The CLI resolves against the active organization participant list and sends UUIDs
-to the API, preserving selection order. Confirmation shows username and UUID.
+to the API, preserving selection order. Each key selector must match exactly one
+active registration belonging to its selected user; missing, removed, wrong-user
+and ambiguous keys fail before generation. A registration UUID can disambiguate
+multiple registrations of the same fingerprint. Confirmation shows username,
+**External PGP** and fingerprint, or username and **Passkey**. Internal UUIDs and
+wire custody names remain in the exact signed request, not this summary.
 Username/UUID resolution precedes custody prompts and generation; direct-mode
 organization selections require authenticated participant discovery too.
 
 Repeated `--pgp-key` selects registered
-PGP certificates. Without an override, a sole registered PGP certificate is selected;
+PGP certificates, one per selected user. Explicit external-PGP custody prompts
+“Select PGP key” when multiple keys exist; legacy custody selection retains
+“Select custody.” Without an override, a sole registered PGP certificate is selected;
 other cases require an interactive custody choice or explicit noninteractive
 selection. `--caution-backed` explicitly selects WebAuthn for users without PGP
 overrides. The CLI presents custody and threshold for confirmation when interactive.
