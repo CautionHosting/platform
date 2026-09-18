@@ -1,8 +1,9 @@
 # WebAuthn and mixed share recovery
 
-Shared Rust dependencies select Locksmith `cd0f5fd44e252114c3bd160edd84c119b99263d0`,
-including the external-PGP signing hash fallback. Rebuild/install the CLI to use
-this fix with existing bundles. The enclave runtime pin remains `4851791bda5f8f392f88e474ed5731b287ecd4bc`;
+Shared Rust dependencies select Locksmith `1e6ec48251ad05ec7cc806d49ec752e768b16b30`,
+including the external-PGP signing hash fallback and labelled, inline smartcard
+PIN prompts. Rebuild/install the CLI to use these fixes with existing bundles.
+The enclave runtime pin remains `4851791bda5f8f392f88e474ed5731b287ecd4bc`;
 this client-side fix does not require a service redeployment. The new dependency
 revision is local until explicitly published; remote builds require publication.
 
@@ -44,6 +45,21 @@ registered Platform origin; the passkey must already be in the bundle snapshot.
 Native approval requires USB FIDO2 user verification (PIN/biometric), not touch
 alone. External PGP holders may contribute to mixed bundles using `--keyring`
 or their supported OpenPGP smartcard.
+
+Smartcard recovery shows three operations: **[1/3] Decrypt bundle metadata**,
+**[2/3] Decrypt your share**, and **[3/3] Sign the encrypted submission**. Each PIN
+and touch instruction explains its operation. Interactive PIN entry is hidden and
+inline, preserving the application, holder, destination and completed steps.
+Ctrl-C cancels and restores terminal input settings. PINs are not cached: three
+card operations remain. Explicit headless/noninteractive handling is unchanged.
+Step completion does not mean acceptance; wait for the destination's acknowledgement.
+
+Local validation against the pinned revision: 38 Locksmith and 169 CLI tests
+passed; API/gateway compilation passed. Three pseudo-terminal scenarios passed:
+successful hidden input, cancellation, and PIN-format retry exhaustion, each
+checking retained output and restored terminal settings. Physical YubiKey
+acceptance is separate: confirm the three labelled operations and final receiver
+response, and that cancelling a PIN prompt prevents later operations/submission.
 
 `send-shard` checks live destination attestation against
 `.caution/trusted_hashes.json` before showing the interactive holder chooser or

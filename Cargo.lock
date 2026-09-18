@@ -4468,7 +4468,7 @@ dependencies = [
 [[package]]
 name = "keymaker-models"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=cd0f5fd44e252114c3bd160edd84c119b99263d0#cd0f5fd44e252114c3bd160edd84c119b99263d0"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=1e6ec48251ad05ec7cc806d49ec752e768b16b30#1e6ec48251ad05ec7cc806d49ec752e768b16b30"
 dependencies = [
  "serde",
  "serde_cbor",
@@ -4660,7 +4660,7 @@ dependencies = [
 [[package]]
 name = "locksmith"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=cd0f5fd44e252114c3bd160edd84c119b99263d0#cd0f5fd44e252114c3bd160edd84c119b99263d0"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=1e6ec48251ad05ec7cc806d49ec752e768b16b30#1e6ec48251ad05ec7cc806d49ec752e768b16b30"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
@@ -4670,6 +4670,7 @@ dependencies = [
  "card-backend",
  "card-backend-pcsc",
  "cfg-if",
+ "crossterm",
  "daemonize",
  "dterror 0.1.0",
  "ed25519-dalek 2.2.0",
@@ -4688,6 +4689,7 @@ dependencies = [
  "openpgp-card-sequoia",
  "pgp",
  "rand 0.8.7",
+ "rpassword",
  "rpgpie",
  "sequoia-openpgp",
  "serde",
@@ -5898,7 +5900,7 @@ checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
 [[package]]
 name = "public-certificate-models"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=cd0f5fd44e252114c3bd160edd84c119b99263d0#cd0f5fd44e252114c3bd160edd84c119b99263d0"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=1e6ec48251ad05ec7cc806d49ec752e768b16b30#1e6ec48251ad05ec7cc806d49ec752e768b16b30"
 dependencies = [
  "serde",
 ]
