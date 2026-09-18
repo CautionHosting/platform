@@ -1,8 +1,10 @@
 # WebAuthn and mixed share recovery
 
-**Local and StageX checks pass with a temporary Locksmith source override.
-Dependency/runtime pins now select Locksmith `4851791bda5f8f392f88e474ed5731b287ecd4bc`.
-Publish that revision and validate remote fetching before Nitro acceptance.**
+Shared Rust dependencies select Locksmith `cd0f5fd44e252114c3bd160edd84c119b99263d0`,
+including the external-PGP signing hash fallback. Rebuild/install the CLI to use
+this fix with existing bundles. The enclave runtime pin remains `4851791bda5f8f392f88e474ed5731b287ecd4bc`;
+this client-side fix does not require a service redeployment. The new dependency
+revision is local until explicitly published; remote builds require publication.
 
 Create with explicit per-holder custody:
 
