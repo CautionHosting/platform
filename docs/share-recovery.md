@@ -143,9 +143,12 @@ bundle-bound credentials and certificates used to authorize release.
 
 ## Approval context and field provenance
 
-The browser shows the destination application, contribution and custody service,
-with check explanations under **Verification details** and full evidence in nested
-**Technical values** (both collapsed by default).
+The browser groups the destination and your contribution in one approval card,
+with a prominent four-group comparison code and approval controls.
+**Verification & technical details** opens a drawer, closed by default, with
+Destination, Custody and Bundle tabs. Each tab explains the checks and groups its
+related values. The drawer fills the screen on phones; Escape or Close returns
+to approval without cancelling it.
 The CLI and browser display the same grouped 16-hex-character prefix of the full
 release-context hash, computed from the prepared response data (excluding its
 attestation wrapper). This compares authenticated release context only; it does
@@ -185,8 +188,12 @@ or application unlock. The destination's threshold must still be reached.
 The approval page shows a compact application/holder/destination summary and a
 four-group comparison code above the action. Compare all four groups with the
 CLI. The code covers authenticated release context, not Platform labels or
-CLI-reported addresses. Verification details explain the checks; nested technical
-values retain full copyable identifiers and policies for independent comparison.
+CLI-reported addresses. The drawer retains every technical value for independent
+comparison. Hashes and fingerprints are shortened by default: Reveal/Hide toggles
+the full value, while Copy always copies the complete value. Compare full PCRs
+with an independently trusted policy. Keyboard tabs stay inside the drawer; arrow
+keys, Home and End switch categories. Terminal session states close the drawer
+and clear its contents.
 Missing optional metadata is omitted, and differing recorded/reported addresses
 are highlighted. Labels never determine authorization.
 
