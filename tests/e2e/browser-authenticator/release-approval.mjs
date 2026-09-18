@@ -12,6 +12,7 @@ let options, finish
 let expires = Math.floor(Date.now()/1000) + 120
 let includeMetadata = true
 let readStatus = 200, finishStatus = 200, dropFinish = false, finishCount = 0
+let cancellationDelay = 0
 const server = createServer(async (request, response) => {
   const path = new URL(request.url, 'http://localhost').pathname
   if (path.startsWith('/auth/qr-release/')) {
@@ -20,6 +21,7 @@ const server = createServer(async (request, response) => {
     response.setHeader('content-type', 'application/json')
     if (path.endsWith('/read') && readStatus !== 200) { response.writeHead(readStatus); return response.end('{}') }
     if (path.endsWith('/read')) return response.end(JSON.stringify({ options, context: { bundle_id: Array(16).fill(1), holder: 'test-holder', expires_at_unix_seconds: expires, organization_id: Array(16).fill(3), version: 'V1', destination_policy: { 0: 'ab'.repeat(48), 1: 'ab'.repeat(48), 2: 'ab'.repeat(48) } }, destination_key: Array(32).fill(2), context_hash: 'edcd12bf40e1c288' + '0'.repeat(48), metadata: includeMetadata ? { application: { name: '<img src=x onerror=alert(1)>', id: 'test-app', public_ip: '203.0.113.43', domain: 'app.example.test', state: 'running' }, bundle: { username: 'alice', threshold: 2, holders: 3, eligible_passkeys: 2 } } : null, reported: { destination_address: '203.0.113.42:49504', custody_url: 'https://custody.example.test' } }))
+    if (input.assertion === null && cancellationDelay) await new Promise(resolve => setTimeout(resolve, cancellationDelay))
     finish = input
     finishCount++
     if (dropFinish) {
@@ -93,11 +95,16 @@ try {
   assert.equal(authData[32] & 5, 5, 'presence and verified UV must be set')
   assert.ok(verify('sha256', Buffer.concat([authData, createHash('sha256').update(clientData).digest()]), createPublicKey({ key: Buffer.from(registration.publicKey), format: 'der', type: 'spki' }), Buffer.from(assertion.response.signature, 'base64url')))
   finish = undefined
+  cancellationDelay = 150
   await page.goto(`${origin}/qr-release?attempt=cancel#cancellation-test`)
   await page.waitForFunction(() => [...document.querySelectorAll('button')].some(b => b.textContent === 'Cancel'))
+  const cancellationResponse = page.waitForResponse(response => response.url().endsWith('/auth/qr-release/finish') && response.request().method() === 'POST')
   await page.evaluate(() => [...document.querySelectorAll('button')].find(b => b.textContent === 'Cancel').click())
   await page.waitForFunction(() => document.body.textContent.includes('Approval cancelled.'))
+  assert.equal((await cancellationResponse).status(), 200)
+  assert.equal(finish.token, 'cancellation-test')
   assert.equal(finish.assertion, null)
+  finish = undefined
   includeMetadata = false
   expires = Math.floor(Date.now()/1000) + 2
   await page.goto(`${origin}/qr-release?attempt=expired#expiry-test`)
@@ -109,10 +116,14 @@ try {
       signal.addEventListener('abort', () => { window.approvalAborted = true; reject(new DOMException('Aborted', 'AbortError')) })
     }) })
   })
+  const expiryResponse = page.waitForResponse(response => response.url().endsWith('/auth/qr-release/finish') && response.request().method() === 'POST')
   await page.evaluate(() => [...document.querySelectorAll('button')].find(b => b.textContent.includes('Approve with passkey')).click())
   await page.waitForFunction(() => document.body.textContent.includes('This approval link is no longer active.'))
   assert.equal(await page.evaluate(() => window.approvalAborted), true)
+  assert.equal((await expiryResponse).status(), 200)
+  assert.equal(finish.token, 'expiry-test')
   assert.equal(finish.assertion, null)
+  cancellationDelay = 0
   assert.equal(await page.$('button'), null)
   assert.equal(await page.$('details'), null)
   assert.equal(await page.$('[role=timer]'), null)

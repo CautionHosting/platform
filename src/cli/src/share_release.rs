@@ -236,8 +236,9 @@ impl ReleaseSummary {
     }
 }
 
-fn comparison_block(hash: &str) -> String {
-    format!("\nCOMPARE WITH YOUR BROWSER\n\n    {}\n\nCompare all four groups. Approve only if they match.\nThe code covers release context, not descriptive application labels or addresses.\n\nWaiting for passkey approval…", comparison_code(hash))
+fn comparison_block(prepared: &Prepared) -> Result<String, InitError> {
+    let hash = release::hash(prepared).with_context(Ctx::new("approval hash"))?;
+    Ok(format!("\nCOMPARE WITH YOUR BROWSER\n\n    {}\n\nCompare all four groups. Approve only if they match.\nThe code covers release context, not descriptive application labels or addresses.\n\nWaiting for passkey approval…", comparison_code(&hash)))
 }
 
 fn comparison_code(hash: &str) -> String {
@@ -289,7 +290,7 @@ async fn browser_assertion(
     output::status(format!(
         "Approve on your phone or open in your browser: {}", terminal_label(url)
     ));
-    output::status(comparison_block(&release::hash(prepared).with_context(Ctx::new("approval hash"))?));
+    output::status(comparison_block(&prepared.data)?);
     let result = async {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -521,9 +522,33 @@ mod holder_selection_tests {
         assert!(!escaped.chars().any(char::is_control));
         assert!(!escaped.contains('\u{202e}'));
         assert_eq!(terminal_label("vkobel · Passkey"), "vkobel · Passkey");
-        let block = comparison_block(&format!("edcd12bf40e1c288{}", "0".repeat(48)));
-        assert!(block.contains("\n    EDCD 12BF 40E1 C288\n"));
+    }
+
+    #[test]
+    fn comparison_matches_gateway_data_hash_and_excludes_attestation() {
+        let mut envelope: Attested<Prepared> = serde_json::from_value(json!({
+            "attestation": [1, 2, 3],
+            "data": {
+                "request_hash": "request", "session_id": "session",
+                "context": {"version":"V1", "bundle_hash":"bundle", "bundle_id":vec![1;16],
+                    "organization_id":vec![2;16], "holder":"holder", "holder_position":0,
+                    "certificate_index":0, "destination_policy":{"0":"ab".repeat(48),"1":"ab".repeat(48),"2":"ab".repeat(48)},
+                    "transport_nonce":"12".repeat(32), "expires_at_unix_seconds":1800000000},
+                "destination_attestation_hash":"destination", "destination_key":vec![3;32],
+                "options":{"publicKey":{"challenge":"Y3VzdG9keS1jaGFsbGVuZ2U", "rpId":"example.com",
+                    "allowCredentials":[], "userVerification":"required", "timeout":120000}}
+            }
+        })).unwrap();
+        // The gateway's verified_request publishes hash(approval.prepared.data).
+        let browser_hash = release::hash(&envelope.data).unwrap();
+        let block = comparison_block(&envelope.data).unwrap();
+        assert!(block.contains(&format!("\n    {}\n", comparison_code(&browser_hash))));
+        assert!(!block.contains(&comparison_code(&release::hash(&envelope).unwrap())));
         assert!(block.ends_with("Waiting for passkey approval…"));
+        envelope.attestation = vec![4, 5, 6];
+        assert_eq!(comparison_block(&envelope.data).unwrap(), block);
+        envelope.data.context.holder = "another-holder".into();
+        assert_ne!(comparison_block(&envelope.data).unwrap(), block);
     }
 
     #[test]

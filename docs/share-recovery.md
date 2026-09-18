@@ -144,7 +144,8 @@ The browser shows the destination application, contribution and custody service,
 with check explanations under **Verification details** and full evidence in nested
 **Technical values** (both collapsed by default).
 The CLI and browser display the same grouped 16-hex-character prefix of the full
-release-context hash. This compares authenticated release context only; it does
+release-context hash, computed from the prepared response data (excluding its
+attestation wrapper). This compares authenticated release context only; it does
 not authenticate descriptive app labels or CLI-reported addresses.
 
 - **Authenticated release context:** organization/bundle IDs, holder fingerprint
