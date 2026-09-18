@@ -222,3 +222,37 @@ application readiness. If the destination closes the connection without a result
 acceptance is unknown: the application may already be unlocked, but the command
 remains a failure. Check its status before retrying. Holder-selection errors are
 reported as selection errors rather than malformed bundle JSON.
+
+### Inspect a saved bundle
+
+```sh
+caution secret inspect
+caution secret inspect --bundle /path/quorum-bundle.json \
+  --keymaker-pcr-policy /path/keymaker-pcr-policy.json
+caution --verbose secret inspect
+# Explicitly view unauthenticated contents, without Platform lookup:
+caution secret inspect --unverified
+```
+
+Inspection is read-only and does not send a share. It defaults to
+`.caution/quorum-bundle.json`; policy precedence is the explicit flag, then
+`KEYMAKER_PCR_POLICY_PATH`, then `.caution/keymaker-pcr-policy.json`.
+Missing policies and invalid proofs fail; there is no automatic unverified fallback.
+`--unverified` cannot be combined with an explicit policy flag.
+
+The summary shows bundle ID, saved labels, threshold, custody, certificate
+fingerprints, included passkey counts and the SHA-256 of the exact UTF-8 public-key
+text (the same hash as the Dashboard). Multiple passkeys represent one share.
+Verified output includes the authenticated generation time: this proves historical
+provenance, not live authorization or current application state. Synthetic test
+proofs are explicitly marked TEST ONLY and provide no authenticated timestamp.
+
+Verified inspection uses an existing Platform session for best-effort holder names
+only when the complete bundle and holder metadata match. It never prompts for login;
+offline or unavailable names fall back to Holder N. Names reflect current organization
+registrations, not authorization evidence. Dashboard record names/edited labels and
+record creation dates are not substituted for saved bundle contents.
+
+`--verbose` adds full holder fingerprints, the deterministic bundle hash and policy
+path. Raw proofs, certificates and credential snapshots are not printed. Human-readable
+inspection output goes to stderr, following the CLI's existing output convention.

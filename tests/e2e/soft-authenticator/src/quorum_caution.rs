@@ -166,6 +166,13 @@ pub(super) fn run(session: &mut Session<'_>, work: &Path, pgp: &str) -> Result<(
     }
     fs::write(&policy_path, policy)?;
 
+    let inspect_home = work.join("inspect-home");
+    for directory in [inspect_home.join("Library/Application Support/caution-cli"), inspect_home.join(".config/caution-cli")] {
+        fs::create_dir_all(&directory)?;
+        fs::write(directory.join("config.json"), json!({
+            "session_id": session.id, "expires_at": "2099-01-01T00:00:00Z", "server_url": session.base
+        }).to_string())?;
+    }
     for mixed in [false, true] {
         let mut request = request.clone();
         if mixed {
@@ -227,6 +234,28 @@ pub(super) fn run(session: &mut Session<'_>, work: &Path, pgp: &str) -> Result<(
         fs::write(work.join(name), serde_json::to_vec(&downloaded["data"])?)?;
         let named_rows: Value = checked(session.get("/quorum-bundles")?)?.json()?;
         fs::write(work.join(format!("{name}.holders")), serde_json::to_vec(&named_rows)?)?;
+        for unverified in [false, true] {
+            let mut command = Command::new(std::env::var("QUORUM_CLI")?);
+            command.current_dir(work).stdin(Stdio::null())
+                .env("HOME", &inspect_home).env("XDG_CONFIG_HOME", inspect_home.join(".config"))
+                .args(["--url", session.base, "secret", "inspect", "--bundle", name]);
+            if unverified { command.arg("--unverified"); }
+            let inspected = command.output()?;
+            let text = String::from_utf8_lossy(&inspected.stderr);
+            anyhow::ensure!(inspected.status.success(), "{name} inspection: {text}");
+            anyhow::ensure!(text.contains("Included passkeys: 2 (one share)"));
+            anyhow::ensure!(text.contains("quorummock · Passkey") == !unverified, "holder names: {text}");
+            anyhow::ensure!(text.contains(if mixed { "2 of 3 holders" } else { "2 of 2 holders" }));
+            anyhow::ensure!(text.contains(if unverified { "UNVERIFIED" } else { "TEST ONLY" }));
+        }
+        let mut altered = downloaded["data"].clone();
+        altered["data"]["label"]["purpose"] = json!("tampered");
+        fs::write(work.join("altered-inspect.json"), serde_json::to_vec(&altered)?)?;
+        let rejected = Command::new(std::env::var("QUORUM_CLI")?)
+            .current_dir(work).stdin(Stdio::null())
+            .args(["secret", "inspect", "--bundle", "altered-inspect.json"]).output()?;
+        anyhow::ensure!(!rejected.status.success());
+        anyhow::ensure!(String::from_utf8_lossy(&rejected.stderr).contains("unable to verify proofed V1"));
         let encrypted = Command::new(std::env::var("QUORUM_CLI")?)
             .current_dir(work)
             .stdin(Stdio::null())
