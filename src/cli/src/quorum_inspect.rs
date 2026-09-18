@@ -49,111 +49,66 @@ fn summary(
     names: &HolderNames,
     options: &Options,
     verbose: bool,
+    platform: Option<&str>,
 ) -> Result<String, InitError> {
     let GenerateQuorumBundle::V1(data) = bundle;
-    if data.threshold == 0
-        || data.threshold > data.max
-        || usize::from(data.max) != data.keyring.len()
-    {
-        return Err(InitError::invalid(
-            "invalid bundle threshold or holder count",
-        ));
+    if data.threshold == 0 || data.threshold > data.max || usize::from(data.max) != data.keyring.len() {
+        return Err(InitError::invalid("invalid bundle threshold or holder count"));
     }
-    let mut lines = vec![if options.unverified {
-        "UNVERIFIED — bundle contents have not been authenticated.".to_owned()
+    let id = uuid::Uuid::from_bytes(data.bundle_id).to_string();
+    let title = data.label.get("name").filter(|name| !name.is_empty())
+        .map(|name| format!("{} · {}", terminal_label(name), &id[..8]))
+        .unwrap_or_else(|| format!("Bundle {}", &id[..8]));
+    let status = if options.unverified {
+        "UNVERIFIED — bundle contents have not been authenticated."
     } else if generation_time.is_some() {
-        "Verified — historical Keymaker proof matches the configured policy.".to_owned()
+        "Proof verified — historical Keymaker evidence matches the configured policy."
     } else {
-        "TEST ONLY — synthetic proof accepted; no authenticated generation time.".to_owned()
-    }];
-    lines.push(format!(
-        "Bundle: {}",
-        uuid::Uuid::from_bytes(data.bundle_id)
-    ));
+        "TEST ONLY — synthetic proof accepted; no authenticated generation time."
+    };
+    let mut lines = vec![format!("{title}\n{status}\n")];
+    let pgp = data.keyring.iter().filter(|key| matches!(key, Key::OpenPGP { .. })).count();
+    let custody = [(pgp, "External PGP"), (data.keyring.len() - pgp, "Passkey")]
+        .into_iter().filter(|(count, _)| *count > 0).map(|(count, kind)| format!("{count} {kind}")).collect::<Vec<_>>().join(" · ");
+    lines.push(format!("Quorum       {} of {} holders · {custody}", data.threshold, data.max));
     if !options.unverified {
         if let Some(at) = generation_time {
             let at: chrono::DateTime<chrono::Utc> = at.into();
-            lines.push(format!(
-                "Authenticated generation time: {}",
-                at.to_rfc3339()
-            ));
+            lines.push(format!("Generated    {} (authenticated)", at.format("%d %b %Y, %H:%M:%S UTC")));
         }
+        if let Some(platform) = platform { lines.push(format!("Platform     {} (metadata source)", terminal_label(platform))); }
     }
-    let pgp = data
-        .keyring
-        .iter()
-        .filter(|key| matches!(key, Key::OpenPGP { .. }))
-        .count();
-    lines.push(format!(
-        "Quorum: {} of {} holders · {pgp} External PGP · {} Passkey",
-        data.threshold,
-        data.max,
-        data.keyring.len() - pgp
-    ));
-    let mut labels: Vec<_> = data.label.iter().collect();
+    let mut labels: Vec<_> = data.label.iter().filter(|(key, _)| key.as_str() != "name").collect();
     labels.sort_by_key(|(key, _)| *key);
-    for (key, value) in labels {
-        lines.push(format!(
-            "Label: {} = {}",
-            terminal_label(key),
-            terminal_label(value)
-        ));
-    }
-    lines.push(String::from("Holders:"));
+    for (key, value) in labels { lines.push(format!("Label        {} = {}", terminal_label(key), terminal_label(value))); }
+    let mut rows = Vec::new();
     for (index, key) in data.keyring.iter().enumerate() {
-        let (cert, credentials) = match key {
-            Key::OpenPGP { cert } => (cert, None),
-            Key::WebAuthn { cert, credential } => (cert, Some(credential.len())),
+        let (cert, custody, credentials) = match key {
+            Key::OpenPGP { cert } => (cert, "External PGP", None),
+            Key::WebAuthn { cert, credential } => (cert, "Passkey", Some(credential.len())),
         };
-        let fingerprint = Cert::from_bytes(cert.as_bytes())
-            .with_context(Ctx::new("invalid holder certificate"))?
-            .fingerprint()
-            .to_string();
-        let label =
-            share_release::holder_label(&data.keyring, &fingerprint, credentials.is_some(), names);
-        lines.push(format!("  {}. {label}", index + 1));
-        // Named passkey labels normally omit the fingerprint; inspection includes it.
-        if verbose || (credentials.is_some() && names.contains_key(&fingerprint)) {
-            let shown = if verbose {
-                fingerprint.clone()
-            } else {
-                format!(
-                    "{}…{}",
-                    &fingerprint[..4],
-                    &fingerprint[fingerprint.len() - 4..]
-                )
-            };
-            lines.push(format!("     Certificate fingerprint: {shown}"));
-        }
-        if let Some(count) = credentials {
-            lines.push(format!("     Included passkeys: {count} (one share)"));
-        }
+        let fingerprint = Cert::from_bytes(cert.as_bytes()).with_context(Ctx::new("invalid holder certificate"))?.fingerprint().to_string();
+        let name = names.get(&fingerprint).filter(|name| names.values().filter(|other| *other == *name).count() == 1)
+            .map(|name| terminal_label(name)).unwrap_or_else(|| format!("Holder {}", index + 1));
+        let certificate = if verbose { fingerprint } else { share_release::short_fingerprint(&fingerprint) };
+        rows.push((name, custody, certificate, credentials));
     }
-    if !names.is_empty() {
-        lines.push(
-            "Names reflect current organization registrations, not authorization evidence.".into(),
-        );
+    let width = rows.iter().map(|row| row.0.chars().count()).max().unwrap_or(0).max(6);
+    let passkeys = rows.iter().any(|row| row.3.is_some());
+    lines.push(format!("\n{:<width$}  {:<12}  {:<17}{}", "HOLDER", "CUSTODY", "CERTIFICATE", if passkeys { "  PASSKEYS" } else { "" }));
+    for (name, custody, certificate, credentials) in rows {
+        let count = if passkeys { format!("  {}", credentials.map(|n| n.to_string()).unwrap_or_else(|| "—".into())) } else { String::new() };
+        lines.push(format!("{name:<width$}  {custody:<12}  {certificate:<17}{count}"));
     }
-    // Dashboard hashes the exact UTF-8 armored public-key string, including newlines.
-    lines.push(format!(
-        "Public key SHA-256: {}",
-        hex::encode(Sha256::digest(data.public_key.as_bytes()))
-    ));
+    if passkeys { lines.push("Multiple included passkeys still contribute one share per holder.".into()); }
+    if !names.is_empty() { lines.push("\nNames reflect current Platform registrations, not authorization evidence.".into()); }
     if verbose {
-        lines.push(format!(
-            "Bundle hash: {}",
-            hex::encode(deterministic_bundle_hash(bundle).with_context(Ctx::new("hash bundle"))?)
-        ));
-        if !options.unverified {
-            lines.push(format!(
-                "Verification policy: {}",
-                terminal_label(
-                    &quorum_init::policy_path(options.keymaker_pcr_policy.as_deref())
-                        .display()
-                        .to_string()
-                )
-            ));
-        }
+        lines.push("\nIdentifiers & verification".into());
+        lines.push(format!("Bundle ID: {id}"));
+        lines.push(format!("Bundle hash: {}", hex::encode(deterministic_bundle_hash(bundle).with_context(Ctx::new("hash bundle"))?)));
+        // Match Dashboard hashing of the exact UTF-8 public-key text.
+        lines.push(format!("Public key SHA-256: {}", hex::encode(Sha256::digest(data.public_key.as_bytes()))));
+        if !options.unverified { lines.push(format!("Verification policy: {}", terminal_label(&quorum_init::policy_path(options.keymaker_pcr_policy.as_deref()).display().to_string()))); }
     }
     Ok(lines.join("\n"))
 }
@@ -167,9 +122,9 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
     } else {
         let envelope =
             serde_json::from_str(&text).with_context(Ctx::new("invalid quorum bundle JSON"))?;
-        share_release::holder_names(client, &envelope).await
+        share_release::holder_names_for(client, &envelope, "inspect").await
     };
-    output::status(summary(&bundle, at, &names, &options, client.verbose)?);
+    output::status(summary(&bundle, at, &names, &options, client.verbose, Some(&client.base_url))?);
     Ok(())
 }
 
@@ -233,11 +188,13 @@ mod tests {
                     credential: vec!["snapshot".into(); 2],
                 };
             }
-            let text = summary(&bundle, None, &HolderNames::new(), &options(), false).unwrap();
-            assert!(text.starts_with("UNVERIFIED"));
+            let text = summary(&bundle, None, &HolderNames::new(), &options(), false, None).unwrap();
+            assert!(text.contains("UNVERIFIED"));
+            assert!(text.contains("01010101"));
+            assert!(!text.contains("0 External PGP") && !text.contains("0 Passkey"));
             assert!(text.contains("Holder 1"));
             assert!(
-                text.contains("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+                !text.contains("Public key SHA-256")
             );
             assert!(!text.contains('\x1b'));
             assert!(!text.contains("\nspoof"));
@@ -246,7 +203,7 @@ mod tests {
             assert!(!text.contains("encrypted shares"));
             assert!(!text.contains("Bundle hash:"));
             if kind != "pgp" {
-                assert!(text.contains("Included passkeys: 2 (one share)"));
+                assert!(text.contains("PASSKEYS") && text.contains("one share per holder"));
             }
         }
     }
@@ -266,19 +223,21 @@ mod tests {
         let mut opts = options();
         opts.unverified = false;
         opts.keymaker_pcr_policy = Some("trusted.json".into());
-        let text = summary(&bundle, Some(SystemTime::UNIX_EPOCH), &names, &opts, true).unwrap();
-        assert!(text.contains("Verified — historical"));
-        assert!(text.contains("1970-01-01T00:00:00+00:00"));
+        let text = summary(&bundle, Some(SystemTime::UNIX_EPOCH), &names, &opts, true, Some("https://platform.test")).unwrap();
+        assert!(text.contains("Proof verified — historical"));
+        assert!(text.contains("01 Jan 1970, 00:00:00 UTC (authenticated)"));
         assert!(text.contains(&fingerprint));
-        assert!(text.contains("alice · Passkey"));
-        assert!(text.contains("alice · External PGP"));
+        assert!(text.contains("alice   Passkey"));
+        assert!(text.contains("alice   External PGP"));
+        assert!(text.contains("https://platform.test (metadata source)"));
+        assert!(text.contains("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
         assert!(text.contains("not authorization evidence"));
         assert!(text.contains("Verification policy: trusted.json"));
         assert!(text.contains("Bundle hash:"));
         assert!(
-            summary(&bundle, None, &names, &opts, false)
+            summary(&bundle, None, &names, &opts, false, None)
                 .unwrap()
-                .starts_with("TEST ONLY")
+                .contains("TEST ONLY")
         );
         let unverified = summary(
             &bundle,
@@ -286,9 +245,10 @@ mod tests {
             &HolderNames::new(),
             &options(),
             true,
+            None,
         )
         .unwrap();
-        assert!(!unverified.contains("Authenticated generation time"));
+        assert!(!unverified.contains("(authenticated)"));
         assert!(!unverified.contains("Verification policy"));
     }
 
@@ -304,7 +264,7 @@ mod tests {
         let mut bundle = fixture();
         let GenerateQuorumBundle::V1(data) = &mut bundle;
         data.threshold = 0;
-        assert!(summary(&bundle, None, &HolderNames::new(), &options(), false).is_err());
+        assert!(summary(&bundle, None, &HolderNames::new(), &options(), false, None).is_err());
     }
 
     #[test]

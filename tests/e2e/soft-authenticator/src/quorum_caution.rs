@@ -238,13 +238,14 @@ pub(super) fn run(session: &mut Session<'_>, work: &Path, pgp: &str) -> Result<(
             let mut command = Command::new(std::env::var("QUORUM_CLI")?);
             command.current_dir(work).stdin(Stdio::null())
                 .env("HOME", &inspect_home).env("XDG_CONFIG_HOME", inspect_home.join(".config"))
-                .args(["--url", session.base, "secret", "inspect", "--bundle", name]);
+                .args(["--url", session.base, "--verbose", "secret", "inspect", "--bundle", name]);
             if unverified { command.arg("--unverified"); }
             let inspected = command.output()?;
             let text = String::from_utf8_lossy(&inspected.stderr);
             anyhow::ensure!(inspected.status.success(), "{name} inspection: {text}");
-            anyhow::ensure!(text.contains("Included passkeys: 2 (one share)"));
-            anyhow::ensure!(text.contains("quorummock · Passkey") == !unverified, "holder names: {text}");
+            anyhow::ensure!(text.contains(downloaded["bundle_hash"].as_str().context("API bundle hash")?));
+            anyhow::ensure!(text.contains("PASSKEYS") && text.contains("one share per holder"));
+            anyhow::ensure!(text.contains("quorummock") == !unverified, "holder names: {text}");
             anyhow::ensure!(text.contains(if mixed { "2 of 3 holders" } else { "2 of 2 holders" }));
             anyhow::ensure!(text.contains(if unverified { "UNVERIFIED" } else { "TEST ONLY" }));
         }

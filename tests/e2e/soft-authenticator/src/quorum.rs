@@ -409,7 +409,7 @@ pub fn run(
             let inspected = command.output()?;
             let text = String::from_utf8_lossy(&inspected.stderr);
             anyhow::ensure!(inspected.status.success(), "CLI inspection: {text}");
-            anyhow::ensure!(text.contains("Quorum:") && text.contains("Public key SHA-256:"));
+            anyhow::ensure!(text.contains("Quorum       ") && text.contains("CERTIFICATE"));
             anyhow::ensure!(text.contains(if unverified { "UNVERIFIED" } else { "TEST ONLY" }));
             anyhow::ensure!(!text.contains("BEGIN PGP") && !text.contains("necroproof"));
         }

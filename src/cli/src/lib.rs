@@ -3535,7 +3535,8 @@ pub async fn run() -> Result<(), RunError> {
 
     validate_global_qr(&cli.command, cli.qr)?;
 
-    if let Err(e) = check_dependencies(cli.verbose) {
+    if !matches!(&cli.command, Commands::Secret { command: SecretCommands::Inspect(_) })
+        && let Err(e) = check_dependencies(cli.verbose) {
         output::error(format!("Dependency check failed: {}", e));
         return Err(RunError::DependencyCheck {
             location: std::panic::Location::caller(),

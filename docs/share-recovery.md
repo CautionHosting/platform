@@ -249,9 +249,9 @@ Inspection is read-only and does not send a share. It defaults to
 Missing policies and invalid proofs fail; there is no automatic unverified fallback.
 `--unverified` cannot be combined with an explicit policy flag.
 
-The summary shows bundle ID, saved labels, threshold, custody, certificate
-fingerprints, included passkey counts and the SHA-256 of the exact UTF-8 public-key
-text (the same hash as the Dashboard). Multiple passkeys represent one share.
+The compact summary shows the embedded bundle ID prefix, saved name/labels,
+threshold, custody and a holder table with shortened certificate fingerprints
+and included passkey counts. Multiple passkeys represent one share.
 Verified output includes the authenticated generation time: this proves historical
 provenance, not live authorization or current application state. Synthetic test
 proofs are explicitly marked TEST ONLY and provide no authenticated timestamp.
@@ -262,6 +262,35 @@ offline or unavailable names fall back to Holder N. Names reflect current organi
 registrations, not authorization evidence. Dashboard record names/edited labels and
 record creation dates are not substituted for saved bundle contents.
 
-`--verbose` adds full holder fingerprints, the deterministic bundle hash and policy
-path. Raw proofs, certificates and credential snapshots are not printed. Human-readable
+`--verbose` replaces shortened fingerprints with full values and adds an
+Identifiers & verification section: full Bundle ID, deterministic bundle hash,
+public-key SHA-256 and policy path. The public-key hash covers the exact UTF-8
+public-key text, matching the Dashboard. Raw proofs, certificates and credential snapshots are not printed. Human-readable
 inspection output goes to stderr, following the CLI's existing output convention.
+
+### Matching CLI and Dashboard bundles
+
+Both interfaces identify V1 bundles by their embedded UUID: `Bundle 9fd6da23`, or
+`Name · 9fd6da23`. The CLI uses the saved bundle name label; the Dashboard may use
+its editable record name. Names can differ; match the embedded ID and full hash.
+The Dashboard's Identifiers section exposes full Bundle ID, Bundle hash,
+Public key SHA-256 and Platform record ID with Reveal/Copy controls. Hashes and
+fingerprints abbreviate to eight leading and eight trailing characters; Copy
+always uses the complete value. A Platform record ID identifies a database row,
+not the bundle contents. Older records without an embedded ID explicitly use
+`Platform record …` as their fallback title.
+
+The API adds optional `bundle_hash` display metadata to existing list/get responses,
+using the same canonical Rust hashing function as the CLI. Unsupported records omit
+it. Computing/displaying this hash does not verify a proof, and this metadata is not
+included in downloaded bundles. Updates and deletes still use the Platform record ID.
+
+Inspection and recovery explain why holder names are unavailable: missing/unreadable
+or expired session, mismatched server, failed/timed-out API lookup, unmatched bundle,
+or unavailable/inconsistent holder metadata. These are display failures, separate
+from local proof verification. A server mismatch prints both servers and suggests an
+explicit `--url` command, even without `--verbose`. The CLI never switches servers,
+sends the session to a different server, or prompts for login just to retrieve names.
+Metadata requests reject redirects rather than forwarding the session.
+Unverified inspection skips all metadata lookup. Inspection also skips irrelevant
+USB/FIDO2 dependency diagnostics; existing environment warnings remain unchanged.

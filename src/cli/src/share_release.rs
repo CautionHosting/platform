@@ -58,22 +58,96 @@ fn matched_names(bundle: &Value, rows: &[Value]) -> Option<HolderNames> {
     result
 }
 
-pub(crate) async fn holder_names(client: &ApiClient, bundle: &Value) -> HolderNames {
-    let Ok(config) = client.require_existing_authenticated_config() else { return HolderNames::new(); };
-    let lookup = async {
-        let response = client.client.get(format!("{}/api/quorum-bundles", client.base_url))
-            .header("X-Session-ID", &config.session_id).send().await.ok()?
-            .error_for_status().ok()?;
-        let rows: Vec<Value> = response.json().await.ok()?;
-        matched_names(bundle, &rows)
+#[derive(Debug, PartialEq, Eq)]
+enum NameLookup {
+    Found(HolderNames),
+    MissingSession,
+    InvalidSession,
+    ExpiredSession,
+    ServerMismatch { selected: String, saved: String },
+    ApiFailure,
+    Timeout,
+    UnmatchedBundle,
+    UnavailableMetadata,
+    InconsistentMetadata,
+}
+
+impl NameLookup {
+    fn message(&self, command: &str) -> Option<String> {
+        let reason = match self {
+            Self::Found(_) => return None,
+            Self::ServerMismatch { selected, saved } => return Some(format!(
+                "Holder names unavailable: server mismatch\n  Selected server: {}\n  Saved session:   {}\nUse: caution --url '{}' secret {}\nLocal bundle verification is independent of this lookup.",
+                terminal_label(selected), terminal_label(saved), terminal_label(saved).replace('\'', "'\"'\"'"), command)),
+            Self::MissingSession => "no saved Platform session",
+            Self::InvalidSession => "saved Platform session could not be read",
+            Self::ExpiredSession => "Platform session expired or was rejected",
+            Self::ApiFailure => "Platform API unavailable or returned an invalid response",
+            Self::Timeout => "Platform API lookup timed out",
+            Self::UnmatchedBundle => "no identical bundle in the current Platform organization",
+            Self::UnavailableMetadata => "holder metadata or names are unavailable",
+            Self::InconsistentMetadata => "holder metadata does not match the bundle",
+        };
+        Some(format!("Holder names unavailable: {reason}. Using certificate identifiers."))
+    }
+}
+
+fn names_from_rows(bundle: &Value, rows: &[Value]) -> NameLookup {
+    let matching: Vec<_> = rows.iter().filter(|row| row.get("data") == Some(bundle)).collect();
+    if matching.is_empty() { return NameLookup::UnmatchedBundle; }
+    if matching.iter().any(|row| !row.get("holders").is_some_and(Value::is_array)) {
+        return NameLookup::UnavailableMetadata;
+    }
+    match matched_names(bundle, rows) {
+        Some(names) if !names.is_empty() => NameLookup::Found(names),
+        Some(_) => NameLookup::UnavailableMetadata,
+        None => NameLookup::InconsistentMetadata,
+    }
+}
+
+async fn lookup_names(client: &ApiClient, bundle: &Value) -> NameLookup {
+    let config = match client.load_config() {
+        Ok(config) => config,
+        Err(_) if !client.config_path.exists() => return NameLookup::MissingSession,
+        Err(_) => return NameLookup::InvalidSession,
     };
-    tokio::time::timeout(Duration::from_secs(5), lookup).await.ok().flatten().unwrap_or_default()
+    // Check the server before using any session, even when it has also expired.
+    if !client.is_same_server(&config) {
+        return NameLookup::ServerMismatch { selected: client.base_url.clone(), saved: config.server_url.unwrap_or_default() };
+    }
+    if client.is_session_expired(&config) { return NameLookup::ExpiredSession; }
+    // Custom session headers must not follow an API redirect to another host.
+    let Ok(http) = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build()
+        else { return NameLookup::ApiFailure; };
+    let lookup = async {
+        let Ok(response) = http.get(format!("{}/api/quorum-bundles", client.base_url))
+            .header("X-Session-ID", &config.session_id).send().await else { return NameLookup::ApiFailure; };
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED { return NameLookup::ExpiredSession; }
+        if !response.status().is_success() { return NameLookup::ApiFailure; }
+        let Ok(rows) = response.json::<Vec<Value>>().await else { return NameLookup::ApiFailure; };
+        names_from_rows(bundle, &rows)
+    };
+    tokio::time::timeout(Duration::from_secs(5), lookup).await.unwrap_or(NameLookup::Timeout)
+}
+
+pub(crate) async fn holder_names_for(client: &ApiClient, bundle: &Value, command: &str) -> HolderNames {
+    let outcome = lookup_names(client, bundle).await;
+    if let Some(message) = outcome.message(command) { output::warning(message); }
+    match outcome { NameLookup::Found(names) => names, _ => HolderNames::new() }
+}
+
+pub(crate) async fn holder_names(client: &ApiClient, bundle: &Value) -> HolderNames {
+    holder_names_for(client, bundle, "send-shard").await
+}
+
+pub(crate) fn short_fingerprint(value: &str) -> String {
+    if value.len() > 16 { format!("{}…{}", &value[..8], &value[value.len()-8..]) } else { value.to_owned() }
 }
 
 pub(crate) fn holder_label(keys: &[Key], holder: &str, webauthn: bool, names: &HolderNames) -> String {
     let unique_name = names.get(holder).filter(|name| names.values().filter(|other| *other == *name).count() == 1);
     let kind = if webauthn { "Passkey" } else { "External PGP" };
-    let short = if holder.len() > 12 { format!("{}…{}", &holder[..4], &holder[holder.len()-4..]) } else { holder.to_owned() };
+    let short = short_fingerprint(holder);
     if let Some(name) = unique_name {
         if webauthn { format!("{} · {kind}", terminal_label(name)) } else { format!("{} · {kind} · {short}", terminal_label(name)) }
     } else {
@@ -614,6 +688,68 @@ mod holder_selection_tests {
         assert!(matched_names(&bundle, &[row, renamed]).is_none());
     }
 
+    #[test]
+    fn lookup_outcomes_distinguish_missing_and_inconsistent_metadata() {
+        let (_, bundle, row) = fixture();
+        assert!(matches!(names_from_rows(&bundle, &[row.clone()]), NameLookup::Found(_)));
+        assert_eq!(names_from_rows(&bundle, &[]), NameLookup::UnmatchedBundle);
+        let mut missing = row.clone(); missing.as_object_mut().unwrap().remove("holders");
+        assert_eq!(names_from_rows(&bundle, &[missing]), NameLookup::UnavailableMetadata);
+        let mut invalid = row; invalid["holders"][0]["fingerprint"] = json!("wrong");
+        assert_eq!(names_from_rows(&bundle, &[invalid]), NameLookup::InconsistentMetadata);
+        assert!(NameLookup::Timeout.message("inspect").unwrap().contains("timed out"));
+        assert_eq!(short_fingerprint("0123456789abcdef0123456789abcdef"), "01234567…89abcdef");
+    }
+
+    #[tokio::test]
+    async fn server_mismatch_and_expired_sessions_never_send_a_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let client = ApiClient { base_url: base_url.clone(), client: reqwest::Client::new(),
+            config_path: dir.path().join("config.json"), deployment_path: None,
+            verbose: false, qr: false, workdir: None };
+        assert_eq!(lookup_names(&client, &json!({})).await, NameLookup::MissingSession);
+        std::fs::write(&client.config_path, "invalid").unwrap();
+        assert_eq!(lookup_names(&client, &json!({})).await, NameLookup::InvalidSession);
+        for expiry in ["2099-01-01T00:00:00Z", "2000-01-01T00:00:00Z"] {
+            std::fs::write(&client.config_path, json!({"session_id":"secret", "expires_at":expiry,"server_url":"https://saved.test"}).to_string()).unwrap();
+            let result = lookup_names(&client, &json!({})).await;
+            assert_eq!(result, NameLookup::ServerMismatch { selected: base_url.clone(), saved: "https://saved.test".into() });
+            let warning = result.message("inspect").unwrap();
+            assert!(warning.contains("server mismatch") && warning.contains("--url 'https://saved.test' secret inspect"));
+            assert!(!warning.contains("secret\n"));
+        }
+        std::fs::write(&client.config_path, json!({"session_id":"secret", "expires_at":"2000-01-01T00:00:00Z","server_url":base_url}).to_string()).unwrap();
+        assert_eq!(lookup_names(&client, &json!({})).await, NameLookup::ExpiredSession);
+        assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    }
+
+    #[tokio::test]
+    async fn metadata_redirect_does_not_forward_session() {
+        use std::io::{Read, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let source = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        let base_url = format!("http://{}", source.local_addr().unwrap());
+        let redirect = format!("HTTP/1.1 302 Found\r\nLocation: http://{}/stolen\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", target.local_addr().unwrap());
+        let client = ApiClient { base_url: base_url.clone(), client: reqwest::Client::new(),
+            config_path: dir.path().join("config.json"), deployment_path: None,
+            verbose: false, qr: false, workdir: None };
+        std::fs::write(&client.config_path, json!({"session_id":"secret", "expires_at":"2099-01-01T00:00:00Z", "server_url":base_url}).to_string()).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = source.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            let mut request = [0; 4096]; stream.read(&mut request).unwrap();
+            stream.write_all(redirect.as_bytes()).unwrap();
+        });
+        assert_eq!(lookup_names(&client, &json!({})).await, NameLookup::ApiFailure);
+        server.join().unwrap();
+        assert_eq!(target.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+    }
+
     #[tokio::test]
     async fn names_are_optional_without_session_or_when_api_fails() {
         use std::io::{Read, Write};
@@ -635,7 +771,7 @@ mod holder_selection_tests {
             assert!(String::from_utf8_lossy(&request[..n]).starts_with("GET /api/quorum-bundles "));
             stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
         });
-        assert!(holder_names(&client, &json!({})).await.is_empty());
+        assert_eq!(lookup_names(&client, &json!({})).await, NameLookup::ApiFailure);
         server.join().unwrap();
     }
 

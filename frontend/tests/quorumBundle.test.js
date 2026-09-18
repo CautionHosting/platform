@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { compile } from 'vue'
 import { parse } from 'vue/compiler-sfc'
-import { getQuorumBundleFiles, getQuorumBundleSummary, serializeQuorumBundle } from '../src/utils/quorumBundle.js'
+import { getQuorumBundleFiles, getQuorumBundleSummary, serializeQuorumBundle, getEmbeddedBundleId, bundleTitle, bundleIdentifiers, abbreviateBundleValue } from '../src/utils/quorumBundle.js'
 
 const dashboard = readFileSync(new URL('../src/views/Dashboard.vue', import.meta.url), 'utf8')
 const { descriptor } = parse(dashboard)
@@ -22,9 +22,8 @@ const compileSection = name => compile(findDetails(descriptor.template.ast, name
 const compiledDetails = compileSection('bundle-details')
 const compiledActions = compileSection('bundle-actions')
 const defaults = {
-  getQuorumBundleSummary, getQuorumBundleFiles, serializeQuorumBundle,
+  getQuorumBundleSummary, getQuorumBundleFiles, serializeQuorumBundle, bundleTitle, bundleIdentifiers, abbreviateBundleValue,
   expandedBundles: new Proxy({}, { get: () => true }), revealedBundleValues: {},
-  abbreviateBundleValue: value => value.length > 20 ? `${value.slice(0, 12)}…${value.slice(-8)}` : value,
    truncateId: id => id, addingLabelTo: null, bundleKeyHashes: {}, handleBundleMenuSelection() {}, toggleBundleMenu() {},
   deletingBundle: null, startAddLabel() {}, copyToClipboard() {},
 }
@@ -140,7 +139,7 @@ test('expanded values copy full fingerprints and hashes and reveal without chang
   const context = { bundle, revealedBundleValues, bundleKeyHashes: { id: hash }, copyToClipboard: (...args) => copies.push(args) }
   const actions = buttons(renderDetails(context))
   actions.find(b => b.props?.['aria-label'] === 'Copy certificate fingerprint for holder 1').props.onClick()
-  actions.find(b => b.props?.['aria-label'] === 'Copy public key SHA-256').props.onClick()
+  actions.find(b => b.props?.['aria-label'] === 'Copy Public key SHA-256').props.onClick()
   assert.deepEqual(copies, [[fingerprint, 'Certificate fingerprint'], [hash, 'Public key SHA-256']])
   actions.find(b => b.props?.['aria-label'] === 'Toggle full certificate fingerprint for holder 1').props.onClick()
   assert.equal(revealedBundleValues['id:0'], true)
@@ -170,3 +169,19 @@ test('action menus toggle exclusively, dismiss outside/on selection/Escape and r
   watched()
   assert.equal(controls.bundleMenu.value, null)
 })
+
+test('embedded identity is shared with CLI and record IDs remain distinct', () => {
+  const id = '9fd6da23b21b4ebc8544442414e7d1c1';
+  const bundle = { id: 'bae317a1-record', data: { data: { bundle_id: [...Buffer.from(id, 'hex')] } }, bundle_hash: 'e8'.repeat(32) };
+  assert.equal(getEmbeddedBundleId(bundle), '9fd6da23-b21b-4ebc-8544-442414e7d1c1');
+  assert.equal(bundleTitle(bundle), 'Bundle 9fd6da23');
+  assert.equal(bundleTitle({ ...bundle, name: 'root' }), 'root · 9fd6da23');
+  assert.equal(bundleTitle({ id: bundle.id }), 'Platform record bae317a1');
+  assert.equal(getEmbeddedBundleId({ data: { data: { bundle_id: Array(16).fill(256) } } }), null);
+  assert.equal(abbreviateBundleValue('0123456789abcdef'.repeat(3)), '01234567…89abcdef');
+  const copies = [];
+  const actions = buttons(renderDetails({ bundle, bundleKeyHashes: {}, copyToClipboard: (...args) => copies.push(args) }));
+  for (const label of ['Bundle ID', 'Bundle hash', 'Platform record ID']) actions.find(b => b.props?.['aria-label'] === `Copy ${label}`).props.onClick();
+  assert.deepEqual(copies, [[getEmbeddedBundleId(bundle), 'Bundle ID'], [bundle.bundle_hash, 'Bundle hash'], [bundle.id, 'Platform record ID']]);
+  assert.equal(bundleIdentifiers({ id: 'legacy' }).length, 1);
+});
