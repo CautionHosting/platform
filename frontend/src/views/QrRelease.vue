@@ -38,7 +38,7 @@
           <p class="check-note">{{ groups[selectedTab].explanation }}</p>
           <section v-for="section in groups[selectedTab].sections" :key="section.title" class="detail-section">
             <h3>{{ section.title }}</h3>
-            <dl><template v-for="item in section.items" :key="item.label"><dt>{{ item.label }}</dt><dd><ReleaseValue :key="item.label" :value="item.value" :label="item.label" /></dd></template></dl>
+            <dl><template v-for="item in section.items" :key="item.label"><dt>{{ item.label }}</dt><dd><ReleaseValue :key="item.label" :value="item.value" :label="item.label" :technical="item.technical" /></dd></template></dl>
           </section>
           <p v-if="selectedTab !== 2" class="source">Compare full measurements with your independently trusted policy.</p>
         </section>
@@ -83,23 +83,23 @@ const groups = computed(() => {
   const r = request.value
   if (!r) return []
   const c = r.context
-  const section = (title, entries) => ({ title, items: entries.filter(([, value]) => value !== null && value !== undefined && value !== '').map(([label, value]) => ({ label, value })) })
+  const section = (title, entries) => ({ title, items: entries.filter(([, value]) => value !== null && value !== undefined && value !== '').map(([label, value, technical = true]) => ({ label, value, technical })) })
   const measurements = policy => Object.entries(policy || {}).map(([index, value]) => [`PCR${index}`, value])
   return [
     { title: 'Destination', explanation: 'The custody enclave checked fresh destination attestation against the requested PCR policy. The CLI also checks the destination before requesting approval. Platform labels and reported addresses are descriptive, not attested application identity.', sections: [
-      section('Application & connection', [['Application ID', app.value.id], ['Domain', app.value.domain], ['Recorded state', app.value.state], ['Connection (CLI-reported)', reported.value.destination_address], ['Platform-recorded IP', app.value.public_ip]]),
+      section('Application & connection', [['Application ID', app.value.id], ['Domain', app.value.domain], ['Recorded state', app.value.state, false], ['Connection (CLI-reported)', reported.value.destination_address], ['Platform-recorded IP', app.value.public_ip]]),
       section('Attested session', [['Destination session key', hex(r.destination_key)], ['Destination attestation hash', r.destination_attestation_hash]]),
       section('Approved destination measurements', measurements(c.destination_policy)),
     ] },
     { title: 'Custody', explanation: 'The gateway checked custody evidence against its configured PCR policy. The CLI independently checks custody evidence against its selected policy. The reported custody hostname is not established by those measurements.', sections: [
       section('Custody service', [['Custody URL (CLI-reported)', reported.value.custody_url]]),
-      section('Passkey approval', [['Approval origin', r.approval_origin], ['RP ID', r.options?.publicKey?.rpId], ['User verification', 'Required'], ['Lifetime', '3 minutes · Single use'], ['Expires at', c.expires_at_unix_seconds ? new Date(c.expires_at_unix_seconds * 1000).toISOString() : null]]),
+      section('Passkey approval', [['Approval origin', r.approval_origin], ['RP ID', r.options?.publicKey?.rpId], ['User verification', 'Required', false], ['Lifetime', '3 minutes · Single use', false], ['Expires at', c.expires_at_unix_seconds ? new Date(c.expires_at_unix_seconds * 1000).toISOString() : null, false]]),
       section('Gateway custody verification policy', measurements(r.custody_policy)),
     ] },
     { title: 'Bundle', explanation: 'The comparison code covers authenticated release context, not descriptive application names or addresses. Multiple eligible passkeys for this holder still contribute only one share.', sections: [
-      section('Bundle identity', [['Organization ID', uuid(c.organization_id)], ['Bundle', bundle.value.name], ['Bundle ID', uuid(c.bundle_id)], ['Bundle hash', c.bundle_hash]]),
-      section('Holder', [['Holder certificate', c.holder], ['Eligible passkeys in bundle', bundle.value.eligible_passkeys], ['Holder position / certificate index (zero-based)', c.holder_position === undefined ? null : `${c.holder_position} / ${c.certificate_index}`]]),
-      section('Release context', [['Full release context hash', r.context_hash], ['Protocol', c.version]]),
+      section('Bundle identity', [['Organization ID', uuid(c.organization_id)], ['Bundle', bundle.value.name, false], ['Bundle ID', uuid(c.bundle_id)], ['Bundle hash', c.bundle_hash]]),
+      section('Holder', [['Holder certificate', c.holder], ['Eligible passkeys in bundle', bundle.value.eligible_passkeys, false]]),
+      section('Release context', [['Full release context hash', r.context_hash], ['Protocol', c.version, false]]),
     ] },
   ].map(group => ({ ...group, sections: group.sections.filter(section => section.items.length) }))
 })

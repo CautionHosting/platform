@@ -190,9 +190,11 @@ or application unlock. The destination's threshold must still be reached.
 The approval page shows a compact application/holder/destination summary and a
 four-group comparison code above the action. Compare all four groups with the
 CLI. The code covers authenticated release context, not Platform labels or
-CLI-reported addresses. The drawer retains every technical value for independent
-comparison. Hashes and fingerprints are shortened by default: Reveal/Hide toggles
-the full value, while Copy always copies the complete value. Compare full PCRs
+CLI-reported addresses. The drawer groups technical values for independent
+comparison; internal holder-position and certificate-index values are not displayed. Hashes and fingerprints are shortened by default: Reveal/Hide toggles
+the full value, while Copy always copies the complete value. Copy controls are
+reserved for identifiers, cryptographic values, URLs and addresses. Descriptive
+fields such as state, lifetime and passkey count use plain text. Compare full PCRs
 with an independently trusted policy. Keyboard tabs stay inside the drawer; arrow
 keys, Home and End switch categories. Terminal session states close the drawer
 and clear its contents.

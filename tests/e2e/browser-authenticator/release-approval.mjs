@@ -76,6 +76,19 @@ try {
   await page.click('.details-trigger')
   assert.equal(await page.$eval('dialog', e => e.open), true)
   assert.equal(await page.evaluate(() => document.activeElement.getAttribute('aria-label')), 'Close verification details')
+  async function assertPlainFields(labels) {
+    for (const label of labels) {
+      const field = await page.evaluate(label => {
+        const term = [...document.querySelectorAll('dialog dt')].find(e => e.textContent === label)
+        const value = term?.nextElementSibling
+        return value && { text: value.textContent.trim(), buttons: value.querySelectorAll('button').length, technical: !!value.querySelector('.technical') }
+      }, label)
+      assert.ok(field?.text, `${label} remains visible`)
+      assert.equal(field.buttons, 0, `${label} has no copy or reveal control`)
+      assert.equal(field.technical, false, `${label} uses normal typography`)
+    }
+  }
+  await assertPlainFields(['Recorded state'])
   await page.click('[aria-label="Copy Application ID"]')
   assert.equal(await page.evaluate(() => window.copiedValue), 'test-app')
   assert.equal(await page.$('[aria-label="Copy Holder certificate"]'), null, 'other tabs are not rendered')
@@ -91,11 +104,14 @@ try {
   await page.focus('#tab-0')
   await page.keyboard.press('ArrowRight')
   assert.equal(await page.$eval('#tab-1', e => e.getAttribute('aria-selected')), 'true')
+  await assertPlainFields(['User verification', 'Lifetime', 'Expires at'])
   await page.click('[aria-label="Copy PCR0"]')
   assert.equal(await page.evaluate(() => window.copiedValue), 'bc'.repeat(48))
   await page.focus('#tab-1')
   await page.keyboard.press('End')
   assert.equal(await page.$eval('#tab-2', e => e.getAttribute('aria-selected')), 'true')
+  await assertPlainFields(['Eligible passkeys in bundle', 'Protocol'])
+  assert.equal(await page.evaluate(() => document.querySelector('dialog').textContent.includes('certificate index')), false)
   await page.click('[aria-label="Copy Holder certificate"]')
   assert.equal(await page.evaluate(() => window.copiedValue), 'cd'.repeat(20))
   await page.focus('#tab-2')
