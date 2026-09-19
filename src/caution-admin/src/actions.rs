@@ -12,18 +12,9 @@ use uuid::Uuid;
 pub async fn reset_webauthn(user_id: Uuid) -> Result<(), ResetWebauthnError> {
     use ResetWebauthnErrorCtx as Ctx;
 
-    let api_service_url =
-        std::env::var("API_SERVICE_URL").map_err(|source| ResetWebauthnError::MissingApiUrl {
-            location: std::panic::Location::caller(),
-            source: Box::new(source),
-        })?;
+    let api_service_url = std::env::var("API_SERVICE_URL").with_context(Ctx::missing_api_url())?;
 
-    let secret = std::env::var("INTERNAL_SERVICE_SECRET").map_err(|source| {
-        ResetWebauthnError::MissingSecret {
-            location: std::panic::Location::caller(),
-            source: Box::new(source),
-        }
-    })?;
+    let secret = std::env::var("INTERNAL_SERVICE_SECRET").with_context(Ctx::missing_secret())?;
 
     let url = format!(
         "{}/internal/webauthn/reset",
@@ -33,10 +24,7 @@ pub async fn reset_webauthn(user_id: Uuid) -> Result<(), ResetWebauthnError> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .map_err(|source| ResetWebauthnError::Request {
-            location: std::panic::Location::caller(),
-            source: Box::new(source),
-        })?;
+        .with_context(Ctx::request())?;
 
     let response = client
         .post(&url)

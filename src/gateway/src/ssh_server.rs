@@ -72,7 +72,7 @@ impl From<russh::Error> for SshHandlerError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum EnsureGitRepoExistsError {
-    #[error("failed to create git repos directory [{location}]")]
+    #[error("Failed to create git repos directory [{location}]")]
     CreateDirectory {
         #[location]
         location: Location,
@@ -80,7 +80,7 @@ pub(crate) enum EnsureGitRepoExistsError {
         source: BoxError,
     },
 
-    #[error("failed to execute git init [{location}]")]
+    #[error("Failed to execute git init [{location}]")]
     GitInitSpawn {
         #[location]
         location: Location,
@@ -88,7 +88,7 @@ pub(crate) enum EnsureGitRepoExistsError {
         source: BoxError,
     },
 
-    #[error("git init failed [{location}]")]
+    #[error("Git init failed: {stderr} [{location}]")]
     GitInitFailed {
         stderr: String,
         #[location]
@@ -96,23 +96,9 @@ pub(crate) enum EnsureGitRepoExistsError {
     },
 }
 
-impl EnsureGitRepoExistsError {
-    /// Returns the client-visible error message matching HEAD's anyhow Display
-    /// output (the outermost `.context()` string or `bail!` message).
-    fn client_message(&self) -> String {
-        match self {
-            Self::CreateDirectory { .. } => "Failed to create git repos directory".to_string(),
-            Self::GitInitSpawn { .. } => "Failed to execute git init".to_string(),
-            Self::GitInitFailed { stderr, .. } => {
-                format!("Git init failed: {}", stderr)
-            }
-        }
-    }
-}
-
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum PreparePushRefHookError {
-    #[error("failed to create temporary git hook directory [{location}]")]
+    #[error("Failed to create temporary git hook directory [{location}]")]
     CreateTempDir {
         #[location]
         location: Location,
@@ -120,7 +106,7 @@ pub(crate) enum PreparePushRefHookError {
         source: BoxError,
     },
 
-    #[error("failed to write post-receive hook [{location}]")]
+    #[error("Failed to write post-receive hook [{location}]")]
     WriteHook {
         #[location]
         location: Location,
@@ -128,7 +114,7 @@ pub(crate) enum PreparePushRefHookError {
         source: BoxError,
     },
 
-    #[error("failed to stat post-receive hook [{location}]")]
+    #[error("Failed to stat post-receive hook [{location}]")]
     StatHook {
         #[location]
         location: Location,
@@ -136,30 +122,13 @@ pub(crate) enum PreparePushRefHookError {
         source: BoxError,
     },
 
-    #[error("failed to make post-receive hook executable [{location}]")]
+    #[error("Failed to make post-receive hook executable [{location}]")]
     SetPermissions {
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-}
-
-impl PreparePushRefHookError {
-    /// Returns the client-visible error message matching HEAD's anyhow Display
-    /// output (the `.context()` string for each failure path).
-    fn client_message(&self) -> String {
-        match self {
-            Self::CreateTempDir { .. } => {
-                "Failed to create temporary git hook directory".to_string()
-            }
-            Self::WriteHook { .. } => "Failed to write post-receive hook".to_string(),
-            Self::StatHook { .. } => "Failed to stat post-receive hook".to_string(),
-            Self::SetPermissions { .. } => {
-                "Failed to make post-receive hook executable".to_string()
-            }
-        }
-    }
 }
 
 /// Error type for parsing the pushed-ref log lines. All variants are source-less
@@ -274,20 +243,20 @@ pub(crate) enum HandleGitPushError {
         location: Location,
     },
 
-    /// Typed inner errors as unmarked fields: these feed `client_message()`
-    /// directly (documented deviation, same pattern as `PasskeyError::Auth`).
     #[error("failed to ensure git repo exists [{location}]")]
     EnsureRepo {
         #[location]
         location: Location,
-        source: EnsureGitRepoExistsError,
+        #[source]
+        source: BoxError,
     },
 
     #[error("failed to prepare push ref hook [{location}]")]
     PrepareHook {
         #[location]
         location: Location,
-        source: PreparePushRefHookError,
+        #[source]
+        source: BoxError,
     },
 
     #[error("failed to spawn git receive-pack [{location}]")]
@@ -300,12 +269,11 @@ pub(crate) enum HandleGitPushError {
 }
 
 impl HandleGitPushError {
-    /// Returns the client-visible error message without the internal `[{location}]`
-    /// suffix. Byte-identical to what HEAD's `bail!`/`.context(...)` produced via
-    /// anyhow's Display (which only shows the outermost context string). For
-    /// EnsureRepo and PrepareHook, this delegates to the inner error's own
-    /// `client_message()` since at HEAD those propagated their specific message
-    /// directly (no call-site `.context()` was added).
+    /// Client-visible message for the git channel. Built from fixed literals so
+    /// it never embeds the internal `[{location}]` segment or the boxed source
+    /// (both are for logs only). The `RunningApp`/`AppNotFound` wording is
+    /// byte-identical to HEAD's; the remaining variants use a fixed generic
+    /// string because their underlying cause is now an opaque boxed source.
     pub(crate) fn client_message(&self) -> String {
         match self {
             Self::InvalidAppId { .. } => "Invalid app ID format".to_string(),
@@ -320,8 +288,8 @@ impl HandleGitPushError {
             Self::AppNotFound { app_id, .. } => {
                 format!("App '{}' not found. Run 'caution init' first.", app_id)
             }
-            Self::EnsureRepo { source, .. } => source.client_message(),
-            Self::PrepareHook { source, .. } => source.client_message(),
+            Self::EnsureRepo { .. } => "Failed to create git repos directory".to_string(),
+            Self::PrepareHook { .. } => "Failed to prepare post-receive hook".to_string(),
             Self::SpawnReceivePack { .. } => "Failed to spawn git receive-pack".to_string(),
         }
     }
@@ -952,15 +920,9 @@ async fn handle_git_push(
     let allow_noop_redeploy = resource_state_allows_noop_redeploy(&resource_state);
 
     let repo_path = format!("{}/git-repos/{}.git", data_dir, app_id);
-    ensure_git_repo_exists(&repo_path).map_err(|source| HandleGitPushError::EnsureRepo {
-        location: std::panic::Location::caller(),
-        source,
-    })?;
+    ensure_git_repo_exists(&repo_path).with_context(Ctx::ensure_repo())?;
     let (push_hook_dir, push_ref_log_path) =
-        prepare_push_ref_hook().map_err(|source| HandleGitPushError::PrepareHook {
-            location: std::panic::Location::caller(),
-            source,
-        })?;
+        prepare_push_ref_hook().with_context(Ctx::prepare_hook())?;
     let hooks_path = push_hook_dir.path().to_path_buf();
 
     tracing::info!("Spawning git receive-pack for {}", repo_path);
@@ -1716,6 +1678,40 @@ mod tests {
             msg.contains("Do not run `caution apps create`"),
             "must warn against creating a new app: {msg}"
         );
+    }
+
+    #[test]
+    fn running_app_client_message_ignores_brackets_in_data() {
+        // Regression: the channel writer used to strip the location suffix via
+        // `to_string().rsplit_once(" [")`, which truncated at the LAST bracket.
+        // A resource id containing " [" broke that. client_message() must return
+        // the full guidance regardless of brackets in the interpolated data, and
+        // must never leak the internal location segment.
+        let err = super::HandleGitPushError::RunningApp {
+            app_id: "weird [id]".into(),
+            state: "run [ning]".into(),
+            location: std::panic::Location::caller(),
+        };
+        let msg = err.client_message();
+        assert_eq!(
+            msg,
+            "App 'weird [id]' is in state 'run [ning]'. In-place redeploy is not supported. \
+             `caution apps destroy weird [id]` causes downtime and temporarily withdraws managed DNS. \
+             After destroy completes, redeploy the same app ID, managed hostname, and any BYOC \
+             linkage with `git push caution HEAD:main` using the existing remote. Do not run \
+             `caution apps create` or plain `caution init`. For BYOC apps, do not run \
+             `caution teardown --byoc`.",
+            "client message must equal the fixed guidance with no location leak: {msg}"
+        );
+    }
+
+    #[test]
+    fn ensure_repo_client_message_is_fixed_and_location_free() {
+        let err = super::HandleGitPushError::EnsureRepo {
+            location: std::panic::Location::caller(),
+            source: Box::new(std::io::Error::other("boom [detail]")),
+        };
+        assert_eq!(err.client_message(), "Failed to create git repos directory");
     }
 
     #[test]

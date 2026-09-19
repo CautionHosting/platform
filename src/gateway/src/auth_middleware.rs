@@ -9,6 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use dterror::{CtxError, ResultExt};
 use sha2::{Digest, Sha256};
 use ssh_key::{PublicKey as SshPublicKey, SshSig};
 use std::error::Error;
@@ -297,7 +298,7 @@ impl std::fmt::Debug for VerifySshSignedRequestErrorKind {
 
 #[derive(Debug, thiserror::Error)]
 #[error("Unable to verify SSH-signed request: {kind:?} [{location}]")]
-struct VerifySshSignedRequestError {
+pub(crate) struct VerifySshSignedRequestError {
     kind: VerifySshSignedRequestErrorKind,
     location: &'static Location<'static>,
     status: StatusCode,
@@ -431,12 +432,6 @@ impl CsrfValidationError {
             location: Location::caller(),
         }
     }
-
-    /// Returns a generic message safe to show to end users.
-    /// Specific error details are logged server-side via the Display impl.
-    pub fn user_message(&self) -> &'static str {
-        "Request validation failed"
-    }
 }
 
 /// Validate CSRF token for state-changing requests from browser.
@@ -481,12 +476,78 @@ fn validate_csrf(
     Ok(())
 }
 
+/// Handler error for `fido2_auth_middleware`: every variant maps to an explicit
+/// status with a fixed body in `IntoResponse`; inner errors are preserved only
+/// as boxed sources for logs.
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum SessionAuthError {
+    #[error("session ID is missing [{location}]")]
+    MissingSessionId {
+        location: &'static Location<'static>,
+    },
+
+    #[error("session validation failed [{location}]")]
+    SessionValidation {
+        #[location]
+        location: &'static Location<'static>,
+        #[source]
+        source: Box<dyn Error + Send + Sync + 'static>,
+    },
+
+    #[error("invalid or expired session [{location}]")]
+    InvalidSession {
+        location: &'static Location<'static>,
+    },
+
+    #[error("CSRF validation failed [{location}]")]
+    Csrf {
+        #[location]
+        location: &'static Location<'static>,
+        #[source]
+        source: Box<dyn Error + Send + Sync + 'static>,
+    },
+
+    #[error("failed to resolve user [{location}]")]
+    UserLookup {
+        #[location]
+        location: &'static Location<'static>,
+        #[source]
+        source: Box<dyn Error + Send + Sync + 'static>,
+    },
+}
+
+impl IntoResponse for SessionAuthError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::MissingSessionId { .. } | Self::InvalidSession { .. } => {
+                tracing::debug!(?self, "Login session missing/invalid");
+                (StatusCode::UNAUTHORIZED, "authentication required").into_response()
+            }
+            Self::Csrf { .. } => {
+                tracing::warn!(?self, "CSRF validation failed");
+                (StatusCode::FORBIDDEN, "Request validation failed").into_response()
+            }
+            Self::SessionValidation { .. } | Self::UserLookup { .. } => {
+                tracing::error!(?self, "Session auth lookup failed");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "An internal error occurred",
+                )
+                    .into_response()
+            }
+        }
+    }
+}
+
 #[allow(clippy::result_large_err)]
+#[tracing::instrument(skip_all, err)]
 pub async fn fido2_auth_middleware(
     State(state): State<AppState>,
     mut req: Request,
     next: Next,
-) -> Result<Response, Response> {
+) -> Result<Response, SessionAuthError> {
+    use SessionAuthErrorCtx as Ctx;
+
     if req.uri().path() == "/health" {
         return Ok(next.run(req).await);
     }
@@ -518,34 +579,26 @@ pub async fn fido2_auth_middleware(
     } else if let Some(cookie_session) = crate::csrf::get_cookie(req.headers(), "caution_session") {
         (cookie_session, false)
     } else {
-        return Err((StatusCode::UNAUTHORIZED, "Missing session ID").into_response());
+        return Err(SessionAuthError::MissingSessionId {
+            location: std::panic::Location::caller(),
+        });
     };
 
     // Validate session FIRST to ensure the auth method claim is legitimate
     let credential_id = db::validate_auth_session(&state.db, &session_id)
         .await
-        .map_err(|e| {
-            tracing::error!("Session validation error: {:?}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Session validation failed",
-            )
-                .into_response()
-        })?
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Invalid or expired session").into_response())?;
+        .with_context(Ctx::session_validation())?
+        .ok_or_else(|| SessionAuthError::InvalidSession {
+            location: std::panic::Location::caller(),
+        })?;
 
     // Now that session is validated, check CSRF for cookie-based auth
-    validate_csrf(&req, &session_id, using_header_auth, &state.csrf_secret).map_err(|e| {
-        tracing::warn!("{}", e);
-        (StatusCode::FORBIDDEN, e.user_message()).into_response()
-    })?;
+    validate_csrf(&req, &session_id, using_header_auth, &state.csrf_secret)
+        .with_context(Ctx::csrf())?;
 
     let user_id = db::get_user_id_by_credential(&state.db, &credential_id)
         .await
-        .map_err(|e| {
-            tracing::error!("Failed to get user ID for credential: {:?}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to resolve user").into_response()
-        })?;
+        .with_context(Ctx::user_lookup())?;
 
     req.headers_mut().insert(
         "X-Authenticated-User-ID",
@@ -568,6 +621,44 @@ fn username_gate_exempt_path(path: &str) -> bool {
     path == "/user/username" || path == "/auth/logout" || path == "/user/status"
 }
 
+/// Handler error for `username_claim_gate_middleware`.
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum UsernameGateError {
+    #[error("username not yet claimed [{location}]")]
+    UsernameRequired {
+        #[location]
+        location: &'static Location<'static>,
+    },
+
+    #[error("could not check account status [{location}]")]
+    StatusLookup {
+        #[location]
+        location: &'static Location<'static>,
+        #[source]
+        source: Box<dyn Error + Send + Sync + 'static>,
+    },
+}
+
+impl IntoResponse for UsernameGateError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::UsernameRequired { .. } => (
+                StatusCode::FORBIDDEN,
+                axum::Json(serde_json::json!({ "error": "username_required" })),
+            )
+                .into_response(),
+            Self::StatusLookup { .. } => {
+                tracing::error!(?self, "Failed to check username placeholder status");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "An internal error occurred",
+                )
+                    .into_response()
+            }
+        }
+    }
+}
+
 /// Enforces the Phase 1 "username claimed" migration gate: once a user is
 /// authenticated (`AuthenticatedUserId` set by `fido2_auth_middleware`, which
 /// must run before this middleware in the layer stack), every protected
@@ -576,11 +667,14 @@ fn username_gate_exempt_path(path: &str) -> bool {
 /// applies uniformly to web, CLI, and QR clients since it's enforced at the
 /// gateway rather than in UI.
 #[allow(clippy::result_large_err)]
+#[tracing::instrument(skip_all, err)]
 pub async fn username_claim_gate_middleware(
     State(state): State<AppState>,
     req: Request,
     next: Next,
-) -> Result<Response, Response> {
+) -> Result<Response, UsernameGateError> {
+    use UsernameGateErrorCtx as Ctx;
+
     if username_gate_exempt_path(req.uri().path()) {
         return Ok(next.run(req).await);
     }
@@ -593,24 +687,14 @@ pub async fn username_claim_gate_middleware(
         return Ok(next.run(req).await);
     };
 
-    let (_username, is_placeholder) =
-        db::get_username_status(&state.db, user_id)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to check username placeholder status: {:?}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to check account status",
-                )
-                    .into_response()
-            })?;
+    let (_username, is_placeholder) = db::get_username_status(&state.db, user_id)
+        .await
+        .with_context(Ctx::status_lookup())?;
 
     if is_placeholder {
-        return Err((
-            StatusCode::FORBIDDEN,
-            axum::Json(serde_json::json!({ "error": "username_required" })),
-        )
-            .into_response());
+        return Err(UsernameGateError::UsernameRequired {
+            location: std::panic::Location::caller(),
+        });
     }
 
     Ok(next.run(req).await)
@@ -719,6 +803,7 @@ fn ssh_signed_request_error_response(error: VerifySshSignedRequestError) -> Resp
     error.into_response()
 }
 
+#[tracing::instrument(skip_all, err)]
 async fn verify_ssh_signed_request(
     state: &AppState,
     req: Request,
@@ -895,12 +980,205 @@ fn requires_fido2_signature(method: &Method, path: &str) -> bool {
         || (path.starts_with("/passkeys/") && *method == Method::DELETE)
 }
 
+/// Handler error for `fido2_sign_middleware`: every variant maps to an explicit
+/// status with a fixed body in `IntoResponse`; inner errors are preserved only
+/// as boxed sources for logs. `SshSigned` is a documented deviation: the SSH
+/// verification flow has its own multi-status client mapping, so its typed error
+/// is carried as a source (like `ssh_key::SshKeyInputError`) and its own
+/// `into_response` renders the client-visible status and body.
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum Fido2SignError {
+    #[error("SSH-signed request verification failed [{location}]")]
+    SshSigned {
+        #[location]
+        location: &'static Location<'static>,
+        source: VerifySshSignedRequestError,
+    },
+
+    #[error("invalid challenge ID header [{location}]")]
+    InvalidChallengeId {
+        #[location]
+        location: &'static Location<'static>,
+    },
+
+    #[error("this operation requires signature verification [{location}]")]
+    SignatureRequired {
+        #[location]
+        location: &'static Location<'static>,
+    },
+
+    #[error("missing X-Fido2-Response header [{location}]")]
+    MissingResponseHeader {
+        #[location]
+        location: &'static Location<'static>,
+    },
+
+    #[error("invalid base64 in X-Fido2-Response [{location}]")]
+    InvalidResponseBase64 {
+        #[location]
+        location: &'static Location<'static>,
+        #[source]
+        source: Box<dyn Error + Send + Sync + 'static>,
+    },
+
+    #[error("invalid FIDO response format [{location}]")]
+    InvalidResponseFormat {
+        #[location]
+        location: &'static Location<'static>,
+        #[source]
+        source: Box<dyn Error + Send + Sync + 'static>,
+    },
+
+    #[error("invalid or expired challenge [{location}]")]
+    ChallengeNotFound {
+        #[location]
+        location: &'static Location<'static>,
+    },
+
+    #[error("challenge expired [{location}]")]
+    ChallengeExpired {
+        #[location]
+        location: &'static Location<'static>,
+    },
+
+    #[error("request does not match signed challenge [{location}]")]
+    RequestMismatch {
+        #[location]
+        location: &'static Location<'static>,
+    },
+
+    #[error("failed to read body [{location}]")]
+    ReadBody {
+        #[location]
+        location: &'static Location<'static>,
+        #[source]
+        source: Box<dyn Error + Send + Sync + 'static>,
+    },
+
+    #[error("body does not match signed hash [{location}]")]
+    BodyHashMismatch {
+        #[location]
+        location: &'static Location<'static>,
+    },
+
+    #[error("failed to verify signature [{location}]")]
+    CredentialLookup {
+        #[location]
+        location: &'static Location<'static>,
+        #[source]
+        source: Box<dyn Error + Send + Sync + 'static>,
+    },
+
+    #[error("failed to deserialize credential [{location}]")]
+    CredentialParse {
+        #[location]
+        location: &'static Location<'static>,
+        #[source]
+        source: Box<dyn Error + Send + Sync + 'static>,
+    },
+
+    #[error("invalid signature [{location}]")]
+    SignatureInvalid {
+        #[location]
+        location: &'static Location<'static>,
+        #[source]
+        source: Box<dyn Error + Send + Sync + 'static>,
+    },
+
+    #[error("failed to serialize authentication state [{location}]")]
+    SerializeAuthState {
+        #[location]
+        location: &'static Location<'static>,
+        #[source]
+        source: Box<dyn Error + Send + Sync + 'static>,
+    },
+
+    #[error("failed to record signed request [{location}]")]
+    AuditRecord {
+        #[location]
+        location: &'static Location<'static>,
+        #[source]
+        source: Box<dyn Error + Send + Sync + 'static>,
+    },
+}
+
+impl IntoResponse for Fido2SignError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::SshSigned { source, .. } => ssh_signed_request_error_response(source),
+            Self::InvalidChallengeId { .. } => {
+                tracing::debug!(?self, "Signed request: invalid challenge ID header");
+                (StatusCode::BAD_REQUEST, "Invalid challenge ID header").into_response()
+            }
+            Self::SignatureRequired { .. } => {
+                tracing::debug!(?self, "Signed request: signature required");
+                (
+                    StatusCode::FORBIDDEN,
+                    "This operation requires signature verification",
+                )
+                    .into_response()
+            }
+            Self::MissingResponseHeader { .. } => {
+                tracing::debug!(?self, "Signed request: missing response header");
+                (StatusCode::BAD_REQUEST, "Missing FIDO2 response header").into_response()
+            }
+            Self::InvalidResponseBase64 { .. } | Self::InvalidResponseFormat { .. } => {
+                tracing::warn!(?self, "Signed request: malformed response");
+                (StatusCode::BAD_REQUEST, "Invalid FIDO response format").into_response()
+            }
+            Self::ChallengeNotFound { .. } | Self::ChallengeExpired { .. } => {
+                tracing::debug!(?self, "Signed request: challenge missing or expired");
+                (StatusCode::UNAUTHORIZED, "Invalid or expired challenge").into_response()
+            }
+            Self::RequestMismatch { .. } => {
+                tracing::error!(?self, "Signed request: request/challenge mismatch");
+                (
+                    StatusCode::FORBIDDEN,
+                    "Request does not match signed challenge",
+                )
+                    .into_response()
+            }
+            Self::ReadBody { .. } => {
+                tracing::warn!(?self, "Signed request: could not read body");
+                (StatusCode::BAD_REQUEST, "Failed to read body").into_response()
+            }
+            Self::BodyHashMismatch { .. } => {
+                tracing::error!(?self, "Signed request: body hash mismatch");
+                (StatusCode::FORBIDDEN, "Body does not match signed hash").into_response()
+            }
+            Self::CredentialLookup { .. } | Self::CredentialParse { .. } => {
+                tracing::error!(?self, "Signed request: credential lookup/parse failure");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to verify signature",
+                )
+                    .into_response()
+            }
+            Self::SignatureInvalid { .. } => {
+                tracing::warn!(?self, "Signed request: signature verification failed");
+                (StatusCode::UNAUTHORIZED, "Invalid signature").into_response()
+            }
+            Self::SerializeAuthState { .. } | Self::AuditRecord { .. } => {
+                tracing::error!(?self, "Signed request: audit recording failure");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to record signed request",
+                )
+                    .into_response()
+            }
+        }
+    }
+}
+
 #[allow(clippy::result_large_err)]
+#[tracing::instrument(skip_all, err)]
 pub async fn fido2_sign_middleware(
     State(state): State<AppState>,
     mut req: Request,
     next: Next,
-) -> Result<Response, Response> {
+) -> Result<Response, Fido2SignError> {
+    use Fido2SignError as E;
+
     // SECURITY: Strip headers to prevent bypass attacks from external requests.
     // These headers are only set internally by this middleware after verification.
     req.headers_mut().remove("X-Authenticated-User-ID");
@@ -908,26 +1186,42 @@ pub async fn fido2_sign_middleware(
     req.headers_mut().remove(SSH_AUTHENTICATED_HEADER);
 
     if is_ssh_signed_resource_request(req.method(), req.uri().path()) {
-        match ssh_signature_header_state(&req) {
-            SshSignatureHeaderState::Complete => {
-                let req = verify_ssh_signed_request(&state, req)
-                    .await
-                    .map_err(ssh_signed_request_error_response)?;
-                return Ok(next.run(req).await);
-            }
-            SshSignatureHeaderState::Partial => {
-                return Err(ssh_signed_request_error_response(
-                    incomplete_ssh_headers_error(&req),
-                ));
-            }
-            SshSignatureHeaderState::None => {}
-        }
+        return match ssh_signature_header_state(&req) {
+            SshSignatureHeaderState::Complete => match verify_ssh_signed_request(&state, req).await
+            {
+                Ok(req) => Ok(next.run(req).await),
+                Err(source) => Err(E::SshSigned {
+                    source,
+                    location: std::panic::Location::caller(),
+                }),
+            },
+            SshSignatureHeaderState::Partial => Err(E::SshSigned {
+                source: incomplete_ssh_headers_error(&req),
+                location: std::panic::Location::caller(),
+            }),
+            // No SSH headers at all: fall through to the FIDO2 signing flow
+            // below (the request is not an SSH-signed resource request).
+            SshSignatureHeaderState::None => fido2_sign_flow(State(state), req, next).await,
+        };
     }
+
+    fido2_sign_flow(State(state), req, next).await
+}
+
+#[tracing::instrument(skip_all, err)]
+async fn fido2_sign_flow(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, Fido2SignError> {
+    use Fido2SignError as E;
+    use Fido2SignErrorCtx as Ctx;
 
     // In e2e test mode, skip all FIDO2 signing requirements.
     // Requests will still be authenticated by fido2_auth_middleware (session check).
     #[cfg(feature = "e2e-testing-unsafe")]
     {
+        let _ = &state;
         return Ok(next.run(req).await);
     }
 
@@ -938,17 +1232,19 @@ pub async fn fido2_sign_middleware(
     let requires_signature = requires_fido2_signature(method, path);
 
     let challenge_id = match req.headers().get("X-Fido2-Challenge-Id") {
-        Some(h) => h
-            .to_str()
-            .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid challenge ID header").into_response())?
-            .to_string(),
+        Some(h) => match h.to_str() {
+            Ok(value) => value.to_string(),
+            Err(_source) => {
+                return Err(E::InvalidChallengeId {
+                    location: std::panic::Location::caller(),
+                });
+            }
+        },
         None => {
             if requires_signature {
-                return Err((
-                    StatusCode::FORBIDDEN,
-                    "This operation requires signature verification",
-                )
-                    .into_response());
+                return Err(E::SignatureRequired {
+                    location: std::panic::Location::caller(),
+                });
             }
             return Ok(next.run(req).await);
         }
@@ -958,23 +1254,16 @@ pub async fn fido2_sign_middleware(
         .headers()
         .get("X-Fido2-Response")
         .and_then(|h| h.to_str().ok())
-        .ok_or_else(|| {
-            (StatusCode::BAD_REQUEST, "Missing X-Fido2-Response header").into_response()
+        .ok_or_else(|| E::MissingResponseHeader {
+            location: std::panic::Location::caller(),
         })?;
 
-    let auth_response_json = URL_SAFE_NO_PAD.decode(auth_response_b64).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            "Invalid base64 in X-Fido2-Response",
-        )
-            .into_response()
-    })?;
+    let auth_response_json = URL_SAFE_NO_PAD
+        .decode(auth_response_b64)
+        .with_context(Ctx::invalid_response_base64())?;
 
     let auth_response: PublicKeyCredential =
-        serde_json::from_slice(&auth_response_json).map_err(|e| {
-            tracing::error!("Failed to parse FIDO response: {}", e);
-            (StatusCode::BAD_REQUEST, "Invalid FIDO response format").into_response()
-        })?;
+        serde_json::from_slice(&auth_response_json).with_context(Ctx::invalid_response_format())?;
 
     // SECURITY: Remove-then-check is intentional. Atomically removing the challenge
     // before checking expiry prevents replay attacks — even an expired challenge is
@@ -986,12 +1275,14 @@ pub async fn fido2_sign_middleware(
         .write()
         .await
         .remove(&challenge_id)
-        .ok_or_else(|| {
-            (StatusCode::UNAUTHORIZED, "Invalid or expired challenge").into_response()
+        .ok_or_else(|| E::ChallengeNotFound {
+            location: std::panic::Location::caller(),
         })?;
 
     if time::OffsetDateTime::now_utc() > pending.expires_at {
-        return Err((StatusCode::UNAUTHORIZED, "Challenge expired").into_response());
+        return Err(E::ChallengeExpired {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let method = req.method().as_str();
@@ -1005,17 +1296,15 @@ pub async fn fido2_sign_middleware(
             method,
             path
         );
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Request does not match signed challenge",
-        )
-            .into_response());
+        return Err(E::RequestMismatch {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let (parts, body) = req.into_parts();
     let body_bytes = axum::body::to_bytes(body, 10 * 1024 * 1024)
         .await
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Failed to read body").into_response())?;
+        .with_context(Ctx::read_body())?;
 
     let body_hash = hex::encode(Sha256::digest(&body_bytes));
     if pending.body_hash != body_hash {
@@ -1024,7 +1313,9 @@ pub async fn fido2_sign_middleware(
             pending.body_hash,
             body_hash
         );
-        return Err((StatusCode::FORBIDDEN, "Body does not match signed hash").into_response());
+        return Err(E::BodyHashMismatch {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let credential_id_bytes = auth_response.raw_id.as_ref().to_vec();
@@ -1034,50 +1325,19 @@ pub async fn fido2_sign_middleware(
     );
     let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
         .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to get credential {}: {}",
-                hex::encode(&credential_id_bytes),
-                e
-            );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to verify signature",
-            )
-                .into_response()
-        })?;
+        .with_context(Ctx::credential_lookup())?;
 
     // Use SecurityKey for flexible UV policy (Passkey enforces UV=Required)
-    let _seckey: SecurityKey = serde_json::from_slice(&cred_bytes).map_err(|e| {
-        tracing::error!("Failed to deserialize credential: {}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to verify signature",
-        )
-            .into_response()
-    })?;
+    let _seckey: SecurityKey =
+        serde_json::from_slice(&cred_bytes).with_context(Ctx::credential_parse())?;
 
     state
         .webauthn
         .finish_securitykey_authentication(&auth_response, &pending.auth_state)
-        .map_err(|e| {
-            tracing::error!("FIDO signature verification failed: {:?}", e);
-            (StatusCode::UNAUTHORIZED, "Invalid signature").into_response()
-        })?;
+        .with_context(Ctx::signature_invalid())?;
 
-    let authentication_state = serde_json::to_vec(&pending.auth_state).map_err(|source| {
-        tracing::error!(
-            challenge_id = %pending.challenge_id,
-            user_id = %pending.user_id,
-            ?source,
-            "Failed to serialize verified WebAuthn authentication state"
-        );
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to record signed request",
-        )
-            .into_response()
-    })?;
+    let authentication_state =
+        serde_json::to_vec(&pending.auth_state).with_context(Ctx::serialize_auth_state())?;
 
     // The body length is bounded by the 10 MiB read above, so this conversion
     // cannot exceed PostgreSQL's BIGINT range.
@@ -1100,14 +1360,7 @@ pub async fn fido2_sign_middleware(
         },
     )
     .await
-    .map_err(|error| {
-        tracing::error!(?error, "Failed to persist verified signed request");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to record signed request",
-        )
-            .into_response()
-    })?;
+    .with_context(Ctx::audit_record())?;
 
     tracing::info!(
         audit_id = %audit_id,

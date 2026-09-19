@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use crate::errors::ValidationError;
 use crate::types::UserRole;
 use regex::Regex;
 use std::sync::OnceLock;
@@ -51,6 +50,8 @@ fn get_email_regex() -> &'static Regex {
     EMAIL_REGEX.get_or_init(|| Regex::new(EMAIL_PATTERN).unwrap())
 }
 
+pub use crate::errors::ValidationError;
+
 pub fn validate_app_name(name: &str) -> Result<(), ValidationError> {
     let len = name.len();
 
@@ -59,6 +60,7 @@ pub fn validate_app_name(name: &str) -> Result<(), ValidationError> {
             min: APP_NAME_MIN_LEN,
             max: APP_NAME_MAX_LEN,
             actual: len,
+            location: std::panic::Location::caller(),
         });
     }
 
@@ -75,9 +77,29 @@ pub fn validate_app_name(name: &str) -> Result<(), ValidationError> {
             })
             .map(|(_, c)| c)
             .unwrap_or('?');
-        return Err(ValidationError::AppNameInvalidChars { invalid_char });
+        return Err(ValidationError::AppNameInvalidChars {
+            invalid_char,
+            location: std::panic::Location::caller(),
+        });
     }
 
+    Ok(())
+}
+
+/// Validate a resource command string. Leaf: source-less domain error.
+pub fn validate_cmd(cmd: &str) -> Result<(), ValidationError> {
+    if cmd.is_empty() {
+        return Err(ValidationError::CmdEmpty {
+            location: std::panic::Location::caller(),
+        });
+    }
+    if cmd.len() > 1000 {
+        return Err(ValidationError::CmdTooLong {
+            max: 1000,
+            actual: cmd.len(),
+            location: std::panic::Location::caller(),
+        });
+    }
     Ok(())
 }
 
@@ -89,16 +111,21 @@ pub fn validate_branch_name(name: &str) -> Result<(), ValidationError> {
             min: BRANCH_NAME_MIN_LEN,
             max: BRANCH_NAME_MAX_LEN,
             actual: len,
+            location: std::panic::Location::caller(),
         });
     }
 
     if !get_branch_name_regex().is_match(name) {
-        return Err(ValidationError::BranchNameInvalidChars);
+        return Err(ValidationError::BranchNameInvalidChars {
+            location: std::panic::Location::caller(),
+        });
     }
 
     // Reject git-unsafe patterns
     if name.contains("..") || name.contains("@{") || name.ends_with('/') || name.ends_with('.') {
-        return Err(ValidationError::BranchNameInvalidChars);
+        return Err(ValidationError::BranchNameInvalidChars {
+            location: std::panic::Location::caller(),
+        });
     }
 
     Ok(())
@@ -112,15 +139,20 @@ pub fn validate_org_name(name: &str) -> Result<(), ValidationError> {
             min: ORG_NAME_MIN_LEN,
             max: ORG_NAME_MAX_LEN,
             actual: len,
+            location: std::panic::Location::caller(),
         });
     }
 
     if !get_org_name_regex().is_match(name) {
-        return Err(ValidationError::OrgNameInvalidChars);
+        return Err(ValidationError::OrgNameInvalidChars {
+            location: std::panic::Location::caller(),
+        });
     }
 
     if name.contains("  ") {
-        return Err(ValidationError::OrgNameConsecutiveSpaces);
+        return Err(ValidationError::OrgNameConsecutiveSpaces {
+            location: std::panic::Location::caller(),
+        });
     }
 
     Ok(())
@@ -134,11 +166,14 @@ pub fn validate_username(username: &str) -> Result<(), ValidationError> {
             min: USERNAME_MIN_LEN,
             max: USERNAME_MAX_LEN,
             actual: len,
+            location: std::panic::Location::caller(),
         });
     }
 
     if !get_username_regex().is_match(username) {
-        return Err(ValidationError::UsernameInvalidChars);
+        return Err(ValidationError::UsernameInvalidChars {
+            location: std::panic::Location::caller(),
+        });
     }
 
     Ok(())
@@ -151,11 +186,14 @@ pub fn validate_email(email: &str) -> Result<(), ValidationError> {
         return Err(ValidationError::EmailTooLong {
             max: EMAIL_MAX_LEN,
             actual: len,
+            location: std::panic::Location::caller(),
         });
     }
 
     if !get_email_regex().is_match(email) {
-        return Err(ValidationError::EmailInvalidFormat);
+        return Err(ValidationError::EmailInvalidFormat {
+            location: std::panic::Location::caller(),
+        });
     }
 
     Ok(())
@@ -164,6 +202,7 @@ pub fn validate_email(email: &str) -> Result<(), ValidationError> {
 pub fn validate_role(role: &str) -> Result<UserRole, ValidationError> {
     UserRole::from_str(role).ok_or_else(|| ValidationError::InvalidRole {
         role: role.to_string(),
+        location: std::panic::Location::caller(),
     })
 }
 
@@ -366,11 +405,14 @@ mod tests {
             min: 3,
             max: 63,
             actual: 2,
+            location: std::panic::Location::caller(),
         };
         assert!(err.to_string().contains("3"));
         assert!(err.to_string().contains("63"));
 
-        let err = ValidationError::EmailInvalidFormat;
+        let err = ValidationError::EmailInvalidFormat {
+            location: std::panic::Location::caller(),
+        };
         assert!(err.to_string().contains("email"));
     }
 
@@ -380,10 +422,13 @@ mod tests {
             min: 3,
             max: 63,
             actual: 2,
+            location: std::panic::Location::caller(),
         };
         assert_eq!(err.code(), "app_name_length");
 
-        let err = ValidationError::EmailInvalidFormat;
+        let err = ValidationError::EmailInvalidFormat {
+            location: std::panic::Location::caller(),
+        };
         assert_eq!(err.code(), "email_invalid_format");
     }
 }

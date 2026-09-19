@@ -90,20 +90,6 @@ pub(crate) fn normalize_login_username(username: Option<String>) -> Option<Strin
         .filter(|u| !u.is_empty())
 }
 
-/// A caller-supplied username failed the scope check at login-finish time:
-/// the resolved credential belongs to a different user than the one the
-/// challenge was scoped to (or to no user at all, for a decoy). Returned by
-/// [`check_username_scope`]; each flow's handler error type converts from it.
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "resolved credential belongs to a different user than the login was scoped to [{location}]"
-)]
-pub(crate) struct CredentialScopeMismatch {
-    pub(crate) expected_user_id: Option<Uuid>,
-    pub(crate) actual_user_id: Uuid,
-    pub(crate) location: dterror::Location,
-}
-
 /// A stored `public_key` blob failed to deserialize (pure decode failure —
 /// no database access is involved in this error's origin).
 #[derive(Debug, thiserror::Error)]
@@ -117,36 +103,44 @@ pub(crate) struct DeserializeCredentialError {
 
 /// Everything that can fail while building a username-scoped (or decoy) login
 /// challenge in [`scoped_or_decoy_challenge`] / [`force_decoy_challenge`].
-/// Each caller converts it into its own handler error type.
-#[derive(Debug, thiserror::Error)]
+/// Every field is a boxed source; callers box this whole error into their own
+/// handler error type without inspecting its variants.
+#[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum ScopedChallengeError {
     #[error("could not look up user for scoped login [{location}]")]
     UserLookup {
+        #[location]
+        location: Location,
         #[source]
-        source: db::DbError,
-        location: dterror::Location,
+        source: BoxError,
     },
     #[error("could not fetch credentials for scoped login [{location}]")]
     CredentialFetch {
+        #[location]
+        location: Location,
         #[source]
-        source: db::DbError,
-        location: dterror::Location,
+        source: BoxError,
     },
     #[error("could not deserialize stored credentials [{location}]")]
     DeserializeCredentials {
-        source: DeserializeCredentialError,
-        location: dterror::Location,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
     },
     #[error("could not start authentication challenge [{location}]")]
     StartAuthentication {
+        #[location]
+        location: Location,
         #[source]
-        source: WebauthnError,
-        location: dterror::Location,
+        source: BoxError,
     },
 }
 
 /// Deserialize a set of stored `public_key` blobs into `SecurityKey`s for use
-/// as an `allowCredentials` list.
+/// as an `allowCredentials` list. A malformed blob at index `i` fails the
+/// whole batch with that `index` and the JSON error boxed as the source;
+/// callers map this leaf into their own single source-bearing variant.
 #[tracing::instrument(skip_all, err)]
 fn deserialize_security_keys(
     public_keys: &[Vec<u8>],
@@ -155,15 +149,11 @@ fn deserialize_security_keys(
         .iter()
         .enumerate()
         .map(|(i, cred_bytes)| {
-            serde_json::from_slice(cred_bytes)
-                .inspect_err(|_| {
-                    tracing::error!("Failed to deserialize credential {}", i);
-                })
-                .map_err(|source| DeserializeCredentialError {
-                    index: i,
-                    source,
-                    location: std::panic::Location::caller(),
-                })
+            serde_json::from_slice(cred_bytes).map_err(|source| DeserializeCredentialError {
+                index: i,
+                source,
+                location: std::panic::Location::caller(),
+            })
         })
         .collect()
 }
@@ -256,23 +246,22 @@ pub(crate) enum UsernameScope {
 /// Verifies a resolved discoverable-auth user is consistent with the
 /// username scope recorded when the challenge began (Finding 1: a
 /// username-scoped decoy challenge must not silently authenticate whichever
-/// resident credential the browser/authenticator happens to return).
-#[tracing::instrument(skip_all, err)]
+/// resident credential the browser/authenticator happens to return). Returns
+/// `Some((expected, actual))` on mismatch; callers collapse it into their own
+/// opaque auth-failure error so the rejection is indistinguishable from every
+/// other credential-verification failure (no username-enumeration oracle).
+#[tracing::instrument(skip_all)]
 pub(crate) fn check_username_scope(
     scope: &UsernameScope,
     resolved_user_id: Uuid,
-) -> Result<(), CredentialScopeMismatch> {
+) -> Option<(Option<Uuid>, Uuid)> {
     match scope {
-        UsernameScope::Unscoped => Ok(()),
+        UsernameScope::Unscoped => None,
         UsernameScope::Decoy { expected_user_id } => {
             if *expected_user_id == Some(resolved_user_id) {
-                Ok(())
+                None
             } else {
-                Err(CredentialScopeMismatch {
-                    expected_user_id: *expected_user_id,
-                    actual_user_id: resolved_user_id,
-                    location: std::panic::Location::caller(),
-                })
+                Some((*expected_user_id, resolved_user_id))
             }
         }
     }
@@ -321,16 +310,12 @@ async fn force_decoy_challenge(
     expected_user_id: Option<Uuid>,
     equalize: bool,
 ) -> Result<(RequestChallengeResponse, AuthState), ScopedChallengeError> {
+    use ScopedChallengeErrorCtx as Ctx;
+
     let (mut rcr, auth_state) = state
         .webauthn
         .start_discoverable_authentication()
-        .inspect_err(|e| {
-            tracing::error!("Failed to start decoy challenge: {:?}", e);
-        })
-        .map_err(|source| ScopedChallengeError::StartAuthentication {
-            source,
-            location: std::panic::Location::caller(),
-        })?;
+        .with_context(Ctx::start_authentication())?;
     apply_decoy_shape(&mut rcr, &state.csrf_secret, username);
     if equalize {
         equalize_decoy_work(state, rcr.public_key.allow_credentials.len());
@@ -378,6 +363,8 @@ pub(crate) async fn scoped_or_decoy_challenge(
     state: &AppState,
     username: &str,
 ) -> Result<(RequestChallengeResponse, AuthState), ScopedChallengeError> {
+    use ScopedChallengeErrorCtx as Ctx;
+
     if crate::validation::validate_username(username).is_err() {
         return force_decoy_challenge(state, username, None, false).await;
     }
@@ -393,10 +380,7 @@ pub(crate) async fn scoped_or_decoy_challenge(
 
     let user_id = db::get_user_id_by_username(&state.db, username)
         .await
-        .map_err(|source| ScopedChallengeError::UserLookup {
-            source,
-            location: std::panic::Location::caller(),
-        })?;
+        .with_context(Ctx::user_lookup())?;
 
     // Timing equalization: always issue the same shape of DB work (a user
     // lookup followed by a credential fetch keyed on a real/plausible user
@@ -423,18 +407,12 @@ pub(crate) async fn scoped_or_decoy_challenge(
     let credential_lookup_id = user_id.unwrap_or_else(Uuid::new_v4);
     let public_keys = db::get_credential_public_keys_by_user_id(&state.db, credential_lookup_id)
         .await
-        .inspect_err(|e| {
-            tracing::error!("Failed to fetch credentials for scoped login: {:?}", e);
-        })
-        .map_err(|source| ScopedChallengeError::CredentialFetch {
-            source,
-            location: std::panic::Location::caller(),
-        })?;
+        .with_context(Ctx::credential_fetch())?;
     let allow_credentials = match user_id {
         Some(_) => deserialize_security_keys(&public_keys).map_err(|source| {
             ScopedChallengeError::DeserializeCredentials {
-                source,
                 location: std::panic::Location::caller(),
+                source: Box::new(source),
             }
         })?,
         None => Vec::new(),
@@ -449,13 +427,7 @@ pub(crate) async fn scoped_or_decoy_challenge(
         let (mut rcr, auth_state) = state
             .webauthn
             .start_securitykey_authentication(&allow_credentials)
-            .inspect_err(|e| {
-                tracing::error!("Failed to start scoped authentication: {:?}", e);
-            })
-            .map_err(|source| ScopedChallengeError::StartAuthentication {
-                source,
-                location: std::panic::Location::caller(),
-            })?;
+            .with_context(Ctx::start_authentication())?;
         rcr.public_key.user_verification = UserVerificationPolicy::Preferred;
         return Ok((rcr, AuthState::SecurityKey(auth_state)));
     }
@@ -546,9 +518,6 @@ pub async fn begin_login_handler(
         // byte-for-byte unchanged pending the Phase 3 flip.
         let all_public_keys = db::get_all_credential_public_keys(&state.db)
             .await
-            .inspect_err(|e| {
-                tracing::error!("Failed to fetch credentials from DB: {:?}", e);
-            })
             .with_context(BeginCtx::fetch_credentials())?;
 
         tracing::debug!("Found {} credentials in database", all_public_keys.len());
@@ -557,7 +526,7 @@ pub async fn begin_login_handler(
             BeginLoginError::DeserializeCredential {
                 index: e.index,
                 location: std::panic::Location::caller(),
-                source: Box::new(e),
+                source: Box::new(e.source),
             }
         })?;
 
@@ -570,9 +539,6 @@ pub async fn begin_login_handler(
         let (mut rcr, auth_state) = state
             .webauthn
             .start_securitykey_authentication(&allow_credentials)
-            .inspect_err(|e| {
-                tracing::error!("Failed to start authentication: {:?}", e);
-            })
             .with_context(BeginCtx::start_authentication())?;
 
         // Always use Preferred - we enforce PIN requirement in finish_login based on org settings
@@ -591,9 +557,6 @@ pub async fn begin_login_handler(
         let (rcr, auth_state) = state
             .webauthn
             .start_discoverable_authentication()
-            .inspect_err(|e| {
-                tracing::error!("Failed to start discoverable authentication: {:?}", e);
-            })
             .with_context(BeginCtx::start_authentication())?;
         (
             rcr,
@@ -671,9 +634,16 @@ pub async fn finish_login_handler(
             let credential_id_bytes = auth_response.raw_id.as_ref().to_vec();
             tracing::debug!("Credential ID: {}", hex::encode(&credential_id_bytes));
 
-            let user_id = db::get_user_id_by_credential(&state.db, &credential_id_bytes)
-                .await
-                .with_context(Ctx::db_get_user_id_by_credential(&credential_id_bytes))?;
+            let user_id = match db::get_user_id_by_credential(&state.db, &credential_id_bytes).await
+            {
+                Ok(user_id) => user_id,
+                Err(e) => {
+                    return Err(LoginError::CredentialNotFound {
+                        source: Box::new(e),
+                        location: std::panic::Location::caller(),
+                    });
+                }
+            };
 
             let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
                 .await
@@ -705,9 +675,16 @@ pub async fn finish_login_handler(
                 hex::encode(&credential_id_bytes)
             );
 
-            let user_id = db::get_user_id_by_credential(&state.db, &credential_id_bytes)
-                .await
-                .with_context(Ctx::db_get_user_id_by_credential(&credential_id_bytes))?;
+            let user_id = match db::get_user_id_by_credential(&state.db, &credential_id_bytes).await
+            {
+                Ok(user_id) => user_id,
+                Err(e) => {
+                    return Err(LoginError::CredentialNotFound {
+                        source: Box::new(e),
+                        location: std::panic::Location::caller(),
+                    });
+                }
+            };
 
             let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
                 .await
@@ -737,10 +714,11 @@ pub async fn finish_login_handler(
             // identical to every other credential-verification failure (see
             // `LoginError::into_response`) to avoid a username-enumeration
             // oracle.
-            if let Err(mismatch) = check_username_scope(&scope, user_id) {
+            if let Some((expected_user_id, actual_user_id)) = check_username_scope(&scope, user_id)
+            {
                 return Err(LoginError::UnexpectedCredentialOwner {
-                    expected_user_id: mismatch.expected_user_id,
-                    actual_user_id: mismatch.actual_user_id,
+                    expected_user_id,
+                    actual_user_id,
                     location: std::panic::Location::caller(),
                 });
             }
@@ -1008,7 +986,7 @@ mod tests {
     #[test]
     fn check_username_scope_allows_unscoped_login() {
         let resolved = Uuid::new_v4();
-        assert!(check_username_scope(&UsernameScope::Unscoped, resolved).is_ok());
+        assert!(check_username_scope(&UsernameScope::Unscoped, resolved).is_none());
     }
 
     #[test]
@@ -1016,36 +994,28 @@ mod tests {
         // Username didn't resolve to any user at all: no expected_user_id,
         // but must still always reject, not just no-op like `Unscoped`.
         let resolved = Uuid::new_v4();
-        let err = check_username_scope(
+        let mismatch = check_username_scope(
             &UsernameScope::Decoy {
                 expected_user_id: None,
             },
             resolved,
         )
-        .unwrap_err();
-        assert!(matches!(
-            err,
-            CredentialScopeMismatch { expected_user_id: None, actual_user_id, .. }
-            if actual_user_id == resolved
-        ));
+        .expect("a decoy must always reject");
+        assert_eq!(mismatch, (None, resolved));
     }
 
     #[test]
     fn check_username_scope_rejects_decoy_for_known_zero_cred_user_mismatch() {
         let expected = Uuid::new_v4();
         let resolved = Uuid::new_v4();
-        let err = check_username_scope(
+        let mismatch = check_username_scope(
             &UsernameScope::Decoy {
                 expected_user_id: Some(expected),
             },
             resolved,
         )
-        .unwrap_err();
-        assert!(matches!(
-            err,
-            CredentialScopeMismatch { expected_user_id: Some(e), actual_user_id, .. }
-            if e == expected && actual_user_id == resolved
-        ));
+        .expect("a mismatched decoy must reject");
+        assert_eq!(mismatch, (Some(expected), resolved));
     }
 
     #[test]
@@ -1060,7 +1030,7 @@ mod tests {
             },
             user
         )
-        .is_ok());
+        .is_none());
     }
 
     // --- apply_decoy_shape -----------------------------------------------

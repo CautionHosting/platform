@@ -136,17 +136,19 @@ impl Encryptor {
 
     #[tracing::instrument(skip_all, err)]
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, EncryptError> {
-        use EncryptErrorCtx as Ctx;
-
         let mut nonce_bytes = [0u8; NONCE_SIZE];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
-        let ciphertext = self
-            .cipher
-            .encrypt(nonce, plaintext)
-            .map_err(|e| std::io::Error::other(e.to_string()))
-            .with_context(Ctx::cipher())?;
+        let ciphertext = match self.cipher.encrypt(nonce, plaintext) {
+            Ok(ciphertext) => ciphertext,
+            Err(source) => {
+                return Err(EncryptError::Cipher {
+                    source: Box::new(std::io::Error::other(source.to_string())),
+                    location: std::panic::Location::caller(),
+                });
+            }
+        };
 
         let mut result = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
         result.extend_from_slice(&nonce_bytes);
@@ -157,8 +159,6 @@ impl Encryptor {
 
     #[tracing::instrument(skip_all, err)]
     pub fn decrypt(&self, encrypted: &[u8]) -> Result<Vec<u8>, DecryptError> {
-        use DecryptErrorCtx as Ctx;
-
         if encrypted.len() < NONCE_SIZE {
             return Err(DecryptError::TooShort {
                 location: std::panic::Location::caller(),
@@ -168,10 +168,13 @@ impl Encryptor {
         let (nonce_bytes, ciphertext) = encrypted.split_at(NONCE_SIZE);
         let nonce = Nonce::from_slice(nonce_bytes);
 
-        self.cipher
-            .decrypt(nonce, ciphertext)
-            .map_err(|e| std::io::Error::other(e.to_string()))
-            .with_context(Ctx::cipher())
+        match self.cipher.decrypt(nonce, ciphertext) {
+            Ok(plaintext) => Ok(plaintext),
+            Err(source) => Err(DecryptError::Cipher {
+                source: Box::new(std::io::Error::other(source.to_string())),
+                location: std::panic::Location::caller(),
+            }),
+        }
     }
 
     #[tracing::instrument(skip_all, err)]
@@ -355,7 +358,7 @@ mod tests {
         }
 
         let result = enc.decrypt(&encrypted);
-        assert!(result.is_err());
+        assert!(matches!(result, Err(DecryptError::Cipher { .. })));
     }
 
     #[test]

@@ -159,31 +159,49 @@ pub async fn paddle_webhook_handler(
         ));
     }
 
-    let result: Result<(), BoxError> = match payload.event_type.as_str() {
+    let result: Result<(), PaddleWebhookError> = match payload.event_type.as_str() {
         "transaction.completed" => handle_transaction_completed(&state, &payload)
             .await
-            .map_err(|e| e.into()),
-        "transaction.billed" => handle_transaction_billed(&state, &payload)
-            .await
-            .map_err(|e| e.into()),
-        "transaction.payment_failed" => handle_payment_failed(&state, &payload)
-            .await
-            .map_err(|e| e.into()),
+            .map_err(|source| PaddleWebhookError::Processing {
+                source: Box::new(source),
+                location: std::panic::Location::caller(),
+            }),
+        "transaction.billed" => {
+            handle_transaction_billed(&state, &payload)
+                .await
+                .map_err(|source| PaddleWebhookError::Processing {
+                    source: Box::new(source),
+                    location: std::panic::Location::caller(),
+                })
+        }
+        "transaction.payment_failed" => {
+            handle_payment_failed(&state, &payload)
+                .await
+                .map_err(|source| PaddleWebhookError::Processing {
+                    source: Box::new(source),
+                    location: std::panic::Location::caller(),
+                })
+        }
         "subscription.created"
         | "subscription.updated"
         | "subscription.activated"
         | "subscription.resumed"
         | "subscription.paused"
-        | "subscription.canceled" => handle_subscription_event(&state, &payload)
-            .await
-            .map_err(|e| e.into()),
+        | "subscription.canceled" => {
+            handle_subscription_event(&state, &payload)
+                .await
+                .map_err(|source| PaddleWebhookError::Processing {
+                    source: Box::new(source),
+                    location: std::panic::Location::caller(),
+                })
+        }
         _ => {
             tracing::debug!("Ignoring Paddle event type: {}", payload.event_type);
             Ok(())
         }
     };
 
-    result.with_context(Ctx::processing())?;
+    result?;
 
     tx.commit().await.with_context(Ctx::processing())?;
 
@@ -249,10 +267,10 @@ async fn handle_subscription_event(
         })?;
     let occurred_at = DateTime::parse_from_rfc3339(&payload.occurred_at)
         .map(|value| value.with_timezone(&Utc))
-        .map_err(|_| HandleSubscriptionEventError {
+        .map_err(|source| HandleSubscriptionEventError {
             kind: HandleSubscriptionEventErrorKind::InvalidOccurredAt,
             location: std::panic::Location::caller(),
-            source: None,
+            source: Some(Box::new(source)),
         })?;
 
     let provider_status = data["status"]
@@ -449,10 +467,10 @@ async fn handle_subscription_event(
             })?
             .version,
     )
-    .map_err(|_| HandleSubscriptionEventError {
+    .map_err(|source| HandleSubscriptionEventError {
         kind: HandleSubscriptionEventErrorKind::CatalogVersionOverflow,
         location: std::panic::Location::caller(),
-        source: None,
+        source: Some(Box::new(source)),
     })?;
     let projection = sqlx::query(
         "INSERT INTO subscriptions

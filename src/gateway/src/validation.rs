@@ -13,12 +13,16 @@ static USERNAME_REGEX: OnceLock<Regex> = OnceLock::new();
 
 /// Error type returned by all validation functions in this module.
 ///
-/// Location is Debug-only: the `Display` output of this type feeds client-facing
-/// bodies (via `SshKeyInputError::client_message` and `RegisterError::InvalidUsername`).
+/// Location is Debug-only: this type's `Display` is internal; callers box it as
+/// a `#[source]` and serve fixed, generic client bodies.
 #[derive(Debug, thiserror::Error)]
 pub enum ValidationError {
-    #[error("Invalid app ID format, expected UUID")]
-    InvalidAppId { location: dterror::Location },
+    #[error("Invalid app ID format, expected UUID [{location}]")]
+    InvalidAppId {
+        #[source]
+        source: dterror::BoxError,
+        location: dterror::Location,
+    },
 
     #[error("Username must be at least {min} characters")]
     UsernameTooShort {
@@ -91,7 +95,8 @@ fn get_username_regex() -> &'static Regex {
 
 #[track_caller]
 pub fn validate_app_id(id: &str) -> Result<(), ValidationError> {
-    uuid::Uuid::parse_str(id).map_err(|_| ValidationError::InvalidAppId {
+    uuid::Uuid::parse_str(id).map_err(|source| ValidationError::InvalidAppId {
+        source: Box::new(source),
         location: std::panic::Location::caller(),
     })?;
     Ok(())

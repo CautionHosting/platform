@@ -38,6 +38,18 @@ pub enum ResetRegisterError {
         location: Location,
     },
 
+    /// The caller-supplied token was not valid hex. Mapped to the same client
+    /// response as `InvalidToken` so a prober cannot distinguish "malformed
+    /// token" from "unknown/expired token".
+    #[error("invalid reset token encoding [{location}]")]
+    InvalidTokenPayload {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
     #[error("Registration challenge has expired. Please try again. [{location}]")]
     ChallengeExpired {
         #[location]
@@ -90,7 +102,7 @@ pub enum ResetRegisterError {
 impl IntoResponse for ResetRegisterError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
-            Self::InvalidToken { .. } => (
+            Self::InvalidToken { .. } | Self::InvalidTokenPayload { .. } => (
                 StatusCode::BAD_REQUEST,
                 "This token is invalid, expired, or has already been used.".to_string(),
             ),
@@ -155,9 +167,11 @@ pub async fn begin_reset_register_handler(
         });
     }
 
-    let token_bytes = hex::decode(token_hex).map_err(|_| ResetRegisterError::InvalidToken {
-        location: std::panic::Location::caller(),
-    })?;
+    let token_bytes =
+        hex::decode(token_hex).map_err(|source| ResetRegisterError::InvalidTokenPayload {
+            location: std::panic::Location::caller(),
+            source: Box::new(source),
+        })?;
 
     let user_id = db::get_valid_reset_token(&state.db, &token_bytes)
         .await

@@ -167,10 +167,12 @@ fn resolve_templates_dir() -> Result<PathBuf, ResolveTemplatesDirError> {
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error, dterror::CtxError)]
 pub enum StageEifComponentsError {
-    #[error("could not validate key exchange: {reason} [{location}]")]
+    #[error("could not validate key exchange [{location}]")]
     ValidateKeyExchange {
-        reason: ValidateKeyExchangeError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
     #[error("could not create directory {path} [{location}]")]
@@ -183,28 +185,36 @@ pub enum StageEifComponentsError {
         source: dterror::BoxError,
     },
 
-    #[error("could not stage user application: {reason} [{location}]")]
+    #[error("could not stage user application [{location}]")]
     StageUserApplication {
-        reason: StageUserApplicationError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
-    #[error("could not copy enclave source: {reason} [{location}]")]
+    #[error("could not copy enclave source [{location}]")]
     CopyEnclaveSource {
-        reason: CopyDirRecursiveError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
-    #[error("could not write enclave manifest: {reason} [{location}]")]
+    #[error("could not write enclave manifest [{location}]")]
     WriteManifest {
-        reason: crate::manifest::WriteToFileError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
-    #[error("could not resolve templates directory: {reason} [{location}]")]
+    #[error("could not resolve templates directory [{location}]")]
     ResolveTemplates {
-        reason: ResolveTemplatesDirError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
     #[error("run.sh.template not found at {path} [{location}]")]
@@ -225,16 +235,20 @@ pub enum StageEifComponentsError {
         location: dterror::Location,
     },
 
-    #[error("could not render run.sh template: {reason} [{location}]")]
+    #[error("could not render run.sh template [{location}]")]
     RenderRunSh {
-        reason: RenderRunShTemplateError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
-    #[error("could not render Containerfile.eif template: {reason} [{location}]")]
+    #[error("could not render Containerfile.eif template [{location}]")]
     RenderContainerfile {
-        reason: RenderContainerfileTemplateError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
     #[error("could not write run.sh to {path} [{location}]")]
@@ -291,12 +305,7 @@ pub async fn stage_eif_components(
 ) -> Result<PathBuf, StageEifComponentsError> {
     use StageEifComponentsErrorCtx as Ctx;
 
-    validate_key_exchange(e2e_key_exchange).map_err(|reason| {
-        StageEifComponentsError::ValidateKeyExchange {
-            reason,
-            location: std::panic::Location::caller(),
-        }
-    })?;
+    validate_key_exchange(e2e_key_exchange).with_context(Ctx::validate_key_exchange())?;
 
     let stage_dir = work_dir.join("eif-stage");
     fs::create_dir_all(&stage_dir)
@@ -321,10 +330,7 @@ pub async fn stage_eif_components(
 
     stage_user_application(user_fs_path, &stage_dir, &app_dir)
         .await
-        .map_err(|reason| StageEifComponentsError::StageUserApplication {
-            reason,
-            location: std::panic::Location::caller(),
-        })?;
+        .with_context(Ctx::stage_user_application())?;
 
     tracing::info!(
         "Staging enclave source from: {}",
@@ -332,10 +338,7 @@ pub async fn stage_eif_components(
     );
     copy_dir_recursive(enclave_source_path, &enclave_dir)
         .await
-        .map_err(|reason| StageEifComponentsError::CopyEnclaveSource {
-            reason,
-            location: std::panic::Location::caller(),
-        })?;
+        .with_context(Ctx::copy_enclave_source())?;
 
     let enclaveos_commit = manifest
         .as_ref()
@@ -377,22 +380,14 @@ pub async fn stage_eif_components(
         manifest
             .write_to_file(&manifest_path)
             .await
-            .map_err(|reason| StageEifComponentsError::WriteManifest {
-                reason,
-                location: std::panic::Location::caller(),
-            })?;
+            .with_context(Ctx::write_manifest())?;
         tracing::info!("Wrote manifest to: {}", manifest_path.display());
     }
 
     // Read and render templates
     let templates_dir = match templates_dir {
         Some(dir) => dir.to_path_buf(),
-        None => {
-            resolve_templates_dir().map_err(|reason| StageEifComponentsError::ResolveTemplates {
-                reason,
-                location: std::panic::Location::caller(),
-            })?
-        }
+        None => resolve_templates_dir().with_context(Ctx::resolve_templates())?,
     };
 
     let run_sh_template = templates_dir.join("run.sh.template");
@@ -435,10 +430,7 @@ pub async fn stage_eif_components(
         egress,
     )
     .await
-    .map_err(|reason| StageEifComponentsError::RenderRunSh {
-        reason,
-        location: std::panic::Location::caller(),
-    })?;
+    .with_context(Ctx::render_run_sh())?;
     let containerfile_content = render_containerfile_template(
         &containerfile_template,
         e2e,
@@ -449,10 +441,7 @@ pub async fn stage_eif_components(
         &locksmith_commit,
     )
     .await
-    .map_err(|reason| StageEifComponentsError::RenderContainerfile {
-        reason,
-        location: std::panic::Location::caller(),
-    })?;
+    .with_context(Ctx::render_containerfile())?;
 
     let run_sh_path = stage_dir.join("run.sh");
     fs::write(&run_sh_path, &run_sh_content)
@@ -807,10 +796,12 @@ pub enum BuildEifFromFilesystemsError {
         source: dterror::BoxError,
     },
 
-    #[error("could not stage EIF components: {reason} [{location}]")]
+    #[error("could not stage EIF components [{location}]")]
     Stage {
-        reason: StageEifComponentsError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
     #[error("could not canonicalize output directory {path} [{location}]")]
@@ -831,10 +822,12 @@ pub enum BuildEifFromFilesystemsError {
         source: dterror::BoxError,
     },
 
-    #[error("could not write build context tar: {reason} [{location}]")]
+    #[error("could not write build context tar [{location}]")]
     WriteContext {
-        reason: WriteContextTarError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
     #[error("failed to open build context tar {path} [{location}]")]
@@ -978,10 +971,7 @@ pub async fn build_eif_from_filesystems(
         templates_dir,
     )
     .await
-    .map_err(|reason| BuildEifFromFilesystemsError::Stage {
-        reason,
-        location: std::panic::Location::caller(),
-    })?;
+    .with_context(Ctx::stage())?;
 
     tracing::info!("Building EIF using Docker and Containerfile.eif");
     let output_dir = stage_dir.join("output");
@@ -1033,10 +1023,7 @@ pub async fn build_eif_from_filesystems(
             tokio::task::spawn_blocking(move || write_context_tar(&stage_for_ctx, &ctx_for_task))
                 .await
                 .with_context(Ctx::join_panicked())?;
-        inner.map_err(|reason| BuildEifFromFilesystemsError::WriteContext {
-            reason,
-            location: std::panic::Location::caller(),
-        })?;
+        inner.with_context(Ctx::write_context())?;
         docker_args.push("-".to_string());
         Some(ctx_path)
     } else {
@@ -1171,10 +1158,12 @@ pub(crate) const APP_PAYLOAD_TAR: &str = "app.tar";
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error, dterror::CtxError)]
 pub enum StageUserApplicationError {
-    #[error("could not copy user application directory: {reason} [{location}]")]
+    #[error("could not copy user application directory [{location}]")]
     CopyDir {
-        reason: CopyDirRecursiveError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
     #[error("failed to stage user application tar {path} [{location}]")]
@@ -1223,10 +1212,7 @@ async fn stage_user_application(
         fs::remove_file(stage_dir.join(APP_PAYLOAD_TAR)).await.ok();
         copy_dir_recursive(user_fs_path, app_dir)
             .await
-            .map_err(|reason| StageUserApplicationError::CopyDir {
-                reason,
-                location: std::panic::Location::caller(),
-            })?;
+            .with_context(Ctx::copy_dir())?;
         return Ok(false);
     }
 
@@ -1916,7 +1902,9 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert!(err.to_string().contains("unsupported STEVE key exchange"));
+        assert!(std::error::Error::source(&err)
+            .and_then(|source| source.downcast_ref::<ValidateKeyExchangeError>())
+            .is_some_and(|inner| inner.to_string().contains("unsupported STEVE key exchange")));
         assert!(!work_dir.path().join("eif-stage/run.sh").exists());
     }
 

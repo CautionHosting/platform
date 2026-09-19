@@ -3,8 +3,8 @@
 
 use crate::db;
 use crate::handlers::{
-    authenticate_session, read_credprops_rk, relax_registration_extensions, RegisterBeginResponse,
-    SignRequestError, MAX_PENDING_CHALLENGES,
+    authenticate_session, generic_auth_failure_response, read_credprops_rk,
+    relax_registration_extensions, RegisterBeginResponse, MAX_PENDING_CHALLENGES,
 };
 use crate::types::*;
 use axum::{
@@ -81,36 +81,19 @@ pub enum PasskeyError {
         location: Location,
     },
 
-    #[error("{message} [{location}]")]
+    #[error("invalid passkey request [{location}]")]
     BadRequest {
-        message: String,
-
         #[location]
         location: Location,
+
+        #[source]
+        source: BoxError,
     },
 
-    #[error("{message} [{location}]")]
+    #[error("passkey registration does not belong to this session [{location}]")]
     Forbidden {
-        message: String,
-
         #[location]
         location: Location,
-    },
-
-    /// Auth failure forwarded from `authenticate_session`. The typed inner error
-    /// is deliberate (deviating from the usual boxed `BoxError` source): the
-    /// `SignRequestError`'s own `IntoResponse` drives the client-facing status
-    /// and body, so it must be preserved rather than erased into a boxed
-    /// dyn-error. The field is therefore NOT marked `#[source]`: the `CtxError`
-    /// derive's `from_context` assigns a boxed dyn-error to any `#[source]`
-    /// field, which cannot hold the typed inner error. The variant carries no
-    /// generated `Ctx` constructor and is hand-built with `.map_err(...)`.
-    #[error("authentication failed [{location}]")]
-    Auth {
-        #[location]
-        location: Location,
-
-        source: SignRequestError,
     },
 
     #[error("user is missing a WebAuthn handle [{location}]")]
@@ -127,12 +110,26 @@ pub enum PasskeyError {
         #[source]
         source: BoxError,
     },
+
+    /// Auth failure forwarded from `authenticate_session`, boxed as a source;
+    /// the generic 401 body matches every other authentication failure.
+    #[error("authentication failed [{location}]")]
+    Auth {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
 }
 
 impl IntoResponse for PasskeyError {
     fn into_response(self) -> Response {
         match self {
-            Self::Auth { source, .. } => source.into_response(),
+            error @ Self::Auth { .. } => {
+                tracing::warn!(?error, "Passkey management: authentication failed");
+                generic_auth_failure_response().into_response()
+            }
             Self::NoRegistrationState { .. } => (
                 StatusCode::GONE,
                 "No matching passkey registration state found. Please start over.",
@@ -159,8 +156,14 @@ impl IntoResponse for PasskeyError {
                 "You must keep at least one passkey on your account.",
             )
                 .into_response(),
-            Self::BadRequest { message, .. } => (StatusCode::BAD_REQUEST, message).into_response(),
-            Self::Forbidden { message, .. } => (StatusCode::FORBIDDEN, message).into_response(),
+            Self::BadRequest { .. } => {
+                (StatusCode::BAD_REQUEST, "Invalid passkey request.").into_response()
+            }
+            Self::Forbidden { .. } => (
+                StatusCode::FORBIDDEN,
+                "Passkey registration does not belong to this session.",
+            )
+                .into_response(),
             Self::MissingWebAuthnHandle { .. } => {
                 tracing::error!("user is missing a WebAuthn handle");
                 (
@@ -296,12 +299,7 @@ pub async fn begin_add_passkey_handler(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| {
-            crate::validation::validate_passkey_name(value).map_err(|e| {
-                PasskeyError::BadRequest {
-                    message: e.to_string(),
-                    location: std::panic::Location::caller(),
-                }
-            })?;
+            crate::validation::validate_passkey_name(value).with_context(Ctx::bad_request())?;
             Ok::<String, PasskeyError>(value.to_string())
         })
         .transpose()?;
@@ -401,16 +399,12 @@ pub async fn finish_add_passkey_handler(
 
     if pending.user_id != user_id {
         return Err(PasskeyError::Forbidden {
-            message: "Passkey registration does not belong to this session.".to_string(),
             location: std::panic::Location::caller(),
         });
     }
 
     let reg_response: RegisterPublicKeyCredential =
-        serde_json::from_value(req.clone()).map_err(|e| PasskeyError::BadRequest {
-            message: format!("Failed to parse registration response: {}", e),
-            location: std::panic::Location::caller(),
-        })?;
+        serde_json::from_value(req.clone()).with_context(Ctx::bad_request())?;
 
     let seckey = state
         .webauthn
@@ -467,10 +461,7 @@ pub async fn delete_passkey_handler(
 
     authenticate_session(&state, &headers)
         .await
-        .map_err(|source| PasskeyError::Auth {
-            location: std::panic::Location::caller(),
-            source,
-        })?;
+        .with_context(Ctx::auth())?;
     let credentials = db::list_user_credentials(&state.db, user_id)
         .await
         .with_context(Ctx::internal())?;

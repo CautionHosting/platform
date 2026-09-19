@@ -238,11 +238,14 @@ pub struct BuildRequest {
 pub const ACTIVE_BUILD_CONFLICT_MSG: &str =
     "A build is already in progress for this app. Please wait for it to complete.";
 
-/// Failure modes for [`validate_remote_containerfile_path`] (leaf error: no underlying source).
+/// Failure modes for [`validate_remote_containerfile_path`].
 #[derive(Debug, thiserror::Error)]
 pub enum ValidateRemoteContainerfilePathError {
-    #[error("{reason}")]
-    InvalidPath { reason: String, location: Location },
+    #[error("invalid containerfile path [{location}]")]
+    InvalidPath {
+        location: Location,
+        source: dterror::BoxError,
+    },
 
     #[error("Remote builder containerfile path contains unsupported character {character:?}")]
     UnsupportedCharacter { character: char, location: Location },
@@ -252,11 +255,15 @@ pub enum ValidateRemoteContainerfilePathError {
 pub fn validate_remote_containerfile_path(
     containerfile: &str,
 ) -> Result<String, ValidateRemoteContainerfilePathError> {
-    let containerfile = enclave_builder::validate_explicit_containerfile_path(containerfile)
-        .map_err(|source| ValidateRemoteContainerfilePathError::InvalidPath {
-            reason: source.to_string(),
-            location: std::panic::Location::caller(),
-        })?;
+    let containerfile = match enclave_builder::validate_explicit_containerfile_path(containerfile) {
+        Ok(containerfile) => containerfile,
+        Err(source) => {
+            return Err(ValidateRemoteContainerfilePathError::InvalidPath {
+                location: std::panic::Location::caller(),
+                source: source.into(),
+            });
+        }
+    };
     if let Some(character) = containerfile
         .chars()
         .find(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/')))
@@ -1375,8 +1382,11 @@ async fn poll_build_status(
 /// Failure modes for [`generate_builder_userdata`].
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum GenerateBuilderUserdataError {
-    #[error("{reason} [{location}]")]
-    ValidateContainerfile { reason: String, location: Location },
+    #[error("could not validate containerfile path [{location}]")]
+    ValidateContainerfile {
+        location: Location,
+        source: dterror::BoxError,
+    },
 }
 
 /// Generate the user-data shell script for the builder instance.
@@ -1404,13 +1414,15 @@ fn generate_builder_userdata(
         .map(|port| port.to_string())
         .unwrap_or_default();
 
-    let containerfile =
-        validate_remote_containerfile_path(&request.containerfile).map_err(|source| {
-            GenerateBuilderUserdataError::ValidateContainerfile {
-                reason: source.to_string(),
+    let containerfile = match validate_remote_containerfile_path(&request.containerfile) {
+        Ok(containerfile) => containerfile,
+        Err(source) => {
+            return Err(GenerateBuilderUserdataError::ValidateContainerfile {
                 location: std::panic::Location::caller(),
-            }
-        })?;
+                source: source.into(),
+            });
+        }
+    };
 
     // STEVE and Platform are resolved before the cache lookup and carried on
     // BuildRequest, so the cache key, manifest, and EIF build use the same commits.
@@ -2763,7 +2775,8 @@ mod tests {
     fn test_validate_remote_containerfile_path_rejects_absolute_paths() {
         let err = validate_remote_containerfile_path("/etc/passwd").unwrap_err();
         assert!(
-            err.to_string().contains("relative path"),
+            std::error::Error::source(&err)
+                .is_some_and(|source| source.to_string().contains("relative path")),
             "unexpected error: {err}"
         );
     }
@@ -2772,7 +2785,8 @@ mod tests {
     fn test_validate_remote_containerfile_path_rejects_parent_dirs() {
         let err = validate_remote_containerfile_path("../Dockerfile").unwrap_err();
         assert!(
-            err.to_string().contains("within the repository"),
+            std::error::Error::source(&err)
+                .is_some_and(|source| source.to_string().contains("within the repository")),
             "unexpected error: {err}"
         );
     }
@@ -3285,7 +3299,8 @@ mod tests {
         .unwrap_err();
 
         assert!(
-            err.to_string().contains("unsupported character"),
+            std::error::Error::source(&err)
+                .is_some_and(|source| source.to_string().contains("unsupported character")),
             "unexpected error: {err}"
         );
     }

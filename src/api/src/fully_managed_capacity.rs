@@ -139,7 +139,7 @@ pub(crate) enum CapacityError {
     #[error("No fully managed deployment regions are available. [{location}]")]
     NoRegionsAvailable { location: Location },
 
-    #[error("{message} [{location}]")]
+    #[error("invalid enclave vCPU request [{location}]")]
     NoCapacity {
         message: &'static str,
         location: Location,
@@ -528,11 +528,24 @@ pub(crate) enum JoinWaitlistError {
         source: BoxError,
     },
 
-    #[error("Invalid email: {message} [{location}]")]
-    InvalidEmail { message: String, location: Location },
+    #[error("invalid email [{location}]")]
+    InvalidEmail {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
-    #[error("{message} [{location}]")]
-    InvalidVCpus { message: String, location: Location },
+    #[error("enclave vCPU sizing failed [{location}]")]
+    InvalidVCpus {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("requested enclave vCPUs out of range [{location}]")]
+    InvalidVCpusLeaf { location: Location },
 
     #[error("Failed to join capacity waitlist [{location}]")]
     Database {
@@ -543,29 +556,19 @@ pub(crate) enum JoinWaitlistError {
     },
 }
 
-impl JoinWaitlistError {
-    /// Client-facing message: fixed wording without the internal location segment.
-    fn client_message(&self) -> String {
-        match self {
-            JoinWaitlistError::OrganizationAccess { .. } => {
-                "Organization access denied".to_string()
-            }
-            JoinWaitlistError::InvalidEmail { message, .. } => format!("Invalid email: {message}"),
-            JoinWaitlistError::InvalidVCpus { message, .. } => message.clone(),
-            JoinWaitlistError::Database { .. } => "Failed to join capacity waitlist".to_string(),
-        }
-    }
-}
-
 impl IntoResponse for JoinWaitlistError {
     fn into_response(self) -> Response<Body> {
-        let status = match &self {
-            JoinWaitlistError::OrganizationAccess { .. } => StatusCode::FORBIDDEN,
-            JoinWaitlistError::InvalidEmail { .. } => StatusCode::BAD_REQUEST,
-            JoinWaitlistError::InvalidVCpus { .. } => StatusCode::BAD_REQUEST,
-            JoinWaitlistError::Database { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+        let (status, body) = match &self {
+            JoinWaitlistError::OrganizationAccess { .. } => (StatusCode::FORBIDDEN, "forbidden"),
+            JoinWaitlistError::InvalidEmail { .. } => (StatusCode::BAD_REQUEST, "bad request"),
+            JoinWaitlistError::InvalidVCpus { .. } | JoinWaitlistError::InvalidVCpusLeaf { .. } => {
+                (StatusCode::BAD_REQUEST, "bad request")
+            }
+            JoinWaitlistError::Database { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
         };
-        (status, self.client_message()).into_response()
+        (status, body).into_response()
     }
 }
 
@@ -583,17 +586,12 @@ pub(crate) async fn join_waitlist(
         .with_context(Ctx::organization_access())?;
 
     let email = payload.email.trim().to_lowercase();
-    validation::validate_email(&email).map_err(|error| JoinWaitlistError::InvalidEmail {
-        message: error.to_string(),
-        location: std::panic::Location::caller(),
-    })?;
+    validation::validate_email(&email).with_context(Ctx::invalid_email())?;
 
     if let Some(cpus) = payload.requested_enclave_vcpus
         && (cpus == 0 || cpus > MAX_FULLY_MANAGED_ENCLAVE_VCPUS)
     {
-        return Err(JoinWaitlistError::InvalidVCpus {
-            message: "requested_enclave_vcpus must be between 1 and 46; contact support for larger requests"
-                .to_string(),
+        return Err(JoinWaitlistError::InvalidVCpusLeaf {
             location: std::panic::Location::caller(),
         });
     }
@@ -605,10 +603,7 @@ pub(crate) async fn join_waitlist(
                 .map(|requirements| requirements.host_vcpus as i32)
         })
         .transpose()
-        .map_err(|error| JoinWaitlistError::InvalidVCpus {
-            message: error.to_string(),
-            location: std::panic::Location::caller(),
-        })?;
+        .with_context(Ctx::invalid_v_cpus())?;
 
     let inserted: Option<bool> = sqlx::query_scalar(
         "INSERT INTO fully_managed_capacity_waitlist

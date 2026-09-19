@@ -48,10 +48,12 @@ pub enum ValidateExplicitContainerfilePathError {
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error, dterror::CtxError)]
 pub enum BuildUserImageError {
-    #[error("invalid containerfile configuration: {reason} [{location}]")]
+    #[error("invalid containerfile configuration [{location}]")]
     ValidateContainerfile {
-        reason: ValidateExplicitContainerfilePathError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
     #[error(
@@ -250,28 +252,24 @@ pub async fn build_user_image(
 
     tracing::info!("Building Docker image with tag: {}", image_tag);
 
-    let containerfile =
-        if !has_explicit_build_command(config.build_command.as_deref()) {
-            match config.containerfile.as_deref() {
-                Some(containerfile) => {
-                    let containerfile = validate_explicit_containerfile_path(containerfile)
-                        .map_err(|e| BuildUserImageError::ValidateContainerfile {
-                            reason: e,
-                            location: std::panic::Location::caller(),
-                        })?;
-                    if !work_dir.join(&containerfile).is_file() {
-                        return Err(BuildUserImageError::MissingFile {
-                            containerfile,
-                            location: std::panic::Location::caller(),
-                        });
-                    }
-                    Some(containerfile)
+    let containerfile = if !has_explicit_build_command(config.build_command.as_deref()) {
+        match config.containerfile.as_deref() {
+            Some(containerfile) => {
+                let containerfile = validate_explicit_containerfile_path(containerfile)
+                    .with_context(Ctx::validate_containerfile())?;
+                if !work_dir.join(&containerfile).is_file() {
+                    return Err(BuildUserImageError::MissingFile {
+                        containerfile,
+                        location: std::panic::Location::caller(),
+                    });
                 }
-                None => None,
+                Some(containerfile)
             }
-        } else {
-            None
-        };
+            None => None,
+        }
+    } else {
+        None
+    };
 
     let build_command = resolve_build_command_in_dir(
         config.build_command.as_deref(),
