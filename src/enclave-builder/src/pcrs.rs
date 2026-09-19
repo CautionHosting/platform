@@ -24,10 +24,12 @@ pub enum ExtractPcrsFromEifError {
         source: dterror::BoxError,
     },
 
-    #[error("could not parse PCR file: {reason} [{location}]")]
+    #[error("could not parse PCR file [{location}]")]
     ParseFailed {
-        reason: ParsePcrsFileError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 }
 
@@ -105,10 +107,7 @@ pub fn extract_pcrs_from_eif(eif: &EifFile) -> Result<PcrValues, ExtractPcrsFrom
     let pcrs_content =
         std::fs::read_to_string(&pcrs_path).with_context(Ctx::read_file(pcrs_path))?;
 
-    parse_pcrs_file(&pcrs_content).map_err(|e| ExtractPcrsFromEifError::ParseFailed {
-        reason: e,
-        location: std::panic::Location::caller(),
-    })
+    parse_pcrs_file(&pcrs_content).with_context(Ctx::parse_failed())
 }
 
 #[tracing::instrument(skip_all, err)]

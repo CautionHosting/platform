@@ -65,16 +65,20 @@ pub enum ExportImageFilesystemTarError {
         source: dterror::BoxError,
     },
 
-    #[error("image not found locally: {reason} [{location}]")]
+    #[error("image not found locally [{location}]")]
     VerifyImage {
-        reason: VerifyImageExistsLocallyError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
-    #[error("failed to create container: {reason} [{location}]")]
+    #[error("failed to create container [{location}]")]
     CreateContainer {
-        reason: CreateContainerError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
     #[error("failed to create work directory [{location}]")]
@@ -87,10 +91,12 @@ pub enum ExportImageFilesystemTarError {
         source: dterror::BoxError,
     },
 
-    #[error("failed to write container export: {reason} [{location}]")]
+    #[error("failed to write container export [{location}]")]
     WriteExport {
-        reason: WriteContainerExportError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
     #[error("failed to remove temporary container [{location}]")]
@@ -153,16 +159,20 @@ pub enum ExtractImageFilesystemError {
         source: dterror::BoxError,
     },
 
-    #[error("image not found locally: {reason} [{location}]")]
+    #[error("image not found locally [{location}]")]
     VerifyImage {
-        reason: VerifyImageExistsLocallyError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
-    #[error("failed to create container: {reason} [{location}]")]
+    #[error("failed to create container [{location}]")]
     CreateContainer {
-        reason: CreateContainerError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
     #[error("failed to create export directory [{location}]")]
@@ -175,10 +185,12 @@ pub enum ExtractImageFilesystemError {
         source: dterror::BoxError,
     },
 
-    #[error("failed to export container filesystem: {reason} [{location}]")]
+    #[error("failed to export container filesystem [{location}]")]
     ExportFilesystem {
-        reason: ExportContainerFilesystemError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
     #[error("failed to remove temporary container [{location}]")]
@@ -285,16 +297,20 @@ pub enum ExtractSpecificFilesError {
         source: dterror::BoxError,
     },
 
-    #[error("image not found locally: {reason} [{location}]")]
+    #[error("image not found locally [{location}]")]
     VerifyImage {
-        reason: VerifyImageExistsLocallyError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
-    #[error("failed to create container: {reason} [{location}]")]
+    #[error("failed to create container [{location}]")]
     CreateContainer {
-        reason: CreateContainerError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
     #[error("failed to create output directory [{location}]")]
@@ -382,16 +398,20 @@ pub enum ExtractStaticBinaryError {
         source: dterror::BoxError,
     },
 
-    #[error("image not found locally: {reason} [{location}]")]
+    #[error("image not found locally [{location}]")]
     VerifyImage {
-        reason: VerifyImageExistsLocallyError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
-    #[error("failed to create container: {reason} [{location}]")]
+    #[error("failed to create container [{location}]")]
     CreateContainer {
-        reason: CreateContainerError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
     #[error("failed to create output directory [{location}]")]
@@ -489,10 +509,12 @@ pub enum ExtractLastLayerOnlyError {
         source: dterror::BoxError,
     },
 
-    #[error("image not found locally: {reason} [{location}]")]
+    #[error("image not found locally [{location}]")]
     VerifyImage {
-        reason: VerifyImageExistsLocallyError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
     #[error("failed to create image save file [{location}]")]
@@ -676,17 +698,11 @@ pub async fn export_image_filesystem_tar(
 
     verify_image_exists_locally(&docker, image_ref)
         .await
-        .map_err(|e| ExportImageFilesystemTarError::VerifyImage {
-            reason: e,
-            location: std::panic::Location::caller(),
-        })?;
+        .with_context(Ctx::verify_image())?;
 
-    let container_id = create_container(&docker, image_ref).await.map_err(|e| {
-        ExportImageFilesystemTarError::CreateContainer {
-            reason: e,
-            location: std::panic::Location::caller(),
-        }
-    })?;
+    let container_id = create_container(&docker, image_ref)
+        .await
+        .with_context(Ctx::create_container())?;
 
     fs::create_dir_all(work_dir)
         .await
@@ -702,10 +718,7 @@ pub async fn export_image_filesystem_tar(
         .await
         .with_context(Ctx::remove_container());
 
-    export_result.map_err(|e| ExportImageFilesystemTarError::WriteExport {
-        reason: e,
-        location: std::panic::Location::caller(),
-    })?;
+    export_result.with_context(Ctx::write_export())?;
     remove_result?;
 
     tracing::info!("Exported user filesystem tar to: {}", tar_path.display());
@@ -753,17 +766,11 @@ pub async fn extract_image_filesystem(
 
     verify_image_exists_locally(&docker, image_ref)
         .await
-        .map_err(|e| ExtractImageFilesystemError::VerifyImage {
-            reason: e,
-            location: std::panic::Location::caller(),
-        })?;
+        .with_context(Ctx::verify_image())?;
 
-    let container_id = create_container(&docker, image_ref).await.map_err(|e| {
-        ExtractImageFilesystemError::CreateContainer {
-            reason: e,
-            location: std::panic::Location::caller(),
-        }
-    })?;
+    let container_id = create_container(&docker, image_ref)
+        .await
+        .with_context(Ctx::create_container())?;
 
     let export_dir = work_dir.join("user-service");
     fs::create_dir_all(&export_dir)
@@ -772,10 +779,7 @@ pub async fn extract_image_filesystem(
 
     export_container_filesystem(&docker, &container_id, &export_dir)
         .await
-        .map_err(|e| ExtractImageFilesystemError::ExportFilesystem {
-            reason: e,
-            location: std::panic::Location::caller(),
-        })?;
+        .with_context(Ctx::export_filesystem())?;
 
     docker
         .remove_container(&container_id, None)
@@ -901,17 +905,11 @@ pub async fn extract_specific_files(
 
     verify_image_exists_locally(&docker, image_ref)
         .await
-        .map_err(|e| ExtractSpecificFilesError::VerifyImage {
-            reason: e,
-            location: std::panic::Location::caller(),
-        })?;
+        .with_context(Ctx::verify_image())?;
 
-    let container_id = create_container(&docker, image_ref).await.map_err(|e| {
-        ExtractSpecificFilesError::CreateContainer {
-            reason: e,
-            location: std::panic::Location::caller(),
-        }
-    })?;
+    let container_id = create_container(&docker, image_ref)
+        .await
+        .with_context(Ctx::create_container())?;
 
     let output_dir = work_dir.join("user-service");
     fs::create_dir_all(&output_dir)
@@ -996,17 +994,11 @@ pub async fn extract_static_binary(
 
     verify_image_exists_locally(&docker, image_ref)
         .await
-        .map_err(|e| ExtractStaticBinaryError::VerifyImage {
-            reason: e,
-            location: std::panic::Location::caller(),
-        })?;
+        .with_context(Ctx::verify_image())?;
 
-    let container_id = create_container(&docker, image_ref).await.map_err(|e| {
-        ExtractStaticBinaryError::CreateContainer {
-            reason: e,
-            location: std::panic::Location::caller(),
-        }
-    })?;
+    let container_id = create_container(&docker, image_ref)
+        .await
+        .with_context(Ctx::create_container())?;
 
     let output_dir = work_dir.join("user-service");
     fs::create_dir_all(&output_dir)
@@ -1125,10 +1117,7 @@ pub async fn extract_last_layer_only(
 
     verify_image_exists_locally(&docker, image_ref)
         .await
-        .map_err(|e| ExtractLastLayerOnlyError::VerifyImage {
-            reason: e,
-            location: std::panic::Location::caller(),
-        })?;
+        .with_context(Ctx::verify_image())?;
 
     let save_path = work_dir.join("image.tar");
     let mut stream = docker.export_image(image_ref);

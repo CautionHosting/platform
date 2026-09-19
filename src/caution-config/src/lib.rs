@@ -427,7 +427,7 @@ pub enum AwsIdValidationError {
 }
 
 #[non_exhaustive]
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
 pub enum FromProcfileError {
     #[error(
         "Port {port} is reserved for internal enclave services. Ports 49500-49600 are reserved; choose a different application port. [{location}]"
@@ -455,22 +455,28 @@ pub enum FromProcfileError {
     #[error("managed_on_prem with platform 'aws' requires 'aws_region' [{location}]")]
     ManagedOnPremMissingRegion { location: dterror::Location },
 
-    #[error("invalid domain: {reason} [{location}]")]
+    #[error("invalid domain [{location}]")]
     InvalidDomain {
-        reason: DomainValidationError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
-    #[error("invalid ssh key: {reason} [{location}]")]
+    #[error("invalid ssh key [{location}]")]
     InvalidSshKey {
-        reason: SshKeyValidationError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
-    #[error("invalid provider config: {reason} [{location}]")]
+    #[error("invalid provider config [{location}]")]
     InvalidProvider {
-        reason: AwsIdValidationError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 }
 
@@ -548,25 +554,28 @@ pub enum FromStrError {
         source: dterror::BoxError,
     },
 
-    #[error("invalid domain: {reason} [{location}]")]
+    #[error("invalid domain [{location}]")]
     InvalidDomain {
-        reason: DomainValidationError,
         #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
-    #[error("invalid ssh key: {reason} [{location}]")]
+    #[error("invalid ssh key [{location}]")]
     InvalidSshKey {
-        reason: SshKeyValidationError,
         #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
-    #[error("invalid provider config: {reason} [{location}]")]
+    #[error("invalid provider config [{location}]")]
     InvalidProvider {
-        reason: AwsIdValidationError,
         #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 }
 
@@ -757,6 +766,8 @@ fn validate_provider(provider: &Provider) -> Result<(), AwsIdValidationError> {
 impl ConfigurationFile {
     #[tracing::instrument(skip_all, err)]
     pub fn from_procfile(content: &str) -> Result<Self, FromProcfileError> {
+        use FromProcfileErrorCtx as Ctx;
+
         let mut containerfile = None;
         let mut app_sources: Vec<String> = Vec::new();
         let mut cache: Option<bool> = None;
@@ -827,12 +838,8 @@ impl ConfigurationFile {
                         if !value.is_empty() {
                             let unquoted = value.trim_matches('"').trim_matches('\'').trim();
                             if !unquoted.is_empty() {
-                                let sanitized = sanitize_ssh_key(unquoted).map_err(|reason| {
-                                    FromProcfileError::InvalidSshKey {
-                                        reason,
-                                        location: std::panic::Location::caller(),
-                                    }
-                                })?;
+                                let sanitized = sanitize_ssh_key(unquoted)
+                                    .with_context(Ctx::invalid_ssh_key())?;
                                 ssh_keys.push(sanitized);
                             }
                         }
@@ -970,10 +977,10 @@ impl ConfigurationFile {
             allow_plaintext_fallback: None,
         });
 
-        if let Err(reason) = validate_domain(domain.as_deref()) {
+        if let Err(source) = validate_domain(domain.as_deref()) {
             return Err(FromProcfileError::InvalidDomain {
-                reason,
                 location: std::panic::Location::caller(),
+                source: Box::new(source),
             });
         }
 
@@ -1075,11 +1082,11 @@ impl ConfigurationFile {
         };
 
         if let Some(ref p) = provider
-            && let Err(reason) = validate_provider(p)
+            && let Err(source) = validate_provider(p)
         {
             return Err(FromProcfileError::InvalidProvider {
-                reason,
                 location: std::panic::Location::caller(),
+                source: Box::new(source),
             });
         }
 
@@ -1104,11 +1111,11 @@ impl ConfigurationFile {
         let mut config: ConfigurationFile = hcl::from_str(s).with_context(Ctx::hcl_parse())?;
 
         if let Some(provider) = config.caution.as_ref().and_then(|c| c.provider.as_ref())
-            && let Err(reason) = validate_provider(provider)
+            && let Err(source) = validate_provider(provider)
         {
             return Err(FromStrError::InvalidProvider {
-                reason,
                 location: std::panic::Location::caller(),
+                source: Box::new(source),
             });
         }
 
@@ -1149,10 +1156,10 @@ impl ConfigurationFile {
                 if let Some(ref network) = enclave.network
                     && let Some(ref http) = network.http
                 {
-                    if let Err(reason) = validate_domain(http.domain.as_deref()) {
+                    if let Err(source) = validate_domain(http.domain.as_deref()) {
                         return Err(FromStrError::InvalidDomain {
-                            reason,
                             location: std::panic::Location::caller(),
+                            source: Box::new(source),
                         });
                     }
 
@@ -1216,12 +1223,7 @@ impl ConfigurationFile {
             for enclave in enclaves.values_mut() {
                 if let Some(debug) = enclave.debug.as_mut() {
                     for key in debug.ssh_keys.iter_mut() {
-                        *key = sanitize_ssh_key(key).map_err(|reason| {
-                            FromStrError::InvalidSshKey {
-                                reason,
-                                location: std::panic::Location::caller(),
-                            }
-                        })?;
+                        *key = sanitize_ssh_key(key).with_context(Ctx::invalid_ssh_key())?;
                     }
                 }
             }

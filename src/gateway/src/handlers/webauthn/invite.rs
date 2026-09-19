@@ -67,10 +67,10 @@ pub async fn begin_invite_register_handler(
     // Validate username if provided, otherwise use email
     let username_for_registration = if let Some(username) = req.username {
         let username = username.trim().to_lowercase();
-        if let Err(e) = crate::validation::validate_username(&username) {
+        if let Err(source) = crate::validation::validate_username(&username) {
             return Err(RegisterError::InvalidUsername {
-                username_error: e.to_string(),
                 location: std::panic::Location::caller(),
+                source: Box::new(source),
             });
         }
         username

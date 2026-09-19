@@ -1047,7 +1047,7 @@ pub(crate) async fn destroy_resource_by_id(
         return Ok(());
     }
 
-    let terraform_result: Result<(), BoxError> = match destroy_credentials {
+    let terraform_result = match destroy_credentials {
         Ok((aws_credentials, asg_name)) => deployment::destroy_app_with_credentials(
             org_id,
             resource_id,
@@ -1057,16 +1057,16 @@ pub(crate) async fn destroy_resource_by_id(
         )
         .await
         .map_err(|error| -> BoxError { error.into() }),
-        Err(error) => Err(error.into()),
+        Err(error) => Err(Box::new(error) as BoxError),
     };
-    if let Err(error) = terraform_result {
-        tracing::error!(resource_id = %resource_id, error = %error, "OpenTofu destroy failed");
+    if let Err(source) = terraform_result {
+        tracing::error!(resource_id = %resource_id, error = %source, "OpenTofu destroy failed");
         if !force {
             return Err(DestroyResourceByIdError {
                 kind: Kind::TofuDestroyFailed,
                 resource_id,
                 location: std::panic::Location::caller(),
-                source: Some(error),
+                source: Some(source),
             });
         }
         tracing::warn!(resource_id = %resource_id, "force enabled after DNS withdrawal; marking app destroyed despite OpenTofu failure");

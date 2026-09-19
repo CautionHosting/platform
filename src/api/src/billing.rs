@@ -1659,42 +1659,24 @@ fn build_paddle_checkout_custom_data(
     })
 }
 
-/// Categories of checkout-binding validation failure. Each maps to a fixed
-/// client-facing message via [`ValidatePaddleCheckoutBindingError::client_message`].
+/// Categories of checkout-binding validation failure (internal only; the
+/// consuming handler renders a fixed generic body).
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ValidatePaddleCheckoutBindingErrorKind {
     NotBound,
     WrongAccount,
     Expired,
     InvalidSig,
+    HexDecode,
 }
 
 /// Failure modes for [`validate_paddle_checkout_binding`] (source-less domain
-/// failures; the caller surfaces `client_message` to the client).
+/// failures; callers box this error as a `#[source]`).
 #[derive(Debug, thiserror::Error)]
 #[error("invalid checkout binding ({kind:?}) [{location}]")]
 struct ValidatePaddleCheckoutBindingError {
     kind: ValidatePaddleCheckoutBindingErrorKind,
     location: Location,
-}
-
-impl ValidatePaddleCheckoutBindingError {
-    fn client_message(&self) -> &'static str {
-        match self.kind {
-            ValidatePaddleCheckoutBindingErrorKind::NotBound => {
-                "Transaction is not bound to this account"
-            }
-            ValidatePaddleCheckoutBindingErrorKind::WrongAccount => {
-                "Transaction does not belong to this account"
-            }
-            ValidatePaddleCheckoutBindingErrorKind::Expired => {
-                "Transaction checkout has expired. Please try again."
-            }
-            ValidatePaddleCheckoutBindingErrorKind::InvalidSig => {
-                "Transaction checkout binding is invalid"
-            }
-        }
-    }
 }
 
 #[tracing::instrument(skip_all, err)]
@@ -1739,19 +1721,22 @@ fn validate_paddle_checkout_binding(
         return Err(not_bound(Kind::Expired));
     }
 
-    let Ok(sig_bytes) = hex::decode(sig_hex) else {
-        return Err(not_bound(Kind::InvalidSig));
+    let sig_bytes = match hex::decode(sig_hex) {
+        Ok(bytes) => bytes,
+        Err(_source) => return Err(not_bound(Kind::HexDecode)),
     };
     let payload = paddle_checkout_binding_payload(user_id, org_id, issued_at);
     let mut mac =
         HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC can take key of any size");
     mac.update(payload.as_bytes());
-    mac.verify_slice(&sig_bytes)
-        .map_err(|_| not_bound(Kind::InvalidSig))
+    match mac.verify_slice(&sig_bytes) {
+        Ok(()) => Ok(()),
+        Err(_source) => Err(not_bound(Kind::InvalidSig)),
+    }
 }
 
-/// Categories of setup-transaction validation failure. Each maps to a fixed
-/// client-facing message via [`ValidatePaddleSetupTransactionError::client_message`].
+/// Categories of setup-transaction validation failure (internal only; the
+/// consuming handler renders a fixed generic body).
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ValidatePaddleSetupTransactionErrorKind {
     NotCompleted,
@@ -1764,38 +1749,12 @@ enum ValidatePaddleSetupTransactionErrorKind {
 }
 
 /// Failure modes for [`validate_paddle_setup_transaction`] (source-less domain
-/// failures; the caller surfaces `client_message` to the client).
+/// failures; callers box this error as a `#[source]`).
 #[derive(Debug, thiserror::Error)]
 #[error("invalid setup transaction ({kind:?}) [{location}]")]
 struct ValidatePaddleSetupTransactionError {
     kind: ValidatePaddleSetupTransactionErrorKind,
     location: Location,
-}
-
-impl ValidatePaddleSetupTransactionError {
-    fn client_message(&self) -> &'static str {
-        match self.kind {
-            ValidatePaddleSetupTransactionErrorKind::NotCompleted => "transaction not completed",
-            ValidatePaddleSetupTransactionErrorKind::NotAutomatic => {
-                "Transaction is not an automatic checkout"
-            }
-            ValidatePaddleSetupTransactionErrorKind::WrongPrice => {
-                "Transaction does not match the configured setup price"
-            }
-            ValidatePaddleSetupTransactionErrorKind::NoCustomerId => {
-                "Transaction has no customer_id"
-            }
-            ValidatePaddleSetupTransactionErrorKind::WrongAccount => {
-                "Transaction does not belong to this account"
-            }
-            ValidatePaddleSetupTransactionErrorKind::CustomerEmailUnavailable => {
-                "Transaction customer email is unavailable"
-            }
-            ValidatePaddleSetupTransactionErrorKind::NoBinding => {
-                "No billing customer, account email, or valid checkout binding on file"
-            }
-        }
-    }
 }
 
 #[tracing::instrument(skip_all, err)]
@@ -1872,10 +1831,20 @@ pub enum PaddleTransactionCompletedError {
     #[error("checkout binding unavailable [{location}]")]
     CheckoutBindingUnavailable { location: Location },
 
-    #[error("transaction rejected ({message}) [{location}]")]
-    BadRequest {
-        message: &'static str,
+    #[error("checkout binding validation failed [{location}]")]
+    BindingRejected {
+        #[location]
         location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("setup transaction validation failed [{location}]")]
+    SetupRejected {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
     },
 
     #[error("could not verify the Paddle transaction [{location}]")]
@@ -1913,8 +1882,11 @@ impl IntoResponse for PaddleTransactionCompletedError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Checkout binding is unavailable. Contact support.",
             ),
-            PaddleTransactionCompletedError::BadRequest { message, .. } => {
-                (StatusCode::BAD_REQUEST, *message)
+            PaddleTransactionCompletedError::BindingRejected { .. } => {
+                (StatusCode::BAD_REQUEST, "bad request")
+            }
+            PaddleTransactionCompletedError::SetupRejected { .. } => {
+                (StatusCode::BAD_REQUEST, "bad request")
             }
             PaddleTransactionCompletedError::FetchTransaction { .. } => {
                 (StatusCode::BAD_GATEWAY, "failed to verify transaction")
@@ -1984,13 +1956,15 @@ pub async fn paddle_transaction_completed(
                     location: std::panic::Location::caller(),
                 }
             })?;
-            validate_paddle_checkout_binding(&txn, secret, auth.user_id, org_id).map_err(|e| {
-                PaddleTransactionCompletedError::BadRequest {
-                    message: e.client_message(),
-                    location: std::panic::Location::caller(),
+            match validate_paddle_checkout_binding(&txn, secret, auth.user_id, org_id) {
+                Ok(()) => true,
+                Err(source) => {
+                    return Err(PaddleTransactionCompletedError::BindingRejected {
+                        source: Box::new(source),
+                        location: std::panic::Location::caller(),
+                    });
                 }
-            })?;
-            true
+            }
         } else {
             false
         };
@@ -2002,10 +1976,7 @@ pub async fn paddle_transaction_completed(
         user_email.as_deref(),
         allow_checkout_binding,
     )
-    .map_err(|e| PaddleTransactionCompletedError::BadRequest {
-        message: e.client_message(),
-        location: std::panic::Location::caller(),
-    })?;
+    .with_context(Ctx::setup_rejected())?;
 
     upsert_local_payment_method(
         &state.db,
@@ -2192,9 +2163,8 @@ fn build_credit_purchase_custom_data(
     })
 }
 
-/// Categories of credit-purchase transaction validation failure. Each maps to a
-/// fixed client-facing message via
-/// [`ValidateCreditPurchaseTransactionError::client_message`].
+/// Categories of credit-purchase transaction validation failure (internal only;
+/// the handler renders a fixed body).
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ValidateCreditPurchaseTransactionErrorKind {
     PriceMismatch,
@@ -2207,40 +2177,12 @@ enum ValidateCreditPurchaseTransactionErrorKind {
 }
 
 /// Failure modes for [`validate_credit_purchase_transaction`] (source-less domain
-/// failures; the caller surfaces `client_message` to the client).
+/// failures; callers box this error as a `#[source]`).
 #[derive(Debug, thiserror::Error)]
 #[error("invalid credit purchase transaction ({kind:?}) [{location}]")]
 struct ValidateCreditPurchaseTransactionError {
     kind: ValidateCreditPurchaseTransactionErrorKind,
     location: Location,
-}
-
-impl ValidateCreditPurchaseTransactionError {
-    fn client_message(&self) -> &'static str {
-        match self.kind {
-            ValidateCreditPurchaseTransactionErrorKind::PriceMismatch => {
-                "Transaction does not match the selected credit package"
-            }
-            ValidateCreditPurchaseTransactionErrorKind::MissingMetadata => {
-                "Transaction is missing credit purchase metadata"
-            }
-            ValidateCreditPurchaseTransactionErrorKind::NotCreditPurchase => {
-                "Transaction is not a credit purchase"
-            }
-            ValidateCreditPurchaseTransactionErrorKind::WrongAccount => {
-                "Transaction does not belong to this account"
-            }
-            ValidateCreditPurchaseTransactionErrorKind::WrongUser => {
-                "Transaction does not belong to this user"
-            }
-            ValidateCreditPurchaseTransactionErrorKind::AmountMismatch => {
-                "Transaction amount does not match the requested credit purchase"
-            }
-            ValidateCreditPurchaseTransactionErrorKind::CreditMismatch => {
-                "Transaction credit amount does not match the requested package"
-            }
-        }
-    }
 }
 
 #[tracing::instrument(skip_all, err)]
@@ -2448,8 +2390,8 @@ fn format_currency_amount(cents: i64) -> String {
     format!("{:.2}", cents as f64 / 100.0)
 }
 
-/// Categories of credit-purchase request resolution failure. Each maps to a fixed
-/// client-facing message via [`ResolveCreditPurchaseRequestError::client_message`].
+/// Categories of credit-purchase request resolution failure (internal only; the
+/// handler renders a fixed body).
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ResolveCreditPurchaseRequestErrorKind {
     BothProvided,
@@ -2465,23 +2407,6 @@ enum ResolveCreditPurchaseRequestErrorKind {
 struct ResolveCreditPurchaseRequestError {
     kind: ResolveCreditPurchaseRequestErrorKind,
     location: Location,
-}
-
-impl ResolveCreditPurchaseRequestError {
-    fn client_message(&self) -> &'static str {
-        match self.kind {
-            ResolveCreditPurchaseRequestErrorKind::BothProvided => {
-                "Provide either package_index or amount_cents, not both"
-            }
-            ResolveCreditPurchaseRequestErrorKind::NeitherProvided => {
-                "package_index or amount_cents is required"
-            }
-            ResolveCreditPurchaseRequestErrorKind::InvalidIndex => "Invalid package index",
-            ResolveCreditPurchaseRequestErrorKind::BelowMinimum => {
-                "Custom credit purchase must be at least $10.00"
-            }
-        }
-    }
 }
 
 #[tracing::instrument(skip_all, err)]
@@ -2539,11 +2464,24 @@ fn resolve_credit_purchase_request(
 /// fixed client message; transport and database failures map to generic bodies.
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum PurchaseCreditsError {
-    #[error("request rejected ({message}) [{location}]")]
-    BadRequest {
-        message: &'static str,
+    #[error("credit purchase request could not be resolved [{location}]")]
+    RequestInvalid {
+        #[location]
         location: Location,
+        #[source]
+        source: BoxError,
     },
+
+    #[error("credit purchase transaction rejected [{location}]")]
+    TransactionRejected {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("request rejected [{location}]")]
+    BadRequest { location: Location },
 
     #[error("Paddle not configured ({message}) [{location}]")]
     NotConfigured {
@@ -2591,7 +2529,11 @@ pub enum PurchaseCreditsError {
 impl IntoResponse for PurchaseCreditsError {
     fn into_response(self) -> Response {
         let (status, body) = match &self {
-            PurchaseCreditsError::BadRequest { message, .. } => (StatusCode::BAD_REQUEST, *message),
+            PurchaseCreditsError::RequestInvalid { .. } => (StatusCode::BAD_REQUEST, "bad request"),
+            PurchaseCreditsError::TransactionRejected { .. } => {
+                (StatusCode::BAD_REQUEST, "bad request")
+            }
+            PurchaseCreditsError::BadRequest { .. } => (StatusCode::BAD_REQUEST, "bad request"),
             PurchaseCreditsError::NotConfigured { message, .. } => {
                 (StatusCode::SERVICE_UNAVAILABLE, *message)
             }
@@ -2639,10 +2581,10 @@ pub async fn purchase_credits(
         &state.paddle_credits_price_ids,
     ) {
         Ok(purchase) => purchase,
-        Err(err) => {
-            tracing::warn!(user_id = %auth.user_id, error = %err, "invalid credit purchase request");
-            return Err(PurchaseCreditsError::BadRequest {
-                message: err.client_message(),
+        Err(source) => {
+            tracing::warn!(user_id = %auth.user_id, error = %source, "invalid credit purchase request");
+            return Err(PurchaseCreditsError::RequestInvalid {
+                source: Box::new(source),
                 location: std::panic::Location::caller(),
             });
         }
@@ -2801,7 +2743,6 @@ pub async fn purchase_credits(
         if !verify_resp.status().is_success() {
             tracing::warn!(transaction_id = %transaction_id, status = %verify_resp.status(), "Paddle transaction verification failed");
             return Err(PurchaseCreditsError::BadRequest {
-                message: "Invalid transaction ID",
                 location: std::panic::Location::caller(),
             });
         }
@@ -2811,12 +2752,12 @@ pub async fn purchase_credits(
             .await
             .with_context(Ctx::paddle_transport())?;
 
-        if let Err(err) =
+        if let Err(source) =
             validate_credit_purchase_transaction(&verify_data, org_id, auth.user_id, &purchase)
         {
-            tracing::warn!(transaction_id = %transaction_id, error = %err, "credit purchase validation failed");
-            return Err(PurchaseCreditsError::BadRequest {
-                message: err.client_message(),
+            tracing::warn!(transaction_id = %transaction_id, error = %source, "credit purchase validation failed");
+            return Err(PurchaseCreditsError::TransactionRejected {
+                source: Box::new(source),
                 location: std::panic::Location::caller(),
             });
         }
@@ -2835,7 +2776,6 @@ pub async fn purchase_credits(
             if txn_customer_id != expected_cid.as_str() {
                 tracing::warn!(transaction_id = %transaction_id, "Paddle transaction customer_id does not match user's customer_id");
                 return Err(PurchaseCreditsError::BadRequest {
-                    message: "Transaction does not belong to this account",
                     location: std::panic::Location::caller(),
                 });
             }
@@ -2843,7 +2783,6 @@ pub async fn purchase_credits(
             if txn_customer_id.is_empty() {
                 tracing::warn!(org_id = %org_id, transaction_id = %transaction_id, "no billing account on file");
                 return Err(PurchaseCreditsError::BadRequest {
-                    message: "No billing account on file",
                     location: std::panic::Location::caller(),
                 });
             }
@@ -2943,7 +2882,6 @@ pub async fn purchase_credits(
     let Some(authoritative_credit_cents) = intent_credit_cents else {
         tracing::error!(transaction_id = %transaction_id, org_id = %org_id, "No credit purchase intent for transaction; refusing to credit");
         return Err(PurchaseCreditsError::BadRequest {
-            message: "No matching credit purchase on record",
             location: std::panic::Location::caller(),
         });
     };
@@ -3345,7 +3283,6 @@ mod tests {
         transaction_contains_price_id, validate_credit_purchase_transaction,
         validate_paddle_checkout_binding, validate_paddle_setup_transaction,
     };
-    use axum::http::StatusCode;
     use uuid::Uuid;
 
     fn sample_transaction() -> serde_json::Value {
@@ -3509,10 +3446,7 @@ mod tests {
         )
         .expect_err("missing package should be rejected");
 
-        assert_eq!(
-            err.client_message(),
-            "package_index or amount_cents is required"
-        );
+        assert!(format!("{err:?}").contains("NeitherProvided"));
     }
 
     #[test]
@@ -3533,7 +3467,7 @@ mod tests {
         )
         .expect_err("invalid package index should be rejected");
 
-        assert_eq!(err.client_message(), "Invalid package index");
+        assert!(format!("{err:?}").contains("InvalidIndex"));
     }
 
     #[test]
@@ -3577,10 +3511,7 @@ mod tests {
         )
         .expect_err("custom amount should be rejected");
 
-        assert_eq!(
-            err.client_message(),
-            "Custom credit purchase must be at least $10.00"
-        );
+        assert!(format!("{err:?}").contains("BelowMinimum"));
     }
 
     #[test]
@@ -3601,10 +3532,7 @@ mod tests {
         )
         .expect_err("mixed request should be rejected");
 
-        assert_eq!(
-            err.client_message(),
-            "Provide either package_index or amount_cents, not both"
-        );
+        assert!(format!("{err:?}").contains("BothProvided"));
     }
 
     #[test]
@@ -3696,10 +3624,7 @@ mod tests {
 
         let err = validate_credit_purchase_transaction(&txn, org_id, user_id, &purchase)
             .expect_err("transaction metadata should be rejected");
-        assert!(
-            err.client_message()
-                .contains("does not belong to this user")
-        );
+        assert!(format!("{err:?}").contains("WrongUser"));
     }
 
     #[test]
@@ -3752,10 +3677,7 @@ mod tests {
             validate_paddle_setup_transaction(&txn, "pri_setup", Some("ctm_other"), None, false)
                 .expect_err("transaction should be rejected");
 
-        assert!(
-            err.client_message()
-                .contains("does not belong to this account")
-        );
+        assert!(format!("{err:?}").contains("WrongAccount"));
     }
 
     #[test]
@@ -3790,6 +3712,6 @@ mod tests {
         )
         .expect_err("transaction should be rejected");
 
-        assert!(err.client_message().contains("setup price"));
+        assert!(format!("{err:?}").contains("WrongPrice"));
     }
 }

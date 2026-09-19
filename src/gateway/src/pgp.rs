@@ -27,10 +27,9 @@ impl ValidatedPgpPublicKey {
     }
 }
 
-/// Leaf error for PGP public key parsing.
-///
-/// Location is Debug-only: the `Display` output of this type feeds client-facing
-/// bodies (via `AddPgpKeyError::InvalidPublicKey`'s transparent forwarding).
+/// Leaf error for PGP public key parsing. Display is internal-only: every
+/// handler that receives this type boxes it as a `#[source]` behind its own
+/// fixed, generic client body.
 #[derive(Debug, thiserror::Error)]
 pub enum ParsePgpPublicKeyError {
     #[error("PGP public key is empty")]
@@ -81,7 +80,7 @@ pub enum ParsePgpPublicKeyError {
     #[error("Normalized PGP public certificate is not valid UTF-8")]
     Utf8 {
         #[source]
-        source: std::string::FromUtf8Error,
+        source: dterror::BoxError,
         location: dterror::Location,
     },
 }
@@ -183,7 +182,7 @@ pub fn parse_public_key(input: &str) -> Result<ValidatedPgpPublicKey, ParsePgpPu
         })?;
     let mut armored =
         String::from_utf8(serialized).map_err(|source| ParsePgpPublicKeyError::Utf8 {
-            source,
+            source: Box::new(source),
             location: std::panic::Location::caller(),
         })?;
     if !armored.ends_with('\n') {

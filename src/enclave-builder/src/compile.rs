@@ -731,25 +731,9 @@ pub async fn get_or_clone_enclave_source(
 pub async fn get_or_clone_framework_source(
     framework_source_url: &str,
     work_dir: &Path,
-) -> Result<PathBuf, GetOrCloneFrameworkSourceError> {
+) -> Result<PathBuf, GetOrCloneFrameworkSourceFromUrlsError> {
     let candidates = crate::archive_url_candidates(framework_source_url);
-    get_or_clone_framework_source_from_urls(&candidates, work_dir)
-        .await
-        .map_err(|reason| GetOrCloneFrameworkSourceError::FromUrls {
-            reason,
-            location: std::panic::Location::caller(),
-        })
-}
-
-/// Error type for [`get_or_clone_framework_source`].
-#[non_exhaustive]
-#[derive(Debug, thiserror::Error)]
-pub enum GetOrCloneFrameworkSourceError {
-    #[error("could not obtain framework source: {reason} [{location}]")]
-    FromUrls {
-        reason: GetOrCloneFrameworkSourceFromUrlsError,
-        location: dterror::Location,
-    },
+    get_or_clone_framework_source_from_urls(&candidates, work_dir).await
 }
 
 /// Error type for [`get_or_clone_framework_source_from_urls`].

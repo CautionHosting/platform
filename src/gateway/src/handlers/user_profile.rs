@@ -28,12 +28,13 @@ pub struct UsernameStatusResponse {
 /// variants are hand-built with `std::panic::Location::caller()`.
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum UsernameClaimError {
-    #[error("Invalid username: {username_error} [{location}]")]
+    #[error("invalid username [{location}]")]
     InvalidUsername {
-        username_error: String,
-
         #[location]
         location: Location,
+
+        #[source]
+        source: BoxError,
     },
 
     #[error("This username is already taken. [{location}]")]
@@ -61,11 +62,9 @@ pub enum UsernameClaimError {
 impl IntoResponse for UsernameClaimError {
     fn into_response(self) -> Response {
         match self {
-            Self::InvalidUsername {
-                ref username_error, ..
-            } => (
+            Self::InvalidUsername { .. } => (
                 StatusCode::BAD_REQUEST,
-                format!("Invalid username: {username_error}"),
+                "The requested username is invalid.",
             )
                 .into_response(),
             Self::UsernameTaken { .. } => {
@@ -117,27 +116,27 @@ pub async fn claim_username_handler(
     Json(req): Json<ClaimUsernameRequest>,
 ) -> Result<Json<UsernameStatusResponse>, UsernameClaimError> {
     let username = req.username.trim().to_lowercase();
-    if let Err(e) = crate::validation::validate_username(&username) {
+    if let Err(source) = crate::validation::validate_username(&username) {
         return Err(UsernameClaimError::InvalidUsername {
-            username_error: e.to_string(),
             location: std::panic::Location::caller(),
+            source: Box::new(source),
         });
     }
 
-    let claimed = db::claim_username(&state.db, user_id, &username)
-        .await
-        .map_err(|e| {
-            if e.kind == DbErrorKind::UsernameTaken {
-                UsernameClaimError::UsernameTaken {
-                    location: std::panic::Location::caller(),
-                }
-            } else {
-                UsernameClaimError::Internal {
-                    source: Box::new(e),
-                    location: std::panic::Location::caller(),
-                }
-            }
-        })?;
+    let claimed = match db::claim_username(&state.db, user_id, &username).await {
+        Ok(claimed) => claimed,
+        Err(e) if e.kind == DbErrorKind::UsernameTaken => {
+            return Err(UsernameClaimError::UsernameTaken {
+                location: std::panic::Location::caller(),
+            });
+        }
+        Err(source) => {
+            return Err(UsernameClaimError::Internal {
+                source: Box::new(source),
+                location: std::panic::Location::caller(),
+            });
+        }
+    };
 
     if !claimed {
         return Err(UsernameClaimError::AlreadyClaimed {

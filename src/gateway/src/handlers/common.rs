@@ -67,6 +67,18 @@ pub enum LoginError {
         location: Location,
     },
 
+    /// The asserted credential has no row in `fido2_credentials`: collapsed
+    /// into the generic auth-failure response like every other
+    /// credential-verification outcome (no enumeration oracle).
+    #[error("credential not found [{location}]")]
+    CredentialNotFound {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
     #[error("authentication challenge has expired [{location}]")]
     ChallengeExpired {
         #[location]
@@ -81,18 +93,6 @@ pub enum LoginError {
 
     #[error("failed to parse pubkey credential [{location}]")]
     ParsePubkeyCredential {
-        #[location]
-        location: Location,
-
-        #[source]
-        source: BoxError,
-    },
-
-    #[error("could not find user ID for: {provided_bytes:?} [{location}]")]
-    DbGetUserIdByCredential {
-        #[context(borrow = [u8])]
-        provided_bytes: Vec<u8>,
-
         #[location]
         location: Location,
 
@@ -270,10 +270,6 @@ impl IntoResponse for LoginError {
                 tracing::debug!(?self, "Login finish: decoy/scope rejection");
                 generic_auth_failure_response().into_response()
             }
-            Self::DbGetUserIdByCredential { .. } => {
-                tracing::error!(?self, "Login finish: credential not found");
-                generic_auth_failure_response().into_response()
-            }
             Self::DbGetPublicKeyForCredential { .. } | Self::ParseSecurityKey { .. } => {
                 tracing::warn!(?self, "Login finish: credential lookup/parse failure");
                 generic_auth_failure_response().into_response()
@@ -424,18 +420,28 @@ pub enum RegisterError {
         location: Location,
     },
 
-    #[error("Invalid username: {username_error} [{location}]")]
+    #[error("invalid username [{location}]")]
     InvalidUsername {
-        username_error: String,
-
         #[location]
         location: Location,
+
+        #[source]
+        source: BoxError,
     },
 
     #[error("This username is already taken. [{location}]")]
     UsernameTaken {
         #[location]
         location: Location,
+    },
+
+    #[error("registration challenge failed [{location}]")]
+    ChallengeFailed {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
     },
 
     #[error("Invalid registration request body. [{location}]")]
@@ -485,23 +491,27 @@ impl IntoResponse for RegisterError {
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many pending registrations. Please try again later.".to_string(),
             ),
-            Self::InvalidUsername {
-                ref username_error, ..
-            } => (
+            Self::InvalidUsername { .. } => (
                 StatusCode::BAD_REQUEST,
-                format!("Invalid username: {username_error}"),
+                "The requested username is invalid.".to_string(),
             ),
             Self::UsernameTaken { .. } => (
                 StatusCode::CONFLICT,
                 "This username is already taken.".to_string(),
             ),
-            // An unparseable registration body is a client error: earlier
-            // rounds deliberately reclassified this from the generic 500 to a
-            // 400 with an explicit message. Keep that accepted behavior.
             Self::InvalidPayload { .. } => (
                 StatusCode::BAD_REQUEST,
                 "Invalid registration request body.".to_string(),
             ),
+            // A failed WebAuthn ceremony step: logged at error level and
+            // collapsed into the generic 500 like every other internal error.
+            Self::ChallengeFailed { .. } => {
+                tracing::error!(?self, "Registration challenge failed");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "An internal error occurred".to_string(),
+                )
+            }
             Self::Internal { .. } => {
                 tracing::error!(?self, "Registration error");
                 (

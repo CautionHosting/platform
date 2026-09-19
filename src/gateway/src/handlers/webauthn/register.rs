@@ -38,10 +38,10 @@ pub async fn begin_register_handler(
     tracing::debug!("Alpha code validated: id={}", alpha_code_id);
 
     let username = req.username.trim().to_lowercase();
-    if let Err(e) = crate::validation::validate_username(&username) {
+    if let Err(source) = crate::validation::validate_username(&username) {
         return Err(RegisterError::InvalidUsername {
-            username_error: e.to_string(),
             location: std::panic::Location::caller(),
+            source: Box::new(source),
         });
     }
 
@@ -86,7 +86,7 @@ pub(crate) async fn begin_registration_challenge(
             None,
             None,
         )
-        .with_context(Ctx::internal())?;
+        .with_context(Ctx::challenge_failed())?;
 
     // Override authenticator selection to be maximally compatible:
     // - UV Preferred: authenticators that support PIN/biometric will use it, but won't block
@@ -169,7 +169,7 @@ pub(crate) async fn finish_register_handler(
     let seckey = state
         .webauthn
         .finish_securitykey_registration(&reg_response, &pending.reg_state)
-        .with_context(Ctx::internal())?;
+        .with_context(Ctx::challenge_failed())?;
 
     let credential_id = seckey.cred_id().clone();
     if db::credential_exists(&state.db, &credential_id)
@@ -196,7 +196,7 @@ pub(crate) async fn finish_register_handler(
 
     let user_id = match pending.kind {
         PendingRegistrationKind::AlphaCode { alpha_code_id } => {
-            let user_id = db::create_user(
+            let user_id = match db::create_user(
                 &state.db,
                 &user_unique_id.as_bytes()[..],
                 alpha_code_id,
@@ -204,22 +204,25 @@ pub(crate) async fn finish_register_handler(
                 &legal,
             )
             .await
-            .map_err(|e| {
-                if e.kind == DbErrorKind::UsernameTaken {
-                    RegisterError::UsernameTaken {
+            {
+                Ok(user_id) => user_id,
+                Err(e) if e.kind == DbErrorKind::UsernameTaken => {
+                    return Err(RegisterError::UsernameTaken {
                         location: std::panic::Location::caller(),
-                    }
-                } else if e.kind == DbErrorKind::AlphaCodeUnavailable {
-                    RegisterError::InvalidAccessCode {
-                        location: std::panic::Location::caller(),
-                    }
-                } else {
-                    RegisterError::Internal {
-                        source: Box::new(e),
-                        location: std::panic::Location::caller(),
-                    }
+                    });
                 }
-            })?;
+                Err(e) if e.kind == DbErrorKind::AlphaCodeUnavailable => {
+                    return Err(RegisterError::InvalidAccessCode {
+                        location: std::panic::Location::caller(),
+                    });
+                }
+                Err(source) => {
+                    return Err(RegisterError::Internal {
+                        source: Box::new(source),
+                        location: std::panic::Location::caller(),
+                    });
+                }
+            };
 
             tracing::debug!("User registered and alpha code redeemed");
             user_id
@@ -228,7 +231,7 @@ pub(crate) async fn finish_register_handler(
             invitation_id,
             token_hash,
         } => {
-            let user_id = db::accept_invitation_and_create_user(
+            let user_id = match db::accept_invitation_and_create_user(
                 &state.db,
                 invitation_id,
                 &token_hash,
@@ -237,18 +240,20 @@ pub(crate) async fn finish_register_handler(
                 &legal,
             )
             .await
-            .map_err(|e| {
-                if e.kind == DbErrorKind::UsernameTaken {
-                    RegisterError::UsernameTaken {
+            {
+                Ok(user_id) => user_id,
+                Err(e) if e.kind == DbErrorKind::UsernameTaken => {
+                    return Err(RegisterError::UsernameTaken {
                         location: std::panic::Location::caller(),
-                    }
-                } else {
-                    RegisterError::Internal {
-                        source: Box::new(e),
-                        location: std::panic::Location::caller(),
-                    }
+                    });
                 }
-            })?;
+                Err(source) => {
+                    return Err(RegisterError::Internal {
+                        source: Box::new(source),
+                        location: std::panic::Location::caller(),
+                    });
+                }
+            };
 
             tracing::debug!("User registered from organization invitation");
             user_id

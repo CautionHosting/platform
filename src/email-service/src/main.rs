@@ -102,7 +102,12 @@ enum SendEmailError {
 #[derive(Debug, thiserror::Error, CtxError)]
 enum MainError {
     #[error("FROM_EMAIL environment variable is not set [{location:?}]")]
-    MissingFromEmail { location: dterror::Location },
+    MissingFromEmail {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
     #[error("FROM_EMAIL is not a valid email address [{location:?}]")]
     InvalidFromEmail {
         #[location]
@@ -1259,9 +1264,7 @@ async fn main() -> Result<(), MainError> {
     let from_email = if test_mode {
         std::env::var("FROM_EMAIL").unwrap_or_else(|_| "noreply@localhost".to_string())
     } else {
-        let value = std::env::var("FROM_EMAIL").map_err(|_| MainError::MissingFromEmail {
-            location: std::panic::Location::caller(),
-        })?;
+        let value = std::env::var("FROM_EMAIL").with_context(Ctx::missing_from_email())?;
         value
             .parse::<lettre::Address>()
             .with_context(Ctx::invalid_from_email())?;

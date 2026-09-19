@@ -109,20 +109,11 @@ impl PricingConfig {
         use ParsePricingErrorCtx as Ctx;
 
         let mut config: Self = serde_json::from_str(contents).with_context(Ctx::json())?;
-        normalize_tiers(&mut config.subscription_tiers).map_err(|e| {
-            ParsePricingError::NormalizeTiers {
-                reason: e,
-                location: std::panic::Location::caller(),
-            }
-        })?;
+        normalize_tiers(&mut config.subscription_tiers).with_context(Ctx::normalize_tiers())?;
 
         if let Some(catalog) = &config.paddle_catalog {
-            validate_catalog(catalog, &config.subscription_tiers, paddle_enabled).map_err(|e| {
-                ParsePricingError::ValidateCatalog {
-                    reason: e,
-                    location: std::panic::Location::caller(),
-                }
-            })?;
+            validate_catalog(catalog, &config.subscription_tiers, paddle_enabled)
+                .with_context(Ctx::validate_catalog())?;
         } else if paddle_enabled {
             return Err(ParsePricingError::MissingCatalog {
                 reason: "paddle_catalog is required when BYOC_PADDLE_SUBSCRIPTIONS_ENABLED is true"
@@ -206,15 +197,9 @@ fn validate_catalog(
         "product",
         paddle_enabled,
     )
-    .map_err(|e| match e {
-        ValidateOptionalIdError::Missing { kind, .. } => ValidateCatalogError::IdRequired {
-            kind,
-            location: std::panic::Location::caller(),
-        },
-        ValidateOptionalIdError::Malformed { kind, .. } => ValidateCatalogError::MalformedId {
-            kind,
-            location: std::panic::Location::caller(),
-        },
+    .map_err(|source| ValidateCatalogError::InvalidId {
+        source: Box::new(source),
+        location: std::panic::Location::caller(),
     })?;
 
     let expected = [
@@ -279,15 +264,9 @@ fn validate_catalog(
             &format!("price for tier `{key}`"),
             paddle_enabled,
         )
-        .map_err(|e| match e {
-            ValidateOptionalIdError::Missing { kind, .. } => ValidateCatalogError::IdRequired {
-                kind,
-                location: std::panic::Location::caller(),
-            },
-            ValidateOptionalIdError::Malformed { kind, .. } => ValidateCatalogError::MalformedId {
-                kind,
-                location: std::panic::Location::caller(),
-            },
+        .map_err(|source| ValidateCatalogError::InvalidId {
+            source: Box::new(source),
+            location: std::panic::Location::caller(),
         })?;
         if let Some(id) = tier.paddle_price_id.as_deref()
             && !ids.insert(id)
@@ -343,19 +322,23 @@ pub enum ParsePricingError {
         source: dterror::BoxError,
     },
 
-    #[error("invalid pricing configuration: {reason} [{location}]")]
+    #[error("invalid pricing configuration [{location}]")]
     NormalizeTiers {
-        reason: NormalizeTiersError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
-    #[error("invalid pricing configuration: {reason} [{location}]")]
+    #[error("invalid pricing configuration [{location}]")]
     ValidateCatalog {
-        reason: ValidateCatalogError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
-    #[error("invalid pricing configuration: {reason} [{location}]")]
+    #[error("invalid pricing configuration [{location}]")]
     MissingCatalog {
         reason: String,
         location: dterror::Location,
@@ -405,16 +388,10 @@ pub enum ValidateCatalogError {
     #[error("paddle_catalog.tax_category must not be empty")]
     EmptyTaxCategory { location: dterror::Location },
 
-    #[error("Paddle {kind} ID is required")]
-    IdRequired {
-        kind: String,
+    #[error("Paddle ID validation failed [{location}]")]
+    InvalidId {
         location: dterror::Location,
-    },
-
-    #[error("malformed Paddle {kind} ID")]
-    MalformedId {
-        kind: String,
-        location: dterror::Location,
+        source: dterror::BoxError,
     },
 
     #[error("subscription_tiers must contain exactly five self-service tiers")]
@@ -507,9 +484,15 @@ mod tests {
     }
 
     fn error(value: &Value, enabled: bool) -> String {
-        PricingConfig::parse(&value.to_string(), enabled)
-            .unwrap_err()
-            .to_string()
+        let err = PricingConfig::parse(&value.to_string(), enabled).unwrap_err();
+        let mut chain = err.to_string();
+        let mut source = std::error::Error::source(&err);
+        while let Some(current) = source {
+            chain.push_str(": ");
+            chain.push_str(&current.to_string());
+            source = current.source();
+        }
+        chain
     }
 
     #[test]
@@ -565,7 +548,7 @@ mod tests {
     #[test]
     fn rejects_missing_catalog_when_enabled() {
         let value = json!({"compute_margin_percent": 0, "subscription_tiers": {}});
-        assert!(error(&value, true).contains("paddle_catalog is required"));
+        assert!(error(&value, true).contains("invalid pricing configuration"));
     }
 
     #[test]

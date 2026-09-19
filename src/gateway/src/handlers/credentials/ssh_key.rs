@@ -15,61 +15,39 @@ use uuid::Uuid;
 
 /// Input/validation failure shared by all SSH-key handlers (malformed or
 /// missing authenticated user ID, invalid public key, unparsable key type).
-///
-/// This is a leaf error: it derives only `thiserror::Error` (no `CtxError`)
-/// because every variant is source-less. The typed inner error is carried as an
-/// UNMARKED plain field rather than a boxed `#[source]` — a documented deviation
-/// mirroring `PasskeyError::Auth`: the surrounding handlers need the concrete
-/// `ValidationError` preserved so [`SshKeyInputError::client_message`] can forward
-/// its `Display` byte-for-byte, which a boxed dyn-error source would erase. The
-/// `CtxError` derive also cannot be applied here because it requires at least one
-/// source-bearing variant. Variants are hand-built with
-/// `std::panic::Location::caller()`; the client-facing body comes from
-/// [`SshKeyInputError::client_message`], not from `Display` (which carries a
-/// `[{location}]` suffix for logs only).
-#[derive(Debug, thiserror::Error)]
+/// Client-facing bodies come from fixed literals in each handler's
+/// `IntoResponse`; the underlying [`crate::validation::ValidationError`] is
+/// boxed as a `#[source]`, preserving it for logs.
+#[derive(Debug, thiserror::Error, CtxError)]
 #[allow(clippy::enum_variant_names)]
 pub enum SshKeyInputError {
     #[error("missing or invalid authenticated user ID [{location}]")]
-    InvalidUserId { location: dterror::Location },
+    InvalidUserId {
+        #[location]
+        location: Location,
+    },
 
-    /// The typed inner error is deliberate (deviating from the boxed `BoxError`
-    /// source used by the surrounding handlers): it must be preserved so
-    /// [`SshKeyInputError::client_message`] can forward its `Display`. It is
-    /// therefore an UNMARKED plain field, not `#[source]`.
-    #[error("{validation_error} [{location}]")]
+    #[error("invalid SSH public key [{location}]")]
     InvalidPublicKey {
-        validation_error: crate::validation::ValidationError,
+        #[location]
+        location: Location,
 
-        location: dterror::Location,
+        #[source]
+        source: BoxError,
     },
 
     #[error("failed to parse SSH key type [{location}]")]
-    InvalidKeyType { location: dterror::Location },
-}
-
-impl SshKeyInputError {
-    /// Client-facing message, byte-identical to what the handlers sent before the
-    /// typed-error migration. The `Display` impl adds a `[{location}]` log suffix;
-    /// this method returns the clean body that reaches the client.
-    fn client_message(&self) -> String {
-        match self {
-            Self::InvalidUserId { .. } => "missing or invalid authenticated user ID".to_string(),
-            Self::InvalidKeyType { .. } => "failed to parse SSH key type".to_string(),
-            Self::InvalidPublicKey {
-                ref validation_error,
-                ..
-            } => format!("{validation_error}"),
-        }
-    }
+    InvalidKeyType {
+        #[location]
+        location: Location,
+    },
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum AddSshKeyError {
-    /// Hand-built at call sites: the inner [`SshKeyInputError`] is an unmarked
-    /// typed field (not `#[source]`), so this variant is not constructible through
-    /// the context machinery.
-    #[error("{source} [{location}]")]
+    /// Hand-built at call sites: [`SshKeyInputError`] carries its own typed
+    /// variants that the wrapper must not erase; it is carried as a typed field.
+    #[error("invalid input [{location}]")]
     Input {
         source: SshKeyInputError,
 
@@ -90,8 +68,8 @@ pub enum AddSshKeyError {
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum ListSshKeysError {
     /// Hand-built at call sites; see [`AddSshKeyError::Input`] for why the inner
-    /// error is an unmarked typed field.
-    #[error("{source} [{location}]")]
+    /// error is a typed field.
+    #[error("invalid input [{location}]")]
     Input {
         source: SshKeyInputError,
 
@@ -136,8 +114,13 @@ pub enum DeleteSshKeyError {
 impl IntoResponse for AddSshKeyError {
     fn into_response(self) -> Response {
         match self {
-            Self::Input { source, .. } => {
-                (StatusCode::BAD_REQUEST, source.client_message()).into_response()
+            error @ Self::Input { .. } => {
+                tracing::warn!(?error, "Rejected SSH key add: invalid input");
+                (
+                    StatusCode::BAD_REQUEST,
+                    "The submitted SSH key or user ID is invalid.",
+                )
+                    .into_response()
             }
             Self::Database { .. } => {
                 tracing::error!(?self, "SSH key add error");
@@ -154,8 +137,13 @@ impl IntoResponse for AddSshKeyError {
 impl IntoResponse for ListSshKeysError {
     fn into_response(self) -> Response {
         match self {
-            Self::Input { source, .. } => {
-                (StatusCode::BAD_REQUEST, source.client_message()).into_response()
+            error @ Self::Input { .. } => {
+                tracing::warn!(?error, "Rejected SSH key list: invalid input");
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Missing or invalid authenticated user ID.",
+                )
+                    .into_response()
             }
             Self::Database { .. } => {
                 tracing::error!(?self, "SSH key list error");
@@ -174,7 +162,7 @@ impl IntoResponse for DeleteSshKeyError {
         match self {
             Self::InvalidUserId { .. } => (
                 StatusCode::BAD_REQUEST,
-                "missing or invalid authenticated user ID",
+                "Missing or invalid authenticated user ID.",
             )
                 .into_response(),
             Self::NotFound { .. } => (StatusCode::NOT_FOUND, "SSH key not found").into_response(),
@@ -231,15 +219,15 @@ pub async fn add_ssh_key_handler(
         location: std::panic::Location::caller(),
     })?;
 
-    crate::validation::validate_ssh_public_key(&req.public_key).map_err(|e| {
-        AddSshKeyError::Input {
+    if let Some(source) = crate::validation::validate_ssh_public_key(&req.public_key).err() {
+        return Err(AddSshKeyError::Input {
             source: SshKeyInputError::InvalidPublicKey {
-                validation_error: e,
                 location: std::panic::Location::caller(),
+                source: Box::new(source),
             },
             location: std::panic::Location::caller(),
-        }
-    })?;
+        });
+    }
 
     let key_type =
         req.public_key

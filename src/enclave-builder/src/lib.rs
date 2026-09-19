@@ -205,62 +205,22 @@ pub(crate) enum SavePcrsToCacheError {
 
 /// Error type for [`EnclaveBuilder::extract_user_image`].
 #[non_exhaustive]
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
 pub enum ExtractUserImageError {
     #[error("could not extract specific files [{location}]")]
     SpecificFiles {
-        reason: extract::ExtractSpecificFilesError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
     #[error("could not export image filesystem tar [{location}]")]
     ExportTar {
-        reason: extract::ExportImageFilesystemTarError,
+        #[location]
         location: dterror::Location,
-    },
-}
-
-/// Error type for [`EnclaveBuilder::extract_static_binary`].
-#[non_exhaustive]
-#[derive(Debug, thiserror::Error)]
-pub enum ExtractStaticBinaryError {
-    #[error("could not extract static binary [{location}]")]
-    Extract {
-        reason: extract::ExtractStaticBinaryError,
-        location: dterror::Location,
-    },
-}
-
-/// Error type for [`EnclaveBuilder::build_eif_native`].
-#[non_exhaustive]
-#[derive(Debug, thiserror::Error)]
-pub enum BuildEifNativeError {
-    #[error("could not build EIF from filesystems [{location}]")]
-    Build {
-        reason: build::BuildEifFromFilesystemsError,
-        location: dterror::Location,
-    },
-}
-
-/// Error type for [`EnclaveBuilder::extract_pcrs`].
-#[non_exhaustive]
-#[derive(Debug, thiserror::Error)]
-pub enum ExtractPcrsError {
-    #[error("failed to extract PCR values - ensure eif_build generated .pcrs file [{location}]")]
-    Extract {
-        reason: pcrs::ExtractPcrsFromEifError,
-        location: dterror::Location,
-    },
-}
-
-/// Error type for [`EnclaveBuilder::parse_attestation_pcrs`].
-#[non_exhaustive]
-#[derive(Debug, thiserror::Error)]
-pub enum ParseAttestationPcrsError {
-    #[error("could not parse attestation document [{location}]")]
-    Parse {
-        reason: pcrs::ParseAttestationDocumentError,
-        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 }
 
@@ -526,19 +486,19 @@ impl EnclaveBuilder {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub async fn extract_user_image(
         &self,
         image: &UserImage,
         specific_files: Option<Vec<String>>,
     ) -> Result<PathBuf, ExtractUserImageError> {
+        use ExtractUserImageErrorCtx as Ctx;
+
         if let Some(files) = specific_files {
             tracing::info!("Extracting specific files: {:?}", files);
             extract::extract_specific_files(&image.reference, &files, &self.work_dir)
                 .await
-                .map_err(|reason| ExtractUserImageError::SpecificFiles {
-                    reason,
-                    location: std::panic::Location::caller(),
-                })
+                .with_context(Ctx::specific_files())
         } else {
             // Hand the build the export tar rather than an unpacked directory:
             // unpacking here would drop case-colliding entries on macOS and
@@ -547,10 +507,7 @@ impl EnclaveBuilder {
             tracing::info!("Exporting full filesystem as tar");
             extract::export_image_filesystem_tar(&image.reference, &self.work_dir)
                 .await
-                .map_err(|reason| ExtractUserImageError::ExportTar {
-                    reason,
-                    location: std::panic::Location::caller(),
-                })
+                .with_context(Ctx::export_tar())
         }
     }
 
@@ -558,14 +515,9 @@ impl EnclaveBuilder {
         &self,
         image: &UserImage,
         binary_path: &str,
-    ) -> Result<PathBuf, ExtractStaticBinaryError> {
+    ) -> Result<PathBuf, extract::ExtractStaticBinaryError> {
         tracing::info!("Extracting static binary: {}", binary_path);
-        extract::extract_static_binary(&image.reference, binary_path, &self.work_dir)
-            .await
-            .map_err(|reason| ExtractStaticBinaryError::Extract {
-                reason,
-                location: std::panic::Location::caller(),
-            })
+        extract::extract_static_binary(&image.reference, binary_path, &self.work_dir).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -590,7 +542,7 @@ impl EnclaveBuilder {
         e2e_cors_origins: Option<String>,
         egress: bool,
         templates_dir: Option<&std::path::Path>,
-    ) -> Result<EifFile, BuildEifNativeError> {
+    ) -> Result<EifFile, build::BuildEifFromFilesystemsError> {
         build::build_eif_from_filesystems(
             user_fs_path,
             bootproofd_path,
@@ -615,31 +567,19 @@ impl EnclaveBuilder {
             templates_dir,
         )
         .await
-        .map_err(|reason| BuildEifNativeError::Build {
-            reason,
-            location: std::panic::Location::caller(),
-        })
     }
 
     #[tracing::instrument(skip_all, err)]
-    pub fn extract_pcrs(&self, eif: &EifFile) -> Result<PcrValues, ExtractPcrsError> {
-        pcrs::extract_pcrs_from_eif(eif).map_err(|reason| ExtractPcrsError::Extract {
-            reason,
-            location: std::panic::Location::caller(),
-        })
+    pub fn extract_pcrs(&self, eif: &EifFile) -> Result<PcrValues, pcrs::ExtractPcrsFromEifError> {
+        pcrs::extract_pcrs_from_eif(eif)
     }
 
     #[tracing::instrument(skip_all, err)]
     pub fn parse_attestation_pcrs(
         &self,
         attestation_b64: &str,
-    ) -> Result<PcrValues, ParseAttestationPcrsError> {
-        pcrs::parse_attestation_document(attestation_b64).map_err(|reason| {
-            ParseAttestationPcrsError::Parse {
-                reason,
-                location: std::panic::Location::caller(),
-            }
-        })
+    ) -> Result<PcrValues, pcrs::ParseAttestationDocumentError> {
+        pcrs::parse_attestation_document(attestation_b64)
     }
 
     pub fn compare_pcrs(&self, local: &PcrValues, remote: &PcrValues) -> bool {

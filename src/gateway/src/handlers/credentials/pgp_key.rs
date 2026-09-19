@@ -8,6 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use dterror::{CtxError, ResultExt};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -29,10 +30,11 @@ pub struct ListPgpKeysResponse {
     pub keys: Vec<crate::db::PgpKeyInfo>,
 }
 
-/// Leaf error: location is Debug-only because the Display of this type feeds
-/// client-facing bodies via `AddPgpKeyError`'s transparent forwarding.
+/// Leaf error: source-less, so it stays a plain `thiserror` type (no `CtxError`
+/// derive). Its Display never reaches clients: the handlers that receive it box
+/// it as a `#[source]` behind their own fixed, generic bodies.
 #[derive(Debug, thiserror::Error)]
-#[error("Verified signed request audit ID is missing")]
+#[error("verified signed request audit ID is missing [{location}]")]
 pub struct MissingSignedRequestAuditError {
     pub(crate) location: dterror::Location,
 }
@@ -56,40 +58,44 @@ fn signed_request_audit_id(
     }
 }
 
-/// Leaf error: location is Debug-only because the `Duplicate` variant's Display
-/// reaches clients via `IntoResponse`; other variants forward the source's Display.
-#[derive(Debug, thiserror::Error)]
+/// Handler error: `IntoResponse` maps every variant to an explicit status with a
+/// fixed, generic body; inner errors are preserved only as boxed sources for logs.
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
 pub enum AddPgpKeyError {
-    #[error("{source}")]
+    #[error("invalid PGP public key [{location}]")]
     InvalidPublicKey {
-        #[source]
-        source: crate::pgp::ParsePgpPublicKeyError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
-    #[error("{source}")]
+    #[error("invalid key name [{location}]")]
     InvalidName {
-        #[source]
-        source: crate::pgp::ValidatePgpKeyNameError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
-    #[error("This PGP public key is already registered to your account")]
+    #[error("This PGP public key is already registered to your account [{location}]")]
     Duplicate { location: dterror::Location },
 
-    #[error("{source}")]
+    #[error("verified signed request audit ID is missing [{location}]")]
     MissingSignedRequestAudit {
-        #[source]
-        source: MissingSignedRequestAuditError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
-    #[error("Unable to store PGP public key for user {user_id}")]
+    #[error("unable to store PGP public key for user {user_id} [{location}]")]
     Database {
         user_id: Uuid,
-        #[source]
-        source: crate::db::DbError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 }
 
@@ -97,11 +103,18 @@ impl IntoResponse for AddPgpKeyError {
     fn into_response(self) -> Response {
         match self {
             error @ (Self::InvalidPublicKey { .. } | Self::InvalidName { .. }) => {
-                (StatusCode::BAD_REQUEST, error.to_string()).into_response()
+                tracing::warn!(?error, "Rejected PGP key request: invalid input");
+                (
+                    StatusCode::BAD_REQUEST,
+                    "The submitted PGP key or key name is invalid.",
+                )
+                    .into_response()
             }
-            error @ Self::Duplicate { .. } => {
-                (StatusCode::CONFLICT, error.to_string()).into_response()
-            }
+            Self::Duplicate { .. } => (
+                StatusCode::CONFLICT,
+                "This PGP public key is already registered to your account",
+            )
+                .into_response(),
             error @ (Self::MissingSignedRequestAudit { .. } | Self::Database { .. }) => {
                 tracing::error!(?error, "Failed to add PGP public key");
                 (
@@ -121,23 +134,14 @@ pub async fn add_pgp_key_handler(
     signed_request: Option<Extension<VerifiedSignedRequestId>>,
     Json(req): Json<AddPgpKeyRequest>,
 ) -> Result<Json<AddPgpKeyResponse>, AddPgpKeyError> {
-    let signed_request_id = signed_request_audit_id(signed_request).map_err(|source| {
-        AddPgpKeyError::MissingSignedRequestAudit {
-            source,
-            location: std::panic::Location::caller(),
-        }
-    })?;
-    let public_key = crate::pgp::parse_public_key(&req.public_key).map_err(|source| {
-        AddPgpKeyError::InvalidPublicKey {
-            source,
-            location: std::panic::Location::caller(),
-        }
-    })?;
+    use AddPgpKeyErrorCtx as Ctx;
+
+    let signed_request_id =
+        signed_request_audit_id(signed_request).with_context(Ctx::missing_signed_request_audit())?;
+    let public_key =
+        crate::pgp::parse_public_key(&req.public_key).with_context(Ctx::invalid_public_key())?;
     if let Some(name) = req.name.as_deref() {
-        crate::pgp::validate_key_name(name).map_err(|source| AddPgpKeyError::InvalidName {
-            source,
-            location: std::panic::Location::caller(),
-        })?;
+        crate::pgp::validate_key_name(name).with_context(Ctx::invalid_name())?;
     }
     let name = req
         .name
@@ -162,11 +166,11 @@ pub async fn add_pgp_key_handler(
             });
         }
         Err(source) => {
-            return Err(AddPgpKeyError::Database {
-                user_id,
-                source,
-                location: std::panic::Location::caller(),
-            });
+            return Err(AddPgpKeyError::from_context(
+                AddPgpKeyErrorCtx::database(user_id),
+                std::panic::Location::caller(),
+                Box::new(source),
+            ));
         }
     };
 
@@ -183,12 +187,14 @@ pub async fn add_pgp_key_handler(
 }
 
 /// Leaf error: internal-only Display (logged via IntoResponse's generic 500).
+/// Source-less context means there is nothing for the `CtxError` derive to
+/// generate, so this stays a plain `thiserror` type hand-built at the call site.
 #[derive(Debug, thiserror::Error)]
 #[error("failed to list PGP keys [{location}]")]
 pub struct ListPgpKeysError {
-    #[source]
-    source: crate::db::DbError,
     location: dterror::Location,
+    #[source]
+    source: dterror::BoxError,
 }
 
 impl IntoResponse for ListPgpKeysError {
@@ -210,39 +216,41 @@ pub async fn list_pgp_keys_handler(
     let keys = crate::db::list_pgp_keys(&state.db, user_id)
         .await
         .map_err(|source| ListPgpKeysError {
-            source,
             location: std::panic::Location::caller(),
+            source: Box::new(source),
         })?;
     Ok(Json(ListPgpKeysResponse { keys }))
 }
 
-/// Leaf error: location is Debug-only because the `NotFound` variant's Display
-/// reaches clients via `IntoResponse`; other variants forward the source's Display.
-#[derive(Debug, thiserror::Error)]
+/// Handler error: `IntoResponse` maps every variant to an explicit status with a
+/// fixed, generic body; inner errors are preserved only as boxed sources for logs.
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
 pub enum RemovePgpKeyHandlerError {
-    #[error("PGP public key not found")]
+    #[error("PGP public key not found [{location}]")]
     NotFound { location: dterror::Location },
 
-    #[error("{source}")]
+    #[error("verified signed request audit ID is missing [{location}]")]
     MissingSignedRequestAudit {
-        #[source]
-        source: MissingSignedRequestAuditError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
-    #[error("{source}")]
+    #[error("database error [{location}]")]
     Database {
-        #[source]
-        source: crate::db::RemovePgpKeyError,
+        #[location]
         location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 }
 
 impl IntoResponse for RemovePgpKeyHandlerError {
     fn into_response(self) -> Response {
         match self {
-            error @ Self::NotFound { .. } => {
-                (StatusCode::NOT_FOUND, error.to_string()).into_response()
+            Self::NotFound { .. } => {
+                (StatusCode::NOT_FOUND, "PGP public key not found").into_response()
             }
             error @ (Self::MissingSignedRequestAudit { .. } | Self::Database { .. }) => {
                 tracing::error!(?error, "Failed to remove PGP public key");
@@ -263,18 +271,13 @@ pub async fn remove_pgp_key_handler(
     signed_request: Option<Extension<VerifiedSignedRequestId>>,
     Path(key_id): Path<Uuid>,
 ) -> Result<StatusCode, RemovePgpKeyHandlerError> {
-    let signed_request_id = signed_request_audit_id(signed_request).map_err(|source| {
-        RemovePgpKeyHandlerError::MissingSignedRequestAudit {
-            source,
-            location: std::panic::Location::caller(),
-        }
-    })?;
+    use RemovePgpKeyHandlerErrorCtx as Ctx;
+
+    let signed_request_id =
+        signed_request_audit_id(signed_request).with_context(Ctx::missing_signed_request_audit())?;
     let fingerprint = crate::db::remove_pgp_key(&state.db, user_id, key_id, signed_request_id)
         .await
-        .map_err(|source| RemovePgpKeyHandlerError::Database {
-            source,
-            location: std::panic::Location::caller(),
-        })?
+        .with_context(Ctx::database())?
         .ok_or_else(|| RemovePgpKeyHandlerError::NotFound {
             location: std::panic::Location::caller(),
         })?;

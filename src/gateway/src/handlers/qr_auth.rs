@@ -60,20 +60,6 @@ pub enum QrLoginFinishError {
         source: BoxError,
     },
 
-    #[error(
-        "could not find user ID for the asserted credential ({provided_bytes:?}) [{location}]"
-    )]
-    DbGetUserIdByCredential {
-        #[context(borrow = [u8])]
-        provided_bytes: Vec<u8>,
-
-        #[location]
-        location: Location,
-
-        #[source]
-        source: BoxError,
-    },
-
     #[error("could not get public key for user {user_id} [{location}]")]
     DbGetPublicKeyForCredential {
         user_id: Uuid,
@@ -223,10 +209,6 @@ impl IntoResponse for QrLoginFinishError {
             // another by status code or body.
             Self::UnexpectedCredentialOwner { .. } => {
                 tracing::debug!(?self, "QR login finish: decoy/scope rejection");
-                generic_auth_failure_response().into_response()
-            }
-            Self::DbGetUserIdByCredential { .. } => {
-                tracing::error!(?self, "QR login finish: credential not found");
                 generic_auth_failure_response().into_response()
             }
             Self::DbGetPublicKeyForCredential { .. } | Self::ParseSecurityKey { .. } => {
@@ -841,11 +823,18 @@ pub async fn qr_login_authenticate_finish_handler(
         AuthState::SecurityKey(auth_state) => {
             let credential_id_bytes = auth_response.raw_id.as_ref().to_vec();
 
-            let user_id = db::get_user_id_by_credential(&state.db, &credential_id_bytes)
-                .await
-                .with_context(FinishCtx::db_get_user_id_by_credential(
-                    &credential_id_bytes,
-                ))?;
+            let user_id = match db::get_user_id_by_credential(&state.db, &credential_id_bytes).await
+            {
+                Ok(user_id) => user_id,
+                Err(source) => {
+                    tracing::debug!(?source, "QR login finish: credential not found");
+                    return Err(QrLoginFinishError::UnexpectedCredentialOwner {
+                        expected_user_id: None,
+                        actual_user_id: Uuid::nil(),
+                        location: std::panic::Location::caller(),
+                    });
+                }
+            };
 
             let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
                 .await
@@ -867,11 +856,18 @@ pub async fn qr_login_authenticate_finish_handler(
                 .with_context(FinishCtx::identify_discoverable_credential())?;
             let credential_id_bytes = cred_id.to_vec();
 
-            let user_id = db::get_user_id_by_credential(&state.db, &credential_id_bytes)
-                .await
-                .with_context(FinishCtx::db_get_user_id_by_credential(
-                    &credential_id_bytes,
-                ))?;
+            let user_id = match db::get_user_id_by_credential(&state.db, &credential_id_bytes).await
+            {
+                Ok(user_id) => user_id,
+                Err(source) => {
+                    tracing::debug!(?source, "QR login finish: credential not found");
+                    return Err(QrLoginFinishError::UnexpectedCredentialOwner {
+                        expected_user_id: None,
+                        actual_user_id: Uuid::nil(),
+                        location: std::panic::Location::caller(),
+                    });
+                }
+            };
 
             let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
                 .await
@@ -890,10 +886,11 @@ pub async fn qr_login_authenticate_finish_handler(
 
             // See the equivalent check in `finish_login_handler` (Finding 1):
             // ceremony is consumed above regardless of outcome.
-            if let Err(mismatch) = check_username_scope(&scope, user_id) {
+            if let Some((expected_user_id, actual_user_id)) = check_username_scope(&scope, user_id)
+            {
                 return Err(QrLoginFinishError::UnexpectedCredentialOwner {
-                    expected_user_id: mismatch.expected_user_id,
-                    actual_user_id: mismatch.actual_user_id,
+                    expected_user_id,
+                    actual_user_id,
                     location: std::panic::Location::caller(),
                 });
             }
