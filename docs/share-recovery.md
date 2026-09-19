@@ -1,11 +1,12 @@
 # WebAuthn and mixed share recovery
 
-Shared Rust dependencies select Locksmith `1e6ec48251ad05ec7cc806d49ec752e768b16b30`,
-including the external-PGP signing hash fallback and labelled, inline smartcard
-PIN prompts. Rebuild/install the CLI to use these fixes with existing bundles.
-The enclave runtime pin remains `4851791bda5f8f392f88e474ed5731b287ecd4bc`;
-this client-side fix does not require a service redeployment. The new dependency
-revision is local until explicitly published; remote builds require publication.
+Shared Rust dependencies and the default enclave runtime select Locksmith
+`2da3be50bebd2dfdc4d0d3a94d05f55be02e910c`, including certified release indices,
+ECDH identity checks between holders, and the smartcard PIN prompt fixes.
+Rebuild/install the CLI to use its fixes with existing bundles. Rebuild/redeploy
+enclave images to update their daemon; `LOCKSMITH_COMMIT` overrides that default
+and must be reviewed when upgrading. Service deployment and trusted PCR-policy
+updates remain separate, as described below.
 
 Create with explicit per-holder custody:
 
@@ -352,3 +353,54 @@ sustained flooding.
 See Locksmith's `docs/service-hardening.md` for exact token provisioning, deployment,
 PCR-policy updates and manual acceptance commands. See
 [the validation record](service-hardening-validation.md) for local test evidence.
+
+## Recipient identity and approval retries
+
+API and CLI holder validation compare ECDH recipients by curve and public point,
+independently of their KDF hash and cipher. Equivalent encryption subkeys within
+one holder are allowed; normalized identities must be unique between holders.
+Keymaker must enforce the same check before generation. Different KDF parameters do not provide independent encryption
+secrets. These checks preserve the original certificates and encryption parameters.
+Existing bundles with shared encryption material remain weak after upgrading;
+assess them separately before migrating their secrets to a new quorum.
+
+Browser release status polls run every two seconds. HTTP 429 responses retain the
+same approval token and back off for 4, 8, then at most 16 seconds between retries.
+A successful pending response restores the two-second interval. The existing
+180-second recovery timeout, destination-disconnect handling, and cancellation
+still apply. Other errors remain terminal; begin and completion requests are not
+retried. The gateway's shared auth budget is unchanged.
+
+The corresponding Locksmith service fix reads a holder's derivation index from
+its verified CA certification, independently of its position in the quorum. This
+supports previously generated subset/reordered bundles without modifying their
+proof-bound contents. Rebuild Keymaker and the certificate service from the fixed
+Locksmith source and establish their trusted PCR policies when deploying. Shared
+Rust dependency and default enclave-daemon pins select the fixed revision;
+rebuilding only Platform does not update those services. Native PIN cancellation
+is separate work.
+
+Focused checks (use the documented host native-library configuration):
+
+```sh
+cargo test --locked -p api org_quorum::
+cargo test --locked -p cli --lib quorum_init::tests
+cargo test --locked -p cli --lib share_release::
+cargo test --locked -p enclave-builder --lib
+cargo check --locked --manifest-path tests/e2e/soft-authenticator/Cargo.toml
+```
+
+The polling suite uses local HTTP servers and the actual gateway rate limiter;
+its two-client test runs for just over a minute. These are local/synthetic checks,
+not live Nitro validation. Ignored database and hosted-metadata tests retain their
+separate harness requirements.
+
+Validation on 2026-09-19 against Locksmith `2da3be50`: API quorum checks passed
+(20; one database test ignored), CLI quorum-init checks passed (24), CLI recovery
+checks passed (26; one hosted metadata test ignored), enclave-builder tests passed
+(95), and the standalone soft-authenticator passed `cargo check`. This includes
+the capped-backoff sequence and concurrent approvals through the real gateway
+middleware.
+
+The quorum checks include equivalent subkeys within one holder, coexistence with
+an independent holder, and cross-holder collision rejection in both orders.

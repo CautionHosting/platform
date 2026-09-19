@@ -64,3 +64,7 @@ serde_json.workspace = true
 
 [features]
 e2e-testing-unsafe = ["locksmith/unsafe-e2e"]
+
+[dev-dependencies]
+axum.workspace = true
+tracing.workspace = true

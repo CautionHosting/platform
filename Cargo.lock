@@ -1815,6 +1815,7 @@ name = "cli"
 version = "0.1.0"
 dependencies = [
  "authenticator",
+ "axum",
  "base64 0.22.1",
  "bootproof-sdk",
  "caution-config",
@@ -1845,6 +1846,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tracing",
  "url",
  "uuid",
  "webauthn-rs-proto",
@@ -4468,7 +4470,7 @@ dependencies = [
 [[package]]
 name = "keymaker-models"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=1e6ec48251ad05ec7cc806d49ec752e768b16b30#1e6ec48251ad05ec7cc806d49ec752e768b16b30"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=2da3be50bebd2dfdc4d0d3a94d05f55be02e910c#2da3be50bebd2dfdc4d0d3a94d05f55be02e910c"
 dependencies = [
  "serde",
  "serde_cbor",
@@ -4660,7 +4662,7 @@ dependencies = [
 [[package]]
 name = "locksmith"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=1e6ec48251ad05ec7cc806d49ec752e768b16b30#1e6ec48251ad05ec7cc806d49ec752e768b16b30"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=2da3be50bebd2dfdc4d0d3a94d05f55be02e910c#2da3be50bebd2dfdc4d0d3a94d05f55be02e910c"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
@@ -5900,7 +5902,7 @@ checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
 [[package]]
 name = "public-certificate-models"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=1e6ec48251ad05ec7cc806d49ec752e768b16b30#1e6ec48251ad05ec7cc806d49ec752e768b16b30"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=2da3be50bebd2dfdc4d0d3a94d05f55be02e910c#2da3be50bebd2dfdc4d0d3a94d05f55be02e910c"
 dependencies = [
  "serde",
 ]

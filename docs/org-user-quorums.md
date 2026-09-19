@@ -247,12 +247,13 @@ The shared models and loader are pinned to the Locksmith revision recorded in
 `Cargo.toml` and `Cargo.lock`. All Bootproof SDK consumers use the historical
 verification revision `821b5c63e80f082f6d67ba3695c11416933489ec`, including the existing
 ES384 encoding fix. No old-remote patch or local path dependency is required.
-The default Locksmith daemon revision is also `4851791bda5f8f392f88e474ed5731b287ecd4bc`,
+The default Locksmith daemon revision is also `2da3be50bebd2dfdc4d0d3a94d05f55be02e910c`,
 matching the API/CLI loader. `LOCKSMITH_COMMIT` still overrides this default.
 The standalone mock E2E helper uses the same revision. This revision includes
-holder-identity checks during shard submission and shared-signing-key rejection
-in Keymaker. `LOCKSMITH_COMMIT` selects the deployed daemon only; it does not
-override the API/CLI Cargo dependencies. Keep both pins aligned when upgrading.
+holder-identity checks during shard submission, certified release indices, and
+shared signing/encryption key rejection between holders in Keymaker. Equivalent
+encryption subkeys within one holder are allowed. `LOCKSMITH_COMMIT` selects the
+deployed daemon only; it does not override the API/CLI Cargo dependencies. Keep both pins aligned when upgrading.
 Existing deployed images require a rebuild/redeployment to use it. Legacy
 bundle fallback remains unimplemented.
 

@@ -388,3 +388,84 @@ fn conflicting_name_labels_are_rejected() {
     r.name = None;
     assert!(validate_request(&r).is_ok());
 }
+
+#[test]
+fn rejects_shared_ecdh_recipients_with_different_kdf_parameters() {
+    use sequoia_openpgp::types::{HashAlgorithm, SymmetricAlgorithm};
+    for kdf in [
+        (HashAlgorithm::SHA512, SymmetricAlgorithm::AES256),
+        (HashAlgorithm::SHA256, SymmetricAlgorithm::AES128),
+        (HashAlgorithm::SHA512, SymmetricAlgorithm::AES128),
+    ] {
+        let certs = recipients::shared_recipient_with_kdf(None, false, false, Some(kdf), false);
+        let keys: Vec<_> = certs
+            .into_iter()
+            .map(|cert| Key::OpenPGP { cert })
+            .collect();
+        for key in &keys {
+            let Key::OpenPGP { cert } = key else {
+                unreachable!()
+            };
+            assert!(validate_keyring(std::slice::from_ref(key), None).is_ok());
+            assert!(eligible_certificate(cert, None).is_ok());
+        }
+        assert!(
+            validate_keyring(&keys, None)
+                .unwrap_err()
+                .message
+                .contains("share an encryption key")
+        );
+    }
+}
+
+#[test]
+fn accepts_repeated_ecdh_keys_within_one_holder_only() {
+    use sequoia_openpgp::{
+        parse::Parse,
+        policy::StandardPolicy,
+        types::{HashAlgorithm, SymmetricAlgorithm},
+    };
+    for kdf in [
+        (HashAlgorithm::SHA512, SymmetricAlgorithm::AES256),
+        (HashAlgorithm::SHA256, SymmetricAlgorithm::AES128),
+        (HashAlgorithm::SHA512, SymmetricAlgorithm::AES128),
+    ] {
+        let certs = recipients::shared_recipient_with_kdf(None, false, false, Some(kdf), true);
+        let repeated_cert = sequoia_openpgp::Cert::from_bytes(certs[0].as_bytes()).unwrap();
+        assert_eq!(
+            repeated_cert
+                .keys()
+                .with_policy(&StandardPolicy::new(), None)
+                .supported()
+                .alive()
+                .revoked(false)
+                .for_storage_encryption()
+                .count(),
+            3
+        );
+        let repeated = Key::OpenPGP {
+            cert: certs[0].clone(),
+        };
+        let shared = Key::OpenPGP {
+            cert: certs[1].clone(),
+        };
+        let independent = Key::OpenPGP {
+            cert: certificate(),
+        };
+        for at in [None, Some(SystemTime::now())] {
+            assert!(validate_keyring(std::slice::from_ref(&repeated), at).is_ok());
+            assert!(validate_keyring(&[repeated.clone(), independent.clone()], at).is_ok());
+            for pair in [
+                [repeated.clone(), shared.clone()],
+                [shared.clone(), repeated.clone()],
+            ] {
+                assert!(
+                    validate_keyring(&pair, at)
+                        .unwrap_err()
+                        .message
+                        .contains("share an encryption key")
+                );
+            }
+        }
+    }
+}
