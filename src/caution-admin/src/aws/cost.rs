@@ -223,7 +223,7 @@ enum FetchServiceCostsStage {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("failed to load AWS service costs while {stage:?} [{location:?}]")]
+#[error("failed to load AWS service costs while {stage:?} [{location}]")]
 struct FetchServiceCostsError {
     stage: FetchServiceCostsStage,
     #[location]
@@ -290,7 +290,7 @@ enum FetchTagCostsStage {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("failed to load AWS costs attributed by {tag_key} while {stage:?} [{location:?}]")]
+#[error("failed to load AWS costs attributed by {tag_key} while {stage:?} [{location}]")]
 struct FetchTagCostsError {
     #[context(borrow = str)]
     tag_key: String,
@@ -337,7 +337,7 @@ enum FetchForecastStage {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum FetchForecastError {
-    #[error("failed to load AWS cost forecast while {stage:?} [{location:?}]")]
+    #[error("failed to load AWS cost forecast while {stage:?} [{location}]")]
     Wrapped {
         stage: FetchForecastStage,
         #[location]
@@ -345,7 +345,7 @@ enum FetchForecastError {
         #[source]
         source: BoxError,
     },
-    #[error("AWS cost forecast did not include a total [{location:?}]")]
+    #[error("AWS cost forecast did not include a total [{location}]")]
     MissingTotal {
         #[location]
         location: Location,
@@ -370,7 +370,7 @@ fn interval(start: NaiveDate, end: NaiveDate) -> Result<DateInterval, BuildInter
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum BuildIntervalError {
-    #[error("failed to build AWS cost date interval [{location:?}]")]
+    #[error("failed to build AWS cost date interval [{location}]")]
     Build {
         #[location]
         location: Location,
@@ -396,7 +396,7 @@ fn cost_line(name: &str, metric: &MetricValue) -> Result<CostLine, CostLineError
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum CostLineError {
-    #[error("failed to decode AWS cost amount for {name} [{location:?}]")]
+    #[error("failed to decode AWS cost amount for {name} [{location}]")]
     Amount {
         #[context(borrow = str)]
         name: String,
@@ -405,7 +405,7 @@ enum CostLineError {
         #[source]
         source: BoxError,
     },
-    #[error("AWS cost amount for {name} is missing [{location:?}]")]
+    #[error("AWS cost amount for {name} is missing [{location}]")]
     MissingAmount {
         name: String,
         #[location]
@@ -422,7 +422,7 @@ fn parse_micros(amount: &str) -> Result<i64, ParseMicrosError> {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum ParseMicrosError {
-    #[error("invalid AWS cost amount [{location:?}]")]
+    #[error("invalid AWS cost amount [{location}]")]
     Parse {
         #[location]
         location: Location,

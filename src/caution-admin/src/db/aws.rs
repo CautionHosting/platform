@@ -141,21 +141,21 @@ impl Database {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum LoadAwsStateError {
-    #[error("failed to load AWS app declarations [{location:?}]")]
+    #[error("failed to load AWS app declarations [{location}]")]
     Apps {
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("failed to load AWS builder declarations [{location:?}]")]
+    #[error("failed to load AWS builder declarations [{location}]")]
     Builds {
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("failed to load BYOC subscriptions [{location:?}]")]
+    #[error("failed to load BYOC subscriptions [{location}]")]
     Byoc {
         #[location]
         location: Location,

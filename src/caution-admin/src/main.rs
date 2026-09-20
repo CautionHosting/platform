@@ -331,7 +331,7 @@ impl fmt::Display for RunAdminStage {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("caution-admin failed while {stage} [{location:?}]")]
+#[error("caution-admin failed while {stage} [{location}]")]
 struct RunAdminError {
     stage: RunAdminStage,
     #[location]
@@ -343,7 +343,7 @@ struct RunAdminError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum RequireDevelopmentAcknowledgementError {
-    #[error("set ENVIRONMENT=development after verifying the target database [{location:?}]")]
+    #[error("set ENVIRONMENT=development after verifying the target database [{location}]")]
     Missing {
         #[location]
         location: Location,
@@ -351,7 +351,7 @@ enum RequireDevelopmentAcknowledgementError {
         source: BoxError,
     },
     #[error(
-        "caution-admin requires an explicit ENVIRONMENT=development acknowledgement [{location:?}]"
+        "caution-admin requires an explicit ENVIRONMENT=development acknowledgement [{location}]"
     )]
     NotAcknowledged {
         #[location]
@@ -375,7 +375,7 @@ impl fmt::Display for PrintJsonStage {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("JSON output failed while {stage} [{location:?}]")]
+#[error("JSON output failed while {stage} [{location}]")]
 struct PrintJsonError {
     stage: PrintJsonStage,
     #[location]
@@ -385,7 +385,7 @@ struct PrintJsonError {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("resource summary output failed while {operation} [{location:?}]")]
+#[error("resource summary output failed while {operation} [{location}]")]
 struct PrintSummariesError {
     operation: &'static str,
     #[location]
@@ -395,7 +395,7 @@ struct PrintSummariesError {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("resource detail output failed while {operation} [{location:?}]")]
+#[error("resource detail output failed while {operation} [{location}]")]
 struct PrintResourceError {
     operation: &'static str,
     #[location]
@@ -405,7 +405,7 @@ struct PrintResourceError {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("related resource output failed while {operation} [{location:?}]")]
+#[error("related resource output failed while {operation} [{location}]")]
 struct PrintRelatedError {
     operation: &'static str,
     #[location]
@@ -415,7 +415,7 @@ struct PrintRelatedError {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("search warning output failed while {operation} [{location:?}]")]
+#[error("search warning output failed while {operation} [{location}]")]
 struct PrintSearchWarningError {
     operation: &'static str,
     #[location]

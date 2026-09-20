@@ -52,7 +52,7 @@ impl fmt::Display for RunFindingsStage {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("AWS findings command failed while {stage} [{location:?}]")]
+#[error("AWS findings command failed while {stage} [{location}]")]
 pub(crate) struct RunFindingsError {
     stage: RunFindingsStage,
     #[location]
@@ -130,7 +130,7 @@ fn empty_result(coverage: caution_admin::aws::FindingsCoverage) -> &'static str 
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("AWS findings output failed while {operation} [{location:?}]")]
+#[error("AWS findings output failed while {operation} [{location}]")]
 struct PrintFindingsError {
     operation: &'static str,
     #[location]
@@ -197,7 +197,7 @@ fn print_finding(
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("AWS finding output failed while {operation} [{location:?}]")]
+#[error("AWS finding output failed while {operation} [{location}]")]
 struct PrintFindingError {
     operation: &'static str,
     #[location]
