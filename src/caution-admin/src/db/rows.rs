@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::model::{Field, Resource, ResourceKind, ResourceSummary, timestamp};
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("failed to decode database resource kind `{kind}` [{location:?}]")]
+#[error("failed to decode database resource kind `{kind}` [{location}]")]
 pub(super) struct SummaryRowError {
     #[context(borrow = str)]
     kind: String,

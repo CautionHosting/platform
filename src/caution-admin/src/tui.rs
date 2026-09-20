@@ -108,7 +108,7 @@ impl fmt::Display for RunTuiStage {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("terminal explorer failed while {stage} [{location:?}]")]
+#[error("terminal explorer failed while {stage} [{location}]")]
 pub struct RunTuiError {
     stage: RunTuiStage,
     #[location]
@@ -604,7 +604,7 @@ impl fmt::Display for NewTerminalSessionStage {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("terminal initialization failed while {stage} [{location:?}]")]
+#[error("terminal initialization failed while {stage} [{location}]")]
 struct NewTerminalSessionError {
     stage: NewTerminalSessionStage,
     #[location]
@@ -621,7 +621,7 @@ fn leave_alternate_screen(output: &mut impl io::Write) -> Result<(), LeaveAltern
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum LeaveAlternateScreenError {
-    #[error("failed to leave the alternate terminal screen [{location:?}]")]
+    #[error("failed to leave the alternate terminal screen [{location}]")]
     Execute {
         #[location]
         location: Location,

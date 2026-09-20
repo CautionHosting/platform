@@ -48,28 +48,28 @@ pub async fn reset_webauthn(user_id: Uuid) -> Result<(), ResetWebauthnError> {
 /// Errors from [`reset_webauthn`].
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum ResetWebauthnError {
-    #[error("API_SERVICE_URL environment variable is not set [{location:?}]")]
+    #[error("API_SERVICE_URL environment variable is not set [{location}]")]
     MissingApiUrl {
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("INTERNAL_SERVICE_SECRET environment variable is not set [{location:?}]")]
+    #[error("INTERNAL_SERVICE_SECRET environment variable is not set [{location}]")]
     MissingSecret {
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("HTTP request to the API failed [{location:?}]")]
+    #[error("HTTP request to the API failed [{location}]")]
     Request {
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("API returned a non-success status [{location:?}]")]
+    #[error("API returned a non-success status [{location}]")]
     NonSuccessStatus {
         status: reqwest::StatusCode,
         user_id: Uuid,

@@ -315,7 +315,7 @@ impl Database {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("failed to load relationships for {kind} {id} [{location:?}]")]
+#[error("failed to load relationships for {kind} {id} [{location}]")]
 pub struct RelationSummariesError {
     kind: ResourceKind,
     id: Uuid,
@@ -328,7 +328,7 @@ pub struct RelationSummariesError {
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum FollowError {
     #[context(constructor = "new")]
-    #[error("failed to follow {relation:?} from {kind} {id} while {operation} [{location:?}]")]
+    #[error("failed to follow {relation:?} from {kind} {id} while {operation} [{location}]")]
     Operation {
         kind: ResourceKind,
         id: Uuid,
@@ -339,14 +339,14 @@ pub enum FollowError {
         #[source]
         source: BoxError,
     },
-    #[error("relation {relation:?} cannot be followed from {kind} [{location:?}]")]
+    #[error("relation {relation:?} cannot be followed from {kind} [{location}]")]
     RelationSourceMismatch {
         relation: Relation,
         kind: ResourceKind,
         #[location]
         location: Location,
     },
-    #[error("{kind} {id} was not found [{location:?}]")]
+    #[error("{kind} {id} was not found [{location}]")]
     SourceNotFound {
         kind: ResourceKind,
         id: Uuid,
@@ -356,7 +356,7 @@ pub enum FollowError {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("failed to check whether {kind} {id} exists [{location:?}]")]
+#[error("failed to check whether {kind} {id} exists [{location}]")]
 struct ResourceExistsError {
     kind: ResourceKind,
     id: Uuid,

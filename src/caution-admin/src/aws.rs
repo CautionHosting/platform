@@ -367,7 +367,7 @@ pub async fn load_snapshot(database: &Database) -> Result<AwsSnapshot, LoadSnaps
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum LoadSnapshotError {
-    #[error("failed to load Platform state for the AWS snapshot [{location:?}]")]
+    #[error("failed to load Platform state for the AWS snapshot [{location}]")]
     Database {
         #[location]
         location: Location,
@@ -401,14 +401,14 @@ async fn fetch_identity(client: &StsClient) -> Result<AccountIdentity, FetchIden
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum FetchIdentityError {
-    #[error("failed to identify the AWS caller [{location:?}]")]
+    #[error("failed to identify the AWS caller [{location}]")]
     Request {
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("AWS did not return an account ID [{location:?}]")]
+    #[error("AWS did not return an account ID [{location}]")]
     MissingAccount {
         #[location]
         location: Location,

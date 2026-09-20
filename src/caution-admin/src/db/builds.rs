@@ -100,7 +100,7 @@ impl BuildRow {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("failed to list builds for app {app_id} while {operation} [{location:?}]")]
+#[error("failed to list builds for app {app_id} while {operation} [{location}]")]
 pub(crate) struct ListBuildsError {
     app_id: Uuid,
     operation: &'static str,
@@ -111,7 +111,7 @@ pub(crate) struct ListBuildsError {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("failed to show build {build_id} for app {app_id} while {operation} [{location:?}]")]
+#[error("failed to show build {build_id} for app {app_id} while {operation} [{location}]")]
 pub(crate) struct ShowBuildError {
     app_id: Uuid,
     build_id: Uuid,

@@ -418,7 +418,7 @@ fn validate_page(limit: u32) -> Result<(), ValidatePageError> {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("failed to establish a read-only PostgreSQL session while {operation} [{location:?}]")]
+#[error("failed to establish a read-only PostgreSQL session while {operation} [{location}]")]
 pub struct ConnectReadOnlyError {
     operation: &'static str,
     #[location]
@@ -429,7 +429,7 @@ pub struct ConnectReadOnlyError {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("resource search failed while {operation} [{location:?}]")]
+#[error("resource search failed while {operation} [{location}]")]
 pub struct SearchError {
     operation: &'static str,
     #[location]
@@ -439,7 +439,7 @@ pub struct SearchError {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("failed to list {kind} resources while {operation} [{location:?}]")]
+#[error("failed to list {kind} resources while {operation} [{location}]")]
 pub struct ListError {
     kind: ResourceKind,
     operation: &'static str,
@@ -450,7 +450,7 @@ pub struct ListError {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("failed to show {kind} {id} [{location:?}]")]
+#[error("failed to show {kind} {id} [{location}]")]
 pub struct ShowError {
     kind: ResourceKind,
     id: Uuid,
@@ -461,7 +461,7 @@ pub struct ShowError {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("failed to load user {id} while {operation} [{location:?}]")]
+#[error("failed to load user {id} while {operation} [{location}]")]
 struct ShowUserError {
     id: Uuid,
     operation: &'static str,
@@ -473,7 +473,7 @@ struct ShowUserError {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("failed to load organization {id} while {operation} [{location:?}]")]
+#[error("failed to load organization {id} while {operation} [{location}]")]
 struct ShowOrganizationError {
     id: Uuid,
     operation: &'static str,
@@ -485,7 +485,7 @@ struct ShowOrganizationError {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("failed to load app {id} while {operation} [{location:?}]")]
+#[error("failed to load app {id} while {operation} [{location}]")]
 struct ShowAppError {
     id: Uuid,
     operation: &'static str,
@@ -497,13 +497,13 @@ struct ShowAppError {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("search requires at least two characters or an exact UUID [{location:?}]")]
+#[error("search requires at least two characters or an exact UUID [{location}]")]
 struct SearchParametersError {
     location: Location,
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("limit must be between 1 and {max}, got {limit} [{location:?}]")]
+#[error("limit must be between 1 and {max}, got {limit} [{location}]")]
 struct ValidatePageError {
     limit: u32,
     max: u32,
