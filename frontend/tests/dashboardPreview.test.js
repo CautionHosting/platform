@@ -167,3 +167,13 @@ test('non-protected asset requests still fall through to vite', () => {
   assert.equal(resolveDashboardPreviewRequest('GET', '/src/main.js'), null)
   assert.equal(resolveDashboardPreviewRequest('GET', '/favicon.ico'), null)
 })
+
+
+test('creation preview exposes member choices but still blocks generation', () => {
+  const members = parse(resolveDashboardPreviewRequest('GET', '/api/quorum-bundles/participants'))
+  assert.equal(members[0].pgp_keys.length, 1)
+  assert.equal(members[0].webauthn_credentials, 2)
+  assert.equal(members[1].pgp_keys.length, 0)
+  assert.equal(members[2].webauthn_credentials, 0)
+  assert.equal(resolveDashboardPreviewRequest('POST', '/api/quorum-bundles/from-org-users').status, 405)
+})
