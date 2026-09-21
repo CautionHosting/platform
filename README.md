@@ -379,16 +379,20 @@ Elastic IP tagged to that app. Redeployment is not required.
 
 ## Reference
 
-### API build dependencies
+### Service build dependencies
 
-The API image fetches locked Cargo dependencies before compiling with
+Every service image (api, gateway, email-service, metering, cli,
+drift-detector) fetches locked Cargo dependencies before compiling with
 `--frozen` and `--network=none`. Git dependencies are retained in the fetch
 layer, rather than a mutable BuildKit cache, so the compile step has the exact
 fetched revisions. Registry and compilation caches remain enabled.
 
+Cargo resolves the whole workspace even when only one binary is built, so every
+image needs the git checkouts, not just the API.
+
 If an older build fails with `can't checkout ... offline mode (--frozen)` after
-a successful fetch, update to the corrected Containerfile and rerun
-`make build-api`. Do not remove the frozen/offline compilation checks.
+a successful fetch, update to the corrected Containerfile and rerun that
+service's build target. Do not remove the frozen/offline compilation checks.
 
 ### Limitations
 
