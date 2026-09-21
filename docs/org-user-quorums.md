@@ -6,7 +6,7 @@ services and independent trust files are configured. WebAuthn/mixed recovery now
 uses the custody enclave with native or browser passkey approval; see
 [share recovery](share-recovery.md) for configuration and the pending Nitro gate.
 
-Hosted creation is CLI → Platform → certificate service (Caution holders only)
+Hosted creation is CLI/dashboard → Platform → certificate service (Caution holders only)
 → Keymaker. Platform snapshots registered credentials in credential-ID order and
 obtains one verified derived certificate per Caution holder. Multiple passkeys
 still represent one share. Mixed keyrings retain participant order, the service's
@@ -162,6 +162,84 @@ outside a project, in addition to always saving `.caution/quorum-bundle.json` an
 its accepted PCR policy. Interactive terminals show only a saved-file confirmation.
 Status messages go to stderr. Files are saved before optional Platform upload, so
 an upload failure does not require generating another bundle.
+
+## Dashboard creation
+
+Open **Secrets → Create quorum bundle**. The two steps are **Configure** and
+**Review & create**, each in one compact card with its actions in the footer.
+Select organization members and optionally use **Add PGP holder** below the member
+list to include external holders in the same bundle. The optional name is editable
+later; labels remain in the existing bundle management controls.
+
+For organization members, the UI shows registered PGP keys and passkey counts.
+Selecting a member opts into the displayed sole recovery method; when both are
+available, choose explicitly. A key selector appears only when several PGP keys
+exist; the selected full fingerprint is displayed beneath the custody controls. Members with no credentials cannot be selected. Multiple passkeys still
+count as one holder/share. Caution-backed private keys stay in enclave custody;
+passkeys authorize recovery. Credentials are snapshotted at creation. Expand
+**About passkey custody** for this explanation when passkey holders are selected.
+
+For each external holder, choose **Add PGP holder**, upload or paste one armored
+public certificate, then choose **Add holder**. Review its user ID and full
+fingerprint; each manual holder can be removed independently. Multi-certificate
+keyrings must be split into individual public certificates before adding them.
+Cancel clears only the import draft; existing selections remain. Finish or cancel
+an open import before reviewing the bundle.
+
+Parsing happens locally with lazy-loaded OpenPGP.js. Private packets, malformed
+input, duplicate selected fingerprints and inputs over 512 KiB are rejected before
+submission. The final signed request is limited to 1 MiB. Dashboard creation is
+limited to **10 holders total**, combining members and manual PGP holders; CLI/API
+limits remain unchanged. Browser parsing does not replace backend cryptographic
+eligibility or independence checks. Imported certificates are not registered as
+organization-member keys and use external PGP custody.
+
+The dashboard **Quorum threshold** starts at **2**, independently of the CLI default. Set
+it explicitly between 1 and the selected holder count. The Holders heading initially
+shows **No holders selected · Max 10** and the threshold input is disabled. Its count
+updates as holders are selected; the threshold row shows quorum counts only when valid. Removing a holder never
+silently lowers the threshold. Review shows exactly the holder choices and
+threshold that will be sent. Review consolidates the name, quorum and nonzero custody
+totals in its header, followed by holder details and full PGP fingerprints.
+**Create bundle** uses the requester's existing
+WebAuthn signed-request flow; it does not collect the holders' recovery approvals.
+The API still performs proof verification and stores the complete bundle.
+
+Editing/navigation and duplicate clicks are blocked during signing/generation.
+Signing cancellation sends no creation request. A generation timeout, lost
+connection or ambiguous server failure may mean creation completed remotely:
+use **Check bundles** before attempting another generation. There are no automatic
+retries; a new attempt requires returning through review. A successful response
+opens the created bundle in the list, with existing downloads available. The UI
+clears its keyring input on exit and does not persist creation drafts locally.
+
+No new roles, endpoints or wire formats are introduced. The existing desktop
+access gate remains; holder rows stack at narrower supported dashboard widths.
+The development preview provides member choices but continues to block mutations.
+
+Validation commands (from `frontend/`):
+
+```sh
+npm test
+npm run build
+npm run test:quorum-browser
+```
+
+The browser harness uses `tests/e2e/browser-authenticator`'s Puppeteer dependency.
+Install its Chromium or set `PUPPETEER_EXECUTABLE_PATH` to a local Chrome binary.
+Optional `QUORUM_SCREENSHOT_DIR` saves UI screenshots. The harness exercises the
+actual dashboard, verifies virtual-authenticator signatures against the exact
+request body, and mocks the API/key services. It is not live Nitro acceptance.
+
+Local UI validation (2026-09-21): 113 frontend tests and the production build
+passed. The browser harness passed member/mixed and keyring creation, file/paste
+import, private-key rejection, signed-body verification, cancellation, duplicate
+submission protection, uncertain outcomes, downloads, focus and light/dark
+layouts. Compact-layout checks additionally cover Configure, import and Review in
+both themes, long holder names, full fingerprints, the custody disclosure and
+narrow holder rows. These results cover this UI worktree, not a deployed revision.
+
+## Dashboard bundle management
 
 The dashboard's **Download bundle** action exports the complete stored
 bundle, including its proof envelope and credential bindings, without Platform's

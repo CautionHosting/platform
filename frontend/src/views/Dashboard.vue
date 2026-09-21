@@ -1291,21 +1291,27 @@ make build-cli
     </div>
 
     <!-- Secrets Tab -->
-    <div v-if="activeTab === 'keys'" class="content-card content-card--dashboard-tab">
+    <QuorumBundleCreate v-if="activeTab === 'keys' && creatingBundle"
+      :fetch-members="fetchQuorumMembers" :submit="submitQuorumBundle"
+      @cancel="closeBundleCreation" @check-bundles="checkCreatedBundles"
+      @created="quorumBundleCreated" @busy="bundleCreationBusy = $event" />
+    <div v-if="activeTab === 'keys' && !creatingBundle" class="content-card content-card--dashboard-tab">
       <div class="content-header">
         <div class="content-header-text">
           <h2 class="content-header-title">Secrets <span v-if="!loadingBundles" class="bundle-count">{{ quorumBundles.length }} bundles</span></h2>
-          <p class="content-header-description">Quorum bundles and their holders. Create with <code>caution secret init</code>.</p>
+          <p class="content-header-description">Quorum bundles and their holders.</p>
         </div>
+        <button ref="createBundleButton" class="btn-primary" @click="creatingBundle = true">Create quorum bundle</button>
       </div>
       <div class="items-list">
         <div v-if="loadingBundles" class="loading">Loading bundles...</div>
         <div v-else-if="quorumBundles.length === 0" class="list-item-empty dashboard-tab-empty">
-          <p class="list-item-empty-copy">No secret bundles yet. Create one with <code>caution secret init</code>.</p>
+          <p class="list-item-empty-copy">No secret bundles yet.</p>
+          <button class="btn-primary" @click="creatingBundle = true">Create quorum bundle</button>
         </div>
         <div v-else class="bundle-list">
           <div class="bundle-columns" aria-hidden="true"><span>Bundle</span><span>Quorum</span><span>Custody</span><span>Actions</span></div>
-          <div v-for="bundle in quorumBundles" :key="bundle.id" class="bundle-card">
+          <div v-for="bundle in quorumBundles" :id="`bundle-${bundle.id}`" :key="bundle.id" class="bundle-card" :class="{ 'bundle-card--created': createdBundleId === bundle.id }" tabindex="-1">
             <div class="bundle-row">
               <div class="bundle-identity">
                 <button class="bundle-toggle" :aria-label="`${expandedBundles[bundle.id] ? 'Collapse' : 'Expand'} ${bundleTitle(bundle)}`" :aria-expanded="!!expandedBundles[bundle.id]" :aria-controls="`bundle-details-${bundle.id}`" @click="expandedBundles[bundle.id] = !expandedBundles[bundle.id]">
@@ -2066,6 +2072,8 @@ make build-cli
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import DashboardLayout from "../components/DashboardLayout.vue";
 import AttestationModal from "../components/AttestationModal.vue";
+import QuorumBundleCreate from "../components/QuorumBundleCreate.vue";
+import { createBundleSubmitter } from "../utils/quorumCreation.js";
 import { authFetch } from "../composables/useWebAuthn.js";
 import {
   getAppEstimatedMonthlyCost,
@@ -2131,6 +2139,7 @@ export default {
   components: {
     DashboardLayout,
     AttestationModal,
+    QuorumBundleCreate,
   },
   setup(props) {
     const DASHBOARD_TAB_HASHES = {
@@ -2436,6 +2445,40 @@ export default {
     const newCredIsDefault = ref(false);
 
     // Quorum bundles state
+    const creatingBundle = ref(false);
+    const bundleCreationBusy = ref(false);
+    const createdBundleId = ref(null);
+    const createBundleButton = ref(null);
+    const submitQuorumBundle = createBundleSubmitter({
+      sign: (...args) => buildSignedHeaders(...args), fetch: authFetch,
+    });
+    const fetchQuorumMembers = async () => {
+      const response = await authFetch("/api/quorum-bundles/participants");
+      if (!response.ok) throw new Error(await readResponseError(response, "Unable to load organization members."));
+      return response.json();
+    };
+    const closeBundleCreation = async () => {
+      if (bundleCreationBusy.value) return;
+      creatingBundle.value = false;
+      await nextTick();
+      createBundleButton.value?.focus();
+    };
+    const checkCreatedBundles = async () => {
+      await closeBundleCreation();
+      await loadBundles();
+    };
+    const quorumBundleCreated = async (bundle) => {
+      bundleCreationBusy.value = false;
+      creatingBundle.value = false;
+      createdBundleId.value = bundle.id;
+      quorumBundles.value = [bundle, ...quorumBundles.value.filter(existing => existing.id !== bundle.id)];
+      expandedBundles.value[bundle.id] = true;
+      showToast("Quorum bundle created");
+      await loadBundles();
+      await nextTick();
+      document.getElementById(`bundle-${bundle.id}`)?.focus();
+    };
+    watch(activeTab, tab => { if (tab !== 'keys' && !bundleCreationBusy.value) creatingBundle.value = false; });
     const expandedBundles = ref({});
     const revealedBundleValues = ref({});
     const bundleMenu = ref(null);
@@ -4711,6 +4754,10 @@ export default {
     };
 
     const logout = async () => {
+      if (bundleCreationBusy.value) {
+        showToast("Wait for the bundle creation result before logging out.", 'error');
+        return;
+      }
       try {
         const response = await authFetch('/auth/logout', { method: 'POST' });
         if (!response.ok) {
@@ -4790,6 +4837,11 @@ export default {
     };
 
     const handleTabChange = (newTab, options = {}) => {
+      if (bundleCreationBusy.value) {
+        showToast("Wait for the bundle creation result before leaving Secrets.", 'error');
+        syncDashboardLocation(activeTab.value, { replace: true });
+        return;
+      }
       const normalizedTab = Object.prototype.hasOwnProperty.call(DASHBOARD_TAB_HASHES, newTab)
         ? newTab
         : "apps";
@@ -5230,6 +5282,8 @@ export default {
     });
 
     return {
+      creatingBundle, bundleCreationBusy, createdBundleId, createBundleButton,
+      submitQuorumBundle, fetchQuorumMembers, closeBundleCreation, checkCreatedBundles, quorumBundleCreated,
       error,
       activeTab,
       pageTitle,
@@ -7428,6 +7482,7 @@ export default {
 }
 
 /* Compact quorum bundle list */
+.bundle-card--created { outline: 2px solid var(--theme-brand); outline-offset: 2px; }
 .bundle-count {
   font-size: .85rem;
   font-weight: 400;

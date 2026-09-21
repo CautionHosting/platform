@@ -371,6 +371,11 @@ export const resolveDashboardPreviewRequest = (input, rawUrl) => {
   if (path === '/pgp-keys') return jsonResponse(200, previewPgpKeys)
   if (path === '/api/credentials') return jsonResponse(200, previewCredentials)
   if (path === '/api/quorum-bundles') return jsonResponse(200, previewBundles)
+  if (path === '/api/quorum-bundles/participants') return jsonResponse(200, [
+    { user_id: '11111111-1111-4111-8111-111111111111', username: 'preview-operator', pgp_keys: [{ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', fingerprint: previewPgpKeys.keys[0].fingerprint, public_key: '' }], webauthn_credentials: 2 },
+    { user_id: '22222222-2222-4222-8222-222222222222', username: 'preview-dev', pgp_keys: [], webauthn_credentials: 1 },
+    { user_id: '33333333-3333-4333-8333-333333333333', username: 'preview-ineligible', pgp_keys: [], webauthn_credentials: 0 },
+  ])
   if (path === '/api/organizations') return jsonResponse(200, previewOrganizations)
   if (path === `/api/organizations/${organizationId}/settings`) return jsonResponse(200, previewOrgSettings)
   if (path === `/api/organizations/${organizationId}/members`) return jsonResponse(200, previewMembers)
