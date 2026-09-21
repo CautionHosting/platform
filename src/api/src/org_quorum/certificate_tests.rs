@@ -41,11 +41,21 @@ fn certificate(ca: &Cert, index: usize, org: [u8; 16], bundle: [u8; 16], mode: &
         .unwrap();
     let flags = NotationDataFlags::empty().set_human_readable();
     let mut builder = SignatureBuilder::new(SignatureType::PositiveCertification)
-        .set_notation(ORG_NOTATION, hex::encode(org), flags.clone(), true)
+        .set_notation(
+            ORG_NOTATION,
+            hex::encode(org),
+            flags.clone(),
+            !matches!(mode, "noncritical-org" | "noncritical-both"),
+        )
         .unwrap();
     if mode != "missing" {
         builder = builder
-            .set_notation(BUNDLE_NOTATION, hex::encode(bundle), flags.clone(), true)
+            .set_notation(
+                BUNDLE_NOTATION,
+                hex::encode(bundle),
+                flags.clone(),
+                !matches!(mode, "noncritical-bundle" | "noncritical-both"),
+            )
             .unwrap();
     }
     if mode == "duplicate" {
@@ -89,6 +99,106 @@ fn data(certificates: Vec<String>) -> PublicCertificateBundle {
         bundle_id: [2; 16],
         certificates,
     })
+}
+
+#[test]
+fn v1_contract_fixtures_match_hashes_and_certified_identity() {
+    use keymaker_models::generate_quorum as quorum;
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/v1-contract.json"
+    )))
+    .unwrap();
+    assert_eq!(fixture["fixture_version"], 1);
+    let certificates = &fixture["public_certificates"];
+    let data: PublicCertificateBundle =
+        serde_json::from_value(certificates["data"].clone()).unwrap();
+    assert_eq!(
+        hex::encode(serde_cbor::to_vec(&data).unwrap()),
+        certificates["cbor_hex"]
+    );
+    let hash = bundle_hash(&data).unwrap();
+    assert_eq!(hex::encode(&hash), certificates["sha256"]);
+    assert!(certificates["proof_nonce"].is_null());
+
+    let anchor = Cert::from_bytes(fixture["public_ca"].as_str().unwrap().as_bytes()).unwrap();
+    assert!(!anchor.is_tsk());
+    let seconds = fixture["verification_time_unix_seconds"].as_u64().unwrap();
+    let at = SystemTime::UNIX_EPOCH + Duration::from_secs(seconds);
+    let org: [u8; 16] =
+        serde_json::from_value(fixture["expected_context"]["organization_id"].clone()).unwrap();
+    let id: [u8; 16] =
+        serde_json::from_value(fixture["expected_context"]["bundle_id"].clone()).unwrap();
+    // These real service-issued fixtures have one-day validity. Freeze both
+    // proof verification and admission eligibility, including validate_keyring.
+    let (actual_id, certs) = verify_certificates_with_eligibility_time(
+        data.clone(),
+        org,
+        NonZeroU8::new(2).unwrap(),
+        &anchor,
+        at,
+        Some(at),
+    )
+    .unwrap();
+    assert_eq!(actual_id, id);
+    assert_eq!(certs, data.clone().to_latest().certificates);
+    // A valid historical proof must not waive current admission eligibility.
+    let after_expiry = at + Duration::from_secs(2 * 86400);
+    assert!(
+        verify_certificates_with_eligibility_time(
+            data,
+            org,
+            NonZeroU8::new(2).unwrap(),
+            &anchor,
+            at,
+            Some(after_expiry),
+        )
+        .is_err()
+    );
+
+    let q = &fixture["quorum"];
+    let quorum_data: quorum::GenerateQuorumBundle =
+        serde_json::from_value(q["data"].clone()).unwrap();
+    let canonical = serde_cbor::value::to_value(&quorum_data).unwrap();
+    assert_eq!(
+        hex::encode(serde_cbor::to_vec(&canonical).unwrap()),
+        q["cbor_hex"]
+    );
+    let quorum_hash = quorum::deterministic_bundle_hash(&quorum_data).unwrap();
+    assert_eq!(hex::encode(&quorum_hash), q["sha256"]);
+    let nonce = quorum::deterministic_necroproof_nonce(&quorum_hash).unwrap();
+    assert_eq!(hex::encode(&nonce), q["proof_nonce_hex"]);
+    assert_ne!(nonce, hash);
+
+    // Schema rejection is independent of attestation verification. No synthetic
+    // evidence here claims to exercise AWS signatures or production PCRs.
+    assert!(
+        serde_json::from_value::<PublicCertificateResponse>(serde_json::json!({
+            "data": q["data"], "necroproof": [1]
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<quorum::GenerateQuorumResponse>(serde_json::json!({
+            "data": certificates["data"], "necroproof": [1]
+        }))
+        .is_err()
+    );
+    let payload = |hash| {
+        Value::Map(
+            [
+                (
+                    Value::Text("timestamp".into()),
+                    Value::Integer(i128::from(seconds) * 1000),
+                ),
+                (Value::Text("user_data".into()), Value::Bytes(hash)),
+            ]
+            .into_iter()
+            .collect(),
+        )
+    };
+    assert_eq!(verify_payload(payload(hash.clone()), &hash).unwrap(), at);
+    assert!(verify_payload(payload(quorum_hash), &hash).is_err());
 }
 
 #[test]
@@ -147,6 +257,9 @@ fn accepts_ca_certified_ordered_context_and_rejects_substitutions() {
         ([1; 16], [2; 16], 0, "duplicate"),
         ([1; 16], [2; 16], 0, "bad-signature"),
         ([1; 16], [2; 16], 0, "unhashed"),
+        ([1; 16], [2; 16], 0, "noncritical-org"),
+        ([1; 16], [2; 16], 0, "noncritical-bundle"),
+        ([1; 16], [2; 16], 0, "noncritical-both"),
     ] {
         let bundle = data(vec![certificate(&ca, index, org, id, mode)]);
         assert!(

@@ -101,12 +101,15 @@ the public key; dashboard compatibility does not add legacy cryptographic verifi
 ## Trust and service configuration
 
 Platform requires `KEYMAKER_URL` and `KEYMAKER_PCR_POLICY_PATH`. WebAuthn/mixed creation additionally requires `PUBLIC_CERTIFICATE_SERVICE_URL`,
-`PUBLIC_CERTIFICATE_PCR_POLICY_PATH` and `CAUTION_CA_CERT_PATH`. PGP-only creation
+`PUBLIC_CERTIFICATE_PCR_POLICY_PATH`, `CAUTION_CA_CERT_PATH` and backend-only
+`PUBLIC_CERTIFICATE_SERVICE_TOKEN` (32 random bytes encoded as 64 hex characters). PGP-only creation
 does not require certificate-service configuration.
 Store `certificate-pcr-policy.json` and the public `caution-ca.asc` alongside the
 Keymaker policy in `~/.config/caution/policies/`; the existing `/run/config`
-read-only mount exposes them to the API. Set the three certificate-service
-variables in `env.example`. Obtain both the service PCRs and Caution CA independently;
+read-only mount exposes them to the API. Set the certificate-service variables in `env.example`. The token must match the
+custody service vault secret. It is sent only to `/v1/public-certificates`, over
+HTTPS, without redirects; do not expose it in frontend configuration or logs.
+Loopback HTTP requires the explicit unsafe E2E build and runtime flag. Obtain both the service PCRs and Caution CA independently;
 neither is learned from a service response. Missing configuration only fails
 Caution-backed creation; PGP creation and unrelated operations remain available.
 
@@ -114,7 +117,7 @@ Platform verifies the AWS proof at its signed timestamp with an absent/null nonc
 checks the generation-time PCR cutoff and binds `user_data` to SHA-256 of the
 service's exact CBOR-serialized response data. This serialization differs from
 Keymaker's canonical-map hash. It checks organization/count, then each certificate's
-CA-certified `Caution public certificate index=N` user ID and exactly one hashed
+CA-certified `Caution public certificate index=N` user ID and exactly one critical, hashed
 organization/bundle notation. The index is in the user ID, not a separate notation.
 It also checks certificate eligibility and duplicate recipients before Keymaker.
 Historical proof verification establishes provenance, not fresh holder approval or
@@ -244,12 +247,13 @@ The shared models and loader are pinned to the Locksmith revision recorded in
 `Cargo.toml` and `Cargo.lock`. All Bootproof SDK consumers use the historical
 verification revision `821b5c63e80f082f6d67ba3695c11416933489ec`, including the existing
 ES384 encoding fix. No old-remote patch or local path dependency is required.
-The default Locksmith daemon revision is also `4851791bda5f8f392f88e474ed5731b287ecd4bc`,
+The default Locksmith daemon revision is also `2da3be50bebd2dfdc4d0d3a94d05f55be02e910c`,
 matching the API/CLI loader. `LOCKSMITH_COMMIT` still overrides this default.
 The standalone mock E2E helper uses the same revision. This revision includes
-holder-identity checks during shard submission and shared-signing-key rejection
-in Keymaker. `LOCKSMITH_COMMIT` selects the deployed daemon only; it does not
-override the API/CLI Cargo dependencies. Keep both pins aligned when upgrading.
+holder-identity checks during shard submission, certified release indices, and
+shared signing/encryption key rejection between holders in Keymaker. Equivalent
+encryption subkeys within one holder are allowed. `LOCKSMITH_COMMIT` selects the
+deployed daemon only; it does not override the API/CLI Cargo dependencies. Keep both pins aligned when upgrading.
 Existing deployed images require a rebuild/redeployment to use it. Legacy
 bundle fallback remains unimplemented.
 

@@ -314,6 +314,7 @@ fn unique_certificates(certificates: &[String]) -> Result<(), InitError> {
         }
         let mut policy = StandardPolicy::new();
         policy.good_critical_notations(&["organization-id@caution.co", "bundle-id@caution.co"]);
+        let mut holder_encryption_keys = HashSet::new();
         for key in cert
             .keys()
             .with_policy(&policy, None)
@@ -322,7 +323,16 @@ fn unique_certificates(certificates: &[String]) -> Result<(), InitError> {
             .for_storage_encryption()
         {
             // Fingerprints include creation time, so compare the key material itself.
-            if !encryption_keys.insert(key.key().mpis().clone()) {
+            // KDF parameters do not change the private scalar that can decrypt.
+            let mut identity = key.key().mpis().clone();
+            if let sequoia_openpgp::crypto::mpi::PublicKey::ECDH { hash, sym, .. } = &mut identity {
+                *hash = sequoia_openpgp::types::HashAlgorithm::SHA256;
+                *sym = sequoia_openpgp::types::SymmetricAlgorithm::AES256;
+            }
+            holder_encryption_keys.insert(identity);
+        }
+        for identity in holder_encryption_keys {
+            if !encryption_keys.insert(identity) {
                 return Err(InitError::invalid(
                     "holders must not share an encryption key",
                 ));

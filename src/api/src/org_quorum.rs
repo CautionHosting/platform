@@ -245,6 +245,7 @@ fn validate_keyring(keyring: &[Key], at: Option<SystemTime>) -> Result<(), OrgQu
         }
         let mut policy = StandardPolicy::new();
         policy.good_critical_notations(&["organization-id@caution.co", "bundle-id@caution.co"]);
+        let mut holder_encryption_keys = HashSet::new();
         for key in cert
             .keys()
             .with_policy(&policy, at)
@@ -253,7 +254,16 @@ fn validate_keyring(keyring: &[Key], at: Option<SystemTime>) -> Result<(), OrgQu
             .for_storage_encryption()
         {
             // Fingerprints include creation time, so compare the key material itself.
-            if !encryption_keys.insert(key.key().mpis().clone()) {
+            // KDF parameters do not change the private scalar that can decrypt.
+            let mut identity = key.key().mpis().clone();
+            if let sequoia_openpgp::crypto::mpi::PublicKey::ECDH { hash, sym, .. } = &mut identity {
+                *hash = sequoia_openpgp::types::HashAlgorithm::SHA256;
+                *sym = sequoia_openpgp::types::SymmetricAlgorithm::AES256;
+            }
+            holder_encryption_keys.insert(identity);
+        }
+        for identity in holder_encryption_keys {
+            if !encryption_keys.insert(identity) {
                 return Err(OrgQuorumError::invalid(
                     "holders must not share an encryption key",
                 ));
@@ -391,21 +401,22 @@ async fn post<T: Serialize, R: serde::de::DeserializeOwned>(
     url: &str,
     body: &T,
 ) -> Result<R, OrgQuorumError> {
-    let response = client
-        .post(url)
-        .json(body)
-        .send()
-        .await
-        .map_err(|source| OrgQuorumError {
-            status: if source.is_timeout() {
-                StatusCode::GATEWAY_TIMEOUT
-            } else {
-                StatusCode::BAD_GATEWAY
-            },
-            message: "key-service request failed; generation was not retried",
-            location: std::panic::Location::caller(),
-            source: Some(source.into()),
-        })?;
+    send(client.post(url).json(body)).await
+}
+
+async fn send<R: serde::de::DeserializeOwned>(
+    request: reqwest::RequestBuilder,
+) -> Result<R, OrgQuorumError> {
+    let response = request.send().await.map_err(|source| OrgQuorumError {
+        status: if source.is_timeout() {
+            StatusCode::GATEWAY_TIMEOUT
+        } else {
+            StatusCode::BAD_GATEWAY
+        },
+        message: "key-service request failed; generation was not retried",
+        location: std::panic::Location::caller(),
+        source: Some(source.into()),
+    })?;
     if !response.status().is_success() {
         let status = match response.status().as_u16() {
             429 => StatusCode::TOO_MANY_REQUESTS,
