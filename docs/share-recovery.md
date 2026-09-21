@@ -1,10 +1,44 @@
 # WebAuthn and mixed share recovery
 
-Shared Rust dependencies select Locksmith `cd0f5fd44e252114c3bd160edd84c119b99263d0`,
-including the external-PGP signing hash fallback. Rebuild/install the CLI to use
-this fix with existing bundles. The enclave runtime pin remains `4851791bda5f8f392f88e474ed5731b287ecd4bc`;
-this client-side fix does not require a service redeployment. The new dependency
-revision is local until explicitly published; remote builds require publication.
+For deployment order, Caution custody responsibilities and application setup, see
+the [secrets operator runbook](secrets-operations.md).
+
+The local V1 contract patch requires exactly one critical, hashed organization
+notation and one critical, hashed bundle notation in the trusted CA certification.
+The certificate index remains in the CA-certified canonical UID, independently of
+holder position. This explicitly replaces the original all-fields-in-self-notations
+proposal. Issuance already produces this profile; nonconforming certificates that
+previously passed verification will be rejected. No wire format or hash changes.
+The patch is not yet published/deployed: shipping requires a published Locksmith
+revision, aligned Platform dependency/mock/runtime pins and updated verified PCRs.
+
+`tests/fixtures/v1-contract.json` is byte-identical to Locksmith's fixture. It pins
+certificate-service typed-CBOR and Keymaker canonical-map bytes/hashes, Keymaker's
+nonce, and public service-issued certificate identities at a fixed verification
+time. These local compatibility checks contain no real Nitro evidence. The
+shared contract is maintained in Locksmith's `docs/v1-contract.md`.
+
+The service-issued fixture certificates expire one day after generation. API
+fixture tests explicitly freeze both proof time and every admission-eligibility
+check, including keyring validation; they also assert rejection after expiry.
+Production admission still uses the wall clock. The frozen fixture bytes/hashes
+are unchanged by this test-clock fix.
+
+Local validation on 21 September: seven API certificate tests passed with the local
+Locksmith patch in a temporary workspace; the source checkout's pins and lockfile
+are unchanged. Locksmith models (6), library (40, one PTY-driver test ignored) and
+service (19) tests passed. Synthetic release tests (12) and the actual custody
+HTTP/destination test passed, including mixed/WebAuthn-only recovery. The fixture
+file SHA-256 is `82e74d053976b47edba6e4f11b143c3184bc422c67b3a16c3599bee924e0403a`.
+This is not fresh real-Nitro, physical-device or deployment evidence.
+
+Shared Rust dependencies and the default enclave runtime select Locksmith
+`2da3be50bebd2dfdc4d0d3a94d05f55be02e910c`, including certified release indices,
+ECDH identity checks between holders, and the smartcard PIN prompt fixes.
+Rebuild/install the CLI to use its fixes with existing bundles. Rebuild/redeploy
+enclave images to update their daemon; `LOCKSMITH_COMMIT` overrides that default
+and must be reviewed when upgrading. Service deployment and trusted PCR-policy
+updates remain separate, as described below.
 
 Create with explicit per-holder custody:
 
@@ -44,6 +78,35 @@ registered Platform origin; the passkey must already be in the bundle snapshot.
 Native approval requires USB FIDO2 user verification (PIN/biometric), not touch
 alone. External PGP holders may contribute to mixed bundles using `--keyring`
 or their supported OpenPGP smartcard.
+
+Smartcard recovery shows three operations: **[1/3] Decrypt bundle metadata**,
+**[2/3] Decrypt your share**, and **[3/3] Sign the encrypted submission**. Each PIN
+and touch instruction explains its operation. Interactive PIN entry is hidden and
+inline, preserving the application, holder, destination and completed steps.
+Ctrl-C cancels and restores terminal input settings. PINs are not cached: three
+card operations remain. Explicit headless/noninteractive handling is unchanged.
+Step completion does not mean acceptance; wait for the destination's acknowledgement.
+
+Local validation against the pinned revision: 38 Locksmith and 169 CLI tests
+passed; API/gateway compilation passed. Three pseudo-terminal scenarios passed:
+successful hidden input, cancellation, and PIN-format retry exhaustion, each
+checking retained output and restored terminal settings. Physical YubiKey
+acceptance is separate: confirm the three labelled operations and final receiver
+response, and that cancelling a PIN prompt prevents later operations/submission.
+
+`send-shard` checks live destination attestation against
+`.caution/trusted_hashes.json` before showing the interactive holder chooser or
+requesting a smartcard/passkey. This extra connection has a 30-second budget and
+sends no share. The actual release still verifies a fresh, nonce-bound attestation
+on its own submission connection. Noninteractive invocations validate holder
+selection first so missing or invalid `--holder` arguments remain actionable.
+
+A **destination PCR mismatch** concerns the application, not the custody service's
+`--recryptor-pcr-policy`. No share is sent. If the deployment changed intentionally,
+complete `caution verify` from the intended application checkout, then retry;
+do not copy measurements from the failing endpoint into the trusted policy.
+Connection and invalid-attestation failures are reported separately. Rebuild/install
+the CLI for this preflight; no service redeployment or bundle change is needed.
 
 The distinct browser relay transports a raw assertion. Gateway login is not
 permission to release. The custody enclave verifies the assertion, consumes its
@@ -299,3 +362,77 @@ sends the session to a different server, or prompts for login just to retrieve n
 Metadata requests reject redirects rather than forwarding the session.
 Unverified inspection skips all metadata lookup. Inspection also skips irrelevant
 USB/FIDO2 dependency diagnostics; existing environment warnings remain unchanged.
+
+## Public-service hardening
+
+Certificate issuance now requires backend-only `PUBLIC_CERTIFICATE_SERVICE_TOKEN`,
+shared with the custody enclave through `env::vault`. The encrypted token replaces
+the dummy `CERTIFICATE_BOOTSTRAP` marker in the deployment example. Keep the same
+root quorum and CA; update packaging/startup/preflight together before deployment.
+Platform sends the token only to the HTTPS certificate endpoint, without redirects.
+The TLS terminator is trusted with that credential; attestation response verification
+does not hide the token from it. PGP-only creation does not require the token.
+
+The custody service caches readiness for two seconds, coalesces health refreshes,
+and admits four blocking release workers with a 60-second request budget. Workers
+retain permits through actual completion, including after timeout or disconnect.
+Sessions retain their three-minute expiry and global 64 limit, plus eight per
+authenticated organization/bundle; preparation retains the reservation. Overload
+returns 503. Release routes remain public and require the existing WebAuthn
+authorization to release a share. These bounds do not guarantee availability under
+sustained flooding.
+
+See Locksmith's `docs/service-hardening.md` for exact token provisioning, deployment,
+PCR-policy updates and manual acceptance commands. See
+[the validation record](service-hardening-validation.md) for local test evidence.
+
+## Recipient identity and approval retries
+
+API and CLI holder validation compare ECDH recipients by curve and public point,
+independently of their KDF hash and cipher. Equivalent encryption subkeys within
+one holder are allowed; normalized identities must be unique between holders.
+Keymaker must enforce the same check before generation. Different KDF parameters do not provide independent encryption
+secrets. These checks preserve the original certificates and encryption parameters.
+Existing bundles with shared encryption material remain weak after upgrading;
+assess them separately before migrating their secrets to a new quorum.
+
+Browser release status polls run every two seconds. HTTP 429 responses retain the
+same approval token and back off for 4, 8, then at most 16 seconds between retries.
+A successful pending response restores the two-second interval. The existing
+180-second recovery timeout, destination-disconnect handling, and cancellation
+still apply. Other errors remain terminal; begin and completion requests are not
+retried. The gateway's shared auth budget is unchanged.
+
+The corresponding Locksmith service fix reads a holder's derivation index from
+its verified CA certification, independently of its position in the quorum. This
+supports previously generated subset/reordered bundles without modifying their
+proof-bound contents. Rebuild Keymaker and the certificate service from the fixed
+Locksmith source and establish their trusted PCR policies when deploying. Shared
+Rust dependency and default enclave-daemon pins select the fixed revision;
+rebuilding only Platform does not update those services. Native PIN cancellation
+is separate work.
+
+Focused checks (use the documented host native-library configuration):
+
+```sh
+cargo test --locked -p api org_quorum::
+cargo test --locked -p cli --lib quorum_init::tests
+cargo test --locked -p cli --lib share_release::
+cargo test --locked -p enclave-builder --lib
+cargo check --locked --manifest-path tests/e2e/soft-authenticator/Cargo.toml
+```
+
+The polling suite uses local HTTP servers and the actual gateway rate limiter;
+its two-client test runs for just over a minute. These are local/synthetic checks,
+not live Nitro validation. Ignored database and hosted-metadata tests retain their
+separate harness requirements.
+
+Validation on 2026-09-19 against Locksmith `2da3be50`: API quorum checks passed
+(20; one database test ignored), CLI quorum-init checks passed (24), CLI recovery
+checks passed (26; one hosted metadata test ignored), enclave-builder tests passed
+(95), and the standalone soft-authenticator passed `cargo check`. This includes
+the capped-backoff sequence and concurrent approvals through the real gateway
+middleware.
+
+The quorum checks include equivalent subkeys within one holder, coexistence with
+an independent holder, and cross-holder collision rejection in both orders.

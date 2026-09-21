@@ -1320,7 +1320,7 @@ dependencies = [
 [[package]]
 name = "public-certificate-models"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=4851791bda5f8f392f88e474ed5731b287ecd4bc#4851791bda5f8f392f88e474ed5731b287ecd4bc"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=2da3be50bebd2dfdc4d0d3a94d05f55be02e910c#2da3be50bebd2dfdc4d0d3a94d05f55be02e910c"
 dependencies = [
  "serde",
 ]

@@ -80,6 +80,7 @@ GATEWAY_URL="http://localhost:$(cat "$WORK/gateway.port")"
 KEYMAKER_BACKEND_URL="http://127.0.0.1:$(cat "$WORK/keymaker.port")"
 KEYMAKER_URL="http://127.0.0.1:$(cat "$WORK/proxy.port")"
 PUBLIC_CERTIFICATE_SERVICE_URL="http://127.0.0.1:$(cat "$WORK/certificate.port")"
+export PUBLIC_CERTIFICATE_SERVICE_TOKEN=$(printf 'ab%.0s' {1..32})
 "$CARGO_TARGET_DIR/debug/certificate-mock" "$WORK" > "$WORK/certificate.log" 2>&1 &
 PIDS="$PIDS $!"
 # Test-only intermediary: change the request before the actual local Keymaker sees it.
@@ -94,6 +95,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args): pass
     def do_GET(self): self.forward(None)
     def do_POST(self):
+        assert self.headers.get("Authorization") is None, "issuance token leaked to Keymaker"
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         with (work / 'keymaker-requests.jsonl').open('a') as log: log.write(json.dumps(body) + '\n')
         if (work / 'downgrade-threshold').exists(): body['threshold'] = 1
@@ -124,6 +126,7 @@ COMMON=(env -i "PATH=$PATH" "ENVIRONMENT=test" "AWS_EC2_METADATA_DISABLED=true" 
     "CAUTION_DATA_DIR=$WORK/data" "CAUTION_UNSAFE_KEY_SERVICE_E2E=1"
     "KEYMAKER_URL=$KEYMAKER_URL" "KEYMAKER_PCR_POLICY_PATH=$WORK/policies/keymaker-pcr-policy.json"
     "PUBLIC_CERTIFICATE_SERVICE_URL=$PUBLIC_CERTIFICATE_SERVICE_URL"
+    "PUBLIC_CERTIFICATE_SERVICE_TOKEN=$PUBLIC_CERTIFICATE_SERVICE_TOKEN"
     "PUBLIC_CERTIFICATE_PCR_POLICY_PATH=$WORK/policies/certificate-pcr-policy.json"
     "CAUTION_CA_CERT_PATH=$WORK/policies/caution-ca.asc")
 cd "$WORK"

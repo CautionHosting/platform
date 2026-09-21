@@ -46,12 +46,12 @@ pub(super) async fn derive(
             organization_id: *org_id.as_bytes(),
             certificate_count: count,
         });
-    let response: PublicCertificateResponse = post(
-        client,
-        &[url.trim_end_matches('/'), "/v1/public-certificates"].concat(),
-        &request,
-    )
-    .await?;
+    let token = configured("PUBLIC_CERTIFICATE_SERVICE_TOKEN")?;
+    let endpoint = [url.trim_end_matches('/'), "/v1/public-certificates"].concat();
+    let local_test = cfg!(feature = "e2e-testing-unsafe")
+        && std::env::var("CAUTION_UNSAFE_KEY_SERVICE_E2E").as_deref() == Ok("1");
+    let response: PublicCertificateResponse =
+        send(issuance_request(client, &endpoint, &token, local_test)?.json(&request)).await?;
     let at = verify_proof(&response, &policy)?;
     verify_certificates(response.data, *org_id.as_bytes(), count, &ca, at)
 }
@@ -141,6 +141,19 @@ fn verify_certificates(
     ca: &Cert,
     at: SystemTime,
 ) -> Result<([u8; 16], Vec<String>), OrgQuorumError> {
+    verify_certificates_with_eligibility_time(data, organization_id, count, ca, at, None)
+}
+
+// Keep admission eligibility separate from authenticated proof time. Production
+// uses the wall clock (None); historical contract fixtures provide a fixed clock.
+fn verify_certificates_with_eligibility_time(
+    data: PublicCertificateBundle,
+    organization_id: [u8; 16],
+    count: NonZeroU8,
+    ca: &Cert,
+    at: SystemTime,
+    eligibility_at: Option<SystemTime>,
+) -> Result<([u8; 16], Vec<String>), OrgQuorumError> {
     let bundle = data.to_latest();
     if bundle.organization_id != organization_id
         || bundle.certificates.len() != usize::from(count.get())
@@ -158,7 +171,7 @@ fn verify_certificates(
     let org = hex::encode(organization_id);
     let id = hex::encode(bundle.bundle_id);
     for (index, armored) in bundle.certificates.iter().enumerate() {
-        let cert = eligible_certificate(armored, None).with_context(Ctx::new(
+        let cert = eligible_certificate(armored, eligibility_at).with_context(Ctx::new(
             StatusCode::BAD_GATEWAY,
             "ineligible derived holder certificate",
         ))?;
@@ -192,12 +205,18 @@ fn verify_certificates(
                 (BUNDLE_NOTATION, id.as_bytes()),
             ] {
                 let values: Vec<_> = signature
-                    .notation_data()
-                    .filter(|n| n.name() == name)
+                    .hashed_area()
+                    .iter()
+                    .filter_map(|packet| match packet.value() {
+                        SubpacketValue::NotationData(n) if n.name() == name => {
+                            Some((packet.critical(), n.value()))
+                        }
+                        _ => None,
+                    })
                     .collect();
-                if values.len() != 1 || values[0].value() != expected {
+                if values.as_slice() != [(true, expected)] {
                     return Err(rejected(
-                        "Caution CA certification has missing, duplicate or mismatched context",
+                        "Caution CA certification has missing, duplicate, noncritical or mismatched context",
                     ));
                 }
             }
@@ -208,7 +227,7 @@ fn verify_certificates(
         .iter()
         .map(|cert| Key::OpenPGP { cert: cert.clone() })
         .collect();
-    validate_keyring(&keys, None).with_context(Ctx::new(
+    validate_keyring(&keys, eligibility_at).with_context(Ctx::new(
         StatusCode::BAD_GATEWAY,
         "duplicate derived recipients",
     ))?;
@@ -218,3 +237,91 @@ fn verify_certificates(
 #[cfg(test)]
 #[path = "certificate_tests.rs"]
 mod tests;
+
+// The shared HTTP client also calls Keymaker: never install this as a default header.
+fn issuance_request(
+    client: &reqwest::Client,
+    endpoint: &str,
+    token: &str,
+    local_test: bool,
+) -> Result<reqwest::RequestBuilder, OrgQuorumError> {
+    let url = reqwest::Url::parse(endpoint).with_context(Ctx::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "invalid certificate-service URL",
+    ))?;
+    let loopback = url.host_str().is_some_and(|host| {
+        host == "localhost"
+            || host
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    });
+    if !(url.scheme() == "https" || (local_test && url.scheme() == "http" && loopback))
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(OrgQuorumError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "certificate issuance requires HTTPS",
+        ));
+    }
+    if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(OrgQuorumError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "certificate-service token must be 32 random bytes encoded as hex",
+        ));
+    }
+    let mut header = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+        .with_context(Ctx::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "invalid certificate-service token",
+        ))?;
+    header.set_sensitive(true);
+    Ok(client
+        .post(url)
+        .header(reqwest::header::AUTHORIZATION, header))
+}
+
+#[cfg(test)]
+mod issuance_tests {
+    use super::*;
+    #[test]
+    fn issuance_token_is_scoped_sensitive_and_requires_secure_transport() {
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let token = "ab".repeat(32);
+        let request = issuance_request(
+            &client,
+            "https://cert.example/v1/public-certificates",
+            &token,
+            false,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let auth = &request.headers()[reqwest::header::AUTHORIZATION];
+        assert_eq!(auth.to_str().unwrap(), format!("Bearer {token}"));
+        assert!(auth.is_sensitive());
+        assert!(
+            !client
+                .post("https://keymaker.example")
+                .build()
+                .unwrap()
+                .headers()
+                .contains_key(reqwest::header::AUTHORIZATION)
+        );
+        for endpoint in [
+            "http://cert.example",
+            "http://127.0.0.1",
+            "https://user:password@cert.example",
+        ] {
+            assert!(issuance_request(&client, endpoint, &token, false).is_err());
+        }
+        assert!(issuance_request(&client, "http://127.0.0.1", &token, true).is_ok());
+        assert!(issuance_request(&client, "http://cert.example", &token, true).is_err());
+        assert!(issuance_request(&client, "https://cert.example", "", false).is_err());
+        assert!(issuance_request(&client, "https://cert.example", "short", false).is_err());
+    }
+}

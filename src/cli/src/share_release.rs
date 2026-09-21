@@ -252,6 +252,10 @@ async fn post<T: Serialize, R: DeserializeOwned>(
         .send()
         .await
         .with_context(Ctx::new("release request failed"))?;
+    decode_response(response).await
+}
+
+async fn decode_response<R: DeserializeOwned>(response: reqwest::Response) -> Result<R, InitError> {
     let mut response = response.error_for_status().with_context(Ctx::new(
         "release request rejected; retry starts a fresh challenge",
     ))?;
@@ -274,6 +278,7 @@ async fn post<T: Serialize, R: DeserializeOwned>(
     }
     serde_json::from_slice(&bytes).with_context(Ctx::new("invalid release response"))
 }
+
 /// Display metadata is never an input to release authorization.
 pub(crate) struct ReleaseSummary {
     pub application_id: String,
@@ -374,25 +379,11 @@ async fn browser_assertion(
         "Approve on your phone or open in your browser: {}", terminal_label(url)
     ));
     output::status(comparison_block(&prepared.data)?);
-    let result = async {
-        loop {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            let result: Value = post(
-                &client.client,
-                &format!("{}/auth/qr-release/status", client.base_url),
-                &json!({"token":token}),
-            )
-            .await?;
-            match result["status"].as_str() {
-                Some("pending") => {}
-                Some("complete") => {
-                    return serde_json::from_value(result["assertion"].clone())
-                        .with_context(Ctx::new("browser assertion"));
-                }
-                _ => return Err(InitError::invalid("release approval cancelled")),
-            }
-        }
-    }
+    let result = poll_browser_assertion(
+        &client.client,
+        &format!("{}/auth/qr-release/status", client.base_url),
+        token,
+    )
     .await;
     let _ = client
         .client
@@ -402,6 +393,42 @@ async fn browser_assertion(
         .await;
     result
 }
+// Only a rejected status poll is safe to retry: a successful poll consumes the assertion.
+async fn poll_browser_assertion(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+) -> Result<webauthn_rs_proto::PublicKeyCredential, InitError> {
+    let normal = Duration::from_secs(2);
+    let mut delay = normal;
+    loop {
+        tokio::time::sleep(delay).await;
+        let response = client
+            .post(url)
+            .json(&json!({"token": token}))
+            .send()
+            .await
+            .with_context(Ctx::new("release status request failed"))?;
+        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            delay = (delay * 2).min(Duration::from_secs(16));
+            continue;
+        }
+        let result: Value = decode_response(response).await?;
+        match result["status"].as_str() {
+            Some("pending") => delay = normal,
+            Some("complete") => {
+                return serde_json::from_value(result["assertion"].clone())
+                    .with_context(Ctx::new("browser assertion"));
+            }
+            _ => return Err(InitError::invalid("release approval cancelled")),
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "share_release/poll_tests.rs"]
+mod poll_tests;
+
 pub(crate) async fn recover(
     client: &ApiClient,
     options: &Options,

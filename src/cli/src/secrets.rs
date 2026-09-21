@@ -3,7 +3,7 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
@@ -1602,6 +1602,34 @@ pub enum SendShardError {
         source: BoxError,
     },
 
+    #[error("Could not obtain destination attestation from {address}. No share was sent; check that the app is awaiting recovery and port 49504 is reachable (30-second connection/response timeout) [{location:?}]")]
+    DestinationAttestation {
+        address: std::net::SocketAddr,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Destination attestation verification failed at {address} against .caution/trusted_hashes.json. No share was sent [{location:?}]")]
+    DestinationVerification {
+        address: std::net::SocketAddr,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Destination PCR mismatch ({pcr}) at {address}: the app does not match .caution/trusted_hashes.json. No share was sent. If you intended to change the deployment, complete `caution verify` from the intended app checkout before retrying. --recryptor-pcr-policy verifies the custody service, not this app [{location:?}]")]
+    DestinationPcrMismatch {
+        address: std::net::SocketAddr,
+        pcr: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
     #[error("Connection closed during share recovery; share acceptance was not confirmed. The application may already be unlocked; check its status before retrying [{location:?}]")]
     ConnectionClosed {
         #[location]
@@ -1660,6 +1688,48 @@ fn share_acceptance_message(remaining: u8) -> String {
         1 => "Share accepted. 1 more share required.".to_owned(),
         n => format!("Share accepted. {n} more shares required."),
     }
+}
+
+fn verify_destination_attestation(
+    address: std::net::SocketAddr,
+    attestation: Vec<u8>,
+    pcrs: std::collections::HashMap<u8, Vec<u8>>,
+    nonce: &[u8],
+    now: std::time::Duration,
+) -> Result<(), SendShardError> {
+    use bootproof_sdk::format::{Error, VerifiableSignedAttestationFormat, nitro::Nitro};
+    // Use the same live verifier as the external-PGP transport. The real release
+    // still verifies its own fresh nonce and destination key on its own connection.
+    Nitro::new(attestation, pcrs)
+        .and_then(|proof| proof.verify(now, &nonce))
+        .map(|_| ())
+        .map_err(|source| match &source {
+            Error::InvalidAAD(pcr) if matches!(pcr.as_ref(), "pcr 0" | "pcr 1" | "pcr 2") => {
+                SendShardError::DestinationPcrMismatch {
+                    address, pcr: pcr.to_string(),
+                    location: std::panic::Location::caller(), source: Box::new(source),
+                }
+            }
+            _ => SendShardError::DestinationVerification {
+                address, location: std::panic::Location::caller(), source: Box::new(source),
+            },
+        })
+}
+
+async fn preflight_destination(
+    address: std::net::SocketAddr,
+    pcrs: &std::collections::HashMap<u8, Vec<u8>>,
+) -> Result<(), SendShardError> {
+    use SendShardErrorCtx as Ctx;
+    let nonce = locksmith::release::random_nonce();
+    let destination = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        locksmith::release::crypto::Destination::connect(address, nonce.clone()),
+    ).await.with_context(Ctx::destination_attestation(address))?
+        .with_context(Ctx::destination_attestation(address))?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .with_context(Ctx::destination_verification(address))?;
+    verify_destination_attestation(address, destination.attestation, pcrs.clone(), nonce.as_bytes(), now)
 }
 
 /// Send a shard to a running enclave's locksmith daemon.
@@ -1808,15 +1878,22 @@ pub async fn send_shard(
     let proof: serde_json::Value = serde_json::from_str(&bundle_text).with_context(Ctx::parse_bundle())?;
     let names = crate::share_release::holder_names(client, &proof).await;
     let keys = &bundle.clone().to_latest().keyring;
-    let (holder, webauthn) = crate::share_release::select_holder(keys, release_options.holder.as_deref(), private_keyring.as_deref(), &names)
-        .with_context(Ctx::select_holder())?;
-    let holder_display = crate::share_release::holder_label(keys, &holder, webauthn, &names);
-    output::verbose(client.verbose, format!("Holder certificate: {holder}"));
-
     let address_str = format!("{}:49504", public_ip);
     let address: std::net::SocketAddr = address_str
         .parse()
         .with_context(Ctx::invalid_address(&address_str))?;
+
+    let select_holder = || crate::share_release::select_holder(keys, release_options.holder.as_deref(), private_keyring.as_deref(), &names)
+        .with_context(Ctx::select_holder());
+    // Preserve useful offline input errors in scripts, but never prompt before
+    // checking the destination. Neither branch accesses a smartcard or passkey.
+    let selected = if std::io::stdin().is_terminal() { None } else { Some(select_holder()?) };
+    output::status(format!("Checking destination attestation at {address} against .caution/trusted_hashes.json…"));
+    preflight_destination(address, &pcrs).await?;
+    output::status("Destination attestation verified. Release will verify a fresh connection again.");
+    let (holder, webauthn) = match selected { Some(holder) => holder, None => select_holder()? };
+    let holder_display = crate::share_release::holder_label(keys, &holder, webauthn, &names);
+    output::verbose(client.verbose, format!("Holder certificate: {holder}"));
 
     let latest = bundle.clone().to_latest();
     let summary = crate::share_release::ReleaseSummary {
@@ -1870,6 +1947,48 @@ pub async fn send_shard(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn destination_preflight_distinguishes_pcr_mismatch_from_invalid_evidence() {
+        let proof = include_bytes!("../tests/data/aws-test.cbor").to_vec();
+        let pcr01 = hex::decode("ef093e4c1fd13878956589833c0e396b935cdf5ae45c1cc595e1a19a6da5812850f0ef3e77df918cb2a86d88ddf9cc03").unwrap();
+        let pcr2 = hex::decode("21b9efbc184807662e966d34f390821309eeac6802309798826296bf3e8bec7c10edb30948c90ba67310f7b964fc500a").unwrap();
+        let pcrs = std::collections::HashMap::from([(0, pcr01.clone()), (1, pcr01), (2, pcr2)]);
+        let nonce = hex::decode("d041b23bce8678bbc7c174bd8494c4f9759386eec963ec69bfd45c1452b10636").unwrap();
+        let now = std::time::Duration::from_millis(1766509563435);
+        let address = "127.0.0.1:49504".parse().unwrap();
+        assert!(super::verify_destination_attestation(address, proof.clone(), pcrs.clone(), &nonce, now).is_ok());
+        for pcr in 0..=2 {
+            let mut wrong = pcrs.clone();
+            wrong.insert(pcr, vec![0xff; 48]);
+            let error = super::verify_destination_attestation(address, proof.clone(), wrong, &nonce, now).unwrap_err();
+            assert!(matches!(&error, super::SendShardError::DestinationPcrMismatch { pcr: name, .. } if name == &format!("pcr {pcr}")));
+            let message = error.to_string();
+            assert!(message.contains(".caution/trusted_hashes.json"));
+            assert!(message.contains("No share was sent"));
+            assert!(message.contains("caution verify"));
+        }
+        let wrong_nonce = super::verify_destination_attestation(address, proof, pcrs.clone(), &[1; 32], now).unwrap_err();
+        assert!(matches!(wrong_nonce, super::SendShardError::DestinationVerification { .. }));
+        let malformed = super::verify_destination_attestation(address, vec![0; 64], pcrs, &nonce, now).unwrap_err();
+        assert!(matches!(malformed, super::SendShardError::DestinationVerification { .. }));
+    }
+
+    #[tokio::test]
+    async fn destination_preflight_eof_is_not_ambiguous_share_acceptance() {
+        use tokio::io::AsyncReadExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let receiver = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = [0; 4096];
+            assert!(stream.read(&mut bytes).await.unwrap() > 0);
+        });
+        let error = super::preflight_destination(address, &Default::default()).await.unwrap_err();
+        assert!(matches!(error, super::SendShardError::DestinationAttestation { .. }));
+        assert!(error.to_string().contains("No share was sent"));
+        receiver.await.unwrap();
+    }
+
     #[test]
     fn share_results_distinguish_acceptance_from_reconstruction() {
         assert_eq!(super::share_acceptance_message(0), "Quorum reconstructed successfully.");

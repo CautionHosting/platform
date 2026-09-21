@@ -77,6 +77,7 @@ fn serve(mut stream: TcpStream, work: &Path, ca: &Cert, wrong_ca: &Cert) -> Resu
     let mut first = String::new();
     reader.read_line(&mut first)?;
     let mut length = 0;
+    let mut authorization = String::new();
     loop {
         let mut line = String::new();
         reader.read_line(&mut line)?;
@@ -84,6 +85,9 @@ fn serve(mut stream: TcpStream, work: &Path, ca: &Cert, wrong_ca: &Cert) -> Resu
             break;
         }
         if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("authorization") {
+                authorization = value.trim().to_owned();
+            }
             if name.eq_ignore_ascii_case("content-length") {
                 length = value.trim().parse()?;
             }
@@ -101,6 +105,13 @@ fn serve(mut stream: TcpStream, work: &Path, ca: &Cert, wrong_ca: &Cert) -> Resu
             200,
             serde_json::json!({"id":"quorum-test", "state":"running", "provider_resource_id":"test", "public_ip":"127.0.0.1"}),
         )
+    } else if authorization
+        != format!(
+            "Bearer {}",
+            std::env::var("PUBLIC_CERTIFICATE_SERVICE_TOKEN")?
+        )
+    {
+        (401, serde_json::json!({"error":"unauthorized"}))
     } else {
         ensure!(
             first.starts_with("POST /v1/public-certificates "),
