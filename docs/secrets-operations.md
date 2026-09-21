@@ -107,6 +107,24 @@ recryptor policy; the live custody policy has one non-expiring PCR0/1/2 set.
 
 ## 4. Application owner and holders: deploy a secret
 
+**Dashboard alternative:** in **Secrets → Create quorum bundle**, choose
+organization members (PGP/passkey/mixed), optionally adding external holders with
+**Add PGP holder** one public certificate at a time. Both types can coexist, up to
+10 holders total in the dashboard (CLI/API limits are unchanged). Set the **Quorum
+threshold**, initially 2, between 1 and the selected holder count; review and
+authorize creation with your passkey. Download the complete
+bundle JSON and place it at `.caution/quorum-bundle.json` in the initialized app
+checkout, alongside the independently verified `.caution/keymaker-pcr-policy.json`.
+Continue below at `caution secret encrypt`; do not generate a second bundle.
+The new bundle opens at the top of the searchable list with **Use this bundle**
+guidance: download, policy prerequisites, a copyable encryption example and links
+to packaging and holder approvals. Reopen that disclosure on any existing bundle.
+It is guidance only; it does not track deployment or recovery completion.
+The dashboard only creates the bundle; encryption, image packaging, deployment
+and holder recovery still follow the CLI steps below. On an uncertain creation
+result, use **Check bundles** before a new attempt. See
+[dashboard creation](org-user-quorums.md#dashboard-creation) for limits and details.
+
 In an initialized application checkout, register the holders' PGP keys/passkeys
 with Platform first. This example selects two organization users and requires both:
 
