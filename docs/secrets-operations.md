@@ -116,6 +116,10 @@ authorize creation with your passkey. Download the complete
 bundle JSON and place it at `.caution/quorum-bundle.json` in the initialized app
 checkout, alongside the independently verified `.caution/keymaker-pcr-policy.json`.
 Continue below at `caution secret encrypt`; do not generate a second bundle.
+The new bundle opens at the top of the searchable list with **Use this bundle**
+guidance: download, policy prerequisites, a copyable encryption example and links
+to packaging and holder approvals. Reopen that disclosure on any existing bundle.
+It is guidance only; it does not track deployment or recovery completion.
 The dashboard only creates the bundle; encryption, image packaging, deployment
 and holder recovery still follow the CLI steps below. On an uncertain creation
 result, use **Check bundles** before a new attempt. See

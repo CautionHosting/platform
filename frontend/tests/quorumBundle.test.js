@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { compile } from 'vue'
 import { parse } from 'vue/compiler-sfc'
-import { getQuorumBundleFiles, getQuorumBundleSummary, serializeQuorumBundle, getEmbeddedBundleId, bundleTitle, bundleIdentifiers, abbreviateBundleValue } from '../src/utils/quorumBundle.js'
+import { getQuorumBundleFiles, getQuorumBundleSummary, serializeQuorumBundle, getEmbeddedBundleId, bundleTitle, bundleIdentifiers, abbreviateBundleValue, selectBundles } from '../src/utils/quorumBundle.js'
 
 const dashboard = readFileSync(new URL('../src/views/Dashboard.vue', import.meta.url), 'utf8')
 const { descriptor } = parse(dashboard)
@@ -23,13 +23,13 @@ const compiledDetails = compileSection('bundle-details')
 const compiledActions = compileSection('bundle-actions')
 const defaults = {
   getQuorumBundleSummary, getQuorumBundleFiles, serializeQuorumBundle, bundleTitle, bundleIdentifiers, abbreviateBundleValue,
-  expandedBundles: new Proxy({}, { get: () => true }), revealedBundleValues: {},
+  expandedBundles: new Proxy({}, { get: () => true }), bundleGuidance: {}, bundleEncryptCommand: "caution secret encrypt DATABASE_URL --env-file /private/path/app.env",
    truncateId: id => id, addingLabelTo: null, bundleKeyHashes: {}, handleBundleMenuSelection() {}, toggleBundleMenu() {},
   deletingBundle: null, startAddLabel() {}, copyToClipboard() {},
 }
 const renderDetails = context => compiledDetails({ ...defaults, ...context }, [])
-const renderActions = context => compiledActions({ ...defaults, bundleMenu: context.bundle.id + ':downloads', ...context }, [])
-const downloadButtons = node => buttons(node).filter(b => !b.props?.['aria-label'])
+const renderActions = context => compiledActions({ ...defaults, bundleMenu: context.bundle.id + ':actions', ...context }, [])
+const downloadButtons = node => buttons(node).filter(b => ['bundle-download', 'bundle-file-download'].includes(b.props?.class))
 function buttons(node) {
   if (node?.type === 'button') return [node]
   return Array.isArray(node?.children) ? node.children.flatMap(buttons) : []
@@ -102,9 +102,9 @@ test('a shard-only bundle keeps its shard download', () => {
  test('summary counts holders, not credentials, and leaves unknown legacy metadata absent', () => {
   const keyring = [{ OpenPGP: { cert: publicKey } }, { WebAuthn: { cert: publicKey, credential: ['one', 'two'] } }]
   const bundle = { data: { data: { version: 'V1', threshold: 2, max: 2, keyring }, necroproof: [1] } }
-  assert.deepEqual(getQuorumBundleSummary(bundle), { threshold: '2 of 2 holders', custody: '1 PGP · 1 passkey-backed' })
+  assert.deepEqual(getQuorumBundleSummary(bundle), { threshold: '2 of 2 holders', custody: '1 external PGP · 1 passkey' })
   bundle.data.data.keyring = [keyring[1], keyring[1]]
-  assert.equal(getQuorumBundleSummary(bundle).custody, '2 passkey-backed')
+  assert.equal(getQuorumBundleSummary(bundle).custody, '2 passkey')
   assert.deepEqual(getQuorumBundleSummary({ data: { shardfile } }), { threshold: '', custody: '' })
   bundle.data.data.threshold = 3
   assert.equal(getQuorumBundleSummary(bundle).threshold, '')
@@ -130,7 +130,7 @@ test('holder display uses metadata in bundle order without rendering credential 
   assert.ok(!display.includes('HIDDEN-CREDENTIAL'))
 })
 
-test('expanded values copy full fingerprints and hashes and reveal without changing data', () => {
+test('expanded values display and copy full fingerprints and hashes without changing data', () => {
   const fingerprint = '0123456789ABCDEF'.repeat(3)
   const hash = 'abcdef0123456789'.repeat(4)
   const bundle = { id: 'id', holders: [{ fingerprint, custody: 'pgp' }] }
@@ -141,8 +141,8 @@ test('expanded values copy full fingerprints and hashes and reveal without chang
   actions.find(b => b.props?.['aria-label'] === 'Copy certificate fingerprint for holder 1').props.onClick()
   actions.find(b => b.props?.['aria-label'] === 'Copy Public key SHA-256').props.onClick()
   assert.deepEqual(copies, [[fingerprint, 'Certificate fingerprint'], [hash, 'Public key SHA-256']])
-  actions.find(b => b.props?.['aria-label'] === 'Toggle full certificate fingerprint for holder 1').props.onClick()
-  assert.equal(revealedBundleValues['id:0'], true)
+  assert.ok(!actions.some(b => b.props?.['aria-label']?.startsWith('Toggle full')))
+  assert.deepEqual(revealedBundleValues, {})
   assert.equal(renderDetails({ ...context, expandedBundles: {} }).type.toString(), 'Symbol(v-cmt)')
 })
 
@@ -185,3 +185,23 @@ test('embedded identity is shared with CLI and record IDs remain distinct', () =
   assert.deepEqual(copies, [[getEmbeddedBundleId(bundle), 'Bundle ID'], [bundle.bundle_hash, 'Bundle hash'], [bundle.id, 'Platform record ID']]);
   assert.equal(bundleIdentifiers({ id: 'legacy' }).length, 1);
 });
+
+test('bundle search and newest-first ordering preserve source order and retain the new record first', () => {
+  const bundles = [{ id: 'old', name: 'Root', created_at: '2025-01-01' }, { id: 'new', name: 'App', created_at: '2026-01-01' }, { id: 'legacy' }]
+  assert.deepEqual(selectBundles(bundles).map(b => b.id), ['new', 'old', 'legacy'])
+  assert.deepEqual(bundles.map(b => b.id), ['old', 'new', 'legacy'])
+  assert.deepEqual(selectBundles(bundles, ' ROOT ').map(b => b.id), ['old'])
+  assert.deepEqual(selectBundles(bundles, 'legacy').map(b => b.id), ['legacy'])
+  assert.deepEqual(selectBundles(bundles, 'missing'), [])
+  assert.equal(selectBundles(bundles, '', 'old')[0].id, 'old')
+  const embedded = { id: 'record', data: { data: { bundle_id: Array(16).fill(17) } } }
+  assert.deepEqual(selectBundles([embedded], '11111111-1111'), [embedded])
+})
+
+test('usage instructions copy a fixed command without incorporating bundle metadata', () => {
+  const copies = []
+  const bundle = { id: 'id', name: '$(unsafe)', holders: [] }
+  const actions = buttons(renderDetails({ bundle, copyToClipboard: (...args) => copies.push(args) }))
+  actions.find(b => b.props?.['aria-label'] === 'Copy encryption command').props.onClick()
+  assert.deepEqual(copies, [[defaults.bundleEncryptCommand, 'Encryption command']])
+})

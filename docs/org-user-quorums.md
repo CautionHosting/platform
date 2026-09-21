@@ -248,18 +248,30 @@ available. Use the JSON with `caution secret encrypt --bundle FILE`; the CLI sti
 requires the independently established Keymaker PCR policy. Downloading does not
 establish trust or upgrade a legacy bundle format.
 
-Compact bundle rows show the threshold, custody counts, creation date and bundle
-ID. **Download bundle** immediately saves the complete JSON; its adjacent dropdown
-contains available `.asc` alternatives. The overflow menu contains Rename and
-Delete, retaining their existing signed authorization and cancellation behavior.
+Bundles appear newest first, with local search by name or bundle ID. Compact rows
+separate the name and short ID from quorum, custody and creation date. The quiet
+Download action saves the complete JSON; the single overflow menu contains
+public-key/shard-file downloads, Rename and Delete. Signed management and
+cancellation behavior are unchanged.
 
-Rows start collapsed and expand independently to show labels and one entry per
-holder regardless of passkey count. Certificate fingerprints and **Public key
-SHA-256** are abbreviated for display, with controls to reveal or copy the full
-value. Missing legacy metadata shows **Unavailable**. Menus close on selection,
-outside click, Escape or leaving Secrets; Escape returns focus to the trigger.
-The section stacks at narrow widths, although the dashboard's existing mobile
-access gate remains unchanged.
+Rows expand independently. Holder fingerprints appear in full with Copy;
+**Technical details** contains full bundle identifiers and hashes with Copy.
+Missing legacy metadata remains explicit. Names are current registration hints,
+not historical identity. Labels remain editable. Menus close on selection,
+outside click, Escape or leaving Secrets; Escape restores trigger focus.
+Both themes and supported narrow layouts retain the existing mobile access gate.
+
+After confirmed creation, search clears and the new bundle remains first after
+refresh, expanded and focused. Its **Use this bundle** disclosure opens with the
+JSON download, required independently verified Keymaker policy, a fixed copyable
+`caution secret encrypt DATABASE_URL --env-file /private/path/app.env` example,
+and links to encryption/packaging and holder-approval documentation. The sequence
+is download, encrypt, package/deploy, verify, then submit enough distinct holder
+shares. Guidance is available on existing bundles, initially collapsed; disclosure
+state lasts only for the current dashboard session. It does not track deployment
+or approval completion. Uncertain creation retains **Check bundles**, without
+success guidance or an automatic retry. Publish the corresponding public Key
+Services guide update before releasing this UI.
 
 The expandable holder list shows certificate
 fingerprints and current organization usernames only when registrations match

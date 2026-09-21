@@ -26,8 +26,8 @@ export const getQuorumBundleSummary = (bundle) => {
   const custody = Array.isArray(keys) && keys.length && keys.every(key =>
     key && Object.keys(key).length === 1 && (key.OpenPGP || key.WebAuthn))
     ? [
-        [keys.filter(key => key.OpenPGP).length, 'PGP'],
-        [keys.filter(key => key.WebAuthn).length, 'passkey-backed'],
+        [keys.filter(key => key.OpenPGP).length, 'external PGP'],
+        [keys.filter(key => key.WebAuthn).length, 'passkey'],
       ].filter(([count]) => count).map(([count, label]) => `${count} ${label}`).join(' · ')
     : ''
   return {
@@ -55,3 +55,12 @@ export const bundleIdentifiers = (bundle, publicKeyHash) => [
   { label: 'Public key SHA-256', value: publicKeyHash },
   { label: 'Platform record ID', value: bundle.id },
 ].filter(item => typeof item.value === 'string' && item.value)
+
+// Keep API order untouched; missing dates sort last, with stable ties.
+export const selectBundles = (bundles, search = '', createdId = null) => {
+  const query = search.trim().toLowerCase()
+  return bundles.filter(bundle => [bundle.name, getEmbeddedBundleId(bundle), bundle.id]
+    .some(value => typeof value === 'string' && value.toLowerCase().includes(query)))
+    .sort((a, b) => Number(b.id === createdId) - Number(a.id === createdId)
+      || (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0))
+}

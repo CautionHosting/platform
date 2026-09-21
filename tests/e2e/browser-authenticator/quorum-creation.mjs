@@ -21,13 +21,17 @@ const members = [
   { user_id: '44444444-4444-4444-8444-444444444444', username: 'Dan', pgp_keys: [], webauthn_credentials: 0 },
 ]
 const challenges = new Map(), bundles = [], requests = [], serverErrors = [], browserErrors = []
+bundles.push(
+  { id: 'older-record', name: 'Existing application secrets', created_at: '2025-01-01', data: { data: { bundle_id: Array(16).fill(5), threshold: 2, max: 2, keyring: [{ OpenPGP: {} }, { OpenPGP: {} }], public_key: keys[0].publicKey.armor(), shardfile: 'fixture' }, necroproof: [] } },
+  { id: 'legacy-record', name: 'Legacy metadata unavailable', data: { public_key: keys[0].publicKey.armor() } },
+)
 let registration, responseMode = 'ok', participantsFail = false, signCount = 0
 const server = createServer(async (request, response) => {
   const path = new URL(request.url, 'http://localhost').pathname
   const json = (status, data) => { response.writeHead(status, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(data)) }
   try {
     if (path === '/api/quorum-bundles/participants') return participantsFail ? json(503, { error: 'Members temporarily unavailable' }) : json(200, members)
-    if (path === '/api/quorum-bundles') return json(200, bundles)
+    if (path === '/api/quorum-bundles') return json(200, [...bundles].reverse())
     if (path === '/auth/sign-request') {
       let body = ''; for await (const chunk of request) body += chunk
       const input = JSON.parse(body), id = randomBytes(16).toString('hex'), challenge = randomBytes(32).toString('base64url')
@@ -53,7 +57,7 @@ const server = createServer(async (request, response) => {
       if (responseMode === 'uncertain') { response.writeHead(200, { 'Content-Type': 'application/json' }); response.write('{'); setTimeout(() => response.destroy(), 10); return }
       if (responseMode === 'slow') await new Promise(resolve => setTimeout(resolve, 250))
       const holders = input.participants.map(holder => holder.key_source === 'existing_pgp' ? { OpenPGP: { cert: keys[0].publicKey.armor() } } : { WebAuthn: { cert: keys[1].publicKey.armor(), credential: [] } }).concat(input.pgp_certificates.map(cert => ({ OpenPGP: { cert } })))
-      const bundle = { id: `bundle-${requests.length}`, name: input.name, created_at: new Date().toISOString(), data: { data: { version: 'V1', bundle_id: Array(16).fill(requests.length), threshold: input.threshold, max: holders.length, keyring: holders, public_key: keys[0].publicKey.armor(), shardfile: 'synthetic shardfile' }, necroproof: [] }, holders: [] }
+      const bundle = { id: `bundle-${requests.length}`, name: input.name, created_at: new Date().toISOString(), data: { data: { version: 'V1', bundle_id: Array(16).fill(requests.length), threshold: input.threshold, max: holders.length, keyring: holders, public_key: keys[0].publicKey.armor(), shardfile: 'synthetic shardfile' }, necroproof: [] }, holders: holders.map((holder, index) => ({ username: index === 0 ? 'Long-holder-name-with-an-unbroken-organization-suffix-12345678901234567890' : `Holder ${index + 1}`, custody: holder.OpenPGP ? 'pgp' : 'caution_backed', fingerprint: (index ? 'BC' : 'AD').repeat(32) })) }
       bundles.unshift(bundle); return json(200, bundle)
     }
     const fixture = resolveDashboardPreviewRequest(request.method, request.url)
@@ -88,7 +92,7 @@ try {
   const selectMember = async name => { await page.evaluate(name => { const row = [...document.querySelectorAll('.member-row')].find(row => row.querySelector('.member-name strong').textContent.trim() === name); row.querySelector('input').click() }, name) }
   const paste = async armor => { await page.$eval('#quorum-armor', (input, value) => { input.value = value; input.dispatchEvent(new Event('input', { bubbles: true })) }, armor); await button('Add holder') }
   const add = async armor => { await button('Add PGP holder'); await paste(armor); await page.waitForFunction(() => !document.querySelector('#quorum-armor')) }
-  await open()
+  await page.goto(`${origin}/#keys`); await page.reload(); await page.waitForSelector('#bundle-search'); await page.type('#bundle-search', 'older-record'); await button('Create quorum bundle'); await page.waitForSelector('.member-row')
   assert.ok((await page.$eval('.holder-count', el => el.textContent)).includes('No holders selected'))
   assert.equal(await page.$eval('#quorum-threshold', input => input.disabled), true)
   assert.equal(await page.$('.summary'), null)
@@ -121,6 +125,40 @@ try {
   await page.waitForSelector('.bundle-card--created .bundle-details')
   assert.equal(requests.length, 1); assert.equal(requests[0].participants.length, 2); assert.equal(requests[0].pgp_certificates.length, 1); assert.equal(requests[0].allow_caution_backed_keys, true)
   assert.ok(await page.$('.bundle-card--created .bundle-download'))
+  assert.equal(await page.$eval('.bundle-card', el => el.id), 'bundle-bundle-1')
+  assert.equal(await page.$eval('.bundle-guide', el => el.open), true)
+  assert.equal(await page.$eval('#bundle-search', el => el.value), '')
+  await page.waitForFunction(() => document.activeElement.classList.contains('bundle-card'))
+  await page.evaluate(() => { window.copiedCommands = []; Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async text => window.copiedCommands.push(text) } }) })
+  await page.click('[aria-label="Copy encryption command"]')
+  assert.deepEqual(await page.evaluate(() => window.copiedCommands), ['caution secret encrypt DATABASE_URL --env-file /private/path/app.env'])
+  assert.deepEqual(await page.$$eval('.bundle-guide a', links => links.map(a => a.href)), ['https://docs.caution.co/concepts/key-services/#2-add-encrypted-secrets', 'https://docs.caution.co/concepts/key-services/#7-send-shards'])
+  await page.focus('.bundle-guide summary'); await page.keyboard.press('Enter')
+  await page.waitForFunction(() => !document.querySelector('.bundle-guide').open)
+  await page.click('.bundle-toggle'); await page.click('.bundle-toggle')
+  assert.equal(await page.$eval('.bundle-guide', el => el.open), false)
+  await page.click('.bundle-guide summary')
+  await page.click('.bundle-overflow'); await page.keyboard.press('Escape')
+  assert.equal(await page.$('.bundle-menu'), null)
+  assert.equal(await page.evaluate(() => document.activeElement.className), 'bundle-overflow')
+  await page.type('#bundle-search', 'no-such-bundle'); await textIncludes('No matching bundles.')
+  await page.$eval('#bundle-search', el => { el.value = ''; el.dispatchEvent(new Event('input', { bubbles: true })) })
+  await page.waitForSelector('.bundle-card')
+  await page.click('.bundle-technical summary')
+  for (const theme of ['light', 'dark']) {
+    await page.evaluate(theme => document.documentElement.dataset.theme = theme, theme)
+    for (const width of [1580, 1000]) {
+      await page.setViewport({ width, height: 1300 })
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, 'bundle list has no horizontal overflow')
+      assert.equal(await page.$$eval('.bundle-details code', nodes => nodes.some(n => n.scrollWidth > n.clientWidth)), false, 'fingerprints and commands wrap')
+      if (process.env.QUORUM_SCREENSHOT_DIR) await page.screenshot({ path: join(process.env.QUORUM_SCREENSHOT_DIR, `bundles-expanded-${theme}-${width}.png`), fullPage: true })
+      await page.click('.bundle-toggle')
+      if (process.env.QUORUM_SCREENSHOT_DIR) await page.screenshot({ path: join(process.env.QUORUM_SCREENSHOT_DIR, `bundles-collapsed-${theme}-${width}.png`), fullPage: true })
+      await page.click('.bundle-toggle')
+    }
+  }
+  await page.setViewport({ width: 1580, height: 1100 })
+  await page.reload(); await page.waitForSelector('.bundle-toggle'); await page.click('.bundle-toggle'); assert.equal(await page.$eval('.bundle-guide', el => el.open), false, 'existing guidance starts collapsed');
   responseMode = 'ok'
 
   await open(); await selectMember('Chloe')
@@ -184,7 +222,7 @@ try {
     await page.keyboard.press('Enter')
     await new Promise(resolve => setTimeout(resolve, 150))
     assert.equal(requests.length, count)
-    if (mode === 'uncertain') { await button('Check bundles'); await page.waitForSelector('.bundle-list') }
+    if (mode === 'uncertain') { await button('Check bundles'); await page.waitForSelector('.bundle-list'); assert.equal(await page.$('.bundle-card--created'), null); assert.equal(await page.$('.bundle-guide[open]'), null); assert.equal(await page.$eval('.bundle-card', el => el.id), 'bundle-bundle-2') }
   }
   // The dashboard cap combines manual holders and members, without changing API limits.
   members.push(...Array.from({ length: 8 }, (_, index) => ({ user_id: `extra-${index}`, username: `Extra ${index}`, pgp_keys: [], webauthn_credentials: 1 })))

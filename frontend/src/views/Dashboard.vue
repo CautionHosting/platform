@@ -1298,7 +1298,7 @@ make build-cli
     <div v-if="activeTab === 'keys' && !creatingBundle" class="content-card content-card--dashboard-tab">
       <div class="content-header">
         <div class="content-header-text">
-          <h2 class="content-header-title">Secrets <span v-if="!loadingBundles" class="bundle-count">{{ quorumBundles.length }} bundles</span></h2>
+          <h2 class="content-header-title">Secrets <span v-if="!loadingBundles" class="bundle-count">{{ quorumBundles.length }} {{ quorumBundles.length === 1 ? 'bundle' : 'bundles' }}</span></h2>
           <p class="content-header-description">Quorum bundles and their holders.</p>
         </div>
         <button ref="createBundleButton" class="btn-primary" @click="creatingBundle = true">Create quorum bundle</button>
@@ -1309,9 +1309,16 @@ make build-cli
           <p class="list-item-empty-copy">No secret bundles yet.</p>
           <button class="btn-primary" @click="creatingBundle = true">Create quorum bundle</button>
         </div>
-        <div v-else class="bundle-list">
-          <div class="bundle-columns" aria-hidden="true"><span>Bundle</span><span>Quorum</span><span>Custody</span><span>Actions</span></div>
-          <div v-for="bundle in quorumBundles" :id="`bundle-${bundle.id}`" :key="bundle.id" class="bundle-card" :class="{ 'bundle-card--created': createdBundleId === bundle.id }" tabindex="-1">
+        <div v-else class="bundle-browser">
+          <div class="bundle-toolbar">
+            <label for="bundle-search">Search bundles</label>
+            <input id="bundle-search" v-model="bundleSearch" type="search" placeholder="Name or bundle ID" />
+            <span>Newest first</span>
+          </div>
+          <p v-if="!visibleBundles.length" class="bundle-no-results">No matching bundles.</p>
+          <div v-else class="bundle-list">
+          <div class="bundle-columns" aria-hidden="true"><span>Bundle</span><span>Quorum</span><span>Custody</span><span>Created</span><span>Actions</span></div>
+          <div v-for="bundle in visibleBundles" :id="`bundle-${bundle.id}`" :key="bundle.id" class="bundle-card" :class="{ 'bundle-card--created': createdBundleId === bundle.id }" tabindex="-1">
             <div class="bundle-row">
               <div class="bundle-identity">
                 <button class="bundle-toggle" :aria-label="`${expandedBundles[bundle.id] ? 'Collapse' : 'Expand'} ${bundleTitle(bundle)}`" :aria-expanded="!!expandedBundles[bundle.id]" :aria-controls="`bundle-details-${bundle.id}`" @click="expandedBundles[bundle.id] = !expandedBundles[bundle.id]">
@@ -1329,26 +1336,22 @@ make build-cli
                   <button class="btn-sm btn-primary" @click="saveBundleName(bundle.id)">Save</button>
                   <button class="btn-sm btn-secondary" @click="cancelEditBundleName()">Cancel</button>
                 </div>
-                  <div v-else class="bundle-name-display"><span class="item-name">{{ bundleTitle(bundle) }}</span></div>
-                  <div class="bundle-subtitle">{{ formatDate(bundle.created_at) }}</div>
+                  <div v-else class="bundle-name-display"><span class="item-name">{{ bundle.name || 'Unnamed bundle' }}</span><span v-if="createdBundleId === bundle.id" class="bundle-new">New</span></div>
+                  <div class="bundle-subtitle">{{ getEmbeddedBundleId(bundle) ? getEmbeddedBundleId(bundle).slice(0, 8) : `Platform record ${truncateId(bundle.id)}` }}</div>
                 </div>
               </div>
               <div class="bundle-field"><span class="bundle-mobile-label">Quorum</span>{{ getQuorumBundleSummary(bundle).threshold || 'Unavailable' }}</div>
               <div class="bundle-field"><span class="bundle-mobile-label">Custody</span>{{ getQuorumBundleSummary(bundle).custody || 'Unavailable' }}</div>
+              <div class="bundle-field bundle-date"><span class="bundle-mobile-label">Created</span>{{ bundle.created_at ? formatDate(bundle.created_at) : 'Unavailable' }}</div>
               <div class="bundle-actions" @click="handleBundleMenuSelection">
-                <div class="bundle-download-group">
-                  <button v-if="serializeQuorumBundle(bundle)" class="bundle-download" @click="downloadFile(serializeQuorumBundle(bundle), bundle.id + '_quorum-bundle.json', 'application/json')">Download bundle</button>
-                  <div v-if="getQuorumBundleFiles(bundle).publicKey || getQuorumBundleFiles(bundle).shardfile" class="bundle-menu-anchor">
-                    <button class="bundle-download bundle-download-chevron" :aria-label="`Other downloads for ${bundleTitle(bundle)}`" :aria-expanded="bundleMenu === bundle.id + ':downloads'" :aria-controls="`bundle-downloads-${bundle.id}`" @click="toggleBundleMenu(bundle.id + ':downloads', $event)">⌄</button>
-                    <div v-if="bundleMenu === bundle.id + ':downloads'" :id="`bundle-downloads-${bundle.id}`" class="bundle-menu">
-                      <button v-if="getQuorumBundleFiles(bundle).publicKey" @click="downloadFile(getQuorumBundleFiles(bundle).publicKey, truncateId(bundle.id) + '_public_key.asc')">Public key (.asc)</button>
-                      <button v-if="getQuorumBundleFiles(bundle).shardfile" @click="downloadFile(getQuorumBundleFiles(bundle).shardfile, truncateId(bundle.id) + '_shardfile.asc')">Shard file (.asc)</button>
-                    </div>
-                  </div>
-                </div>
+                <button v-if="serializeQuorumBundle(bundle)" class="bundle-download" :aria-label="`Download bundle ${bundleTitle(bundle)}`" title="Download bundle" @click="downloadFile(serializeQuorumBundle(bundle), bundle.id + '_quorum-bundle.json', 'application/json')">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"/></svg>
+                </button>
                 <div class="bundle-menu-anchor">
                   <button class="bundle-overflow" :aria-label="`Actions for ${bundleTitle(bundle)}`" :aria-expanded="bundleMenu === bundle.id + ':actions'" :aria-controls="`bundle-actions-${bundle.id}`" @click="toggleBundleMenu(bundle.id + ':actions', $event)">⋯</button>
                   <div v-if="bundleMenu === bundle.id + ':actions'" :id="`bundle-actions-${bundle.id}`" class="bundle-menu">
+                    <button v-if="getQuorumBundleFiles(bundle).publicKey" class="bundle-file-download" @click="downloadFile(getQuorumBundleFiles(bundle).publicKey, truncateId(bundle.id) + '_public_key.asc')">Public key (.asc)</button>
+                    <button v-if="getQuorumBundleFiles(bundle).shardfile" class="bundle-file-download" @click="downloadFile(getQuorumBundleFiles(bundle).shardfile, truncateId(bundle.id) + '_shardfile.asc')">Shard file (.asc)</button>
                     <button @click="startEditBundleName(bundle)">Rename</button>
                     <button class="bundle-delete" :disabled="deletingBundle === bundle.id" @click="deleteBundle(bundle.id)">{{ deletingBundle === bundle.id ? 'Deleting...' : 'Delete' }}</button>
                   </div>
@@ -1356,28 +1359,42 @@ make build-cli
               </div>
             </div>
             <div v-if="expandedBundles[bundle.id]" class="bundle-details" :id="`bundle-details-${bundle.id}`">
+              <details class="bundle-guide" :open="!!bundleGuidance[bundle.id]" @toggle="bundleGuidance[bundle.id] = $event.target.open">
+                <summary>Use this bundle</summary>
+                <ol>
+                  <li><strong>Download the bundle</strong><p>Save the complete JSON as <code>.caution/quorum-bundle.json</code> in your initialized application checkout. Provide an independently verified Keymaker policy at <code>.caution/keymaker-pcr-policy.json</code>, or set <code>KEYMAKER_PCR_POLICY_PATH</code> to its path.</p>
+                    <button v-if="serializeQuorumBundle(bundle)" class="bundle-guide-download" @click="downloadFile(serializeQuorumBundle(bundle), bundle.id + '_quorum-bundle.json', 'application/json')">Download bundle</button>
+                  </li>
+                  <li><strong>Encrypt secrets</strong><p>Your input file must contain <code>DATABASE_URL</code>. Replace the example path with your private env file.</p>
+                    <div class="bundle-command"><code>{{ bundleEncryptCommand }}</code><button class="bundle-text-button" aria-label="Copy encryption command" @click="copyToClipboard(bundleEncryptCommand, 'Encryption command')">Copy</button></div>
+                    <p>Writes <code>.caution/secrets/DATABASE_URL.asc</code>. Keep plaintext out of Git.</p>
+                    <a href="https://docs.caution.co/concepts/key-services/#2-add-encrypted-secrets" target="_blank" rel="noopener noreferrer">Encryption and packaging guide ↗</a>
+                  </li>
+                  <li><strong>Deploy, verify, then approve</strong><p>Include the bundle, Keymaker policy and encrypted secrets in your application image. After deployment and <code>caution verify</code>, enough distinct holders must submit shares to meet the quorum.</p>
+                    <a href="https://docs.caution.co/concepts/key-services/#7-send-shards" target="_blank" rel="noopener noreferrer">Holder approval instructions ↗</a>
+                  </li>
+                </ol>
+              </details>
               <h3 class="bundle-section-title">Holders</h3>
-              <p class="bundle-registration-note">Names match current organization key registrations.</p>
+              <p class="bundle-registration-note">Names are display hints from current organization key registrations.</p>
               <p v-if="!bundle.holders?.length" class="bundle-label">Unavailable</p>
               <div v-for="(holder, index) in bundle.holders" :key="index" class="bundle-holder">
                 <span class="bundle-holder-name">{{ holder.username || `Holder ${index + 1}` }}</span>
-                <span class="bundle-custody">{{ holder.custody === 'pgp' ? 'PGP' : holder.custody === 'caution_backed' ? 'Passkey-backed' : 'Unknown custody' }}</span>
+                <span class="bundle-custody">{{ holder.custody === 'pgp' ? 'External PGP' : holder.custody === 'caution_backed' ? 'Passkey · Caution custody' : 'Unknown custody' }}</span>
                 <div class="bundle-fingerprint">
-                  <span class="bundle-label">Certificate fingerprint</span>
-                  <code>{{ holder.fingerprint ? (revealedBundleValues[bundle.id + ':' + index] ? holder.fingerprint : abbreviateBundleValue(holder.fingerprint)) : 'Unavailable' }}</code>
+                  <code>{{ holder.fingerprint || 'Fingerprint unavailable' }}</code>
                   <template v-if="holder.fingerprint">
-                    <button class="bundle-text-button" :aria-label="`Toggle full certificate fingerprint for holder ${index + 1}`" :aria-expanded="!!revealedBundleValues[bundle.id + ':' + index]" @click="revealedBundleValues[bundle.id + ':' + index] = !revealedBundleValues[bundle.id + ':' + index]">{{ revealedBundleValues[bundle.id + ':' + index] ? 'Hide' : 'Reveal' }}</button>
                     <button class="bundle-text-button" :aria-label="`Copy certificate fingerprint for holder ${index + 1}`" @click="copyToClipboard(holder.fingerprint, 'Certificate fingerprint')">Copy</button>
                   </template>
                 </div>
               </div>
-              <h3 class="bundle-section-title">Identifiers</h3>
+              <details class="bundle-technical"><summary>Technical details</summary>
               <div v-for="item in bundleIdentifiers(bundle, bundleKeyHashes[bundle.id])" :key="item.label" class="bundle-hash-row">
                 <span class="bundle-label">{{ item.label }}</span>
-                <code>{{ revealedBundleValues[bundle.id + ':' + item.label] ? item.value : abbreviateBundleValue(item.value) }}</code>
-                <button class="bundle-text-button" :aria-label="`Toggle full ${item.label}`" :aria-expanded="!!revealedBundleValues[bundle.id + ':' + item.label]" @click="revealedBundleValues[bundle.id + ':' + item.label] = !revealedBundleValues[bundle.id + ':' + item.label]">{{ revealedBundleValues[bundle.id + ':' + item.label] ? 'Hide' : 'Reveal' }}</button>
+                <code>{{ item.value }}</code>
                 <button class="bundle-text-button" :aria-label="`Copy ${item.label}`" @click="copyToClipboard(item.value, item.label)">Copy</button>
               </div>
+              </details>
             <div class="bundle-labels">
               <span v-for="(v, k) in (bundle.labels || {})" :key="k" class="bundle-label-tag">
                 {{ k }}: {{ v }}
@@ -1392,6 +1409,7 @@ make build-cli
               </span>
             </div>
             </div>
+          </div>
           </div>
         </div>
       </div>
@@ -2094,7 +2112,7 @@ import {
 import { formatLocalDate, formatLocalTime } from "../utils/dateTime.js";
 import { getSubscriptionPlanAction } from "../utils/subscriptionPlan.js";
 import { getCurrentTheme } from "../utils/theme.js";
-import { getQuorumBundleFiles, getQuorumBundleSummary, serializeQuorumBundle, bundleTitle, bundleIdentifiers, abbreviateBundleValue } from "../utils/quorumBundle.js";
+import { getQuorumBundleFiles, getQuorumBundleSummary, serializeQuorumBundle, bundleTitle, bundleIdentifiers, getEmbeddedBundleId, selectBundles } from "../utils/quorumBundle.js";
 
 async function sha256Hex(message) {
   const msgBuffer = new TextEncoder().encode(message);
@@ -2471,6 +2489,8 @@ export default {
       bundleCreationBusy.value = false;
       creatingBundle.value = false;
       createdBundleId.value = bundle.id;
+      bundleSearch.value = "";
+      bundleGuidance.value[bundle.id] = true;
       quorumBundles.value = [bundle, ...quorumBundles.value.filter(existing => existing.id !== bundle.id)];
       expandedBundles.value[bundle.id] = true;
       showToast("Quorum bundle created");
@@ -2480,7 +2500,9 @@ export default {
     };
     watch(activeTab, tab => { if (tab !== 'keys' && !bundleCreationBusy.value) creatingBundle.value = false; });
     const expandedBundles = ref({});
-    const revealedBundleValues = ref({});
+    const bundleGuidance = ref({});
+    const bundleSearch = ref("");
+    const bundleEncryptCommand = "caution secret encrypt DATABASE_URL --env-file /private/path/app.env";
     const bundleMenu = ref(null);
     let bundleMenuTrigger = null;
     const closeBundleMenu = () => { bundleMenu.value = null; };
@@ -2489,7 +2511,7 @@ export default {
       bundleMenuTrigger = event.currentTarget;
     };
     const handleBundleMenuSelection = event => {
-      if (event.target.closest('.bundle-menu button, .bundle-download:not(.bundle-download-chevron)')) closeBundleMenu();
+      if (event.target.closest('.bundle-menu button, .bundle-download')) closeBundleMenu();
     };
     const handleBundleMenuOutsideClick = event => {
       if (!event.target.closest('.bundle-menu-anchor')) closeBundleMenu();
@@ -2502,6 +2524,7 @@ export default {
     };
     watch(activeTab, closeBundleMenu);
     const quorumBundles = ref([]);
+    const visibleBundles = computed(() => selectBundles(quorumBundles.value, bundleSearch.value, createdBundleId.value));
     const loadingBundles = ref(true);
     const deletingBundle = ref(null);
     const bundleKeyHashes = ref({});
@@ -5364,9 +5387,8 @@ export default {
       cancelPgpKeyForm,
       formatPgpFingerprint,
       expandedBundles,
-      revealedBundleValues,
+      bundleGuidance, bundleSearch, bundleEncryptCommand, visibleBundles, getEmbeddedBundleId,
       bundleMenu,
-      abbreviateBundleValue,
       bundleTitle,
       bundleIdentifiers,
       toggleBundleMenu,
@@ -7491,6 +7513,24 @@ export default {
   white-space: nowrap;
 }
 
+.bundle-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 16px; }
+.bundle-toolbar label { font-size: .8rem; }
+.bundle-toolbar input { flex: 1; max-width: 360px; min-width: 120px; padding: 10px 12px; border: 1px solid var(--theme-border); border-radius: 6px; background: var(--theme-surface); color: var(--theme-text-primary); font: inherit; font-size: .85rem; }
+.bundle-toolbar > span { margin-left: auto; color: var(--theme-text-muted); font-size: .75rem; }
+.bundle-no-results { padding: 24px; text-align: center; color: var(--theme-text-muted); }
+.bundle-new { font-size: .7rem; color: var(--theme-text-secondary); border: 1px solid var(--theme-border); padding: 2px 6px; border-radius: 4px; }
+.bundle-guide { border: 1px solid var(--theme-border); border-radius: 8px; padding: 14px 16px; margin-bottom: 24px; }
+.bundle-guide summary, .bundle-technical summary { cursor: pointer; font-size: .85rem; font-weight: 600; }
+.bundle-guide ol { margin: 16px 0 0; padding-left: 22px; font-size: .85rem; line-height: 1.6; }
+.bundle-guide li + li { margin-top: 18px; }
+.bundle-guide p { margin: 6px 0; color: var(--theme-text-secondary); }
+.bundle-guide a { color: var(--theme-text-primary); text-underline-offset: 3px; }
+.bundle-command { display: flex; align-items: center; gap: 12px; padding: 10px 12px; background: var(--theme-surface-muted); border-radius: 6px; }
+.bundle-command code { flex: 1; }
+.bundle-guide-download { background: var(--theme-text-primary); color: var(--theme-surface); border: 0; border-radius: 6px; padding: 8px 12px; font: inherit; cursor: pointer; }
+.bundle-technical { margin: 20px 0; }
+.bundle-list summary:focus-visible, .bundle-toolbar input:focus-visible { outline: 2px solid var(--theme-text-secondary); outline-offset: 3px; }
+
 .bundle-list {
   border: 1px solid var(--theme-border);
   border-radius: 12px;
@@ -7498,7 +7538,7 @@ export default {
 
 .bundle-columns, .bundle-row {
   display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(115px, .5fr) minmax(140px, .6fr) 220px;
+  grid-template-columns: minmax(180px, 1.5fr) minmax(90px, .5fr) minmax(150px, 1fr) 100px 76px;
   gap: 20px;
   align-items: center;
 }
@@ -7519,7 +7559,7 @@ export default {
 }
 
 .bundle-card {
-  padding: 20px;
+  padding: 16px 20px;
   border-bottom: 1px solid var(--theme-border);
 }
 
@@ -7589,14 +7629,10 @@ export default {
   justify-content: flex-end;
 }
 
-.bundle-download-group {
-  display: flex;
-}
-
 .bundle-download {
-  background: var(--theme-text-primary);
-  color: var(--theme-surface);
-  border: 1px solid var(--theme-border);
+  background: transparent;
+  color: var(--theme-text-secondary);
+  border: 0;
   border-radius: 6px;
   font: inherit;
   font-size: .8rem;
@@ -7604,15 +7640,6 @@ export default {
   padding: 9px 12px;
   white-space: nowrap;
   cursor: pointer;
-}
-
-.bundle-download-group:has(.bundle-download-chevron) > .bundle-download {
-  border-radius: 6px 0 0 6px;
-}
-
-.bundle-download-chevron {
-  border-radius: 0 6px 6px 0;
-  padding-inline: 9px;
 }
 
 .bundle-menu-anchor {
@@ -7678,7 +7705,7 @@ export default {
 
 .bundle-holder {
   display: grid;
-  grid-template-columns: minmax(100px, 1fr) 140px minmax(240px, 2fr);
+  grid-template-columns: minmax(100px, 1fr) minmax(120px, 1fr) minmax(240px, 2fr);
   align-items: center;
   gap: 16px;
   padding: 12px 0;
@@ -7702,10 +7729,8 @@ export default {
   min-width: 0;
 }
 
-.bundle-fingerprint .bundle-label {
-  flex-basis: 100%;
-  font-size: .7rem;
-}
+.bundle-fingerprint code { flex: 1; }
+.bundle-holder + .bundle-holder { border-top: 1px solid var(--theme-border); }
 
 .bundle-details code {
   overflow-wrap: anywhere;
@@ -7771,8 +7796,7 @@ export default {
   }
 
   .bundle-actions {
-    grid-column: 1 / -1;
-    justify-content: flex-start;
+    justify-content: flex-end;
   }
 
   .bundle-holder {
