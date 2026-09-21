@@ -709,3 +709,65 @@ fn holder_flags_parse_and_reject_mixed_selector_styles() {
         .is_err()
     );
 }
+
+#[test]
+fn rejects_shared_ecdh_recipients_with_different_kdf_parameters() {
+    use sequoia_openpgp::types::{HashAlgorithm, SymmetricAlgorithm};
+    for kdf in [
+        (HashAlgorithm::SHA512, SymmetricAlgorithm::AES256),
+        (HashAlgorithm::SHA256, SymmetricAlgorithm::AES128),
+        (HashAlgorithm::SHA512, SymmetricAlgorithm::AES128),
+    ] {
+        let certs = recipients::shared_recipient_with_kdf(None, false, false, Some(kdf), false);
+        for cert in &certs {
+            assert!(unique_certificates(std::slice::from_ref(cert)).is_ok());
+        }
+        assert!(
+            unique_certificates(&certs)
+                .unwrap_err()
+                .to_string()
+                .contains("share an encryption key")
+        );
+    }
+}
+
+#[test]
+fn accepts_repeated_ecdh_keys_within_one_holder_only() {
+    use sequoia_openpgp::{
+        parse::Parse,
+        policy::StandardPolicy,
+        types::{HashAlgorithm, SymmetricAlgorithm},
+    };
+    for kdf in [
+        (HashAlgorithm::SHA512, SymmetricAlgorithm::AES256),
+        (HashAlgorithm::SHA256, SymmetricAlgorithm::AES128),
+        (HashAlgorithm::SHA512, SymmetricAlgorithm::AES128),
+    ] {
+        let certs = recipients::shared_recipient_with_kdf(None, false, false, Some(kdf), true);
+        let repeated_cert = sequoia_openpgp::Cert::from_bytes(certs[0].as_bytes()).unwrap();
+        assert_eq!(
+            repeated_cert
+                .keys()
+                .with_policy(&StandardPolicy::new(), None)
+                .supported()
+                .alive()
+                .revoked(false)
+                .for_storage_encryption()
+                .count(),
+            3
+        );
+        let repeated = certs[0].clone();
+        let shared = certs[1].clone();
+        let independent = recipients::shared_recipient(None, false, false).remove(0);
+        assert!(unique_certificates(std::slice::from_ref(&repeated)).is_ok());
+        assert!(unique_certificates(&[repeated.clone(), independent]).is_ok());
+        for pair in [[repeated.clone(), shared.clone()], [shared, repeated]] {
+            assert!(
+                unique_certificates(&pair)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("share an encryption key")
+            );
+        }
+    }
+}
