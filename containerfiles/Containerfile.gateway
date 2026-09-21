@@ -37,8 +37,9 @@ COPY . .
 ENV RUST_BACKTRACE=1
 ENV TARGET_ARCH="x86_64-unknown-linux-musl"
 
+# Keep fetched Git dependencies in the layer: the offline build must not rely
+# on a mutable BuildKit cache retaining their checkouts between RUN steps.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
     find /usr/local/cargo/registry -name '.cargo-ok' -delete 2>/dev/null || true && \
     cargo fetch --locked --target $TARGET_ARCH
 
@@ -51,7 +52,6 @@ ENV RUSTFLAGS="${EXTRA_RUSTFLAGS} -C target-feature=+crt-static -C link-arg=-Wl,
 ENV NETTLE_STATIC=1
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,id=gateway-target,target=/build/target \
     --network=none \
     cargo build ${CARGO_BUILD_FLAGS} --frozen \
