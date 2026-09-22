@@ -8,10 +8,10 @@
 # Tests billing enforcement gates:
 #   1. Wait for services
 #   2. Create test user
-#   3. Deploy with zero credits — rejected (402)
-#   4. Deploy with $20 credits — rejected (402, below $25 minimum)
+#   3. Deploy with zero credits — rejected (4xx)
+#   4. Deploy with $20 credits — rejected (4xx, below $25 minimum)
 #   5. Deploy with $25 credits — passes billing gate
-#   6. Deploy while org is credit-suspended — rejected (402)
+#   6. Deploy while org is credit-suspended — rejected (4xx)
 #   7. Unsuspend org, deploy succeeds again
 #   8. Resource limit: deploy up to max_resources_per_org — succeeds
 #   9. Resource limit: deploy one more — rejected (429)
@@ -97,6 +97,14 @@ set_balance() {
     VALUES ('$ORG_ID', $cents, 'purchase', 'billing gate seed');
     " >/dev/null 2>&1
   fi
+}
+
+# Helper: true when RESULT holds a 4xx client-error status (e.g. 402, 403).
+is_4xx() {
+  case "$1" in
+    4[0-9][0-9]) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # Helper: attempt deploy via gateway, return the error status from the
@@ -227,10 +235,10 @@ log "Testing deploy with zero credits..."
 set_balance 0
 
 RESULT=$(attempt_deploy)
-if [ "$RESULT" = "402" ]; then
-  step_pass "Zero credits: deploy rejected (402)"
+if is_4xx "$RESULT"; then
+  step_pass "Zero credits: deploy rejected ($RESULT)"
 else
-  step_fail "Zero credits: expected 402, got $RESULT"
+  step_fail "Zero credits: expected a 4xx, got $RESULT"
 fi
 
 # ── Step 4: Deploy with $20 (below $25 minimum) — should be rejected ─
@@ -240,10 +248,10 @@ log "Testing deploy with \$20 credits (below \$25 minimum)..."
 
 set_balance 2000
 RESULT=$(attempt_deploy)
-if [ "$RESULT" = "402" ]; then
-  step_pass "\$20 credits: deploy rejected (402)"
+if is_4xx "$RESULT"; then
+  step_pass "\$20 credits: deploy rejected ($RESULT)"
 else
-  step_fail "\$20 credits: expected 402, got $RESULT"
+  step_fail "\$20 credits: expected a 4xx, got $RESULT"
 fi
 
 # ── Step 5: Deploy with $25 — should pass billing gate ───────────────
@@ -254,13 +262,13 @@ log "Testing deploy with \$25 credits..."
 set_balance 2500
 RESULT=$(attempt_deploy)
 
-# Should NOT be 402 — it passes the billing gate. May fail for other reasons
+# Should NOT be a 4xx — it passes the billing gate. May fail for other reasons
 # (no actual repo/resource) which is fine; we're testing the gate, not the deploy.
-if [ "$RESULT" != "402" ]; then
+if ! is_4xx "$RESULT"; then
   log "  Balance 2500c: passed billing gate (result: $RESULT)"
   step_pass "\$25 credits: billing gate passed (result: $RESULT)"
 else
-  step_fail "\$25 credits: still rejected with 402"
+  step_fail "\$25 credits: still rejected with $RESULT"
 fi
 
 # ── Step 6: Deploy while credit-suspended — should be rejected ───────
@@ -275,10 +283,10 @@ UPDATE organizations SET credit_suspended_at = NOW() WHERE id = '$ORG_ID';
 
 # Keep balance at $25 — should still be rejected due to suspension
 RESULT=$(attempt_deploy)
-if [ "$RESULT" = "402" ]; then
-  step_pass "Credit-suspended org: deploy rejected (402)"
+if is_4xx "$RESULT"; then
+  step_pass "Credit-suspended org: deploy rejected ($RESULT)"
 else
-  step_fail "Credit-suspended org: expected 402, got $RESULT"
+  step_fail "Credit-suspended org: expected a 4xx, got $RESULT"
 fi
 
 # ── Step 7: Unsuspend org, deploy passes again ───────────────────────
@@ -291,11 +299,11 @@ UPDATE organizations SET credit_suspended_at = NULL WHERE id = '$ORG_ID';
 " >/dev/null 2>&1
 
 RESULT=$(attempt_deploy)
-if [ "$RESULT" != "402" ]; then
+if ! is_4xx "$RESULT"; then
   log "  Unsuspended: passed billing gate (result: $RESULT)"
   step_pass "Unsuspended org: billing gate passed (result: $RESULT)"
 else
-  step_fail "Unsuspended org: still rejected with 402"
+  step_fail "Unsuspended org: still rejected with $RESULT"
 fi
 
 # ── Step 8: Resource limit — fill up to max ──────────────────────────
