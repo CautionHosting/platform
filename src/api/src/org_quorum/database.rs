@@ -259,6 +259,7 @@ async fn storage_roundtrip(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid
         org,
         user,
         storage::CreateBundleRequest {
+            allow_legacy: false,
             data: envelope.clone(),
             name: Some("before".into()),
             labels: None,
@@ -291,6 +292,7 @@ async fn storage_roundtrip(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid
             other_org,
             created.id,
             storage::UpdateBundleRequest {
+                allow_legacy: false,
                 data: None,
                 name: Some("forbidden".into()),
                 labels: None,
@@ -305,6 +307,7 @@ async fn storage_roundtrip(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid
         org,
         created.id,
         storage::UpdateBundleRequest {
+                allow_legacy: false,
             data: None,
             name: Some("after".into()),
             labels: Some(json!({"metadata":"edited"})),
@@ -329,7 +332,7 @@ async fn storage_roundtrip(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid
     .unwrap();
     let downloaded: Value = serde_json::from_slice(&std::fs::read(file.path()).unwrap()).unwrap();
     assert_eq!(downloaded, envelope);
-    let error = verify_upload(&downloaded).unwrap_err();
+    let error = verify_upload(&downloaded, false).unwrap_err();
     assert_eq!(error.message, "uploaded quorum proof verification failed");
     assert!(
         storage::delete_quorum_bundle(pool, org, created.id)
@@ -452,6 +455,7 @@ async fn holder_display_metadata(pool: &PgPool) {
         org,
         alice,
         storage::CreateBundleRequest {
+            allow_legacy: false,
             data: data.clone(),
             name: None,
             labels: None,

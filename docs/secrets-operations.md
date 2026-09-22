@@ -1,5 +1,7 @@
 # Deploying secrets: operator runbook
 
+For existing unversioned PGP bundles, follow [Legacy V0 import and recovery](legacy-v0.md).
+
 Status, 21 September 2026: implemented at Platform [`e38a05b`](https://codeberg.org/caution/platform/commit/e38a05bf54dcd51f48971cbf2ca70884ffd8e812),
 Locksmith [`2da3be5`](https://codeberg.org/caution/locksmith/commit/2da3be50bebd2dfdc4d0d3a94d05f55be02e910c)
 and Bootproof [`821b5c6`](https://codeberg.org/caution/bootproof/commit/821b5c63e80f082f6d67ba3695c11416933489ec).
@@ -9,7 +11,10 @@ Current V1 creation, proof verification, PGP/passkey/mixed recovery, native and
 browser approval, issuance bearer authentication and certified holder-index
 checks are implemented. Local/synthetic validation is recorded in
 [share recovery](share-recovery.md); consolidated live acceptance at these exact
-revisions is **not yet recorded**. Legacy bundle migration is outside this flow.
+revisions is **not yet recorded**. Legacy bundle migration uses the separate
+[import guide](legacy-v0.md). ImportedV0 needs no Keymaker policy in the CLI,
+runtime or image preflight. Rebuild the Platform builder to use the format-aware
+check; V1 still requires its independently trusted generation-proof policy.
 
 The local V1 contract patch additionally requires critical, CA-signed
 organization/bundle notations in API and recryptor verification. Issuance already

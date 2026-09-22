@@ -2,6 +2,8 @@
 use super::*;
 #[path = "quorum_caution.rs"]
 mod caution;
+#[path = "quorum_legacy.rs"]
+mod legacy;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use reqwest::{
     blocking::{Client, Response},
@@ -520,6 +522,7 @@ pub fn run(
     );
     fs::remove_file(work.join("downgrade-threshold"))?;
     caution::run(&mut session, work, &cert)?;
+    legacy::run(&mut session, work)?;
     println!("PASS: signed API create/upload/download/delete, direct CLI, request-threshold downgrade rejection and downloaded-bundle encryption (mock proofs only)");
     Ok(())
 }

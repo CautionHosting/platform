@@ -153,8 +153,12 @@ docker exec "$CONTAINER" psql -U postgres -d caution_quorum_test -c \
     ALPHA_CODE=quorum-mock-test USERNAME=quorummock \
     QUORUM_E2E_DIR="$WORK" \
     QUORUM_DB_CONTAINER="$CONTAINER" \
+    QUORUM_V0_FIXTURES="$LOCKSMITH_SOURCE/tests/fixtures/v0" \
     QUORUM_CLI="$CARGO_TARGET_DIR/debug/caution" \
     "$CARGO_TARGET_DIR/debug/soft-authenticator" || { cat ./*.log; exit 1; }
+# Recover the exact downloaded legacy artifact and decrypt both old and new ciphertext.
+(cd "$LOCKSMITH_SOURCE" && LOCKSMITH_LEGACY_TEST_DIR="$WORK" cargo test --locked \
+    -p locksmith --lib server::tests::downloaded_v0_recovers_and_decrypts -- --ignored --exact)
 # Invoke the actual CLI send-shard implementation with isolated client config.
 # The certificate mock supplies app metadata only; recovery must stop before transport.
 CAUTION_UNSAFE_KEY_SERVICE_E2E=1 \
