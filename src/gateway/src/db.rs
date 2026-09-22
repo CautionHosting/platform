@@ -1697,14 +1697,18 @@ pub async fn create_e2e_user(pool: &PgPool) -> Result<(Uuid, Vec<u8>), DbError> 
     let credential_id: [u8; 16] = rand::thread_rng().gen();
     let credential_id_vec = credential_id.to_vec();
 
-    // Mark e2e users as non-placeholder so the username-claim gate
-    // (`username_claim_gate_middleware`) doesn't 403 every e2e session on
-    // protected/`/api` routes. Real registrations already set this false;
-    // only the placeholder gate test flips a user back to placeholder on
-    // purpose.
+    // Seed the e2e user in the SAME placeholder state as a real signup:
+    // `username_is_placeholder = true` and the auto-generated `u_<base64>`
+    // identifier as its username. This is what lets the WebAuthn login e2e
+    // exercise the username-claim flow end to end — the account starts gated
+    // (`username_claim_gate_middleware` 403s protected routes with
+    // `username_required`), and the test then claims a real username via
+    // `POST /user/username` to lift the gate. A non-placeholder seed would
+    // make the gate never fire (the gate test sees 200, not 403) and make the
+    // one-time claim return 409 already-claimed instead of 200.
     let user_id: Uuid = sqlx::query_scalar(
         "INSERT INTO users (fido2_user_handle, username, email, beta_code_id, username_is_placeholder)
-         VALUES ($1, $2, NULL, NULL, false)
+         VALUES ($1, $2, NULL, NULL, true)
          RETURNING id",
     )
     .bind(&user_handle[..])
@@ -1716,8 +1720,14 @@ pub async fn create_e2e_user(pool: &PgPool) -> Result<(Uuid, Vec<u8>), DbError> 
         "create_e2e_user",
     ))?;
 
-    // Insert a dummy credential row so session validation joins work.
-    const E2E_CREDENTIAL_PUBLIC_KEY: &[u8] = br#"{"cred":{"cred_id":"7ySFchbdsv8y8B5oR-1cxOlY5Trjo1auESH25Co0nTI","cred":{"type_":"ES256","key":{"EC_EC2":{"curve":"SECP256R1","x":"SveqzIeBhZDl0phwAvHY0rAIEdeTphQu4ReAuCzq8bs","y":"6mm9arrmm2MqgpwkdTvN0-X-cduiZd4zAQdvDuEDO7M"}}},"counter":0,"transports":null,"user_verified":false,"backup_eligible":false,"backup_state":false,"registration_policy":"preferred","extensions":{"cred_protect":"Ignored","hmac_create_secret":"NotRequested","appid":"NotRequested","cred_props":"Ignored"},"attestation":{"data":"Self_","metadata":"None"},"attestation_format":"packed"}}"#;
+    // Insert a dummy credential row so session validation joins work. Store a
+    // structurally VALID `SecurityKey` JSON (captured from a genuine dev
+    // registration; the key material is unrelated and non-secret) rather than
+    // a placeholder string: the username-scoped login path
+    // (`scoped_or_decoy_challenge`) deserializes each stored public_key into a
+    // real `SecurityKey` to build the challenge, so an invalid blob would make
+    // a known-username begin 500 instead of returning that user's credential.
+    const E2E_CREDENTIAL_PUBLIC_KEY: &[u8] = br#"{"cred":{"cred_id":"7ySFchbdsv8y8B5oR-1cxOlY5Trjo1auESH25Co0nTI","cred":{"type_":"ES256","key":{"EC_EC2":{"curve":"SECP256R1","x":"VTSRkyIs9sASIgLB2vWSu6xFyAvGf9lQ6GSHgiAmJlQ","y":"UFAsQBox-mvdfu4qaZYEwPKA0bmHWELgEfIUol8H0eQ"}}},"counter":0,"transports":null,"user_verified":true,"backup_eligible":true,"backup_state":true,"registration_policy":"preferred","extensions":{"cred_protect":"Ignored","hmac_create_secret":"NotRequested","appid":"NotRequested","cred_props":"Ignored"},"attestation":{"data":"None","metadata":"None"},"attestation_format":"none"}}"#;
     sqlx::query(
         "INSERT INTO fido2_credentials (
             credential_id, user_id, public_key, name, attestation_type,
