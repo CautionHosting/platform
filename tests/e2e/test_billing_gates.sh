@@ -7,7 +7,7 @@
 #
 # Tests billing enforcement gates:
 #   1. Wait for services
-#   2. Create test user
+#   2. Create test user via e2e-login and claim a username (lifts the gate)
 #   3. Deploy with zero credits — rejected (4xx)
 #   4. Deploy with $20 credits — rejected (4xx, below $25 minimum)
 #   5. Deploy with $25 credits — passes billing gate
@@ -223,6 +223,20 @@ RETURNING id;
 
 log "  Provider account: $PROVIDER_ACCOUNT_ID"
 log "  Test app: $APP_ID"
+
+# Claim a real username. e2e-login seeds the user in the placeholder state, and
+# every protected /api route (including /api/deploy below) runs through
+# username_claim_gate_middleware, which 403s `username_required` until a real
+# username is claimed. Without this, deploy requests never reach the billing
+# gate and every assertion below sees "username not claimed" instead.
+CLAIMED_USERNAME="gate-test-$(date +%s)$RANDOM"
+CLAIM_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GATEWAY_URL/user/username" \
+  -H "X-Session-ID: $SESSION_ID" -H 'Content-Type: application/json' \
+  -d "{\"username\":\"$CLAIMED_USERNAME\"}")
+if [ "$CLAIM_CODE" != "200" ]; then
+  step_fail "Failed to claim username (HTTP $CLAIM_CODE) — protected routes stay gated"
+fi
+log "  Claimed username: $CLAIMED_USERNAME"
 
 step_pass "E2E login (user: ${USER_ID:0:8}..., org: ${ORG_ID:0:8}...)"
 
