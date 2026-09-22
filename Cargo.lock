@@ -1824,6 +1824,7 @@ dependencies = [
  "chrono",
  "clap",
  "coset 0.3.8",
+ "crossterm",
  "dirs",
  "dterror 0.3.0",
  "enclave-builder",
