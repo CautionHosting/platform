@@ -30,6 +30,7 @@ mod cache;
 mod credentials;
 mod pgp_keys;
 mod quorum_init;
+mod quorum_legacy;
 mod quorum_inspect;
 mod share_release;
 mod secrets;
@@ -745,6 +746,8 @@ enum SecretCommands {
         after_help = "Always saves .caution/quorum-bundle.json and .caution/keymaker-pcr-policy.json in the current directory. Redirected stdout also receives the bundle JSON."
     )]
     Init(quorum_init::Options),
+    #[command(about = "Import historical PGP quorum metadata without reconstructing its secret")]
+    ImportLegacy(quorum_legacy::Options),
     #[command(about = "Inspect a saved quorum bundle (verifies its proof by default)")]
     Inspect(quorum_inspect::Options),
     #[command(about = "Encrypt env file values into .caution/secrets/*.asc")]
@@ -772,6 +775,8 @@ enum SecretCommands {
             help = "Directory for encrypted secret files"
         )]
         secrets_dir: PathBuf,
+        #[arg(long, help = "Accept an imported V0 bundle without a Keymaker generation proof")]
+        allow_legacy: bool,
     },
     #[command(about = "Rename a quorum bundle")]
     Rename {
@@ -3836,6 +3841,9 @@ pub async fn run() -> Result<(), RunError> {
                     .await
                     .with_context(Ctx::command_dispatch())?;
             }
+            SecretCommands::ImportLegacy(options) => {
+                quorum_legacy::run(&client, options).await.with_context(Ctx::command_dispatch())?;
+            }
             SecretCommands::Init(options) => {
                 quorum_init::run(&client, options)
                     .await
@@ -3846,8 +3854,9 @@ pub async fn run() -> Result<(), RunError> {
                 env_file,
                 bundle,
                 secrets_dir,
+                allow_legacy,
             } => {
-                secrets::encrypt(keys, env_file, bundle, secrets_dir)
+                secrets::encrypt(keys, env_file, bundle, secrets_dir, allow_legacy)
                     .with_context(Ctx::command_dispatch())?;
             }
             SecretCommands::Rename { id, name } => {

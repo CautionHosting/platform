@@ -469,3 +469,22 @@ fn accepts_repeated_ecdh_keys_within_one_holder_only() {
         }
     }
 }
+
+#[test]
+fn legacy_upload_requires_signed_opt_in_and_public_consistency() {
+    let data: serde_json::Value = serde_json::from_str(include_str!("../../../../tests/fixtures/imported-v0.json")).unwrap();
+    assert!(verify_upload(&data, false).is_err());
+    verify_upload(&data, true).unwrap();
+    let mut broken = data.clone();
+    broken["original"]["keyring_hash"] = serde_json::json!([0]);
+    assert!(verify_upload(&broken, true).is_err());
+    let mut broken = data.clone();
+    broken["threshold"] = serde_json::json!(0);
+    assert!(verify_upload(&broken, true).is_err());
+    let mut disguised = data;
+    disguised["data"] = serde_json::json!({"version":"V1"});
+    assert!(verify_upload(&disguised, true).is_err());
+    assert!(verify_upload(&serde_json::json!({"data":{"version":"V1"},"necroproof":[]}), true).is_err());
+    let request: crate::cryptographic_bundles::CreateBundleRequest = serde_json::from_value(serde_json::json!({"data": {}})).unwrap();
+    assert!(!request.allow_legacy);
+}

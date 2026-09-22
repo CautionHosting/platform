@@ -1,5 +1,7 @@
 # WebAuthn and mixed share recovery
 
+For existing unversioned PGP bundles, follow [Legacy V0 import and recovery](legacy-v0.md).
+
 For deployment order, Caution custody responsibilities and application setup, see
 the [secrets operator runbook](secrets-operations.md).
 
@@ -33,8 +35,8 @@ file SHA-256 is `82e74d053976b47edba6e4f11b143c3184bc422c67b3a16c3599bee924e0403
 This is not fresh real-Nitro, physical-device or deployment evidence.
 
 Shared Rust dependencies and the default enclave runtime select Locksmith
-`2da3be50bebd2dfdc4d0d3a94d05f55be02e910c`, including certified release indices,
-ECDH identity checks between holders, and the smartcard PIN prompt fixes.
+`d2876e971c15c89a5891ee455917e22bad607b30`, including explicit ImportedV0 recovery, expired nonparticipant handling, durable legacy fixtures, the V1 custody
+profile, certified release indices, ECDH identity checks and smartcard PIN fixes.
 Rebuild/install the CLI to use its fixes with existing bundles. Rebuild/redeploy
 enclave images to update their daemon; `LOCKSMITH_COMMIT` overrides that default
 and must be reviewed when upgrading. Service deployment and trusted PCR-policy
@@ -114,10 +116,14 @@ three-minute authorization state, and derives/decrypts/re-encrypts one share.
 Cancelling, expiry, replay or losing the destination connection requires a fresh
 attempt. These operations never consume Keymaker.
 
-Locksmith-enabled application images must include non-empty
+V1 Locksmith-enabled application images must include non-empty
 `/etc/caution/bundle.json`, `/etc/caution/keymaker-pcr-policy.json`, and encrypted
 `/etc/caution/secrets/*.asc`. The builder checks these before EIF staging.
 Cryptographic proof verification remains the runtime loader's responsibility.
+ImportedV0 requires only the non-empty bundle and encrypted secrets. The builder
+reads the explicit format tag to waive the policy-file requirement; Locksmith
+still validates the imported artifact at startup. Rebuild the Platform builder
+for this packaging change; see [legacy recovery](legacy-v0.md).
 
 ## Acceptance gate
 

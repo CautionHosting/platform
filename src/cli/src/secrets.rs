@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+use locksmith::bundle::RecoverySource;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{IsTerminal, Write};
@@ -112,14 +113,14 @@ pub enum ParseQuorumBundlePublicKeyError {
 
 fn parse_quorum_bundle_public_key(
     bundle_text: &str,
-) -> Result<String, ParseQuorumBundlePublicKeyError> {
+    allow_legacy: bool,
+) -> Result<(String, bool), ParseQuorumBundlePublicKeyError> {
     use ParseQuorumBundlePublicKeyErrorCtx as Ctx;
 
-    let bundle = crate::quorum_init::load_bundle(bundle_text)
-        .with_context(Ctx::parse_json())?
-        .to_latest();
-
-    Ok(bundle.public_key)
+    let (bundle, _) = crate::quorum_legacy::load(bundle_text, allow_legacy, None)
+        .with_context(Ctx::parse_json())?;
+    if bundle.recovery().legacy { output::status("Legacy V0 — no Keymaker generation proof (--allow-legacy accepted)"); }
+    Ok((bundle.recovery().public_key.to_owned(), bundle.recovery().legacy))
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
@@ -206,28 +207,25 @@ pub enum EncryptSecretValueError {
 fn encrypt_secret_value(
     recipient: &openpgp::Cert,
     plaintext: &str,
+    legacy: bool,
 ) -> Result<String, EncryptSecretValueError> {
     use EncryptSecretValueErrorCtx as Ctx;
 
     let policy = &OpenPgpPolicy::new();
-    let mut recipients: Vec<_> = recipient
-        .keys()
-        .with_policy(policy, None)
-        .supported()
-        .alive()
-        .revoked(false)
-        .for_storage_encryption()
-        .collect();
-
+    if legacy && matches!(recipient.revocation_status(policy, None), openpgp::types::RevocationStatus::Revoked(_)) {
+        return Err(EncryptSecretValueError::NoEncryptionKey {
+            location: std::panic::Location::caller(),
+        });
+    }
+    // Only an explicitly accepted ImportedV0 artifact may use expired keys.
+    // Keep algorithm support, certificate bindings and revocation checks intact.
+    let keys = || {
+        let keys = recipient.keys().with_policy(policy, None).supported().revoked(false);
+        if legacy { keys } else { keys.alive() }
+    };
+    let mut recipients: Vec<_> = keys().for_storage_encryption().collect();
     if recipients.is_empty() {
-        recipients = recipient
-            .keys()
-            .with_policy(policy, None)
-            .supported()
-            .alive()
-            .revoked(false)
-            .for_transport_encryption()
-            .collect();
+        recipients = keys().for_transport_encryption().collect();
     }
 
     if recipients.is_empty() {
@@ -457,6 +455,7 @@ fn encrypt_env_file(
     bundle_file: &Path,
     secrets_dir: &Path,
     requested_keys: &[String],
+    allow_legacy: bool,
 ) -> Result<usize, EncryptEnvFileError> {
     use EncryptEnvFileErrorCtx as Ctx;
 
@@ -509,7 +508,7 @@ fn encrypt_env_file(
 
     let bundle_text =
         fs::read_to_string(bundle_file).with_context(Ctx::read_bundle_file(bundle_file))?;
-    let public_key = parse_quorum_bundle_public_key(&bundle_text)
+    let (public_key, legacy) = parse_quorum_bundle_public_key(&bundle_text, allow_legacy)
         .with_context(Ctx::parse_bundle(bundle_file))?;
     let recipient = load_recipient_cert(&public_key).with_context(Ctx::load_recipient())?;
 
@@ -526,7 +525,7 @@ fn encrypt_env_file(
             continue;
         }
 
-        let encrypted = encrypt_secret_value(&recipient, &assignment.value)
+        let encrypted = encrypt_secret_value(&recipient, &assignment.value, legacy)
             .with_context(Ctx::encrypt_value(&assignment.key))?;
         let output = secrets_dir.join(format!("{}.asc", assignment.key));
         write_secret_file_atomically(&output, &encrypted)
@@ -1138,10 +1137,11 @@ pub fn encrypt(
     env_file: PathBuf,
     bundle: PathBuf,
     secrets_dir: PathBuf,
+    allow_legacy: bool,
 ) -> Result<(), EncryptError> {
     use EncryptErrorCtx as Ctx;
 
-    encrypt_env_file(&env_file, &bundle, &secrets_dir, &keys)
+    encrypt_env_file(&env_file, &bundle, &secrets_dir, &keys, allow_legacy)
         .with_context(Ctx::encrypt_env_file())?;
 
     Ok(())
@@ -1732,6 +1732,11 @@ async fn preflight_destination(
     verify_destination_attestation(address, destination.attestation, pcrs.clone(), nonce.as_bytes(), now)
 }
 
+fn local_quorum_bundle(root: &Path) -> Option<PathBuf> {
+    [".caution/quorum-bundle.json", ".caution/secrets/bundle.json"]
+        .into_iter().map(|path| root.join(path)).find(|path| path.exists())
+}
+
 /// Send a shard to a running enclave's locksmith daemon.
 pub async fn send_shard(
     client: &ApiClient,
@@ -1761,15 +1766,8 @@ pub async fn send_shard(
     let bundle_file = if let Some(path) = bundle_path {
         path
     } else {
-        // Check local paths first
-        let local_paths = [
-            PathBuf::from(".caution/secrets/bundle.json"),
-            PathBuf::from(".caution/quorum-bundle.json"),
-        ];
-        let found = local_paths.iter().find(|p| p.exists());
-
-        if let Some(path) = found {
-            path.clone()
+        if let Some(path) = local_quorum_bundle(Path::new(".")) {
+            path
         } else {
             // Try to pull from Caution API
             output::status("No local bundle found, checking Caution...");
@@ -1874,10 +1872,14 @@ pub async fn send_shard(
     // Parse the quorum bundle
     let bundle_text =
         fs::read_to_string(&bundle_file).with_context(Ctx::read_bundle_file(&bundle_file))?;
-    let (bundle, generation_time) = crate::quorum_init::load_bundle_with_timestamp(&bundle_text).with_context(Ctx::parse_bundle())?;
+    let (bundle, generation_time) = crate::quorum_legacy::load(&bundle_text, release_options.allow_legacy, None).with_context(Ctx::parse_bundle())?;
     let proof: serde_json::Value = serde_json::from_str(&bundle_text).with_context(Ctx::parse_bundle())?;
     let names = crate::share_release::holder_names(client, &proof).await;
-    let keys = &bundle.clone().to_latest().keyring;
+    let view = bundle.recovery();
+    if view.legacy {
+        output::status(format!("Legacy V0 — no Keymaker generation proof (--allow-legacy accepted)\nContent hash: {}", bundle.content_hash().with_context(Ctx::parse_bundle())?));
+    }
+    let keys = view.keyring;
     let address_str = format!("{}:49504", public_ip);
     let address: std::net::SocketAddr = address_str
         .parse()
@@ -1895,7 +1897,7 @@ pub async fn send_shard(
     let holder_display = crate::share_release::holder_label(keys, &holder, webauthn, &names);
     output::verbose(client.verbose, format!("Holder certificate: {holder}"));
 
-    let latest = bundle.clone().to_latest();
+    let latest = bundle.recovery();
     let summary = crate::share_release::ReleaseSummary {
         application_id: app_info.id.clone(),
         application_name: app_info.resource_name,
@@ -1910,7 +1912,7 @@ pub async fn send_shard(
             (false, _, false) => "OpenPGP smartcard",
         },
     };
-    output::verbose(client.verbose, format!("Application ID: {}; bundle ID: {}", crate::share_release::terminal_label(&app_info.id), hex::encode(latest.bundle_id)));
+    output::verbose(client.verbose, format!("Application ID: {}; bundle identity: {}", crate::share_release::terminal_label(&app_info.id), bundle.bundle_id().map(hex::encode).unwrap_or_else(|| "Legacy V0".into())));
     let status: Result<_, BoxError> = if webauthn {
         let proof = serde_json::from_str(&bundle_text).with_context(Ctx::parse_bundle())?;
         let measurements = pcrs.iter().map(|(&i, v)| (i, hex::encode(v))).collect();
@@ -1947,6 +1949,68 @@ pub async fn send_shard(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn imported_bundle_allows_unchanged_expired_recipient_only_with_opt_in() {
+        let public_key = include_str!("../../../tests/fixtures/expired-v0-recipient.asc");
+        let recipient = load_recipient_cert(public_key).unwrap();
+        assert!(recipient.with_policy(&super::OpenPgpPolicy::new(), None).unwrap().alive().is_err());
+        assert!(encrypt_secret_value(&recipient, "secret", false).is_err());
+        assert!(encrypt_secret_value(&recipient, "secret", true).is_ok());
+        let work = tempdir().unwrap();
+        let env = work.path().join(".env");
+        let bundle = work.path().join("bundle.json");
+        let output = work.path().join("secrets");
+        let mut imported: serde_json::Value = serde_json::from_str(include_str!("../../../tests/fixtures/imported-v0.json")).unwrap();
+        imported["original"]["public_key"] = serde_json::json!(public_key);
+        let original = serde_json::to_vec(&imported).unwrap();
+        std::fs::write(&bundle, &original).unwrap();
+        std::fs::write(&env, "SECRET=legacy-expired-recipient\n").unwrap();
+        assert!(encrypt_env_file(&env, &bundle, &output, &[], false).is_err());
+        assert_eq!(encrypt_env_file(&env, &bundle, &output, &[], true).unwrap(), 1);
+        assert_eq!(std::fs::read(bundle).unwrap(), original);
+    }
+
+    #[test]
+    fn legacy_encryption_still_rejects_revoked_recipients() {
+        let (cert, revocation) = CertBuilder::new().add_userid("revoked recipient")
+            .add_storage_encryption_subkey().generate().unwrap();
+        let revoked = cert.insert_packets([revocation]).unwrap();
+        assert!(encrypt_secret_value(&revoked, "secret", true).is_err());
+    }
+
+    #[test]
+    fn default_release_prefers_imported_output_and_preserves_raw_source() {
+        let work = tempdir().unwrap();
+        let source = work.path().join(".caution/secrets/bundle.json");
+        let imported = work.path().join(".caution/quorum-bundle.json");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        assert!(super::local_quorum_bundle(work.path()).is_none());
+        std::fs::write(&source, "raw V0").unwrap();
+        assert_eq!(super::local_quorum_bundle(work.path()), Some(source.clone()));
+        std::fs::write(&imported, include_str!("../../../tests/fixtures/imported-v0.json")).unwrap();
+        let selected = super::local_quorum_bundle(work.path()).unwrap();
+        assert_eq!(selected, imported);
+        assert!(crate::quorum_legacy::load(&std::fs::read_to_string(selected).unwrap(), true, None).is_ok());
+        assert_eq!(std::fs::read_to_string(source).unwrap(), "raw V0");
+    }
+
+    #[test]
+    fn imported_bundle_encryption_requires_acceptance_and_preserves_recipient() {
+        let work = tempdir().unwrap();
+        let env = work.path().join(".env");
+        let bundle = work.path().join("bundle.json");
+        let output = work.path().join("secrets");
+        let text = include_str!("../../../tests/fixtures/imported-v0.json");
+        std::fs::write(&env, "SECRET=legacy-test\n").unwrap();
+        std::fs::write(&bundle, text).unwrap();
+        assert!(encrypt_env_file(&env, &bundle, &output, &[], false).is_err());
+        assert!(!output.exists());
+        assert_eq!(encrypt_env_file(&env, &bundle, &output, &[], true).unwrap(), 1);
+        let legacy: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(super::parse_quorum_bundle_public_key(text, true).unwrap().0, legacy["original"]["public_key"].as_str().unwrap());
+        assert!(output.join("SECRET.asc").exists());
+    }
+
     #[test]
     fn destination_preflight_distinguishes_pcr_mismatch_from_invalid_evidence() {
         let proof = include_bytes!("../tests/data/aws-test.cbor").to_vec();
@@ -2084,7 +2148,7 @@ export MISSING_EQUALS\n",
     fn encrypt_secret_value_outputs_armored_pgp_message() {
         let public_key = test_public_key();
         let recipient = load_recipient_cert(&public_key).unwrap();
-        let encrypted = encrypt_secret_value(&recipient, "super-secret").unwrap();
+        let encrypted = encrypt_secret_value(&recipient, "super-secret", false).unwrap();
 
         assert!(encrypted.starts_with("-----BEGIN PGP MESSAGE-----"));
         assert!(encrypted.contains("-----END PGP MESSAGE-----"));
@@ -2116,6 +2180,7 @@ UNREQUESTED=nope\n",
                 &bundle_file,
                 &secrets_dir,
                 &["FOO".to_string(), "QUOTED".to_string()],
+                false,
             )
             .is_err()
         );

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+use locksmith::bundle::RecoverySource;
 use crate::{
     ApiClient, output,
     quorum_init::{self, InitError, InitErrorCtx as Ctx},
@@ -16,7 +17,7 @@ use std::{path::PathBuf, time::SystemTime};
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct Options {
-    /// Saved proofed V1 quorum bundle to inspect.
+    /// Saved proofed V1 or imported legacy quorum bundle to inspect.
     #[arg(long, default_value = ".caution/quorum-bundle.json")]
     bundle: PathBuf,
     /// Trusted Keymaker PCR policy (otherwise environment or .caution default).
@@ -119,6 +120,25 @@ fn summary(
 pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), InitError> {
     let text =
         std::fs::read_to_string(&options.bundle).with_context(Ctx::new("read quorum bundle"))?;
+    if locksmith::legacy::is_imported_json(&text).with_context(Ctx::new("invalid bundle format"))? {
+        let bundle = locksmith::legacy::ImportedV0::from_json(&text).with_context(Ctx::new("invalid imported legacy bundle"))?;
+        let envelope = serde_json::from_str(&text).with_context(Ctx::new("invalid bundle JSON"))?;
+        let display = if options.unverified { share_release::BundleDisplay::default() } else {
+            share_release::bundle_display(client, &envelope, "inspect").await
+        };
+        let view = bundle.recovery();
+        let mut lines = vec!["Legacy V0 — no Keymaker generation proof".to_owned(),
+            format!("Quorum       {} of {} holders · External PGP", view.threshold, view.max),
+            format!("Content hash {}", bundle.content_hash().with_context(Ctx::new("hash legacy artifact"))?)];
+        for key in view.keyring {
+            let Key::OpenPGP { cert } = key else { unreachable!("validated legacy PGP holder") };
+            let fingerprint = Cert::from_bytes(cert).with_context(Ctx::new("parse holder"))?.fingerprint().to_string();
+            lines.push(share_release::holder_label(view.keyring, &fingerprint, false, &display.holders));
+        }
+        lines.push("Public structure checked; encrypted metadata is rechecked by each releasing holder. Encryption and release require --allow-legacy.".into());
+        output::status(lines.join("\n"));
+        return Ok(());
+    }
     let (bundle, at) = load(&text, &options)?;
     let display = if options.unverified {
         share_release::BundleDisplay::default()

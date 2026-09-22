@@ -85,18 +85,18 @@ dirs = "5"
 # OpenPGP — force RustCrypto backend across all crates (locksmith defaults to Nettle)
 sequoia-openpgp = { version = "1" }
 
-# Shared quorum contracts and verification from Locksmith PR #15.
+# Shared quorum contracts, verification and explicit ImportedV0 recovery.
 [workspace.dependencies.locksmith]
 git = "https://codeberg.org/caution/locksmith.git"
-rev = "2da3be50bebd2dfdc4d0d3a94d05f55be02e910c"
+rev = "d2876e971c15c89a5891ee455917e22bad607b30"
 
 [workspace.dependencies.keymaker-models]
 git = "https://codeberg.org/caution/locksmith.git"
-rev = "2da3be50bebd2dfdc4d0d3a94d05f55be02e910c"
+rev = "d2876e971c15c89a5891ee455917e22bad607b30"
 
 [workspace.dependencies.public-certificate-models]
 git = "https://codeberg.org/caution/locksmith.git"
-rev = "2da3be50bebd2dfdc4d0d3a94d05f55be02e910c"
+rev = "d2876e971c15c89a5891ee455917e22bad607b30"
 
 # The generated EC2 SDK exhausts LLVM memory when release-optimized as one
 # codegen unit. The drift detector is network-bound, so optimize its code but

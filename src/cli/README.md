@@ -352,3 +352,9 @@ to be owned by.
 | Anton Livaja   | [F4BF 5C81 EC78 A5DD 341C 91EE DC4B 7D1F 52E0 BA4D](https://keyoxide.org/F4BF5C81EC78A5DD341C91EEDC4B7D1F52E0BA4D) |
 | Ryan Heywood   | [8882 3A75 ECAA 786B 0FF3 8B14 8E40 1478 A3FB EF72](https://keyoxide.org/88823A75ECAA786B0FF38B148E401478A3FBEF72) |
 | Daniel Grove   | [C92F E5A3 FBD5 8DD3 EC5A A26B B101 16B8 193F 2DBD](https://keyoxide.org/C92FE5A3FBD58DD3EC5AA26BB10116B8193F2DBD) |
+
+## Legacy PGP bundles
+
+Use `caution secret import-legacy --bundle PATH` for the one-time holder-assisted
+import. Encryption and share release then require `--allow-legacy` on each use.
+See [import, packaging and rebuild steps](../../docs/legacy-v0.md).
