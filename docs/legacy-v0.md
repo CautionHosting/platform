@@ -80,7 +80,8 @@ The frozen `tests/fixtures/imported-v0.json` is byte-identical to Locksmith's
 frontend tests, and `tests/e2e/test_quorum_mock.sh`. The disposable harness exercises
 import, signed upload/replacement/download, opt-in enforcement, encryption,
 threshold recovery and decryption of both pre-import and new ciphertext, plus
-V1 proof rejection with legacy acceptance enabled.
+V1 proof rejection with legacy acceptance enabled. The noninteractive holder-selection
+check explicitly detaches stdin, so the harness can also be launched from a terminal.
 
 Before claiming production support, record a real Nitro recovery with an existing
 legacy bundle and an OpenPGP-card import/release smoke test. Local software-key

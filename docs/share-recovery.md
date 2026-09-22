@@ -5,14 +5,15 @@ For existing unversioned PGP bundles, follow [Legacy V0 import and recovery](leg
 For deployment order, Caution custody responsibilities and application setup, see
 the [secrets operator runbook](secrets-operations.md).
 
-The local V1 contract patch requires exactly one critical, hashed organization
+The selected Locksmith revision's V1 contract requires exactly one critical, hashed organization
 notation and one critical, hashed bundle notation in the trusted CA certification.
 The certificate index remains in the CA-certified canonical UID, independently of
 holder position. This explicitly replaces the original all-fields-in-self-notations
 proposal. Issuance already produces this profile; nonconforming certificates that
 previously passed verification will be rejected. No wire format or hash changes.
-The patch is not yet published/deployed: shipping requires a published Locksmith
-revision, aligned Platform dependency/mock/runtime pins and updated verified PCRs.
+Platform's dependency/mock/runtime pins now include these checks. Source alignment
+does not establish deployment: confirm revision availability to remote builders,
+rebuild affected images and update independently verified PCR policies before use.
 
 `tests/fixtures/v1-contract.json` is byte-identical to Locksmith's fixture. It pins
 certificate-service typed-CBOR and Keymaker canonical-map bytes/hashes, Keymaker's
@@ -27,15 +28,16 @@ Production admission still uses the wall clock. The frozen fixture bytes/hashes
 are unchanged by this test-clock fix.
 
 Local validation on 21 September: seven API certificate tests passed with the local
-Locksmith patch in a temporary workspace; the source checkout's pins and lockfile
-are unchanged. Locksmith models (6), library (40, one PTY-driver test ignored) and
+Locksmith patch in a temporary workspace; that validation left the source
+checkout's pins and lockfile unchanged. Locksmith models (6), library (40, one PTY-driver test ignored) and
 service (19) tests passed. Synthetic release tests (12) and the actual custody
 HTTP/destination test passed, including mixed/WebAuthn-only recovery. The fixture
 file SHA-256 is `82e74d053976b47edba6e4f11b143c3184bc422c67b3a16c3599bee924e0403a`.
 This is not fresh real-Nitro, physical-device or deployment evidence.
 
 Shared Rust dependencies and the default enclave runtime select Locksmith
-`d2876e971c15c89a5891ee455917e22bad607b30`, including explicit ImportedV0 recovery, expired nonparticipant handling, durable legacy fixtures, the V1 custody
+`d2876e971c15c89a5891ee455917e22bad607b30`, including explicit ImportedV0 recovery,
+expired nonparticipant handling, durable legacy fixtures, the V1 custody
 profile, certified release indices, ECDH identity checks and smartcard PIN fixes.
 Rebuild/install the CLI to use its fixes with existing bundles. Rebuild/redeploy
 enclave images to update their daemon; `LOCKSMITH_COMMIT` overrides that default
@@ -97,7 +99,7 @@ Ctrl-C cancels and restores terminal input settings. PINs are not cached: three
 card operations remain. Explicit headless/noninteractive handling is unchanged.
 Step completion does not mean acceptance; wait for the destination's acknowledgement.
 
-Local validation against the pinned revision: 38 Locksmith and 169 CLI tests
+Earlier local validation of the smartcard changes: 38 Locksmith and 169 CLI tests
 passed; API/gateway compilation passed. Three pseudo-terminal scenarios passed:
 successful hidden input, cancellation, and PIN-format retry exhaustion, each
 checking retained output and restored terminal settings. Physical YubiKey
@@ -157,7 +159,8 @@ single-use Keymaker**, updating Platform's endpoint and verified policy first.
 Record source revisions, PCRs, bundle IDs and results. Existing bundle recovery
 and restarts require no Keymaker.
 
-V0/earlier-V1 compatibility, credential rotation, multi-instance coordination and
+Explicit V0 import/recovery has its own [acceptance gate](legacy-v0.md#validation-and-release).
+Earlier-V1 compatibility, credential rotation, multi-instance coordination and
 production root management remain separate. This does not close #7/#10/#11/#12.
 
 ## Snapshot lifetimes
