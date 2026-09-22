@@ -100,6 +100,15 @@ fi
 db "UPDATE users SET email_verified_at = NOW(), payment_method_added_at = NOW() WHERE id = '$USER_ID'"
 pass 'created an authenticated organization owner'
 
+# e2e-login seeds a placeholder account; /api/billing/subscription below is gated
+# by username_claim_gate_middleware until a real username is claimed. Claim one now.
+CLAIMED_USERNAME="paddle-$(date +%s)$RANDOM"
+CLAIM_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GATEWAY_URL/user/username" \
+  -H "X-Session-ID: $SESSION_ID" -H 'Content-Type: application/json' \
+  -d "{\"username\":\"$CLAIMED_USERNAME\"}")
+[[ $CLAIM_CODE == 200 ]] || fail "failed to claim username (HTTP $CLAIM_CODE) — protected routes stay gated"
+pass 'claimed a real username so protected /api routes are reachable'
+
 PADDLE_WEBHOOK_SECRET=$(docker inspect metering | python3 -c '
 import json, sys
 for value in json.load(sys.stdin)[0]["Config"]["Env"]:
