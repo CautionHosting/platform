@@ -91,8 +91,8 @@
         </template>
       </fieldset>
       <details v-if="passkeyCount" class="custody-help">
-        <summary>About passkey custody</summary>
-        <p class="hint">Caution holds the derived private keys inside an enclave. Holders approve unlocking secrets with a registered passkey verified for quorum approval. Credentials are captured when the bundle is created; multiple passkeys still represent one share.</p>
+        <summary>How passkey approval works</summary>
+        <p class="hint">Your passkey authorizes release of one share. The private key stays inside the key-service enclave. Use a registered passkey verified for quorum approval. Credentials are captured when the bundle is created; multiple passkeys still represent one share.</p>
       </details>
       <p v-if="step === 'review'" class="hint creation-note">Your passkey authorizes creation. Holders approve unlocking secrets when needed.</p>
       <div v-if="error" ref="errorElement" class="creation-error" role="alert" tabindex="-1">
@@ -132,7 +132,7 @@ const passkeyCount = computed(() => selected.value.filter(holder => holder.key_s
 const validThreshold = computed(() => Number.isInteger(threshold.value) && threshold.value >= 1 && threshold.value <= holderCount.value)
 function request() { return creationRequest({ name: name.value, threshold: threshold.value, selections: selected.value, members: members.value, certificates: certificates.value }) }
 const validationMessage = computed(() => { try { request(); return '' } catch (err) { return err.message } })
-const methodLabel = method => method === 'existing_pgp' ? 'External PGP' : 'Passkey · Caution custody'
+const methodLabel = method => method === 'existing_pgp' ? 'External PGP' : 'Passkey · Caution Enclave-held key'
 function selectedFingerprint(member) {
   return member.pgp_keys.find(key => key.id === selections.value[member.user_id]?.pgp_key_id)?.fingerprint
 }
@@ -141,7 +141,7 @@ function availability(member) {
   const parts = []
   if (member.pgp_keys.length) parts.push(`${member.pgp_keys.length} PGP key${member.pgp_keys.length === 1 ? '' : 's'}`)
   if (member.webauthn_credentials > 0) parts.push(passkeySummary(member))
-  if (!cautionCustodyUnavailable(member)) parts.push('Caution custody')
+  if (!cautionCustodyUnavailable(member)) parts.push('Caution Enclave-held key')
   if (cautionCustodyUnavailable(member)) parts.push(cautionCustodyUnavailable(member))
   return parts.join(' · ')
 }
@@ -203,7 +203,7 @@ async function review() {
       fingerprint: selection.key_source === 'existing_pgp' ? member.pgp_keys.find(key => key.id === selection.pgp_key_id).fingerprint : null }
   })
   holders.push(...certificates.value.map(cert => ({ name: cert.userId, method: 'External PGP', fingerprint: cert.fingerprint, manual: true })))
-  const custodySummary = [externalCount.value ? `${externalCount.value} external PGP` : '', passkeyCount.value ? `${passkeyCount.value} Caution custody` : ''].filter(Boolean).join(' · ')
+  const custodySummary = [externalCount.value ? `${externalCount.value} external PGP` : '', passkeyCount.value ? `${passkeyCount.value} Caution Enclave-held ${passkeyCount.value === 1 ? 'key' : 'keys'}` : ''].filter(Boolean).join(' · ')
   reviewSnapshot.value = { request: request(), holders, custodySummary }
   step.value = 'review'; await nextTick(); reviewHeading.value?.focus()
 }

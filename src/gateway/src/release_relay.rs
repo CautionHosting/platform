@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Caution-Commercial
-//! Relay only custody-authenticated approval challenges. The enclave authorizes release.
+//! Relay only key-service-authenticated approval challenges. The enclave authorizes release.
 use crate::types::AppState;
 use axum::{
     extract::State,

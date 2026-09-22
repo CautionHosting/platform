@@ -118,7 +118,7 @@ try {
   assert.equal(await page.evaluate(() => document.activeElement.textContent), 'Mixed demo')
   assert.ok((await page.$eval('.review-list', el => el.textContent)).includes(keys[0].publicKey.getFingerprint().toUpperCase()))
   if (process.env.QUORUM_SCREENSHOT_DIR) await page.screenshot({ path: join(process.env.QUORUM_SCREENSHOT_DIR, 'quorum-review.png'), fullPage: true })
-  assert.ok((await page.$eval('.review-heading', el => el.textContent)).includes('2 external PGP · 1 Caution custody'))
+  assert.ok((await page.$eval('.review-heading', el => el.textContent)).includes('2 external PGP · 1 Caution Enclave-held key'))
   assert.equal(await page.$$eval('.review-quorum', rows => rows.length), 1)
   responseMode = 'slow'
   await button('Create bundle')
@@ -275,5 +275,5 @@ try {
   await page.goto(`${origin}/#keys`); await page.reload(); await textIncludes('Create quorum bundle'); await button('Create quorum bundle'); await textIncludes('Members temporarily unavailable')
   participantsFail = false; await button('Reload members'); await page.waitForSelector('.member-row')
   assert.deepEqual(serverErrors, []); assert.deepEqual(browserErrors, [])
-  console.log('PASS: dashboard member/manual/mixed holder creation, real virtual-passkey signatures, selection/review, private-key rejection, cancellation, no retries, errors, downloads, focus, custody disclosure and compact light/dark layout. Mock API only; no Nitro acceptance.')
+  console.log('PASS: dashboard member/manual/mixed holder creation, real virtual-passkey signatures, selection/review, private-key rejection, cancellation, no retries, errors, downloads, focus, passkey approval disclosure and compact light/dark layout. Mock API only; no Nitro acceptance.')
 } finally { if (browser) await browser.close(); await new Promise(resolve => server.close(resolve)); await rm(fixtureDir, { recursive: true, force: true }) }

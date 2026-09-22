@@ -1324,7 +1324,7 @@ make build-cli
           </div>
           <p v-if="!visibleBundles.length" class="bundle-no-results">No matching bundles.</p>
           <div v-else class="bundle-list">
-          <div class="bundle-columns" aria-hidden="true"><span>Bundle</span><span>Quorum</span><span>Custody</span><span>Created</span><span>Actions</span></div>
+          <div class="bundle-columns" aria-hidden="true"><span>Bundle</span><span>Quorum</span><span>Approval method</span><span>Created</span><span>Actions</span></div>
           <div v-for="bundle in visibleBundles" :id="`bundle-${bundle.id}`" :key="bundle.id" class="bundle-card" :class="{ 'bundle-card--created': createdBundleId === bundle.id }" tabindex="-1">
             <div class="bundle-row">
               <div class="bundle-identity">
@@ -1349,7 +1349,7 @@ make build-cli
                 </div>
               </div>
               <div class="bundle-field"><span class="bundle-mobile-label">Quorum</span>{{ getQuorumBundleSummary(bundle).threshold || 'Unavailable' }}</div>
-              <div class="bundle-field"><span class="bundle-mobile-label">Custody</span>{{ getQuorumBundleSummary(bundle).custody || 'Unavailable' }}</div>
+              <div class="bundle-field"><span class="bundle-mobile-label">Approval method</span>{{ getQuorumBundleSummary(bundle).custody || 'Unavailable' }}</div>
               <div class="bundle-field bundle-date"><span class="bundle-mobile-label">Created</span>{{ bundle.created_at ? formatDate(bundle.created_at) : 'Unavailable' }}</div>
               <div class="bundle-actions" @click="handleBundleMenuSelection">
                 <button v-if="serializeQuorumBundle(bundle)" class="bundle-download" :aria-label="`Download bundle ${bundleTitle(bundle)}`" title="Download bundle" @click="downloadFile(serializeQuorumBundle(bundle), bundle.id + '_quorum-bundle.json', 'application/json')">
@@ -1388,7 +1388,7 @@ make build-cli
               <p v-if="!bundle.holders?.length" class="bundle-label">Unavailable</p>
               <div v-for="(holder, index) in bundle.holders" :key="index" class="bundle-holder">
                 <span class="bundle-holder-name">{{ holder.username || `Holder ${index + 1}` }}</span>
-                <span class="bundle-custody">{{ holder.custody === 'pgp' ? 'External PGP' : holder.custody === 'caution_backed' ? 'Passkey · Caution custody' : 'Unknown custody' }}</span>
+                <span class="bundle-custody">{{ holder.custody === 'pgp' ? 'External PGP' : holder.custody === 'caution_backed' ? 'Passkey · Caution Enclave-held key' : 'Unknown approval method' }}</span>
                 <div class="bundle-fingerprint">
                   <code>{{ holder.fingerprint || 'Fingerprint unavailable' }}</code>
                   <template v-if="holder.fingerprint">
