@@ -572,6 +572,7 @@ pub async fn generate_org_quorum_bundle(
         org_id,
         created_by,
         crate::cryptographic_bundles::CreateBundleRequest {
+            allow_legacy: false,
             data,
             name: request.name,
             labels: (!request.labels.is_null()).then_some(request.labels),
@@ -586,8 +587,15 @@ pub async fn generate_org_quorum_bundle(
     })
 }
 
-/// Uploads must preserve and verify the same envelope as hosted generation.
-pub(crate) fn verify_upload(data: &serde_json::Value) -> Result<(), OrgQuorumError> {
+/// Verify V1 proofs or explicitly accepted legacy public structure.
+pub(crate) fn verify_upload(data: &serde_json::Value, allow_legacy: bool) -> Result<(), OrgQuorumError> {
+    if data.get("format").is_some() {
+        if !allow_legacy { return Err(OrgQuorumError::invalid("legacy upload requires explicit allow_legacy: true")); }
+        locksmith::legacy::ImportedV0::from_json(&data.to_string()).with_context(Ctx::new(
+            StatusCode::BAD_REQUEST, "invalid imported legacy bundle (public validation only)",
+        ))?;
+        return Ok(());
+    }
     let response: GenerateQuorumResponse = serde_json::from_value(data.clone()).with_context(
         Ctx::new(StatusCode::BAD_REQUEST, "expected proofed v1 quorum bundle"),
     )?;

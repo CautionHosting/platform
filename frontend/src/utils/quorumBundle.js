@@ -1,8 +1,16 @@
 // SPDX-FileCopyrightText: 2026 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-export const getQuorumBundleFiles = (bundle) => {
+export const isLegacyBundle = bundle => bundle?.data?.format === 'ImportedV0'
+const bundlePayload = bundle => {
   const payload = bundle?.data?.data ?? bundle?.data
+  return isLegacyBundle(bundle)
+    ? { ...payload.original, keyring: payload.keyring, threshold: payload.threshold, max: payload.keyring?.length }
+    : payload
+}
+
+export const getQuorumBundleFiles = (bundle) => {
+  const payload = bundlePayload(bundle)
   const publicKey = payload?.public_key ?? payload?.secret_recipient_public_key
   const shardfile = payload?.shardfile
   return {
@@ -18,7 +26,7 @@ export const serializeQuorumBundle = (bundle) => {
 }
 
 export const getQuorumBundleSummary = (bundle) => {
-  const payload = bundle?.data?.data ?? bundle?.data
+  const payload = bundlePayload(bundle)
   const keys = payload?.keyring
   const validThreshold = Number.isInteger(payload?.threshold) && Number.isInteger(payload?.max)
     && payload.threshold > 0 && payload.threshold <= payload.max

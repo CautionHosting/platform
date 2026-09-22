@@ -5,7 +5,7 @@ use crate::{ApiClient, output, prompt};
 use clap::Args;
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use keymaker_models::generate_quorum::{
-    GenerateQuorumBundle, GenerateQuorumRequest, GenerateQuorumResponse,
+    GenerateQuorumRequest, GenerateQuorumResponse,
     v1::{self, Key},
 };
 use locksmith::bundle::KeymakerPcrPolicy;
@@ -384,19 +384,6 @@ fn check_quorum_parameters(
         ));
     }
     Ok(())
-}
-
-pub(crate) fn load_bundle(text: &str) -> Result<GenerateQuorumBundle, InitError> {
-    load_bundle_with_timestamp(text).map(|(bundle, _)| bundle)
-}
-
-pub(crate) fn load_bundle_with_timestamp(
-    text: &str,
-) -> Result<(GenerateQuorumBundle, Option<std::time::SystemTime>), InitError> {
-    let policy = load_policy(&policy_path(None))?;
-    let response = serde_json::from_str(text).with_context(Ctx::new("invalid quorum bundle JSON"))?;
-    locksmith::bundle::load_response_with_timestamp(response, &policy)
-        .with_context(Ctx::new("unable to verify proofed v1 quorum bundle"))
 }
 
 fn pgp_selection_menu(member: &Member, explicit: Option<bool>) -> String {

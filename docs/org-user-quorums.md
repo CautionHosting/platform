@@ -393,8 +393,10 @@ independently verified measurements; local tests do not establish Nitro readines
   one-use destination-bound authorization and the existing receiver transport.
   Local/mock tests pass; consolidated Nitro acceptance remains pending.
 
-Artifact preflight now checks required bundle, policy and encrypted secrets before
-EIF staging. Live deployment validation remains pending.
+Artifact preflight checks the non-empty bundle and encrypted secrets before EIF
+staging, and requires a Keymaker policy unless the bundle is tagged ImportedV0.
+Runtime bundle validation and V1 proof verification remain mandatory. Live
+deployment validation remains pending.
 
 ### Trying PGP recovery
 

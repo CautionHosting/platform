@@ -1,4 +1,5 @@
 use super::*;
+use keymaker_models::generate_quorum::GenerateQuorumBundle;
 use clap::Parser;
 
 #[derive(Parser)]

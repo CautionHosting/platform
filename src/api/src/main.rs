@@ -1161,7 +1161,7 @@ async fn create_quorum_bundle(
             "unable to resolve organization",
         ))?;
 
-    org_quorum::verify_upload(&req.data)?;
+    org_quorum::verify_upload(&req.data, req.allow_legacy)?;
     let bundle = cryptographic_bundles::create_quorum_bundle(&state.db, org_id, auth.user_id, req)
         .await
         .with_context(org_quorum::OrgQuorumErrorCtx::new(
@@ -1281,7 +1281,7 @@ async fn update_quorum_bundle(
         ))?;
 
     if let Some(data) = &req.data {
-        org_quorum::verify_upload(data)?;
+        org_quorum::verify_upload(data, req.allow_legacy)?;
     }
     let bundle = cryptographic_bundles::update_quorum_bundle(&state.db, org_id, id, req)
         .await

@@ -16,6 +16,9 @@ use std::{io::IsTerminal, path::PathBuf, time::Duration};
 
 #[derive(clap::Args, Debug, Default)]
 pub(crate) struct Options {
+    /// Accept imported V0 without Keymaker generation evidence. Never bypasses V1 verification.
+    #[arg(long)]
+    pub allow_legacy: bool,
     /// Holder username or full certificate fingerprint; skips the chooser.
     /// Without this option, a unique private-keyring match or sole holder is selected.
     #[arg(long)]

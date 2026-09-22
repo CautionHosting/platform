@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { compile } from 'vue'
 import { parse } from 'vue/compiler-sfc'
-import { getQuorumBundleFiles, getQuorumBundleSummary, serializeQuorumBundle, getEmbeddedBundleId, bundleTitle, bundleIdentifiers, abbreviateBundleValue, selectBundles } from '../src/utils/quorumBundle.js'
+import { isLegacyBundle, getQuorumBundleFiles, getQuorumBundleSummary, serializeQuorumBundle, getEmbeddedBundleId, bundleTitle, bundleIdentifiers, abbreviateBundleValue, selectBundles } from '../src/utils/quorumBundle.js'
 
 const dashboard = readFileSync(new URL('../src/views/Dashboard.vue', import.meta.url), 'utf8')
 const { descriptor } = parse(dashboard)
@@ -22,7 +22,7 @@ const compileSection = name => compile(findDetails(descriptor.template.ast, name
 const compiledDetails = compileSection('bundle-details')
 const compiledActions = compileSection('bundle-actions')
 const defaults = {
-  getQuorumBundleSummary, getQuorumBundleFiles, serializeQuorumBundle, bundleTitle, bundleIdentifiers, abbreviateBundleValue,
+  isLegacyBundle, getQuorumBundleSummary, getQuorumBundleFiles, serializeQuorumBundle, bundleTitle, bundleIdentifiers, abbreviateBundleValue,
   expandedBundles: new Proxy({}, { get: () => true }), bundleGuidance: {}, bundleEncryptCommand: "caution secret encrypt DATABASE_URL --env-file /private/path/app.env",
    truncateId: id => id, addingLabelTo: null, bundleKeyHashes: {}, handleBundleMenuSelection() {}, toggleBundleMenu() {},
   deletingBundle: null, startAddLabel() {}, copyToClipboard() {},
@@ -204,4 +204,25 @@ test('usage instructions copy a fixed command without incorporating bundle metad
   const actions = buttons(renderDetails({ bundle, copyToClipboard: (...args) => copies.push(args) }))
   actions.find(b => b.props?.['aria-label'] === 'Copy encryption command').props.onClick()
   assert.deepEqual(copies, [[defaults.bundleEncryptCommand, 'Encryption command']])
+})
+
+test('imported V0 preserves downloads and exposes recovered quorum without a UUID', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const { isLegacyBundle, getEmbeddedBundleId, getQuorumBundleSummary } = await import('../src/utils/quorumBundle.js')
+  const data = JSON.parse(await readFile(new URL('../../tests/fixtures/imported-v0.json', import.meta.url), 'utf8'))
+  const row = { id: 'record', data }
+  assert.equal(isLegacyBundle(row), true)
+  assert.equal(getEmbeddedBundleId(row), null)
+  assert.equal(getQuorumBundleFiles(row).publicKey, data.original.public_key)
+  assert.equal(getQuorumBundleFiles(row).shardfile, data.original.shardfile)
+  assert.equal(getQuorumBundleSummary(row).threshold, '2 of 2 holders')
+  assert.deepEqual(JSON.parse(serializeQuorumBundle(row)), data)
+})
+
+test('legacy usage includes explicit acceptance in copied encryption command', () => {
+  const copies = []
+  const bundle = { id: 'legacy', data: { format: 'ImportedV0' }, holders: [] }
+  const actions = buttons(renderDetails({ bundle, copyToClipboard: (...args) => copies.push(args) }))
+  actions.find(b => b.props?.['aria-label'] === 'Copy encryption command').props.onClick()
+  assert.deepEqual(copies, [[defaults.bundleEncryptCommand + ' --allow-legacy', 'Encryption command']])
 })

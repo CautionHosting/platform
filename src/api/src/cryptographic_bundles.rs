@@ -38,6 +38,8 @@ pub struct SecretsBundle {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateBundleRequest {
+    #[serde(default)]
+    pub allow_legacy: bool,
     pub data: serde_json::Value,
     pub name: Option<String>,
     pub labels: Option<serde_json::Value>,
@@ -45,6 +47,8 @@ pub struct CreateBundleRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateBundleRequest {
+    #[serde(default)]
+    pub allow_legacy: bool,
     pub data: Option<serde_json::Value>,
     pub name: Option<String>,
     pub labels: Option<serde_json::Value>,
@@ -53,6 +57,10 @@ pub struct UpdateBundleRequest {
 // Derived display metadata only: computing this hash does not verify the proof.
 fn canonical_hash(data: &serde_json::Value) -> Option<String> {
     use keymaker_models::generate_quorum::{GenerateQuorumResponse, deterministic_bundle_hash};
+    if data.get("format").is_some() {
+        let bundle: locksmith::legacy::ImportedV0 = serde_json::from_value(data.clone()).ok()?;
+        return bundle.content_hash().ok();
+    }
     let response: GenerateQuorumResponse = serde_json::from_value(data.clone()).ok()?;
     deterministic_bundle_hash(&response.data).ok().map(hex::encode)
 }

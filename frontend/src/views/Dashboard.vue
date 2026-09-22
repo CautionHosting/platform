@@ -1337,6 +1337,7 @@ make build-cli
                   <button class="btn-sm btn-secondary" @click="cancelEditBundleName()">Cancel</button>
                 </div>
                   <div v-else class="bundle-name-display"><span class="item-name">{{ bundle.name || 'Unnamed bundle' }}</span><span v-if="createdBundleId === bundle.id" class="bundle-new">New</span></div>
+                  <div v-if="isLegacyBundle(bundle)" class="bundle-subtitle">Legacy V0 — no Keymaker generation proof</div>
                   <div class="bundle-subtitle">{{ getEmbeddedBundleId(bundle) ? getEmbeddedBundleId(bundle).slice(0, 8) : `Platform record ${truncateId(bundle.id)}` }}</div>
                 </div>
               </div>
@@ -1362,15 +1363,15 @@ make build-cli
               <details class="bundle-guide" :open="!!bundleGuidance[bundle.id]" @toggle="bundleGuidance[bundle.id] = $event.target.open">
                 <summary>Use this bundle</summary>
                 <ol>
-                  <li><strong>Download the bundle</strong><p>Save the complete JSON as <code>.caution/quorum-bundle.json</code> in your initialized application checkout. Provide an independently verified Keymaker policy at <code>.caution/keymaker-pcr-policy.json</code>, or set <code>KEYMAKER_PCR_POLICY_PATH</code> to its path.</p>
+                  <li><strong>Download the bundle</strong><p>Save the complete JSON as <code>.caution/quorum-bundle.json</code> in your initialized application checkout. <span v-if="!isLegacyBundle(bundle)">Provide an independently verified Keymaker policy at <code>.caution/keymaker-pcr-policy.json</code>, or set <code>KEYMAKER_PCR_POLICY_PATH</code> to its path.</span><span v-else>Imported V0 has no Keymaker generation proof. Encryption and release each require <code>--allow-legacy</code>.</span></p>
                     <button v-if="serializeQuorumBundle(bundle)" class="bundle-guide-download" @click="downloadFile(serializeQuorumBundle(bundle), bundle.id + '_quorum-bundle.json', 'application/json')">Download bundle</button>
                   </li>
                   <li><strong>Encrypt secrets</strong><p>Your input file must contain <code>DATABASE_URL</code>. Replace the example path with your private env file.</p>
-                    <div class="bundle-command"><code>{{ bundleEncryptCommand }}</code><button class="bundle-text-button" aria-label="Copy encryption command" @click="copyToClipboard(bundleEncryptCommand, 'Encryption command')">Copy</button></div>
+                    <div class="bundle-command"><code>{{ bundleEncryptCommand + (isLegacyBundle(bundle) ? " --allow-legacy" : "") }}</code><button class="bundle-text-button" aria-label="Copy encryption command" @click="copyToClipboard(bundleEncryptCommand + (isLegacyBundle(bundle) ? ' --allow-legacy' : ''), 'Encryption command')">Copy</button></div>
                     <p>Writes <code>.caution/secrets/DATABASE_URL.asc</code>. Keep plaintext out of Git.</p>
                     <a href="https://docs.caution.co/concepts/key-services/#2-add-encrypted-secrets" target="_blank" rel="noopener noreferrer">Encryption and packaging guide ↗</a>
                   </li>
-                  <li><strong>Deploy, verify, then approve</strong><p>Include the bundle, Keymaker policy and encrypted secrets in your application image. After deployment and <code>caution verify</code>, enough distinct holders must submit shares to meet the quorum.</p>
+                  <li><strong>Deploy, verify, then approve</strong><p>Include the bundle<span v-if="!isLegacyBundle(bundle)">, Keymaker policy</span> and encrypted secrets in your application image. <span v-if="isLegacyBundle(bundle)">Rebuild with an ImportedV0-compatible Locksmith runtime.</span> After deployment and <code>caution verify</code>, enough distinct holders must submit shares to meet the quorum.</p>
                     <a href="https://docs.caution.co/concepts/key-services/#7-send-shards" target="_blank" rel="noopener noreferrer">Holder approval instructions ↗</a>
                   </li>
                 </ol>
@@ -2112,7 +2113,7 @@ import {
 import { formatLocalDate, formatLocalTime } from "../utils/dateTime.js";
 import { getSubscriptionPlanAction } from "../utils/subscriptionPlan.js";
 import { getCurrentTheme } from "../utils/theme.js";
-import { getQuorumBundleFiles, getQuorumBundleSummary, serializeQuorumBundle, bundleTitle, bundleIdentifiers, getEmbeddedBundleId, selectBundles } from "../utils/quorumBundle.js";
+import { isLegacyBundle, getQuorumBundleFiles, getQuorumBundleSummary, serializeQuorumBundle, bundleTitle, bundleIdentifiers, getEmbeddedBundleId, selectBundles } from "../utils/quorumBundle.js";
 
 async function sha256Hex(message) {
   const msgBuffer = new TextEncoder().encode(message);
@@ -5387,7 +5388,7 @@ export default {
       cancelPgpKeyForm,
       formatPgpFingerprint,
       expandedBundles,
-      bundleGuidance, bundleSearch, bundleEncryptCommand, visibleBundles, getEmbeddedBundleId,
+      isLegacyBundle, bundleGuidance, bundleSearch, bundleEncryptCommand, visibleBundles, getEmbeddedBundleId,
       bundleMenu,
       bundleTitle,
       bundleIdentifiers,
