@@ -38,6 +38,7 @@ serde_cbor = "0.11"
 authenticator = { version = "0.4", features = ["crypto_openssl"], default-features = false }
 qrcode = "0.14"
 rpassword = "7.3"
+crossterm = { version = "0.29", default-features = false, features = ["events", "windows"] }
 shlex = "1.3"
 zeroize = "1"
 indicatif = "0.17"

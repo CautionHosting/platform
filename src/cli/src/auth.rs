@@ -6,6 +6,8 @@
 //! Extracted from the monolith; see also `secrets`, `verify`, `cache`,
 //! `ssh_keys`, and `pgp_keys`.
 
+pub(crate) mod cancellation;
+
 use authenticator::{
     Pin, RegisterResult, SignResult, StatusPinUv, StatusUpdate,
     authenticatorservice::{AuthenticatorService, RegisterArgs, SignArgs},
@@ -44,14 +46,25 @@ enum PromptForPinError {
 }
 
 fn prompt_for_pin() -> Result<Option<String>, PromptForPinError> {
-    use PromptForPinErrorCtx as Ctx;
-    let pin = prompt::password("Enter your WebAuthn PIN (or press Enter if no PIN is set): ")
-        .with_context(Ctx::read_pin())?;
+    prompt_for_pin_with_cancellation(None)
+}
 
-    if pin.trim().is_empty() {
+fn prompt_for_pin_with_cancellation(
+    cancel: Option<&cancellation::Cancellation>,
+) -> Result<Option<String>, PromptForPinError> {
+    use PromptForPinErrorCtx as Ctx;
+    let label = "Enter your WebAuthn PIN (or press Enter if no PIN is set): ";
+    let pin = match cancel {
+        Some(cancel) => cancel.password(label).map_err(BoxError::from),
+        None => prompt::password(label).map_err(BoxError::from),
+    }
+    .with_context(Ctx::read_pin())?;
+    let pin = ZeroizePin(pin);
+    if pin.0.trim().is_empty() {
         Ok(None)
     } else {
-        Ok(Some(pin))
+        let mut pin = pin;
+        Ok(Some(std::mem::take(&mut pin.0)))
     }
 }
 
@@ -2230,27 +2243,52 @@ pub(crate) fn get_assertion(
     options: &LoginBeginResponse,
     base_url: &str,
 ) -> Result<AssertionResult, GetAssertionError> {
+    get_assertion_inner(client, options, base_url, None)
+}
+
+pub(crate) fn get_assertion_cancellable(
+    client: &ApiClient,
+    options: &LoginBeginResponse,
+    base_url: &str,
+    cancel: &cancellation::Cancellation,
+) -> Result<AssertionResult, GetAssertionError> {
+    get_assertion_inner(client, options, base_url, Some(cancel))
+}
+
+fn get_assertion_inner(
+    client: &ApiClient,
+    options: &LoginBeginResponse,
+    base_url: &str,
+    cancel: Option<&cancellation::Cancellation>,
+) -> Result<AssertionResult, GetAssertionError> {
     use GetAssertionErrorCtx as Ctx;
+    if let Some(cancel) = cancel {
+        cancel.check().with_context(Ctx::assertion())?;
+    }
 
     output::verbose(client.verbose, "Attempting assertion without PIN first...");
-    match try_get_assertion(client, options, base_url, None) {
+    match try_get_assertion(client, options, base_url, None, cancel) {
         Ok(result) => {
             output::verbose(client.verbose, "Assertion succeeded without PIN");
             Ok(result)
         }
         Err(e) => {
+            if let Some(cancel) = cancel {
+                cancel.check().with_context(Ctx::assertion())?;
+            }
             output::verbose(client.verbose, format!("First attempt failed: {:?}", e));
             output::verbose(client.verbose, format!("Full error details: {:#?}", e));
 
             // Only ask for PIN if the error is PIN-related
             if is_pin_related_error(&e) {
                 output::status("Your security key requires a PIN.");
-                match prompt_for_pin().with_context(Ctx::prompt_for_pin())? {
+                match prompt_for_pin_with_cancellation(cancel).with_context(Ctx::prompt_for_pin())?
+                {
                     Some(pin_string) => {
                         let pin_string = ZeroizePin(pin_string);
                         let pin = Pin::new(&pin_string.0);
                         output::verbose(client.verbose, "Retrying assertion with PIN...");
-                        try_get_assertion(client, options, base_url, Some(pin))
+                        try_get_assertion(client, options, base_url, Some(pin), cancel)
                             .with_context(Ctx::assertion())
                     }
                     None => {
@@ -2281,6 +2319,13 @@ pub(crate) fn get_assertion(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum TryGetAssertionError {
+    #[error("native approval cancelled [{location:?}]")]
+    Cancelled {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
     #[error("failed to decode challenge [{location:?}]")]
     DecodeChallenge {
         #[location]
@@ -2418,9 +2463,13 @@ fn try_get_assertion(
     options: &LoginBeginResponse,
     base_url: &str,
     pin: Option<Pin>,
+    cancel: Option<&cancellation::Cancellation>,
 ) -> Result<AssertionResult, TryGetAssertionError> {
     use TryGetAssertionErrorCtx as Ctx;
 
+    if let Some(cancel) = cancel {
+        cancel.check().with_context(Ctx::cancelled())?;
+    }
     let opts = &options.public_key;
 
     output::verbose(client.verbose, "Getting assertion from authenticator...");
@@ -2481,145 +2530,164 @@ fn try_get_assertion(
     };
 
     output::verbose(client.verbose, "Sending sign request to authenticator...");
-    manager
-        .sign(opts.timeout, args, status_tx, callback)
-        .with_context(Ctx::start_assertion())?;
+    let result = (|| {
+        manager
+            .sign(opts.timeout, args, status_tx, callback)
+            .with_context(Ctx::start_assertion())?;
 
-    output::verbose(
-        client.verbose,
-        "Waiting for callback result (up to 60 seconds)...",
-    );
+        output::verbose(
+            client.verbose,
+            "Waiting for callback result (up to 60 seconds)...",
+        );
 
-    let mut loader = Spinner::new("Tap your security key to continue", SpinnerStyle::KeyTap);
+        let mut loader = Spinner::new("Tap your security key to continue", SpinnerStyle::KeyTap);
 
-    loop {
-        // Check for status updates
-        while let Ok(status) = status_rx.try_recv() {
-            match status {
-                StatusUpdate::SelectResultNotice(sender, users) => {
-                    loader.abandon();
-                    output::status("Multiple credentials found. Please select one:");
-                    for (idx, user) in users.iter().enumerate() {
-                        let display = user
-                            .display_name
-                            .as_deref()
-                            .or(user.name.as_deref())
-                            .unwrap_or("Unknown");
-                        output::status(format!("[{}] {}", idx, display));
-                    }
-
-                    let selection = crate::prompt::select(&format!(
-                        "Enter selection (0-{}): ",
-                        users.len() - 1
-                    ))
-                    .with_context(Ctx::prompt_selection())?;
-
-                    if selection >= users.len() {
-                        return Err(TryGetAssertionError::SelectionOutOfRange {
-                            location: std::panic::Location::caller(),
-                        });
-                    }
-
-                    output::status(format!(
-                        "Selected: {}",
-                        users[selection].name.as_deref().unwrap_or("Unknown")
-                    ));
-                    sender
-                        .send(Some(selection))
-                        .with_context(Ctx::send_selection())?;
-                }
-                StatusUpdate::PinUvError(StatusPinUv::PinRequired(sender)) => {
-                    loader.abandon();
-                    output::verbose(client.verbose, "PIN required by authenticator");
-                    match prompt_for_pin().with_context(Ctx::prompt_for_pin())? {
-                        Some(pin_string) => {
-                            let pin = Pin::new(&pin_string);
-                            sender.send(pin).with_context(Ctx::send_pin())?;
-                            loader = Spinner::new(
-                                "Tap your security key to continue",
-                                SpinnerStyle::KeyTap,
-                            );
+        loop {
+            if let Some(cancel) = cancel {
+                cancel.check().with_context(Ctx::cancelled())?;
+            }
+            // Check for status updates
+            while let Ok(status) = status_rx.try_recv() {
+                match status {
+                    StatusUpdate::SelectResultNotice(sender, users) => {
+                        loader.abandon();
+                        output::status("Multiple credentials found. Please select one:");
+                        for (idx, user) in users.iter().enumerate() {
+                            let display = user
+                                .display_name
+                                .as_deref()
+                                .or(user.name.as_deref())
+                                .unwrap_or("Unknown");
+                            output::status(format!("[{}] {}", idx, display));
                         }
-                        None => {
-                            return Err(TryGetAssertionError::PinRequiredNoneProvided {
+
+                        let label =
+                            ["Enter selection (0-", &(users.len() - 1).to_string(), "): "].concat();
+                        let selection = match cancel {
+                            Some(cancel) => cancel.selection(&label).map_err(BoxError::from),
+                            None => crate::prompt::select(&label).map_err(BoxError::from),
+                        }
+                        .with_context(Ctx::prompt_selection())?;
+
+                        if selection >= users.len() {
+                            return Err(TryGetAssertionError::SelectionOutOfRange {
                                 location: std::panic::Location::caller(),
                             });
                         }
+
+                        output::status(format!(
+                            "Selected: {}",
+                            users[selection].name.as_deref().unwrap_or("Unknown")
+                        ));
+                        sender
+                            .send(Some(selection))
+                            .with_context(Ctx::send_selection())?;
+                    }
+                    StatusUpdate::PinUvError(StatusPinUv::PinRequired(sender)) => {
+                        loader.abandon();
+                        output::verbose(client.verbose, "PIN required by authenticator");
+                        match prompt_for_pin_with_cancellation(cancel)
+                            .with_context(Ctx::prompt_for_pin())?
+                        {
+                            Some(pin_string) => {
+                                let pin_string = ZeroizePin(pin_string);
+                                let pin = Pin::new(&pin_string.0);
+                                sender.send(pin).with_context(Ctx::send_pin())?;
+                                loader = Spinner::new(
+                                    "Tap your security key to continue",
+                                    SpinnerStyle::KeyTap,
+                                );
+                            }
+                            None => {
+                                return Err(TryGetAssertionError::PinRequiredNoneProvided {
+                                    location: std::panic::Location::caller(),
+                                });
+                            }
+                        }
+                    }
+                    StatusUpdate::PinUvError(e) => {
+                        loader.abandon();
+                        output::verbose(client.verbose, format!("PIN/UV error: {:?}", e));
+                        return Err(TryGetAssertionError::PinUvError {
+                            error: e,
+                            location: std::panic::Location::caller(),
+                        });
+                    }
+                    _ => {
+                        output::verbose(
+                            client.verbose,
+                            format!("Authenticator status: {:?}", status),
+                        );
                     }
                 }
-                StatusUpdate::PinUvError(e) => {
-                    loader.abandon();
-                    output::verbose(client.verbose, format!("PIN/UV error: {:?}", e));
-                    return Err(TryGetAssertionError::PinUvError {
-                        error: e,
-                        location: std::panic::Location::caller(),
-                    });
-                }
-                _ => {
-                    output::verbose(
-                        client.verbose,
-                        format!("Authenticator status: {:?}", status),
-                    );
-                }
             }
+
+            if let Some(cancel) = cancel {
+                cancel.check().with_context(Ctx::cancelled())?;
+            }
+            if let Ok(result) = callback_rx.try_recv() {
+                loader.finish();
+                output::verbose(client.verbose, "Got assertion result");
+                // The authenticator surfaces "no credentials" as an error whose message names
+                // `NoCredentials`; detect that by inspecting the message so we can surface a
+                // helpful hint, otherwise wrap the raw error through the typed Ctx constructor.
+                let sign_result = if result
+                    .as_ref()
+                    .err()
+                    .is_some_and(|e| format!("{:?}", e).contains("NoCredentials"))
+                {
+                    Err::<_, TryGetAssertionError>(TryGetAssertionError::NoCredentials {
+                        location: std::panic::Location::caller(),
+                    })
+                } else {
+                    result.with_context(Ctx::assertion_failed())
+                }?;
+
+                let cred_id_bytes = &sign_result
+                    .assertion
+                    .credentials
+                    .as_ref()
+                    .ok_or_else(|| TryGetAssertionError::NoCredential {
+                        location: std::panic::Location::caller(),
+                    })?
+                    .id;
+
+                let response_json = serde_json::json!({
+                    "id": general_purpose::URL_SAFE_NO_PAD.encode(cred_id_bytes),
+                    "rawId": general_purpose::URL_SAFE_NO_PAD.encode(cred_id_bytes),
+                    "response": {
+                        "authenticatorData": general_purpose::URL_SAFE_NO_PAD.encode(sign_result.assertion.auth_data.to_vec()),
+                        "clientDataJSON": general_purpose::URL_SAFE_NO_PAD.encode(&client_data_json_bytes),
+                        "signature": general_purpose::URL_SAFE_NO_PAD.encode(&sign_result.assertion.signature),
+                        "userHandle": sign_result.assertion.user.as_ref()
+                            .map(|u| general_purpose::URL_SAFE_NO_PAD.encode(&u.id))
+                            .unwrap_or_default(),
+                    },
+                    "type": "public-key"
+                });
+
+                output::verbose(client.verbose, "Response JSON structure:");
+                output::verbose(
+                    client.verbose,
+                    &serde_json::to_string_pretty(&response_json)
+                        .with_context(Ctx::serialize_response())?,
+                );
+
+                return Ok(AssertionResult {
+                    response_json: serde_json::to_vec(&response_json)
+                        .with_context(Ctx::serialize_response())?,
+                });
+            }
+
+            std::thread::sleep(Duration::from_millis(100));
         }
-
-        if let Ok(result) = callback_rx.try_recv() {
-            loader.finish();
-            output::verbose(client.verbose, "Got assertion result");
-            // The authenticator surfaces "no credentials" as an error whose message names
-            // `NoCredentials`; detect that by inspecting the message so we can surface a
-            // helpful hint, otherwise wrap the raw error through the typed Ctx constructor.
-            let sign_result = if result
-                .as_ref()
-                .err()
-                .is_some_and(|e| format!("{:?}", e).contains("NoCredentials"))
-            {
-                Err::<_, TryGetAssertionError>(TryGetAssertionError::NoCredentials {
-                    location: std::panic::Location::caller(),
-                })
-            } else {
-                result.with_context(Ctx::assertion_failed())
-            }?;
-
-            let cred_id_bytes = &sign_result
-                .assertion
-                .credentials
-                .as_ref()
-                .ok_or_else(|| TryGetAssertionError::NoCredential {
-                    location: std::panic::Location::caller(),
-                })?
-                .id;
-
-            let response_json = serde_json::json!({
-                "id": general_purpose::URL_SAFE_NO_PAD.encode(cred_id_bytes),
-                "rawId": general_purpose::URL_SAFE_NO_PAD.encode(cred_id_bytes),
-                "response": {
-                    "authenticatorData": general_purpose::URL_SAFE_NO_PAD.encode(sign_result.assertion.auth_data.to_vec()),
-                    "clientDataJSON": general_purpose::URL_SAFE_NO_PAD.encode(&client_data_json_bytes),
-                    "signature": general_purpose::URL_SAFE_NO_PAD.encode(&sign_result.assertion.signature),
-                    "userHandle": sign_result.assertion.user.as_ref()
-                        .map(|u| general_purpose::URL_SAFE_NO_PAD.encode(&u.id))
-                        .unwrap_or_default(),
-                },
-                "type": "public-key"
-            });
-
-            output::verbose(client.verbose, "Response JSON structure:");
-            output::verbose(
-                client.verbose,
-                &serde_json::to_string_pretty(&response_json)
-                    .with_context(Ctx::serialize_response())?,
-            );
-
-            return Ok(AssertionResult {
-                response_json: serde_json::to_vec(&response_json)
-                    .with_context(Ctx::serialize_response())?,
-            });
-        }
-
-        std::thread::sleep(Duration::from_millis(100));
+    })();
+    if cancel.is_some() && result.is_err() {
+        // Release any queued PIN/selection senders before joining transports.
+        drop(status_rx);
+        let _ = manager.cancel();
     }
+    result
 }
 
 #[cfg(test)]

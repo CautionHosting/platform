@@ -78,7 +78,15 @@ The CLI displays the bundle, selected certificate, destination key and release
 context hash. Compare browser details with the CLI. Browser approval runs on the
 registered Platform origin; the passkey must already be in the bundle snapshot.
 Native approval requires USB FIDO2 user verification (PIN/biometric), not touch
-alone. External PGP holders may contribute to mixed bundles using `--keyring`
+alone.
+Native PIN entry and credential selection are cancellable. A destination
+disconnection, recovery deadline, or Ctrl-C cancels the authenticator operation
+and waits for the native approval worker to finish restoring terminal settings
+before returning. PIN input is hidden before the prompt appears and is cleared
+on cancellation. Start a fresh attempt after cancellation. Rebuild/install the
+CLI for this fix; no service deployment or bundle change is required.
+
+External PGP holders may contribute to mixed bundles using `--keyring`
 or their supported OpenPGP smartcard.
 
 Smartcard recovery shows three operations: **[1/3] Decrypt bundle metadata**,
@@ -415,8 +423,8 @@ supports previously generated subset/reordered bundles without modifying their
 proof-bound contents. Rebuild Keymaker and the certificate service from the fixed
 Locksmith source and establish their trusted PCR policies when deploying. Shared
 Rust dependency and default enclave-daemon pins select the fixed revision;
-rebuilding only Platform does not update those services. Native PIN cancellation
-is separate work.
+rebuilding only Platform does not update those services. Native approval cancellation
+is handled locally by the CLI as described above.
 
 Focused checks (use the documented host native-library configuration):
 
@@ -427,6 +435,16 @@ cargo test --locked -p cli --lib share_release::
 cargo test --locked -p enclave-builder --lib
 cargo check --locked --manifest-path tests/e2e/soft-authenticator/Cargo.toml
 ```
+
+Native approval cleanup has a separate PTY harness. Build its Rust driver with
+`cargo test --locked -p cli --lib share_release::native_approval --no-run`, then
+pass the emitted `target/debug/deps/cli-...` executable to
+`python3 src/cli/tests/native_approval_pty.py <test-executable>`. It covers hidden
+PIN entry/editing, successful selection, deadline/disconnection cancellation,
+Ctrl-C, SIGINT, and input EOF; it checks complete terminal restoration and worker
+completion before abrupt error exit. Unit tests also cover pre-cancelled input
+and cancellation racing with a completed worker. These tests require no USB key;
+physical authenticator acceptance remains separate.
 
 The polling suite uses local HTTP servers and the actual gateway rate limiter;
 its two-client test runs for just over a minute. These are local/synthetic checks,

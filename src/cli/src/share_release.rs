@@ -432,6 +432,9 @@ async fn poll_browser_assertion(
 #[path = "share_release/poll_tests.rs"]
 mod poll_tests;
 
+mod native_approval;
+use native_approval::NativeApproval;
+
 pub(crate) async fn recover(
     client: &ApiClient,
     options: &Options,
@@ -441,11 +444,13 @@ pub(crate) async fn recover(
     destination_policy: Measurements,
     generation_time: Option<std::time::SystemTime>,
 ) -> Result<SendSignedEncryptedShardResponse, InitError> {
-    tokio::select! {
-        result = tokio::time::timeout(release::TTL, recover_inner(client, options, bundle, holder, summary, destination_policy, generation_time)) =>
-            result.with_context(Ctx::new("release attempt expired; start a fresh attempt"))?,
-        _ = tokio::signal::ctrl_c() => Err(InitError::invalid("release cancelled")),
-    }
+    NativeApproval::run(release::TTL, async |native| {
+        recover_inner(
+            client, options, bundle, holder, summary, destination_policy, generation_time, native,
+        )
+        .await
+    })
+    .await
 }
 async fn recover_inner(
     client: &ApiClient,
@@ -455,6 +460,7 @@ async fn recover_inner(
     summary: ReleaseSummary,
     destination_policy: Measurements,
     generation_time: Option<std::time::SystemTime>,
+    native: &mut NativeApproval,
 ) -> Result<SendSignedEncryptedShardResponse, InitError> {
     let address = summary.address;
     let url = options
@@ -558,19 +564,13 @@ async fn recover_inner(
                     .with_context(Ctx::new("approval options"))?,
             )
             .with_context(Ctx::new("native approval options"))?;
-            tokio::task::spawn_blocking(move || {
-                let assertion = auth::get_assertion(&client, &options, &client.frontend_url())
-                    .with_context(Ctx::new("native release approval"))?;
-                serde_json::from_slice(&assertion.response_json)
-                    .with_context(Ctx::new("native assertion"))
-            })
-            .await
-            .with_context(Ctx::new("native approval task"))?
+            native.approve(client, options).await
         }
     };
     let assertion = tokio::select! {
-        result=approval=>result?,
+        biased;
         _=destination.disconnected()=>return Err(InitError::invalid("destination disconnected; start a fresh attempt")),
+        result=approval=>result?,
     };
     output::status("Approval received. Requesting share re-encryption…");
     let complete = CompleteRequest {
