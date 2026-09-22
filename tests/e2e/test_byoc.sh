@@ -194,6 +194,15 @@ fi
 
 log "Logged in as user $USER_ID (session: ${SESSION_ID:0:16}...)"
 
+# e2e-login seeds a placeholder account; every protected route below is gated by
+# username_claim_gate_middleware until a real username is claimed. Claim one now.
+CLAIMED_USERNAME="byoc-$(date +%s)$RANDOM"
+CLAIM_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GATEWAY_URL/user/username" \
+    -H "X-Session-ID: $SESSION_ID" -H 'Content-Type: application/json' \
+    -d "{\"username\":\"$CLAIMED_USERNAME\"}")
+[ "$CLAIM_CODE" = "200" ] || step_fail "Failed to claim username (HTTP $CLAIM_CODE) — protected routes stay gated"
+log "Claimed username: $CLAIMED_USERNAME"
+
 # Write CLI config file so the caution binary uses our session
 mkdir -p "$CONFIG_DIR"
 cat > "$CONFIG_DIR/config.json" <<EOF
