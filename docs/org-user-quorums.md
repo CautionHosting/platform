@@ -5,6 +5,8 @@ Hosted creation supports PGP, WebAuthn and mixed holders when the corresponding
 services and independent trust files are configured. WebAuthn/mixed recovery now
 uses the custody enclave with native or browser passkey approval; see
 [share recovery](share-recovery.md) for configuration and the pending Nitro gate.
+Existing unversioned PGP bundles have a separate
+[holder-assisted V0 import path](legacy-v0.md); no new quorum is generated.
 
 Hosted creation is CLI/dashboard → Platform → certificate service (Caution holders only)
 → Keymaker. Platform snapshots registered credentials in credential-ID order and
@@ -242,11 +244,13 @@ narrow holder rows. These results cover this UI worktree, not a deployed revisio
 ## Dashboard bundle management
 
 The dashboard's **Download bundle** action exports the complete stored
-bundle, including its proof envelope and credential bindings, without Platform's
+bundle, including the proof envelope and credential bindings for V1, without Platform's
 database or display metadata. Public-key and shard-file `.asc` downloads remain
 available. Use the JSON with `caution secret encrypt --bundle FILE`; the CLI still
-requires the independently established Keymaker PCR policy. Downloading does not
-establish trust or upgrade a legacy bundle format.
+requires the independently established Keymaker PCR policy for V1. ImportedV0
+instead requires explicit `--allow-legacy` on encryption and release. Downloading
+does not establish trust or import a raw V0 bundle. The dashboard has no importer;
+use [the CLI import flow](legacy-v0.md), with optional signed upload.
 
 Bundles appear newest first, with local search by name or bundle ID. Compact rows
 separate the name and short ID from quorum, custody and creation date. The quiet
@@ -272,6 +276,12 @@ state lasts only for the current dashboard session. It does not track deployment
 or approval completion. Uncertain creation retains **Check bundles**, without
 success guidance or an automatic retry. Publish the corresponding public Key
 Services guide update before releasing this UI.
+
+Uploaded ImportedV0 bundles show **Legacy V0 — no Keymaker generation proof**.
+Their guidance omits the V1 policy requirement, adds `--allow-legacy` to the
+encryption example and calls for an ImportedV0-compatible runtime. Platform's
+image preflight recognizes ImportedV0 and does not require a Keymaker policy for
+it. Runtime bundle validation remains mandatory.
 
 The expandable holder list shows certificate
 fingerprints and current organization usernames only when registrations match
@@ -314,8 +324,10 @@ caution secret encrypt TEST_SECRET --env-file .env.quorum-test
 caution secret send-shard --keyring /absolute/path/to/alice.private.asc
 ```
 
-Legacy/unproofed bundles remain unsupported; supplying a policy does not upgrade
-them. Preserve the original bundle and its recovery material. Do not regenerate
+Raw V0 bundles require [explicit holder-assisted import](legacy-v0.md); supplying
+a policy does not upgrade them. ImportedV0 has no generation proof and requires
+per-use legacy acceptance. Earlier V1 formats remain unsupported. Preserve the
+original bundle and its recovery material. Do not regenerate
 an existing quorum to resolve a loading error: a new quorum has a different key
 and cannot decrypt secrets encrypted for the original quorum.
 
@@ -337,15 +349,18 @@ The shared models and loader are pinned to the Locksmith revision recorded in
 `Cargo.toml` and `Cargo.lock`. All Bootproof SDK consumers use the historical
 verification revision `821b5c63e80f082f6d67ba3695c11416933489ec`, including the existing
 ES384 encoding fix. No old-remote patch or local path dependency is required.
-The default Locksmith daemon revision is also `2da3be50bebd2dfdc4d0d3a94d05f55be02e910c`,
+The default Locksmith daemon revision is also `d2876e971c15c89a5891ee455917e22bad607b30`,
 matching the API/CLI loader. `LOCKSMITH_COMMIT` still overrides this default.
 The standalone mock E2E helper uses the same revision. This revision includes
 holder-identity checks during shard submission, certified release indices, and
 shared signing/encryption key rejection between holders in Keymaker. Equivalent
-encryption subkeys within one holder are allowed. `LOCKSMITH_COMMIT` selects the
+encryption subkeys within one holder are allowed. It also includes the V1 custody
+profile and explicit ImportedV0 recovery with expired nonparticipant handling.
+`LOCKSMITH_COMMIT` selects the
 deployed daemon only; it does not override the API/CLI Cargo dependencies. Keep both pins aligned when upgrading.
-Existing deployed images require a rebuild/redeployment to use it. Legacy
-bundle fallback remains unimplemented.
+Existing deployed images require a rebuild/redeployment to use it. Raw V0
+fallback remains unsupported; explicit import is a separate path with pending
+live-acceptance work.
 
 The required `threshold`/`max` fields intentionally break the previous V1 response
 contract while retaining the V1 tag. Updated API/CLI/runtime readers reject old
@@ -384,8 +399,9 @@ independently verified measurements; local tests do not establish Nitro readines
   [PR #15](https://codeberg.org/caution/locksmith/pulls/15): durable proof loading.
   Historical certificate verification is implemented. The shared PGP keyring
   reconstruction fix also retains every holder for sender/receiver verification.
-  These fixes do not establish successful multi-holder Nitro unlocking. V0
-  fallback/upgrade remains deferred under #11 and PR #15.
+  These fixes do not establish successful multi-holder Nitro unlocking. Explicit
+  V0 import/recovery and format-aware image preflight are implemented separately;
+  Nitro/card acceptance remains outstanding under #11 and PR #15.
 - [Locksmith #2](https://codeberg.org/caution/locksmith/issues/2): Keymaker
   serialization/reset lifecycle; no Platform queue or semaphore is added.
 - [Locksmith #12](https://codeberg.org/caution/locksmith/issues/12): WebAuthn
@@ -593,8 +609,8 @@ CLI encryption with both direct and downloaded bundles. The existing
 `make test-quorum-db` HTTP mock retains controlled failure/timeout coverage.
 
 These are synthetic-proof integration tests. Real Nitro validation and production
-policy provisioning remain release dependencies. V0 fallback/upgrade remains
-with Locksmith PR #15 and #11; real-Nitro WebAuthn recovery acceptance remains
+policy provisioning remain release dependencies. Explicit V0 import/recovery
+has separate acceptance work under Locksmith PR #15 and #11; real-Nitro WebAuthn recovery acceptance remains
 under #12. This work does not close those tickets.
 
 

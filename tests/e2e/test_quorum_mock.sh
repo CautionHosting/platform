@@ -161,12 +161,13 @@ docker exec "$CONTAINER" psql -U postgres -d caution_quorum_test -c \
     -p locksmith --lib server::tests::downloaded_v0_recovers_and_decrypts -- --ignored --exact)
 # Invoke the actual CLI send-shard implementation with isolated client config.
 # The certificate mock supplies app metadata only; recovery must stop before transport.
+# Detach stdin so this noninteractive test also works when make runs in a terminal.
 CAUTION_UNSAFE_KEY_SERVICE_E2E=1 \
 KEYMAKER_PCR_POLICY_PATH="$WORK/policies/keymaker-pcr-policy.json" \
 PUBLIC_CERTIFICATE_SERVICE_URL="$PUBLIC_CERTIFICATE_SERVICE_URL" \
 QUORUM_RECOVERY_TEST_DIR="$WORK" \
     "$RECOVERY_TEST" --ignored --exact \
-    quorum_init::tests::downloaded_bundles_require_explicit_noninteractive_holder --nocapture
+    quorum_init::tests::downloaded_bundles_require_explicit_noninteractive_holder --nocapture < /dev/null
 # A terminal receives no JSON dump, even in a directory without app metadata.
 "${COMMON[@]}" python3 - "$CARGO_TARGET_DIR/debug/caution" "$WORK" <<'PY'
 import errno, json, os, pathlib, pty, subprocess, sys
