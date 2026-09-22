@@ -84,14 +84,14 @@ build-gateway-dev:
 	@docker build -t caution-gateway $(DEV_BUILD_ARGS) -f ./containerfiles/Containerfile.gateway .
 	@echo "Gateway dev image build complete"
 
-build-api-dev:
+build-api-dev: fetch/opentofu-$(TOFU_VERSION).tar.gz
 	@echo "Building API service (dev)..."
-	@docker build -t caution-api $(DEV_BUILD_ARGS) --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) -f ./containerfiles/Containerfile.api .
+	@docker build -t caution-api $(DEV_BUILD_ARGS) --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) --build-arg TOFU_VERSION=$(TOFU_VERSION) -f ./containerfiles/Containerfile.api .
 	@echo "API dev service image built: caution-api"
 
-build-api-e2e:
+build-api-e2e: fetch/opentofu-$(TOFU_VERSION).tar.gz
 	@echo "Building API service (e2e test mode)..."
-	@docker build -t caution-api $(DEV_BUILD_ARGS) --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) --build-arg EXTRA_FEATURES="e2e-testing-unsafe" -f ./containerfiles/Containerfile.api .
+	@docker build -t caution-api $(DEV_BUILD_ARGS) --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) --build-arg TOFU_VERSION=$(TOFU_VERSION) --build-arg EXTRA_FEATURES="e2e-testing-unsafe" -f ./containerfiles/Containerfile.api .
 	@echo "API e2e image build complete"
 
 build-email-dev:
