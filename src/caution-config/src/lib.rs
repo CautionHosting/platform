@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 
 pub mod app_name;
 pub mod pricing;
+mod restart;
+pub use restart::{RestartConfig, RestartPolicy};
 
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -345,6 +347,8 @@ pub struct EnclaveConfig {
     pub debug: Option<DebugConfig>,
     pub network: Option<NetworkConfig>,
     pub resources: Option<ResourceConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart: Option<RestartConfig>,
     pub unit: Option<BTreeMap<String, UnitConfig>>,
 }
 
@@ -1044,6 +1048,7 @@ impl ConfigurationFile {
                 "default".to_string(),
                 EnclaveConfig {
                     build,
+                    restart: None,
                     debug: debug_config,
                     network,
                     resources,
@@ -1265,6 +1270,7 @@ mod tests {
             enclave: Some(BTreeMap::from([(
                 "main".into(),
                 EnclaveConfig {
+                    restart: None,
                     build: Some(BuildConfig {
                         containerfile: Some("Containerfile.example".into()),
                         app_sources: vec![

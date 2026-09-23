@@ -814,6 +814,10 @@ prepare-byoc-provisioner:
 test-unit:
 	cargo test --workspace
 
+.PHONY: test-nitro-restart
+test-nitro-restart:
+	python3 tests/test_nitro_restart.py
+
 test-live-caddy-nitro:
 	@test -n "$(CADDY_E2E_URL)" || { echo "CADDY_E2E_URL is required"; exit 1; }
 	CADDY_E2E_URL="$(CADDY_E2E_URL)" cargo test -p enclave-builder --test caddy_nitro_live -- --ignored --nocapture

@@ -4503,6 +4503,7 @@ async fn deploy_logic(
         cpu_count,
         disk_gb: 30, // no HCL equivalent
         debug_mode: debug_enabled,
+        restart: enclave_opt.and_then(|e| e.restart).unwrap_or_default(),
         ports: ingress_ports.clone(),
         http_port,
         e2e,
