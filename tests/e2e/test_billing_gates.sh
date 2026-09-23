@@ -21,6 +21,9 @@ set -euo pipefail
 
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8000}"
 TEST_DB_HOST="${TEST_DB_HOST:-postgres-test}"
+FIXTURES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/fixtures" && pwd)"
+GIT_SSH_PORT="${GIT_SSH_PORT:-2222}"
+WORK_DIR=$(mktemp -d)
 LOG_DIR="tests/e2e/logs"
 LOG_FILE="$LOG_DIR/billing-gates-$(date +%Y%m%d-%H%M%S).log"
 STEP_NUM=0
@@ -32,6 +35,7 @@ STEP_RESULTS=()
 SESSION_ID=""
 USER_ID=""
 ORG_ID=""
+SSH_KEY_PATH="$WORK_DIR/billing-gates-test-key"
 
 mkdir -p "$LOG_DIR"
 
@@ -216,17 +220,58 @@ RESOURCE_TYPE_ID=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test 
 SELECT id FROM resource_types WHERE type_code = 'ec2-instance' LIMIT 1;
 " 2>/dev/null | head -1 | tr -d ' \n')
 
-# Create the test app resource that deploy requests will reference
+# Generate the app resource id up front. deploy_logic resolves the commit to
+# build via get_commit_sha, which runs
+#   git --git-dir {data_dir}/git-repos/{app_id}.git rev-parse refs/heads/main
+# The bare repo only exists once a repo has been pushed to that app over git
+# SSH (the gateway does `git init --bare` on first push). So we must create the
+# resource row keyed by this id AND actually push the demo fixture before any
+# deploy call, otherwise deploy proceeds past the billing gate and then fails
+# get_commit_sha with a 400.
 APP_ID=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -A -c "
-INSERT INTO compute_resources (organization_id, provider_account_id, resource_type_id,
-  provider_resource_id, resource_name, state, created_by)
-VALUES ('$ORG_ID', '$PROVIDER_ACCOUNT_ID', '$RESOURCE_TYPE_ID',
-  'i-fake-billing-gate-test', 'billing-gate-test', 'running', '$USER_ID')
-RETURNING id;
+SELECT gen_random_uuid();
 " 2>/dev/null | head -1 | tr -d ' \n')
 
 log "  Provider account: $PROVIDER_ACCOUNT_ID"
 log "  Test app: $APP_ID"
+
+# Generate an SSH key and register it for the user. The gateway authorizes a
+# git push by matching the presented key's fingerprint against ssh_keys joined to
+# an organization_member of the app's org (get_user_for_app_by_ssh_key), so this
+# must be done before pushing. Insert directly via SQL to avoid the username gate.
+ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -q
+SSH_PUB_KEY=$(cat "$SSH_KEY_PATH.pub")
+# ssh-keygen prints "SHA256:<base64url>"; the gateway's generate_ssh_fingerprint
+# stores the bare base64url (no prefix), so strip it to match auth lookups.
+FP=$(ssh-keygen -lf - <<< "$SSH_PUB_KEY" 2>/dev/null | awk '{print $2}' | sed 's/^SHA256://')
+docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
+INSERT INTO ssh_keys (user_id, public_key, fingerprint, key_type, name)
+VALUES ('$USER_ID', '$SSH_PUB_KEY', '$FP', 'ssh-ed25519', 'e2e-gates');
+" >/dev/null 2>&1 || true
+
+# Create the test app resource that deploy requests will reference (keyed by APP_ID).
+docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
+INSERT INTO compute_resources (id, organization_id, provider_account_id, resource_type_id,
+  provider_resource_id, resource_name, state, created_by)
+VALUES ('$APP_ID', '$ORG_ID', '$PROVIDER_ACCOUNT_ID', '$RESOURCE_TYPE_ID',
+  'i-fake-billing-gate-test', 'billing-gate-test', 'running', '$USER_ID');
+" >/dev/null 2>&1 || true
+
+# Seed the bare git repo for APP_ID by pushing the demo fixture over git SSH.
+CLONE_DIR="$WORK_DIR/demo-app"
+cp -r "$FIXTURES_DIR/demo-app-happy-path" "$CLONE_DIR"
+cd "$CLONE_DIR"
+git init -q -b main
+git -c user.email="e2e@caution.dev" -c user.name="Caution E2E" add .
+git -c user.email="e2e@caution.dev" -c user.name="Caution E2E" commit -m "Initial commit" --quiet
+eval "$(ssh-agent -s)" >/dev/null
+ssh-add "$SSH_KEY_PATH" 2>/dev/null
+git remote add caution "ssh://git@localhost:$GIT_SSH_PORT/$APP_ID.git"
+export GIT_SSH_COMMAND="ssh -i $SSH_KEY_PATH -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $GIT_SSH_PORT"
+if ! git push caution HEAD:main 2>&1; then
+  step_fail "git push (bare repo for APP_ID not seeded — deploy would fail get_commit_sha)"
+fi
+cd "$WORK_DIR"
 
 # Claim a real username. e2e-login seeds the user in the placeholder state, and
 # every protected /api route (including /api/deploy below) runs through
