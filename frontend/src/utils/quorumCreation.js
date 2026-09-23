@@ -7,10 +7,17 @@ export const MAX_CREATION_BYTES = 1024 * 1024
 export const GENERATION_PATH = '/quorum-bundles/from-org-users'
 const bytes = value => new TextEncoder().encode(value).byteLength
 
+export function cautionCustodyUnavailable(member) {
+  if (!(member.webauthn_credentials > 0)) return 'No registered passkeys. Register a passkey or use external PGP.'
+  if (member.webauthn_credentials > 64) return 'More than 64 passkeys. Reduce the credential count or use external PGP.'
+  if (!(member.webauthn_uv_credentials > 0)) return 'Verify a passkey for quorum approval with PIN/biometrics in Authentication, or use external PGP.'
+  return null
+}
+
 export function recoveryMethods(member) {
   return [
     ...(member.pgp_keys.length ? ['existing_pgp'] : []),
-    ...(member.webauthn_credentials > 0 ? ['caution_backed_pgp'] : []),
+    ...(!cautionCustodyUnavailable(member) ? ['caution_backed_pgp'] : []),
   ]
 }
 
@@ -27,7 +34,7 @@ export function creationRequest({ name, threshold, selections, members, certific
   const participants = selections.map(selection => {
     const member = members.find(member => member.user_id === selection.user_id)
     if (!member || !recoveryMethods(member).includes(selection.key_source)) {
-      throw new Error('Choose a recovery method for each selected holder.')
+      throw new Error('Choose an approval method for each selected holder.')
     }
     const pgp = selection.key_source === 'existing_pgp'
     if (pgp && !member.pgp_keys.some(key => key.id === selection.pgp_key_id)) {

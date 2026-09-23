@@ -248,6 +248,18 @@ mod tests {
         assert!(status(Json(Token { token: requester })).await.is_err());
     }
     #[tokio::test]
+    async fn requester_cancellation_rejects_late_browser_submission() {
+        let (requester, browser) = pending();
+        assert_eq!(cancel(Json(Token { token: requester.clone() })).await, StatusCode::NO_CONTENT);
+        assert!(read(Json(Token { token: browser.clone() })).await.is_err());
+        assert!(finish(Json(Finish {
+            token: browser,
+            assertion: Some(json!({"late": "assertion"})),
+        })).await.is_err());
+        assert!(status(Json(Token { token: requester })).await.is_err());
+    }
+
+    #[tokio::test]
     async fn cancellation_and_expiry_are_terminal() {
         let (requester, browser) = pending();
         finish(Json(Finish {

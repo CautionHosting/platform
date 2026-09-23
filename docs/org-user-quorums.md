@@ -174,11 +174,11 @@ list to include external holders in the same bundle. The optional name is editab
 later; labels remain in the existing bundle management controls.
 
 For organization members, the UI shows registered PGP keys and passkey counts.
-Selecting a member opts into the displayed sole recovery method; when both are
+Selecting a member opts into the displayed sole approval method; when both are
 available, choose explicitly. A key selector appears only when several PGP keys
 exist; the selected full fingerprint is displayed beneath the custody controls. Members with no credentials cannot be selected. Multiple passkeys still
 count as one holder/share. Caution-backed private keys stay in enclave custody;
-passkeys authorize recovery. Credentials are snapshotted at creation. Expand
+passkeys authorize unlocking secrets. Credentials are snapshotted at creation. Expand
 **About passkey custody** for this explanation when passkey holders are selected.
 
 For each external holder, choose **Add PGP holder**, upload or paste one armored
@@ -204,7 +204,7 @@ silently lowers the threshold. Review shows exactly the holder choices and
 threshold that will be sent. Review consolidates the name, quorum and nonzero custody
 totals in its header, followed by holder details and full PGP fingerprints.
 **Create bundle** uses the requester's existing
-WebAuthn signed-request flow; it does not collect the holders' recovery approvals.
+WebAuthn signed-request flow; it does not collect the holders' quorum approvals.
 The API still performs proof verification and stores the complete bundle.
 
 Editing/navigation and duplicate clicks are blocked during signing/generation.
@@ -646,3 +646,54 @@ the unique external-PGP holder matching a private certificate in that file. Mult
 matches prompt among those holders only (or require `--holder` without a terminal).
 No match is an error; public-only certificates do not qualify. Explicit `--holder`
 keeps precedence and all existing decryption/signature checks still apply.
+
+## Passkey eligibility for quorum approval
+
+Before certificate issuance or Keymaker generation, each Caution-backed holder
+must have 1–64 registered credentials and at least one credential with verified
+PIN/biometric evidence. All credentials are captured in their existing order;
+oversized snapshots are rejected, never truncated. External PGP remains available
+for holders who cannot meet these requirements.
+
+Dashboard → Authentication shows **Verified for quorum approval** for credentials with
+evidence. Use **Verify for quorum approval** to qualify an existing capable credential
+without re-registering it. This is an owner-only, single-use WebAuthn ceremony
+with a two-minute deadline. Touch-only U2F keys cannot qualify, but existing login
+policies remain unchanged. The CLI and creation wizard explain unavailable
+holders; missing eligibility metadata fails closed.
+
+Apply migration `054_credential_uv_verified.sql` before restarting the gateway
+and API, and rebuild the frontend and CLI. Gateway startup backfills evidence
+from existing registrations using webauthn-rs parsing; malformed/unknown records
+remain unverified. New registration and reset flows record the verified result.
+Only a successful server-verified UV assertion can qualify another existing key.
+Eligibility is stored separately from WebAuthn login policy; verification updates
+normal credential counters. Existing quorum bundles are not rewritten.
+Adding or verifying a credential now does not repair an older frozen bundle.
+
+The participant API retains `webauthn_credentials` and adds
+`webauthn_uv_credentials`. Passkey listings add `uv_verified`. Authenticated
+`POST /passkeys/{id}/recovery-verification/begin` returns `publicKey` and `session`;
+`/finish` accepts that session with the WebAuthn assertion and returns
+`{"uv_verified":true}` only after successful verification and persistence.
+
+Run `make test-recovery-verification` for real gateway/Postgres ceremonies with
+Chrome virtual authenticators (requires Docker, gateway build dependencies and
+`tests/e2e/browser-authenticator` npm dependencies). Set
+`PUPPETEER_EXECUTABLE_PATH` when using an installed Chrome. This isolated test
+covers registration/reset evidence, upgrading an existing credential, U2F
+rejection, forged UV claims, owner/key binding, replay, deletion during
+verification and startup backfill.
+
+### Quorum terminology in the dashboard and CLI
+
+**Quorum threshold** is the number of distinct holders needed to unlock secrets;
+**quorum approval** is a holder's authorization. Authentication labels passkeys
+as **Verified for quorum approval** or **Not yet verified for quorum approval**.
+The latter means evidence is missing, not necessarily that the key is incompatible.
+PIN/biometric verification for quorum approval is required independently of the
+organization's sign-in setting. Bundle selection and review show how many of each
+holder's registered passkeys are verified; multiple passkeys still represent one share.
+
+Existing `recovery-verification` API paths, internal identifiers and technical
+key-reconstruction terminology remain unchanged.

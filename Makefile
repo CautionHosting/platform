@@ -1100,3 +1100,7 @@ test: test-unit test-cli-install
 test-share-release-browser:
 	@npm run build --prefix frontend
 	@node tests/e2e/browser-authenticator/release-approval.mjs
+
+.PHONY: test-recovery-verification
+test-recovery-verification:
+	@bash tests/e2e/test_recovery_verification.sh
