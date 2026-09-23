@@ -125,7 +125,7 @@ export default {
         path: '/qr-login'
       },
       '/qr-release': {
-        title: 'Approve share recovery • Caution',
+        title: 'Quorum approval • Caution',
         description: 'Authorize one share for a verified application enclave.',
         path: '/qr-release'
       },

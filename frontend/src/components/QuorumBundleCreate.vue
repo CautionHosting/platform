@@ -5,7 +5,7 @@
     <header>
       <button type="button" class="text-button" :disabled="busy" @click="emit('cancel')">← Secrets</button>
       <h2 id="creation-title" ref="heading" tabindex="-1">Create quorum bundle</h2>
-      <p>Choose who can recover your application's secrets.</p>
+      <p>Choose the holders and threshold required to unlock your application's secrets.</p>
       <ol class="steps" aria-label="Creation steps">
         <li :aria-current="step === 'configure' ? 'step' : undefined">1 · Configure</li>
         <li :aria-current="step === 'review' ? 'step' : undefined">2 · Review &amp; create</li>
@@ -32,11 +32,11 @@
             <div v-for="member in filteredMembers" :key="member.user_id" class="member-row">
               <label class="member-name">
                 <input type="checkbox" :checked="!!selections[member.user_id]" :disabled="!recoveryMethods(member).length || (!selections[member.user_id] && holderCount >= MAX_DASHBOARD_HOLDERS)" @change="toggleMember(member, $event.target.checked)" />
-                <span><strong>{{ member.username }}</strong><span class="muted holder-context">{{ selections[member.user_id]?.key_source === 'caution_backed_pgp' ? `${member.webauthn_credentials} registered passkey${member.webauthn_credentials === 1 ? '' : 's'}` : selections[member.user_id] ? 'Organization member' : availability(member) }}</span></span>
+                <span><strong>{{ member.username }}</strong><span class="muted holder-context">{{ selections[member.user_id]?.key_source === 'caution_backed_pgp' ? passkeySummary(member) : selections[member.user_id] ? 'Organization member' : availability(member) }}</span></span>
               </label>
               <div v-if="selections[member.user_id]" class="holder-method">
-                <select v-if="recoveryMethods(member).length > 1" v-model="selections[member.user_id].key_source" :aria-label="`Recovery method for ${member.username}`">
-                  <option disabled value="">Choose recovery method</option>
+                <select v-if="recoveryMethods(member).length > 1" v-model="selections[member.user_id].key_source" :aria-label="`Approval method for ${member.username}`">
+                  <option disabled value="">Choose approval method</option>
                   <option v-for="method in recoveryMethods(member)" :key="method" :value="method">{{ methodLabel(method) }}</option>
                 </select>
                 <span v-else class="method">{{ methodLabel(selections[member.user_id].key_source) }}</span>
@@ -71,7 +71,7 @@
           <div class="threshold">
             <div class="threshold-row"><label for="quorum-threshold">Quorum threshold</label>
             <div class="threshold-control"><input id="quorum-threshold" v-model.number="threshold" :disabled="!holderCount" type="number" min="1" :max="Math.max(holderCount, 1)" step="1" aria-describedby="threshold-help" /><span v-if="validThreshold">of {{ holderCount }} holders required</span><span v-else-if="holderCount">{{ holderCount }} holder{{ holderCount === 1 ? '' : 's' }} selected</span></div></div>
-            <p id="threshold-help" class="hint">{{ !holderCount ? 'Select holders to set the quorum.' : validationMessage || `Any ${threshold} holder${threshold === 1 ? '' : 's'} can recover the secret.` }}</p>
+            <p id="threshold-help" class="hint">{{ !holderCount ? 'Select holders to set the quorum.' : validationMessage || `Any ${threshold} holder${threshold === 1 ? '' : 's'} can unlock the secret.` }}</p>
           </div>
         </template>
 
@@ -84,7 +84,7 @@
             <li v-for="(holder, index) in reviewSnapshot.holders" :key="index">
               <div class="review-holder"><strong>{{ holder.name }}</strong><span>{{ holder.method }}</span></div>
               <span v-if="holder.fingerprint" class="muted holder-context">{{ holder.manual ? 'Manually added' : 'Organization member' }}</span>
-              <span v-else class="muted holder-context">{{ holder.passkeys }} registered passkey{{ holder.passkeys === 1 ? '' : 's' }} · one share</span>
+              <span v-else class="muted holder-context">{{ holder.passkeySummary }} · one share</span>
               <code v-if="holder.fingerprint">{{ holder.fingerprint }}</code>
             </li>
           </ul>
@@ -92,9 +92,9 @@
       </fieldset>
       <details v-if="passkeyCount" class="custody-help">
         <summary>About passkey custody</summary>
-        <p class="hint">Caution holds the derived private keys inside an enclave. Holders authorize recovery with their registered passkeys. Credentials are captured when the bundle is created; multiple passkeys still represent one share.</p>
+        <p class="hint">Caution holds the derived private keys inside an enclave. Holders approve unlocking secrets with a registered passkey verified for quorum approval. Credentials are captured when the bundle is created; multiple passkeys still represent one share.</p>
       </details>
-      <p v-if="step === 'review'" class="hint creation-note">Your passkey authorizes creation. Holders approve recovery later.</p>
+      <p v-if="step === 'review'" class="hint creation-note">Your passkey authorizes creation. Holders approve unlocking secrets when needed.</p>
       <div v-if="error" ref="errorElement" class="creation-error" role="alert" tabindex="-1">
         <template v-if="uncertain">
           <strong>Creation outcome unknown</strong>
@@ -136,10 +136,12 @@ const methodLabel = method => method === 'existing_pgp' ? 'External PGP' : 'Pass
 function selectedFingerprint(member) {
   return member.pgp_keys.find(key => key.id === selections.value[member.user_id]?.pgp_key_id)?.fingerprint
 }
+const passkeySummary = member => `${member.webauthn_uv_credentials ?? 0} of ${member.webauthn_credentials} passkeys verified for quorum approval`
 function availability(member) {
   const parts = []
   if (member.pgp_keys.length) parts.push(`${member.pgp_keys.length} PGP key${member.pgp_keys.length === 1 ? '' : 's'}`)
-  if (!cautionCustodyUnavailable(member)) parts.push(`${member.webauthn_credentials} passkey${member.webauthn_credentials === 1 ? '' : 's'} · Caution custody`)
+  if (member.webauthn_credentials > 0) parts.push(passkeySummary(member))
+  if (!cautionCustodyUnavailable(member)) parts.push('Caution custody')
   if (cautionCustodyUnavailable(member)) parts.push(cautionCustodyUnavailable(member))
   return parts.join(' · ')
 }
@@ -197,7 +199,7 @@ async function review() {
   error.value = ''; uncertain.value = false; attempted.value = false
   const holders = selected.value.map(selection => {
     const member = members.value.find(member => member.user_id === selection.user_id)
-    return { name: member.username, method: methodLabel(selection.key_source), passkeys: member.webauthn_credentials,
+    return { name: member.username, method: methodLabel(selection.key_source), passkeySummary: passkeySummary(member),
       fingerprint: selection.key_source === 'existing_pgp' ? member.pgp_keys.find(key => key.id === selection.pgp_key_id).fingerprint : null }
   })
   holders.push(...certificates.value.map(cert => ({ name: cert.userId, method: 'External PGP', fingerprint: cert.fingerprint, manual: true })))

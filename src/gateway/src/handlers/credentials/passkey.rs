@@ -46,7 +46,7 @@ pub struct PasskeyBeginRequest {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum PasskeyError {
-    #[error("Verify this passkey with a PIN or biometric before using it for recovery. [{location}]")]
+    #[error("Verify this passkey with a PIN or biometric before using it for quorum approval. [{location}]")]
     UserVerificationRequired {
         #[location]
         location: Location,
@@ -134,7 +134,7 @@ impl IntoResponse for PasskeyError {
         match self {
             Self::UserVerificationRequired { .. } => (
                 StatusCode::BAD_REQUEST,
-                "This passkey must verify a PIN or biometric for recovery.",
+                "This passkey must verify a PIN or biometric for quorum approval.",
             ).into_response(),
             error @ Self::Auth { .. } => {
                 tracing::warn!(?error, "Passkey management: authentication failed");

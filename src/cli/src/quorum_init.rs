@@ -222,7 +222,7 @@ impl Member {
         } else if self.webauthn_credentials > 64 {
             Some("selected WebAuthn holder has more than 64 credentials; reduce the credential count or use external PGP")
         } else if self.webauthn_uv_credentials < 1 {
-            Some("selected WebAuthn holder must verify a passkey with PIN/biometrics in Dashboard Authentication, or use external PGP")
+            Some("selected WebAuthn holder must verify a passkey for quorum approval with PIN/biometrics in Dashboard Authentication, or use external PGP")
         } else {
             None
         }

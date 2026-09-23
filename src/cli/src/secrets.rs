@@ -1602,7 +1602,7 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Could not obtain destination attestation from {address}. No share was sent; check that the app is awaiting recovery and port 49504 is reachable (30-second connection/response timeout) [{location:?}]")]
+    #[error("Could not obtain destination attestation from {address}. No share was sent; check that the app is awaiting quorum shares and port 49504 is reachable (30-second connection/response timeout) [{location:?}]")]
     DestinationAttestation {
         address: std::net::SocketAddr,
         #[location]
@@ -1630,7 +1630,7 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Connection closed during share recovery; share acceptance was not confirmed. The application may already be unlocked; check its status before retrying [{location:?}]")]
+    #[error("Connection closed during quorum unlocking; share acceptance was not confirmed. The application may already be unlocked; check its status before retrying [{location:?}]")]
     ConnectionClosed {
         #[location]
         location: Location,

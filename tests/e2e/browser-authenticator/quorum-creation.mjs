@@ -101,6 +101,7 @@ try {
   assert.equal(await page.$('.custody-help'), null)
   assert.equal(await page.$('#quorum-source'), null)
   assert.equal(await page.$eval('#quorum-threshold', input => input.value), '2')
+  assert.ok((await page.$$eval('.member-row', rows => rows.map(row => row.textContent).join(' '))).includes('1 of 2 passkeys verified for quorum approval'))
   assert.equal(await page.$eval('.member-row:last-child input', input => input.disabled), true)
   await selectMember('Alice'); assert.equal(await page.$('[aria-label="PGP key for Alice"]'), null); assert.ok((await page.$eval('.member-row code', el => el.textContent)).includes(keys[0].publicKey.getFingerprint().toUpperCase())); assert.ok(!(await page.$eval('.threshold', el => el.textContent)).includes('of 1 holders required')); await selectMember('Bob')
   await add(keys[1].publicKey.armor())
@@ -113,6 +114,7 @@ try {
   await button('Review bundle →')
   assert.equal(signCount, 0)
   assert.equal(await page.$$eval('.review-list li', rows => rows.length), 3)
+  assert.ok((await page.$eval('.review-list', el => el.textContent)).includes('1 of 2 passkeys verified for quorum approval'))
   assert.equal(await page.evaluate(() => document.activeElement.textContent), 'Mixed demo')
   assert.ok((await page.$eval('.review-list', el => el.textContent)).includes(keys[0].publicKey.getFingerprint().toUpperCase()))
   if (process.env.QUORUM_SCREENSHOT_DIR) await page.screenshot({ path: join(process.env.QUORUM_SCREENSHOT_DIR, 'quorum-review.png'), fullPage: true })
@@ -162,7 +164,7 @@ try {
   responseMode = 'ok'
 
   await open(); await selectMember('Chloe')
-  await page.select('[aria-label="Recovery method for Chloe"]', 'existing_pgp')
+  await page.select('[aria-label="Approval method for Chloe"]', 'existing_pgp')
   assert.equal(await page.$eval('footer .primary', button => button.disabled), true)
   await page.select('[aria-label="PGP key for Chloe"]', members[2].pgp_keys[1].id)
   await selectMember('Bob')

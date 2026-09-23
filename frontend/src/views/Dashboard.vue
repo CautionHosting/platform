@@ -1214,6 +1214,7 @@ make build-cli
         </div>
 
         <div class="security-passkeys">
+          <p class="security-setting-description">Quorum approval requires PIN or biometric verification, regardless of the sign-in setting above.</p>
           <div v-if="passkeyFlowStage" class="passkey-flow-card" role="status" aria-live="polite">
             <div class="passkey-flow-steps">
               <div
@@ -1256,7 +1257,8 @@ make build-cli
                   </div>
                   <div class="passkey-badges">
                     <span class="passkey-badge">{{ passkey.kind }}</span>
-                    <span v-if="passkey.uv_verified" class="passkey-badge">Verified for recovery</span>
+                    <span v-if="passkey.uv_verified" class="passkey-badge">Verified for quorum approval</span>
+                    <span v-if="!passkey.uv_verified" class="passkey-badge">Not yet verified for quorum approval</span>
                     <span v-if="passkey.is_current_session" class="passkey-badge passkey-badge--current">
                       Current session
                     </span>
@@ -1275,7 +1277,7 @@ make build-cli
 
               <button v-if="!passkey.uv_verified" class="btn-secondary btn-small"
                 :disabled="verifyingPasskey !== null" @click="verifyRecovery(passkey)">
-                {{ verifyingPasskey === passkey.id ? 'Verifying…' : 'Verify for recovery' }}
+                {{ verifyingPasskey === passkey.id ? 'Verifying…' : 'Verify for quorum approval' }}
               </button>
               <button
                 class="btn-danger btn-small"
@@ -2927,7 +2929,7 @@ export default {
       try {
         await verifyPasskeyRecovery(passkey.id, authFetch);
         await loadPasskeys();
-        showToast("Passkey verified for quorum recovery");
+        showToast("Passkey verified for quorum approval");
       } catch (err) {
         showToast(err.name === "NotAllowedError"
           ? "Verification was cancelled or this authenticator cannot verify a PIN/biometric. Try a capable passkey."

@@ -150,7 +150,7 @@ it. Each file must contain exactly one public certificate and be no larger than
 Use `--keymaker-url` for direct PGP-only creation. WebAuthn and mixed quorums
 use Platform mediation. Caution-backed holders need 1–64 registered credentials
 and at least one passkey verified with PIN/biometrics. Existing passkeys can be
-verified under Dashboard → Authentication → Verify for recovery. See [selection, trust policies and dependency limits](../../docs/org-user-quorums.md).
+verified under Dashboard → Authentication → Verify for quorum approval. See [selection, trust policies and dependency limits](../../docs/org-user-quorums.md).
 
 ### Encrypt Env Secrets
 

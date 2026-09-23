@@ -1,4 +1,4 @@
-# WebAuthn and mixed share recovery
+# Quorum approval and secret unlocking
 
 For existing unversioned PGP bundles, follow [Legacy V0 import and recovery](legacy-v0.md).
 
