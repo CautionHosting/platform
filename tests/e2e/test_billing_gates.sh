@@ -185,9 +185,13 @@ if [ -z "$ORG_ID" ] || [ "$ORG_ID" = "null" ]; then
   INSERT INTO organizations (name) VALUES ('e2e-gates-org')
   RETURNING id;
   " 2>/dev/null | head -1 | tr -d ' \n' || true)
+  # Link the user to the org. deploy_logic requires the authenticated user to be
+  # a member of req.org_id (the org carried in the deploy request); without this
+  # row it returns NotOrgMember (403) before ever reaching the balance check, so
+  # the gate would deny regardless of the seeded credit amount.
   docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-  INSERT INTO organization_members (organization_id, role)
-  VALUES ('$ORG_ID', 'owner');
+  INSERT INTO organization_members (organization_id, user_id, role)
+  VALUES ('$ORG_ID', '$USER_ID', 'owner');
   " >/dev/null 2>&1 || true
 fi
 

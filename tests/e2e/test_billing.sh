@@ -238,8 +238,8 @@ if [ -z "$ORG_ID" ] || [ "$ORG_ID" = "null" ]; then
     " 2>/dev/null | head -1 | tr -d ' \n' || true)
     if [ -n "$ORG_ID" ] && [ "$ORG_ID" != "null" ]; then
         docker exec "${TEST_DB_HOST:-postgres-test}" psql -U postgres -d caution_test -c "
-        INSERT INTO organization_members (organization_id, role)
-        VALUES ('$ORG_ID', 'owner');
+        INSERT INTO organization_members (organization_id, user_id, role)
+        VALUES ('$ORG_ID', '$USER_ID', 'owner');
         " >/dev/null 2>&1 || true
         log "  Created org $ORG_ID and added user as owner"
     else
