@@ -8,10 +8,10 @@
 # Tests billing enforcement gates:
 #   1. Wait for services
 #   2. Create test user via e2e-login and claim a username (lifts the gate)
-#   3. Deploy with zero credits — rejected (4xx)
-#   4. Deploy with $20 credits — rejected (4xx, below $25 minimum)
+#   3. Deploy with zero credits — rejected (402)
+#   4. Deploy with $20 credits — rejected (402, below $25 minimum)
 #   5. Deploy with $25 credits — passes billing gate
-#   6. Deploy while org is credit-suspended — rejected (4xx)
+#   6. Deploy while org is credit-suspended — rejected (402)
 #   7. Unsuspend org, deploy succeeds again
 #   8. Resource limit: deploy up to max_resources_per_org — succeeds
 #   9. Resource limit: deploy one more — rejected (429)
@@ -21,9 +21,6 @@ set -euo pipefail
 
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8000}"
 TEST_DB_HOST="${TEST_DB_HOST:-postgres-test}"
-FIXTURES_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/fixtures" && pwd)"
-GIT_SSH_PORT="${GIT_SSH_PORT:-2222}"
-WORK_DIR=$(mktemp -d)
 LOG_DIR="tests/e2e/logs"
 LOG_FILE="$LOG_DIR/billing-gates-$(date +%Y%m%d-%H%M%S).log"
 STEP_NUM=0
@@ -35,7 +32,6 @@ STEP_RESULTS=()
 SESSION_ID=""
 USER_ID=""
 ORG_ID=""
-SSH_KEY_PATH="$WORK_DIR/billing-gates-test-key"
 
 mkdir -p "$LOG_DIR"
 
@@ -103,26 +99,16 @@ set_balance() {
   fi
 }
 
-# Helper: true when RESULT holds a 4xx client-error status (e.g. 402, 403).
-is_4xx() {
-  case "$1" in
-    4[0-9][0-9]) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 # Helper: attempt deploy via gateway, return the error status from the
 # streamed response body. The deploy endpoint always returns HTTP 200 and
 # streams results as newline-delimited JSON. On billing/resource gate
 # failure, the last line contains {"error": "...", "status": 402|429}.
 # Returns the status field from the error JSON, or "ok" if no error found.
 attempt_deploy() {
-  # Reset the app to a deployable state before each attempt. A deploy transitions
-  # the resource to 'pending' (then 'running'/'failed'); a live ('running') app
-  # cannot be re-deployed in place, and a 'pending' one returns 409 DeployInProgress.
-  # Reset to 'initialized' so every gate attempt starts from the same deployable state.
+  # Reset app state to 'running' before each attempt so we don't get 409 Conflict
+  # from a previous deploy that transitioned it to 'pending' or 'failed'.
   docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-  UPDATE compute_resources SET state = 'initialized', deploy_attempt_id = NULL WHERE id = '$APP_ID';
+  UPDATE compute_resources SET state = 'running' WHERE id = '$APP_ID';
   " >/dev/null 2>&1
 
   local body
@@ -222,63 +208,20 @@ RESOURCE_TYPE_ID=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test 
 SELECT id FROM resource_types WHERE type_code = 'ec2-instance' LIMIT 1;
 " 2>/dev/null | head -1 | tr -d ' \n')
 
-# Generate the app resource id up front. deploy_logic resolves the commit to
-# build via get_commit_sha, which runs
-#   git --git-dir {data_dir}/git-repos/{app_id}.git rev-parse refs/heads/main
-# The bare repo only exists once a repo has been pushed to that app over git
-# SSH (the gateway does `git init --bare` on first push). So we must create the
-# resource row keyed by this id AND actually push the demo fixture before any
-# deploy call, otherwise deploy proceeds past the billing gate and then fails
-# get_commit_sha with a 400.
+# Create the test app resource that deploy requests will reference. No git repo is
+# seeded on purpose: this test checks the billing/resource *gate decision*, not real
+# deploys. With no repo, get_commit_sha fails (400) after the billing gate passes —
+# that non-402 result is exactly what steps 5/7 assert to mean "the gate let it through".
 APP_ID=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -A -c "
-SELECT gen_random_uuid();
+INSERT INTO compute_resources (organization_id, provider_account_id, resource_type_id,
+  provider_resource_id, resource_name, state, created_by)
+VALUES ('$ORG_ID', '$PROVIDER_ACCOUNT_ID', '$RESOURCE_TYPE_ID',
+  'i-fake-billing-gate-test', 'billing-gate-test', 'running', '$USER_ID')
+RETURNING id;
 " 2>/dev/null | head -1 | tr -d ' \n')
 
 log "  Provider account: $PROVIDER_ACCOUNT_ID"
 log "  Test app: $APP_ID"
-
-# Generate an SSH key and register it for the user. The gateway authorizes a
-# git push by matching the presented key's fingerprint against ssh_keys joined to
-# an organization_member of the app's org (get_user_for_app_by_ssh_key), so this
-# must be done before pushing. Insert directly via SQL to avoid the username gate.
-ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -q
-SSH_PUB_KEY=$(cat "$SSH_KEY_PATH.pub")
-# ssh-keygen prints "SHA256:<base64url>"; the gateway's generate_ssh_fingerprint
-# stores the bare base64url (no prefix), so strip it to match auth lookups.
-FP=$(ssh-keygen -lf - <<< "$SSH_PUB_KEY" 2>/dev/null | awk '{print $2}' | sed 's/^SHA256://')
-docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-INSERT INTO ssh_keys (user_id, public_key, fingerprint, key_type, name)
-VALUES ('$USER_ID', '$SSH_PUB_KEY', '$FP', 'ssh-ed25519', 'e2e-gates');
-" >/dev/null 2>&1 || true
-
-# Create the test app resource that deploy requests will reference (keyed by APP_ID).
-# State is 'initialized' (never deployed), NOT 'running': a running/stopped app is
-# live and cannot be re-deployed in place (handle_git_push rejects it with RunningApp;
-# deploy_logic likewise only transitions non-live states to pending). 'initialized'
-# also keeps the resource-limit count correct, since that check counts active
-# (non-terminated/failed) resources excluding the deploying app itself.
-docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-INSERT INTO compute_resources (id, organization_id, provider_account_id, resource_type_id,
-  provider_resource_id, resource_name, state, created_by)
-VALUES ('$APP_ID', '$ORG_ID', '$PROVIDER_ACCOUNT_ID', '$RESOURCE_TYPE_ID',
-  'i-fake-billing-gate-test', 'billing-gate-test', 'initialized', '$USER_ID');
-" >/dev/null 2>&1 || true
-
-# Seed the bare git repo for APP_ID by pushing the demo fixture over git SSH.
-CLONE_DIR="$WORK_DIR/demo-app"
-cp -r "$FIXTURES_DIR/demo-app-happy-path" "$CLONE_DIR"
-cd "$CLONE_DIR"
-git init -q -b main
-git -c user.email="e2e@caution.dev" -c user.name="Caution E2E" add .
-git -c user.email="e2e@caution.dev" -c user.name="Caution E2E" commit -m "Initial commit" --quiet
-eval "$(ssh-agent -s)" >/dev/null
-ssh-add "$SSH_KEY_PATH" 2>/dev/null
-git remote add caution "ssh://git@localhost:$GIT_SSH_PORT/$APP_ID.git"
-export GIT_SSH_COMMAND="ssh -i $SSH_KEY_PATH -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $GIT_SSH_PORT"
-if ! git push caution HEAD:main 2>&1; then
-  step_fail "git push (bare repo for APP_ID not seeded — deploy would fail get_commit_sha)"
-fi
-cd "$WORK_DIR"
 
 # Claim a real username. e2e-login seeds the user in the placeholder state, and
 # every protected /api route (including /api/deploy below) runs through
@@ -305,10 +248,10 @@ log "Testing deploy with zero credits..."
 set_balance 0
 
 RESULT=$(attempt_deploy)
-if is_4xx "$RESULT"; then
-  step_pass "Zero credits: deploy rejected ($RESULT)"
+if [ "$RESULT" = "402" ]; then
+  step_pass "Zero credits: deploy rejected (402)"
 else
-  step_fail "Zero credits: expected a 4xx, got $RESULT"
+  step_fail "Zero credits: expected 402, got $RESULT"
 fi
 
 # ── Step 4: Deploy with $20 (below $25 minimum) — should be rejected ─
@@ -318,10 +261,10 @@ log "Testing deploy with \$20 credits (below \$25 minimum)..."
 
 set_balance 2000
 RESULT=$(attempt_deploy)
-if is_4xx "$RESULT"; then
-  step_pass "\$20 credits: deploy rejected ($RESULT)"
+if [ "$RESULT" = "402" ]; then
+  step_pass "\$20 credits: deploy rejected (402)"
 else
-  step_fail "\$20 credits: expected a 4xx, got $RESULT"
+  step_fail "\$20 credits: expected 402, got $RESULT"
 fi
 
 # ── Step 5: Deploy with $25 — should pass billing gate ───────────────
@@ -332,13 +275,13 @@ log "Testing deploy with \$25 credits..."
 set_balance 2500
 RESULT=$(attempt_deploy)
 
-# Should NOT be a 4xx — it passes the billing gate. May fail for other reasons
-# (no actual repo/resource) which is fine; we're testing the gate, not the deploy.
-if ! is_4xx "$RESULT"; then
+# Should NOT be 402 — it passes the billing gate. Deploy then fails on the missing
+# repo (get_commit_sha -> 400), which is fine; we're testing the gate, not the deploy.
+if [ "$RESULT" != "402" ]; then
   log "  Balance 2500c: passed billing gate (result: $RESULT)"
   step_pass "\$25 credits: billing gate passed (result: $RESULT)"
 else
-  step_fail "\$25 credits: still rejected with $RESULT"
+  step_fail "\$25 credits: still rejected with 402"
 fi
 
 # ── Step 6: Deploy while credit-suspended — should be rejected ───────
@@ -353,10 +296,10 @@ UPDATE organizations SET credit_suspended_at = NOW() WHERE id = '$ORG_ID';
 
 # Keep balance at $25 — should still be rejected due to suspension
 RESULT=$(attempt_deploy)
-if is_4xx "$RESULT"; then
-  step_pass "Credit-suspended org: deploy rejected ($RESULT)"
+if [ "$RESULT" = "402" ]; then
+  step_pass "Credit-suspended org: deploy rejected (402)"
 else
-  step_fail "Credit-suspended org: expected a 4xx, got $RESULT"
+  step_fail "Credit-suspended org: expected 402, got $RESULT"
 fi
 
 # ── Step 7: Unsuspend org, deploy passes again ───────────────────────
@@ -369,11 +312,11 @@ UPDATE organizations SET credit_suspended_at = NULL WHERE id = '$ORG_ID';
 " >/dev/null 2>&1
 
 RESULT=$(attempt_deploy)
-if ! is_4xx "$RESULT"; then
+if [ "$RESULT" != "402" ]; then
   log "  Unsuspended: passed billing gate (result: $RESULT)"
   step_pass "Unsuspended org: billing gate passed (result: $RESULT)"
 else
-  step_fail "Unsuspended org: still rejected with $RESULT"
+  step_fail "Unsuspended org: still rejected with 402"
 fi
 
 # ── Step 8: Resource limit — fill up to max ──────────────────────────
