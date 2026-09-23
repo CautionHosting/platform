@@ -117,10 +117,12 @@ is_4xx() {
 # failure, the last line contains {"error": "...", "status": 402|429}.
 # Returns the status field from the error JSON, or "ok" if no error found.
 attempt_deploy() {
-  # Reset app state to 'running' before each attempt so we don't get 409 Conflict
-  # from a previous deploy that transitioned it to 'pending' or 'failed'.
+  # Reset the app to a deployable state before each attempt. A deploy transitions
+  # the resource to 'pending' (then 'running'/'failed'); a live ('running') app
+  # cannot be re-deployed in place, and a 'pending' one returns 409 DeployInProgress.
+  # Reset to 'initialized' so every gate attempt starts from the same deployable state.
   docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-  UPDATE compute_resources SET state = 'running' WHERE id = '$APP_ID';
+  UPDATE compute_resources SET state = 'initialized', deploy_attempt_id = NULL WHERE id = '$APP_ID';
   " >/dev/null 2>&1
 
   local body
@@ -250,11 +252,16 @@ VALUES ('$USER_ID', '$SSH_PUB_KEY', '$FP', 'ssh-ed25519', 'e2e-gates');
 " >/dev/null 2>&1 || true
 
 # Create the test app resource that deploy requests will reference (keyed by APP_ID).
+# State is 'initialized' (never deployed), NOT 'running': a running/stopped app is
+# live and cannot be re-deployed in place (handle_git_push rejects it with RunningApp;
+# deploy_logic likewise only transitions non-live states to pending). 'initialized'
+# also keeps the resource-limit count correct, since that check counts active
+# (non-terminated/failed) resources excluding the deploying app itself.
 docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
 INSERT INTO compute_resources (id, organization_id, provider_account_id, resource_type_id,
   provider_resource_id, resource_name, state, created_by)
 VALUES ('$APP_ID', '$ORG_ID', '$PROVIDER_ACCOUNT_ID', '$RESOURCE_TYPE_ID',
-  'i-fake-billing-gate-test', 'billing-gate-test', 'running', '$USER_ID');
+  'i-fake-billing-gate-test', 'billing-gate-test', 'initialized', '$USER_ID');
 " >/dev/null 2>&1 || true
 
 # Seed the bare git repo for APP_ID by pushing the demo fixture over git SSH.
