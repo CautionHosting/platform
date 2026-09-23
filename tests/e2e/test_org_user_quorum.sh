@@ -135,7 +135,7 @@ jq -e --arg user "$USER_ID" '
     type == "array" and
     ([.[] | select(.user_id == $user)] | length == 1) and
     any(.[]; .user_id == $user and .webauthn_credentials >= 1) and
-    all(.[]; (keys | sort) == (["user_id", "username", "pgp_keys", "webauthn_credentials"] | sort))
+    all(.[]; (keys | sort) == (["user_id", "username", "pgp_keys", "webauthn_credentials", "webauthn_uv_credentials"] | sort))
 ' "$WORK_DIR/participants.json" >/dev/null || step_fail "Discovery returns expected member and only public selection metadata"
 step_pass "Authenticated discovery contains the expected member and no credential bindings"
 

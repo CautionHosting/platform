@@ -56,6 +56,15 @@ pub struct PendingPasskeyRegistration {
     pub token_hash: Option<String>,
 }
 
+#[derive(Clone)]
+pub struct PendingRecoveryVerification {
+    pub auth_state: SecurityKeyAuthentication,
+    pub user_id: Uuid,
+    pub credential_row_id: Uuid,
+    pub credential_id: Vec<u8>,
+    pub expires_at: time::OffsetDateTime,
+}
+
 /// Which webauthn-rs authentication ceremony a pending `/auth/login` challenge is
 /// running. `SecurityKey` covers both legacy broadcast and username-scoped login
 /// (both resolve the user from the asserted credential's `rawId`). `Discoverable`
@@ -98,6 +107,7 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub reg_states: Arc<RwLock<HashMap<String, PendingRegistration>>>,
     pub passkey_reg_states: Arc<RwLock<HashMap<String, PendingPasskeyRegistration>>>,
+    pub recovery_verifications: Arc<RwLock<HashMap<String, PendingRecoveryVerification>>>,
     pub auth_states: Arc<RwLock<HashMap<String, PendingAuthentication>>>,
     pub sign_challenges: Arc<RwLock<HashMap<String, PendingSignChallenge>>>,
     pub session_timeout_hours: i64,

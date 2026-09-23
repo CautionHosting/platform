@@ -4,10 +4,10 @@ import * as pgp from 'openpgp'
 import { recoveryMethods, initialSelection, creationRequest, parsePublicKeyring, parsePublicHolder, validateHolderFingerprints, MAX_DASHBOARD_HOLDERS, createBundleSubmitter, MAX_KEYRING_BYTES, MAX_CREATION_BYTES, GENERATION_PATH } from '../src/utils/quorumCreation.js'
 
 const members = [
-  { user_id: 'alice', username: 'Alice', pgp_keys: [{ id: 'key-a', fingerprint: 'AA' }], webauthn_credentials: 0 },
-  { user_id: 'bob', username: 'Bob', pgp_keys: [], webauthn_credentials: 3 },
-  { user_id: 'chloe', username: 'Chloe', pgp_keys: [{ id: 'key-c1', fingerprint: 'CC' }, { id: 'key-c2', fingerprint: 'DD' }], webauthn_credentials: 1 },
-  { user_id: 'dan', username: 'Dan', pgp_keys: [], webauthn_credentials: 0 },
+  { user_id: 'alice', username: 'Alice', pgp_keys: [{ id: 'key-a', fingerprint: 'AA' }], webauthn_credentials: 0, webauthn_uv_credentials: 0 },
+  { user_id: 'bob', username: 'Bob', pgp_keys: [], webauthn_credentials: 3, webauthn_uv_credentials: 1 },
+  { user_id: 'chloe', username: 'Chloe', pgp_keys: [{ id: 'key-c1', fingerprint: 'CC' }, { id: 'key-c2', fingerprint: 'DD' }], webauthn_credentials: 1, webauthn_uv_credentials: 1 },
+  { user_id: 'dan', username: 'Dan', pgp_keys: [], webauthn_credentials: 0, webauthn_uv_credentials: 0 },
 ]
 const base = () => ({ name: ' Demo ', threshold: 2, members, selections: members.slice(0, 2).map(initialSelection), certificates: [] })
 test('eligibility, explicit method choice, and exact registered key selection', () => {
@@ -21,7 +21,7 @@ test('eligibility, explicit method choice, and exact registered key selection', 
   assert.equal(mixed.participants.length, 2) // three passkeys still one share
   assert.equal(mixed.participants[1].pgp_key_id, null)
   args.selections = [initialSelection(members[2])]; args.threshold = 1
-  assert.throws(() => creationRequest(args), /recovery method/)
+  assert.throws(() => creationRequest(args), /approval method/)
   args.selections[0].key_source = 'existing_pgp'
   assert.throws(() => creationRequest(args), /registered PGP key/)
   args.selections[0].pgp_key_id = 'key-c2'
@@ -32,7 +32,7 @@ test('eligibility, explicit method choice, and exact registered key selection', 
 test('threshold, unavailable members, duplicate users, holder and request bounds', () => {
   for (const threshold of [0, 3, 1.5, '', NaN]) assert.throws(() => creationRequest({ ...base(), threshold }), /threshold/)
   assert.equal(creationRequest({ ...base(), threshold: 1 }).threshold, 1)
-  assert.throws(() => creationRequest({ ...base(), selections: [initialSelection(members[3])] }), /recovery method/)
+  assert.throws(() => creationRequest({ ...base(), selections: [initialSelection(members[3])] }), /approval method/)
   assert.throws(() => creationRequest({ ...base(), selections: [initialSelection(members[0]), initialSelection(members[0])] }), /only once/)
   assert.throws(() => creationRequest({ ...base(), name: 'x'.repeat(MAX_CREATION_BYTES) }), /1 MiB/)
   assert.equal(MAX_DASHBOARD_HOLDERS, 10)

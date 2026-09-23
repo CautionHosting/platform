@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 mod passkey;
+mod recovery_verification;
+pub(crate) use recovery_verification::{begin_recovery_verification, finish_recovery_verification};
 mod pgp_key;
 mod ssh_key;
 

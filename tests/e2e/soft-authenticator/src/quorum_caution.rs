@@ -42,6 +42,19 @@ fn add_passkey(session: &mut Session<'_>) -> Result<Vec<Vec<u8>>> {
             .send()?,
     )?
     .json()?;
+    let current = keys.as_array().context("passkey list")?.iter()
+        .find(|key| key["is_current_session"] == true).context("current passkey")?;
+    let path = [session.base, "/passkeys/", current["id"].as_str().context("passkey ID")?, "/recovery-verification"].concat();
+    let begin: Value = checked(session.http.post([path.as_str(), "/begin"].concat())
+        .header("X-Session-ID", session.id).send()?)?.json()?;
+    let assertion = session.authenticator.do_authentication(
+        session.origin.clone(), serde_json::from_value(begin.clone())?,
+    ).map_err(|e| anyhow::anyhow!("recovery verification: {e:?}"))?;
+    let mut finish = serde_json::to_value(assertion)?;
+    finish["session"] = begin["session"].clone();
+    let verified: Value = checked(session.http.post([path.as_str(), "/finish"].concat())
+        .header("X-Session-ID", session.id).json(&finish).send()?)?.json()?;
+    assert_eq!(verified["uv_verified"], true);
     let mut ids = keys
         .as_array()
         .context("passkey list")?
@@ -55,7 +68,8 @@ fn add_passkey(session: &mut Session<'_>) -> Result<Vec<Vec<u8>>> {
 
 fn seed_other_holder(creator: &str) -> Result<&'static str> {
     // The second holder need not authorize creation. Seed a distinct throwaway
-    // public credential, as in the DB suite; creator authorization uses real ceremonies.
+    // public credential and verified eligibility, as in the DB suite; creator
+    // authorization and registration evidence use real ceremonies.
     let other = "00000000-0000-4000-8000-000000000002";
     let mut credential: Value = serde_json::from_str(include_str!(
         "../../../../src/api/src/org_quorum/test-credential.json"
@@ -83,8 +97,8 @@ fn seed_other_holder(creator: &str) -> Result<&'static str> {
     write!(child.stdin.take().unwrap(), "INSERT INTO users(id, username) VALUES ('{other}', 'quorumsecond');
         INSERT INTO organization_members(organization_id, user_id)
         SELECT organization_id, '{other}' FROM organization_members WHERE user_id = :'creator'::uuid;
-        INSERT INTO fido2_credentials(user_id, credential_id, public_key)
-        VALUES ('{other}', decode('01','hex'), decode('{public_key}','hex'));\n")?;
+        INSERT INTO fido2_credentials(user_id, credential_id, public_key, uv_verified)
+        VALUES ('{other}', decode('01','hex'), decode('{public_key}','hex'), true);\n")?;
     anyhow::ensure!(child.wait()?.success(), "seed second holder");
     Ok(other)
 }

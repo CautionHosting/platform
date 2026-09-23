@@ -55,6 +55,7 @@ pub struct UserCredentialRecord {
     pub id: Uuid,
     pub name: Option<String>,
     pub credential_id: Vec<u8>,
+    pub uv_verified: bool,
     pub transport: Option<serde_json::Value>,
     pub created_at: OffsetDateTime,
     pub last_used_at: Option<OffsetDateTime>,
@@ -561,9 +562,10 @@ where
             transport,
             flags,
             resident,
+            uv_verified,
             created_at,
             updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())",
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())",
     )
     .bind(credential_id)
     .bind(user_id)
@@ -575,6 +577,7 @@ where
     .bind(transport)
     .bind(flags)
     .bind(resident)
+    .bind(registration_uv_verified(public_key))
     .execute(executor)
     .await
     .with_context(DbErrorCtx::new(
@@ -582,6 +585,33 @@ where
         "save_fido2_credential",
     ))?;
 
+    Ok(())
+}
+
+fn registration_uv_verified(bytes: &[u8]) -> bool {
+    use webauthn_rs::prelude::{Credential, SecurityKey};
+    serde_json::from_slice::<SecurityKey>(bytes)
+        .map(|key| Credential::from(key).user_verified)
+        .unwrap_or(false)
+}
+
+/// Parse through the same library that verified registrations, rather than
+/// trusting a JSON flag on an otherwise malformed credential. Repeatable and
+/// safe during rolling upgrades; never clears evidence from later assertions.
+pub async fn backfill_credential_uv(pool: &PgPool) -> Result<(), DbError> {
+    let rows: Vec<(Uuid, Vec<u8>)> = sqlx::query_as(
+        "SELECT id, public_key FROM fido2_credentials WHERE uv_verified = false",
+    )
+    .fetch_all(pool)
+    .await
+    .with_context(DbErrorCtx::new(DbErrorKind::QueryFailed, "load registration UV evidence"))?;
+    for (id, bytes) in rows {
+        if registration_uv_verified(&bytes) {
+            sqlx::query("UPDATE fido2_credentials SET uv_verified = true WHERE id = $1 AND public_key = $2")
+                .bind(id).bind(bytes).execute(pool).await
+                .with_context(DbErrorCtx::new(DbErrorKind::QueryFailed, "backfill registration UV evidence"))?;
+        }
+    }
     Ok(())
 }
 
@@ -749,6 +779,7 @@ pub async fn list_user_credentials(
             c.id,
             c.name,
             c.credential_id,
+            c.uv_verified,
             c.transport,
             c.created_at,
             MAX(s.last_used_at) AS last_used_at
@@ -781,6 +812,7 @@ pub async fn get_user_credential_by_credential_id(
             c.id,
             c.name,
             c.credential_id,
+            c.uv_verified,
             c.transport,
             c.created_at,
             MAX(s.last_used_at) AS last_used_at
@@ -1869,5 +1901,20 @@ mod tests {
     #[test]
     fn invitation_token_hash_rejects_invalid_base64() {
         assert!(hash_invitation_token("not base64!!!").is_none());
+    }
+}
+
+#[cfg(test)]
+mod credential_uv_tests {
+    use super::*;
+    #[test]
+    fn registration_evidence_requires_a_valid_credential_and_verified_uv() {
+        let mut value: serde_json::Value = serde_json::from_str(include_str!("../../api/src/org_quorum/test-credential.json")).unwrap();
+        assert!(!registration_uv_verified(&serde_json::to_vec(&value).unwrap()));
+        value["cred"]["user_verified"] = serde_json::json!(true);
+        assert!(registration_uv_verified(&serde_json::to_vec(&value).unwrap()));
+        for malformed in [b"invalid".as_slice(), br#"{"cred":{"user_verified":true}}"#, b"{}"] {
+            assert!(!registration_uv_verified(malformed));
+        }
     }
 }

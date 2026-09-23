@@ -1214,6 +1214,7 @@ make build-cli
         </div>
 
         <div class="security-passkeys">
+          <p class="security-setting-description">Quorum approval requires PIN or biometric verification, regardless of the sign-in setting above.</p>
           <div v-if="passkeyFlowStage" class="passkey-flow-card" role="status" aria-live="polite">
             <div class="passkey-flow-steps">
               <div
@@ -1256,6 +1257,8 @@ make build-cli
                   </div>
                   <div class="passkey-badges">
                     <span class="passkey-badge">{{ passkey.kind }}</span>
+                    <span v-if="passkey.uv_verified" class="passkey-badge">Verified for quorum approval</span>
+                    <span v-if="!passkey.uv_verified" class="passkey-badge">Not yet verified for quorum approval</span>
                     <span v-if="passkey.is_current_session" class="passkey-badge passkey-badge--current">
                       Current session
                     </span>
@@ -1272,6 +1275,10 @@ make build-cli
                 </div>
               </div>
 
+              <button v-if="!passkey.uv_verified" class="btn-secondary btn-small"
+                :disabled="verifyingPasskey !== null" @click="verifyRecovery(passkey)">
+                {{ verifyingPasskey === passkey.id ? 'Verifying…' : 'Verify for quorum approval' }}
+              </button>
               <button
                 class="btn-danger btn-small"
                 @click="deletePasskey(passkey)"
@@ -2093,6 +2100,7 @@ import DashboardLayout from "../components/DashboardLayout.vue";
 import AttestationModal from "../components/AttestationModal.vue";
 import QuorumBundleCreate from "../components/QuorumBundleCreate.vue";
 import { createBundleSubmitter } from "../utils/quorumCreation.js";
+import { verifyPasskeyRecovery } from "../composables/passkeyRecovery.js";
 import { authFetch } from "../composables/useWebAuthn.js";
 import {
   getAppEstimatedMonthlyCost,
@@ -2558,6 +2566,7 @@ export default {
     const passkeys = ref([]);
     const loadingPasskeys = ref(true);
     const addingPasskey = ref(false);
+    const verifyingPasskey = ref(null);
     const removingPasskey = ref(null);
     const passkeyFlowStage = ref(null);
     const addPasskeyButtonLabel = computed(() => {
@@ -2913,6 +2922,21 @@ export default {
     const formatPasskeyTitle = (passkey) => {
       const suffix = passkey.credential_id ? truncatePasskeyId(passkey.credential_id) : "";
       return suffix ? `${passkey.kind} ${suffix}` : passkey.kind;
+    };
+
+    const verifyRecovery = async (passkey) => {
+      verifyingPasskey.value = passkey.id;
+      try {
+        await verifyPasskeyRecovery(passkey.id, authFetch);
+        await loadPasskeys();
+        showToast("Passkey verified for quorum approval");
+      } catch (err) {
+        showToast(err.name === "NotAllowedError"
+          ? "Verification was cancelled or this authenticator cannot verify a PIN/biometric. Try a capable passkey."
+          : err.message, "error");
+      } finally {
+        verifyingPasskey.value = null;
+      }
     };
 
     const addPasskey = async () => {
@@ -5438,6 +5462,8 @@ export default {
       passkeyFlowMessage,
       removingPasskey,
       addPasskey,
+      verifyingPasskey,
+      verifyRecovery,
       deletePasskey,
       formatPasskeyTitle,
       formatPasskeyTransports,
