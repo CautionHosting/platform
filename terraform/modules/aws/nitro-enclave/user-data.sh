@@ -12,7 +12,7 @@ echo "Starting at $(date)"
 
 echo "Installing required packages..."
 dnf update -y
-dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel docker socat dnsmasq iptables iproute
+dnf install -y aws-nitro-enclaves-cli aws-nitro-enclaves-cli-devel docker socat dnsmasq iptables iproute jq
 
 %{ if length(ssh_keys) > 0 ~}
 echo "Adding SSH keys to authorized_keys..."
@@ -123,6 +123,51 @@ sleep 3
 echo "Enclave outbound egress disabled; skipping vsock network proxy"
 %{ endif ~}
 
+# systemd owns the daemon cgroup, including when launch or JSON validation fails.
+cat > /usr/local/bin/start-nitro-enclave <<'START_ENCLAVE'
+#!/bin/bash
+set -euo pipefail
+umask 077
+
+rm -f "$RUNTIME_DIRECTORY/enclave.pid" "$RUNTIME_DIRECTORY/enclave.id"
+nitro-cli run-enclave "$@" > "$RUNTIME_DIRECTORY/launch.json"
+enclave_id=$(jq -er '.EnclaveID | strings | select(test("^i-[a-zA-Z0-9]+-enc[a-zA-Z0-9]+$"))' "$RUNTIME_DIRECTORY/launch.json")
+printf '%s\n' "$enclave_id" > "$RUNTIME_DIRECTORY/enclave.id"
+pid=$(jq -er '.ProcessID | numbers | select(. > 1 and . == floor)' "$RUNTIME_DIRECTORY/launch.json")
+kill -0 "$pid"
+printf '%s\n' "$pid" > "$RUNTIME_DIRECTORY/enclave.pid"
+START_ENCLAVE
+
+cat > /usr/local/bin/stop-nitro-enclave <<'STOP_ENCLAVE'
+#!/bin/bash
+set -euo pipefail
+
+# ExecStopPost also runs on failed startup, before an ID may have been recorded.
+if [ ! -f "$RUNTIME_DIRECTORY/enclave.id" ]; then
+  exit 0
+fi
+enclave_id=$(cat "$RUNTIME_DIRECTORY/enclave.id")
+enclaves=$(nitro-cli describe-enclaves)
+present=$(printf '%s\n' "$enclaves" | jq -r --arg id "$enclave_id" '
+  if type == "array" then any(.[]; .EnclaveID == $id)
+  else error("expected enclave list") end')
+if [ "$present" = true ]; then
+  if nitro-cli terminate-enclave --enclave-id "$enclave_id"; then
+    :
+  else
+    status=$?
+    # Selfnuke can race the describe/terminate calls. Only absence is success.
+    enclaves=$(nitro-cli describe-enclaves)
+    if ! printf '%s\n' "$enclaves" | jq -e --arg id "$enclave_id" 'type == "array" and all(.[]; .EnclaveID != $id)' > /dev/null; then
+      exit "$status"
+    fi
+  fi
+fi
+rm -f "$RUNTIME_DIRECTORY/enclave.id"
+STOP_ENCLAVE
+
+chmod +x /usr/local/bin/start-nitro-enclave /usr/local/bin/stop-nitro-enclave
+
 %{ if debug_mode == "true" ~}
 cat > /usr/local/bin/capture-enclave-console.sh <<'CONSOLE_CAPTURE'
 #!/bin/bash
@@ -134,7 +179,7 @@ mkdir -p /var/log/nitro_enclaves
 echo "=== Enclave console capture starting at $(date -Is) ===" >> "$LOG_FILE"
 
 for i in {1..60}; do
-  ENCLAVE_ID=$(nitro-cli describe-enclaves 2>/dev/null | grep -o '"EnclaveID": "[^"]*"' | cut -d'"' -f4 | head -1)
+  ENCLAVE_ID=$(cat /run/nitro-enclave/enclave.id 2>/dev/null || true)
   if [ -n "$ENCLAVE_ID" ]; then
     echo "Found enclave ID on attempt $i: $ENCLAVE_ID" >> "$LOG_FILE"
     nitro-cli console --enclave-id "$ENCLAVE_ID" 2>&1 | tee -a "$LOG_FILE"
@@ -161,12 +206,22 @@ After=nitro-enclaves-allocator.service
 Requires=nitro-enclaves-allocator.service
 
 [Service]
-Type=simple
+Type=forking
+RuntimeDirectory=nitro-enclave
+RuntimeDirectoryMode=0700
+PIDFile=/run/nitro-enclave/enclave.pid
+GuessMainPID=no
+KillMode=control-group
 ExecStartPre=/bin/sleep 2
-ExecStart=/bin/bash -c 'nitro-cli run-enclave --eif-path /opt/nitro/enclave.eif --memory ${memory_mb} --cpu-count ${cpu_count} --enclave-cid 16 %{if debug_mode == "true"}--debug-mode%{endif} && tail -f /dev/null'
-ExecStop=/usr/bin/nitro-cli terminate-enclave --all
-Restart=on-failure
-RestartSec=10s
+ExecStart=/usr/local/bin/start-nitro-enclave --eif-path /opt/nitro/enclave.eif --memory ${memory_mb} --cpu-count ${cpu_count} --enclave-cid 16 %{if debug_mode == "true"}--debug-mode%{endif}
+%{ if debug_mode == "true" ~}
+# Nonblocking: console capture is ordered after this service finishes starting.
+ExecStartPost=/usr/bin/systemctl --no-block restart nitro-enclave-console.service
+%{ endif ~}
+ExecStop=/usr/local/bin/stop-nitro-enclave
+ExecStopPost=/usr/local/bin/stop-nitro-enclave
+Restart=${restart_policy == "never" ? "no" : restart_policy}
+RestartSec=${restart_delay_seconds}s
 TimeoutStartSec=300
 
 [Install]
@@ -203,7 +258,6 @@ cat > /etc/systemd/system/vsock-proxy-$port.service <<EOF
 [Unit]
 Description=VSock Proxy for Port $port
 After=nitro-enclave.service
-Requires=nitro-enclave.service
 
 [Service]
 Type=simple
@@ -223,7 +277,6 @@ cat > /etc/systemd/system/vsock-proxy-http.service <<EOF
 [Unit]
 Description=VSock Proxy for HTTP Gateway Port ${http_port}
 After=nitro-enclave.service
-Requires=nitro-enclave.service
 
 [Service]
 Type=simple
@@ -242,7 +295,6 @@ cat > /etc/systemd/system/vsock-proxy-${port}.service <<EOF
 [Unit]
 Description=VSock Proxy for Custom Port ${port}
 After=nitro-enclave.service
-Requires=nitro-enclave.service
 
 [Service]
 Type=simple
@@ -270,10 +322,11 @@ systemctl enable vsock-proxy-http.service
 systemctl enable vsock-proxy-${port}.service
 %{ endfor ~}
 
-systemctl start nitro-enclave.service
-%{ if debug_mode == "true" ~}
-systemctl start nitro-enclave-console.service
-%{ endif ~}
+# A recoverable first launch must not prevent ingress/Caddy setup. Systemd
+# retains the failure status and applies the configured restart policy.
+if ! systemctl start nitro-enclave.service; then
+  echo "WARNING: initial enclave launch failed; continuing host setup. Check nitro-enclave.service for recovery status." >&2
+fi
 
 echo "Waiting for enclave to boot before starting host-side proxies..."
 sleep 15

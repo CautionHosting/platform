@@ -354,6 +354,8 @@ pub struct NitroDeploymentRequest {
     pub cpu_count: u32,
     pub disk_gb: u32,
     pub debug_mode: bool,
+    #[serde(default)]
+    pub restart: caution_config::RestartConfig,
     pub ports: Vec<u16>,
     pub http_port: Option<u16>,
     #[serde(default)]
@@ -714,6 +716,7 @@ mod tests {
             cpu_count: 2,
             disk_gb: 30,
             debug_mode: false,
+            restart: Default::default(),
             ports: vec![],
             http_port: None,
             e2e: false,
@@ -954,6 +957,62 @@ mod tests {
 
         let main_tf = std::fs::read_to_string(work_dir.path().join("main.tf")).unwrap();
         assert!(norm(&main_tf).contains(r#"egress = "true""#));
+    }
+
+    #[test]
+    fn deployment_request_without_restart_uses_legacy_defaults() {
+        let mut value = serde_json::to_value(deployment_request("/tmp/enclave.eif", None)).unwrap();
+        value.as_object_mut().unwrap().remove("restart");
+        let parsed: NitroDeploymentRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.restart, caution_config::RestartConfig::default());
+    }
+
+    #[tokio::test]
+    async fn restart_policy_reaches_both_terraform_templates() {
+        use caution_config::{RestartConfig, RestartPolicy};
+        for policy in [
+            RestartPolicy::Never,
+            RestartPolicy::OnFailure,
+            RestartPolicy::Always,
+        ] {
+            for delay_seconds in [0, 10] {
+                let mut request = deployment_request("/tmp/enclave.eif", None);
+                request.restart = RestartConfig {
+                    policy,
+                    delay_seconds,
+                };
+                for byoc in [false, true] {
+                    let work_dir = TempDir::new().unwrap();
+                    if byoc {
+                        request.managed_onprem = Some(managed_onprem_config());
+                        generate_managed_onprem_deployment_tf(
+                            work_dir.path(),
+                            &request,
+                            "s3://bucket/enclave.eif",
+                        )
+                        .await
+                        .unwrap();
+                    } else {
+                        request.managed_onprem = None;
+                        generate_nitro_deployment_main_tf(
+                            work_dir.path(),
+                            &request,
+                            "s3://bucket/enclave.eif",
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    let rendered =
+                        norm(&std::fs::read_to_string(work_dir.path().join("main.tf")).unwrap());
+                    assert!(
+                        rendered.contains(&["restart_policy = \"", policy.as_str(), "\""].concat())
+                    );
+                    assert!(rendered.contains(
+                        &["restart_delay_seconds = ", &delay_seconds.to_string()].concat()
+                    ));
+                }
+            }
+        }
     }
 
     #[test]
@@ -3638,6 +3697,18 @@ async fn generate_nitro_deployment_main_tf(
                             ),
                             (
                                 hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "restart_policy",
+                                )),
+                                hcl::Expression::String(request.restart.policy.as_str().into()),
+                            ),
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "restart_delay_seconds",
+                                )),
+                                hcl::Expression::Number(request.restart.delay_seconds.into()),
+                            ),
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
                                     "ports",
                                 )),
                                 hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked(
@@ -4344,6 +4415,18 @@ async fn generate_managed_onprem_deployment_tf(
                                     hcl::Expression::String(
                                         if request.debug_mode { "true" } else { "false" }.into(),
                                     ),
+                                ),
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "restart_policy",
+                                    )),
+                                    hcl::Expression::String(request.restart.policy.as_str().into()),
+                                ),
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "restart_delay_seconds",
+                                    )),
+                                    hcl::Expression::Number(request.restart.delay_seconds.into()),
                                 ),
                                 (
                                     hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
