@@ -4,10 +4,10 @@ import * as pgp from 'openpgp'
 import { recoveryMethods, initialSelection, creationRequest, parsePublicKeyring, parsePublicHolder, validateHolderFingerprints, MAX_DASHBOARD_HOLDERS, createBundleSubmitter, MAX_KEYRING_BYTES, MAX_CREATION_BYTES, GENERATION_PATH } from '../src/utils/quorumCreation.js'
 
 const members = [
-  { user_id: 'alice', username: 'Alice', pgp_keys: [{ id: 'key-a', fingerprint: 'AA' }], webauthn_credentials: 0 },
-  { user_id: 'bob', username: 'Bob', pgp_keys: [], webauthn_credentials: 3 },
-  { user_id: 'chloe', username: 'Chloe', pgp_keys: [{ id: 'key-c1', fingerprint: 'CC' }, { id: 'key-c2', fingerprint: 'DD' }], webauthn_credentials: 1 },
-  { user_id: 'dan', username: 'Dan', pgp_keys: [], webauthn_credentials: 0 },
+  { user_id: 'alice', username: 'Alice', pgp_keys: [{ id: 'key-a', fingerprint: 'AA' }], webauthn_credentials: 0, webauthn_uv_credentials: 0 },
+  { user_id: 'bob', username: 'Bob', pgp_keys: [], webauthn_credentials: 3, webauthn_uv_credentials: 1 },
+  { user_id: 'chloe', username: 'Chloe', pgp_keys: [{ id: 'key-c1', fingerprint: 'CC' }, { id: 'key-c2', fingerprint: 'DD' }], webauthn_credentials: 1, webauthn_uv_credentials: 1 },
+  { user_id: 'dan', username: 'Dan', pgp_keys: [], webauthn_credentials: 0, webauthn_uv_credentials: 0 },
 ]
 const base = () => ({ name: ' Demo ', threshold: 2, members, selections: members.slice(0, 2).map(initialSelection), certificates: [] })
 test('eligibility, explicit method choice, and exact registered key selection', () => {

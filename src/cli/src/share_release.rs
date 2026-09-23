@@ -343,6 +343,7 @@ async fn browser_assertion(
     nonce: &str,
     display: &Value,
     summary: &ReleaseSummary,
+    approval: &mut RecoveryApproval,
 ) -> Result<webauthn_rs_proto::PublicKeyCredential, InitError> {
     let config = client
         .ensure_authenticated()
@@ -366,6 +367,7 @@ async fn browser_assertion(
     let token = response["token"]
         .as_str()
         .ok_or_else(|| InitError::invalid("missing relay token"))?;
+    approval.register_relay(client, token);
     let url = response["url"]
         .as_str()
         .ok_or_else(|| InitError::invalid("missing approval URL"))?;
@@ -382,19 +384,12 @@ async fn browser_assertion(
         "Approve on your phone or open in your browser: {}", terminal_label(url)
     ));
     output::status(comparison_block(&prepared.data)?);
-    let result = poll_browser_assertion(
+    poll_browser_assertion(
         &client.client,
         &format!("{}/auth/qr-release/status", client.base_url),
         token,
     )
-    .await;
-    let _ = client
-        .client
-        .post(format!("{}/auth/qr-release/cancel", client.base_url))
-        .json(&json!({"token":token}))
-        .send()
-        .await;
-    result
+    .await
 }
 // Only a rejected status poll is safe to retry: a successful poll consumes the assertion.
 async fn poll_browser_assertion(
@@ -433,7 +428,7 @@ async fn poll_browser_assertion(
 mod poll_tests;
 
 mod native_approval;
-use native_approval::NativeApproval;
+use native_approval::RecoveryApproval;
 
 pub(crate) async fn recover(
     client: &ApiClient,
@@ -444,7 +439,7 @@ pub(crate) async fn recover(
     destination_policy: Measurements,
     generation_time: Option<std::time::SystemTime>,
 ) -> Result<SendSignedEncryptedShardResponse, InitError> {
-    NativeApproval::run(release::TTL, async |native| {
+    RecoveryApproval::run(release::TTL, async |native| {
         recover_inner(
             client, options, bundle, holder, summary, destination_policy, generation_time, native,
         )
@@ -460,7 +455,7 @@ async fn recover_inner(
     summary: ReleaseSummary,
     destination_policy: Measurements,
     generation_time: Option<std::time::SystemTime>,
-    native: &mut NativeApproval,
+    native: &mut RecoveryApproval,
 ) -> Result<SendSignedEncryptedShardResponse, InitError> {
     let address = summary.address;
     let url = options
@@ -554,7 +549,7 @@ async fn recover_inner(
         if client.qr {
             browser_assertion(client, &attested_prepared, &prepare.client_nonce, &json!({
                 "application_id":summary.application_id, "destination_address":address.to_string(), "custody_url":url,
-            }), &summary).await
+            }), &summary, native).await
         } else {
             summary.print(None);
             output::status("Waiting for passkey approval…");

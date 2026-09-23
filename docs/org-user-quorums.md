@@ -646,3 +646,41 @@ the unique external-PGP holder matching a private certificate in that file. Mult
 matches prompt among those holders only (or require `--holder` without a terminal).
 No match is an error; public-only certificates do not qualify. Explicit `--holder`
 keeps precedence and all existing decryption/signature checks still apply.
+
+## Passkey recovery eligibility
+
+Before certificate issuance or Keymaker generation, each Caution-backed holder
+must have 1–64 registered credentials and at least one credential with verified
+PIN/biometric evidence. All credentials are captured in their existing order;
+oversized snapshots are rejected, never truncated. External PGP remains available
+for holders who cannot meet these requirements.
+
+Dashboard → Authentication shows **Verified for recovery** for credentials with
+evidence. Use **Verify for recovery** to qualify an existing capable credential
+without re-registering it. This is an owner-only, single-use WebAuthn ceremony
+with a two-minute deadline. Touch-only U2F keys cannot qualify, but existing login
+policies remain unchanged. The CLI and creation wizard explain unavailable
+holders; missing eligibility metadata fails closed.
+
+Apply migration `054_credential_uv_verified.sql` before restarting the gateway
+and API, and rebuild the frontend and CLI. Gateway startup backfills evidence
+from existing registrations using webauthn-rs parsing; malformed/unknown records
+remain unverified. New registration and reset flows record the verified result.
+Only a successful server-verified UV assertion can qualify another existing key.
+Eligibility is stored separately from WebAuthn login policy; verification updates
+normal credential counters. Existing quorum bundles are not rewritten.
+Adding or verifying a credential now does not repair an older frozen bundle.
+
+The participant API retains `webauthn_credentials` and adds
+`webauthn_uv_credentials`. Passkey listings add `uv_verified`. Authenticated
+`POST /passkeys/{id}/recovery-verification/begin` returns `publicKey` and `session`;
+`/finish` accepts that session with the WebAuthn assertion and returns
+`{"uv_verified":true}` only after successful verification and persistence.
+
+Run `make test-recovery-verification` for real gateway/Postgres ceremonies with
+Chrome virtual authenticators (requires Docker, gateway build dependencies and
+`tests/e2e/browser-authenticator` npm dependencies). Set
+`PUPPETEER_EXECUTABLE_PATH` when using an installed Chrome. This isolated test
+covers registration/reset evidence, upgrading an existing credential, U2F
+rejection, forged UV claims, owner/key binding, replay, deletion during
+verification and startup backfill.

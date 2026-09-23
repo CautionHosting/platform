@@ -98,7 +98,7 @@ fn fingerprints_resolve_to_the_same_registration_uuid_payload() {
     for size in [40, 64] {
         let fingerprint = "aB".repeat(size / 2);
         let member = Member {
-            user_id: Uuid::new_v4(), username: "alice".into(), webauthn_credentials: 2,
+            user_id: Uuid::new_v4(), username: "alice".into(), webauthn_credentials: 2, webauthn_uv_credentials: 1,
             pgp_keys: vec![RegisteredKey { id: Uuid::new_v4(), fingerprint: fingerprint.clone(), public_key: "selected certificate".into() }],
         };
         let mut opts = options(vec![member.user_id]);
@@ -120,7 +120,7 @@ fn fingerprints_resolve_to_the_same_registration_uuid_payload() {
 #[test]
 fn fingerprint_selection_is_user_scoped_and_requires_one_active_match() {
     let alice = Member {
-        user_id: Uuid::new_v4(), username: "alice".into(), webauthn_credentials: 1,
+        user_id: Uuid::new_v4(), username: "alice".into(), webauthn_credentials: 1, webauthn_uv_credentials: 1,
         pgp_keys: vec![RegisteredKey { id: Uuid::new_v4(), fingerprint: "ab".repeat(20), public_key: "alice cert".into() }],
     };
     let bob = Member { user_id: Uuid::new_v4(), username: "bob".into(), pgp_keys: vec![RegisteredKey {
@@ -147,7 +147,7 @@ fn fingerprint_selection_is_user_scoped_and_requires_one_active_match() {
 #[test]
 fn creation_summary_uses_names_custody_and_fingerprints() {
     let member = Member {
-        user_id: Uuid::new_v4(), username: "alice".into(), webauthn_credentials: 2,
+        user_id: Uuid::new_v4(), username: "alice".into(), webauthn_credentials: 2, webauthn_uv_credentials: 1,
         pgp_keys: vec![RegisteredKey { id: Uuid::new_v4(), fingerprint: "AB".repeat(20), public_key: "cert".into() }],
     };
     let mut participant = Participant { user_id: member.user_id, key_source: "existing_pgp", pgp_key_id: Some(member.pgp_keys[0].id) };
@@ -165,7 +165,7 @@ fn creation_summary_uses_names_custody_and_fingerprints() {
 #[test]
 fn multiple_registered_keys_prompt_without_a_selector() {
     let member = Member {
-        user_id: Uuid::new_v4(), username: "alice".into(), webauthn_credentials: 2,
+        user_id: Uuid::new_v4(), username: "alice".into(), webauthn_credentials: 2, webauthn_uv_credentials: 1,
         pgp_keys: ["ab", "cd"].into_iter().map(|prefix| RegisteredKey {
             id: Uuid::new_v4(), fingerprint: prefix.repeat(20), public_key: prefix.into(),
         }).collect(),
@@ -208,7 +208,7 @@ fn selection_requires_explicit_webauthn_and_pgp_ownership() {
         user_id: user,
         username: "holder".into(),
         pgp_keys: vec![],
-        webauthn_credentials: 2,
+        webauthn_credentials: 2, webauthn_uv_credentials: 1,
     };
     let mut opts = options(vec![user]);
     assert!(select_participants(&opts, &[member.clone()], false, false).is_err());
@@ -240,13 +240,13 @@ fn selection_without_custody_fails_before_prompting() {
         user_id: user,
         username: "holder".into(),
         pgp_keys: vec![],
-        webauthn_credentials: 0,
+        webauthn_credentials: 0, webauthn_uv_credentials: 0,
     };
     for interactive in [false, true] {
         let error =
             select_participants(&options(vec![user]), &[member.clone()], interactive, false)
                 .unwrap_err();
-        assert!(error.to_string().contains("no usable custody"));
+        assert!(error.to_string().contains("no registered credentials"));
     }
 }
 
@@ -257,7 +257,7 @@ fn duplicate_users_and_overrides_are_rejected() {
         user_id: user,
         username: "holder".into(),
         pgp_keys: vec![],
-        webauthn_credentials: 1,
+        webauthn_credentials: 1, webauthn_uv_credentials: 1,
     };
     let mut opts = options(vec![user, user]);
     opts.caution_backed = true;
@@ -465,7 +465,7 @@ fn selector_parsing_and_uuid_precedence() {
         user_id: Uuid::new_v4(),
         username: id.to_string(),
         pgp_keys: vec![],
-        webauthn_credentials: 1,
+        webauthn_credentials: 1, webauthn_uv_credentials: 1,
     };
     let selector: UserSelector = id.to_string().parse().unwrap();
     assert!(
@@ -512,7 +512,7 @@ fn username_resolution_preserves_order_and_uuid_payloads() {
         .map(|name| Member {
             user_id: Uuid::new_v4(),
             username: name.into(),
-            webauthn_credentials: 1,
+            webauthn_credentials: 1, webauthn_uv_credentials: 1,
             pgp_keys: vec![RegisteredKey {
                 id: Uuid::new_v4(),
                 fingerprint: name.into(),
@@ -595,7 +595,7 @@ fn unknown_partial_and_ambiguous_names_are_rejected() {
         user_id: Uuid::new_v4(),
         username: "Alice".into(),
         pgp_keys: vec![],
-        webauthn_credentials: 1,
+        webauthn_credentials: 1, webauthn_uv_credentials: 1,
     };
     for name in ["unknown", "ali"] {
         assert!(
@@ -634,7 +634,7 @@ fn per_holder_custody_is_explicit_and_mixed() {
             user_id: alice,
             username: "alice".into(),
             pgp_keys: vec![],
-            webauthn_credentials: 1,
+            webauthn_credentials: 1, webauthn_uv_credentials: 1,
         },
         Member {
             user_id: bob,
@@ -644,7 +644,7 @@ fn per_holder_custody_is_explicit_and_mixed() {
                 fingerprint: "bob-key".into(),
                 public_key: "public certificate".into(),
             }],
-            webauthn_credentials: 1,
+            webauthn_credentials: 1, webauthn_uv_credentials: 1,
         },
     ];
     let mut options = options(vec![]);
@@ -770,5 +770,19 @@ fn accepts_repeated_ecdh_keys_within_one_holder_only() {
                     .contains("share an encryption key")
             );
         }
+    }
+}
+
+#[test]
+fn passkey_eligibility_fails_closed_on_unknown_uv_and_oversized_snapshots() {
+    let mut value = serde_json::json!({"user_id":Uuid::new_v4(), "username":"holder", "pgp_keys":[], "webauthn_credentials":1});
+    let member: Member = serde_json::from_value(value.clone()).unwrap();
+    assert!(member.custody_error().unwrap().contains("verify a passkey"));
+    value["webauthn_uv_credentials"] = serde_json::json!(1);
+    for count in [0, 1, 64, 65] {
+        value["webauthn_credentials"] = serde_json::json!(count);
+        let member: Member = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(member.custody_error().is_none(), (1..=64).contains(&count));
+        assert_eq!(pgp_selection_menu(&member, None).contains("0: Caution-backed"), (1..=64).contains(&count));
     }
 }

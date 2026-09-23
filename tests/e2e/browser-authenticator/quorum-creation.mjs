@@ -15,10 +15,10 @@ const root = resolve(import.meta.dirname, '../../../frontend/dist')
 const fixtureDir = await mkdtemp(join(tmpdir(), 'caution-quorum-ui-'))
 const keys = await Promise.all(['Alice', 'Uploaded Bob'].map(name => pgp.generateKey({ type: 'ecc', curve: 'curve25519Legacy', userIDs: [{ name }], format: 'object' })))
 const members = [
-  { user_id: '11111111-1111-4111-8111-111111111111', username: 'Alice', pgp_keys: [{ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', fingerprint: keys[0].publicKey.getFingerprint().toUpperCase(), public_key: keys[0].publicKey.armor() }], webauthn_credentials: 0 },
-  { user_id: '22222222-2222-4222-8222-222222222222', username: 'Bob', pgp_keys: [], webauthn_credentials: 2 },
-  { user_id: '33333333-3333-4333-8333-333333333333', username: 'Chloe', pgp_keys: [{ id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', fingerprint: 'AB'.repeat(20) }, { id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', fingerprint: 'CD'.repeat(20) }], webauthn_credentials: 1 },
-  { user_id: '44444444-4444-4444-8444-444444444444', username: 'Dan', pgp_keys: [], webauthn_credentials: 0 },
+  { user_id: '11111111-1111-4111-8111-111111111111', username: 'Alice', pgp_keys: [{ id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', fingerprint: keys[0].publicKey.getFingerprint().toUpperCase(), public_key: keys[0].publicKey.armor() }], webauthn_credentials: 0, webauthn_uv_credentials: 0 },
+  { user_id: '22222222-2222-4222-8222-222222222222', username: 'Bob', pgp_keys: [], webauthn_credentials: 2, webauthn_uv_credentials: 1 },
+  { user_id: '33333333-3333-4333-8333-333333333333', username: 'Chloe', pgp_keys: [{ id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', fingerprint: 'AB'.repeat(20) }, { id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', fingerprint: 'CD'.repeat(20) }], webauthn_credentials: 1, webauthn_uv_credentials: 1 },
+  { user_id: '44444444-4444-4444-8444-444444444444', username: 'Dan', pgp_keys: [], webauthn_credentials: 0, webauthn_uv_credentials: 0 },
 ]
 const challenges = new Map(), bundles = [], requests = [], serverErrors = [], browserErrors = []
 bundles.push(
@@ -225,7 +225,7 @@ try {
     if (mode === 'uncertain') { await button('Check bundles'); await page.waitForSelector('.bundle-list'); assert.equal(await page.$('.bundle-card--created'), null); assert.equal(await page.$('.bundle-guide[open]'), null); assert.equal(await page.$eval('.bundle-card', el => el.id), 'bundle-bundle-2') }
   }
   // The dashboard cap combines manual holders and members, without changing API limits.
-  members.push(...Array.from({ length: 8 }, (_, index) => ({ user_id: `extra-${index}`, username: `Extra ${index}`, pgp_keys: [], webauthn_credentials: 1 })))
+  members.push(...Array.from({ length: 8 }, (_, index) => ({ user_id: `extra-${index}`, username: `Extra ${index}`, pgp_keys: [], webauthn_credentials: 1, webauthn_uv_credentials: 1 })))
   await open(); await selectMember('Bob')
   for (let index = 0; index < 8; index++) await selectMember(`Extra ${index}`)
   assert.ok((await page.$eval('.holder-count', el => el.textContent)).includes('9 selected · Max 10'))

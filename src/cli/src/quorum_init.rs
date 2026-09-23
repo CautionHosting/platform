@@ -212,6 +212,21 @@ struct Member {
     username: String,
     pgp_keys: Vec<RegisteredKey>,
     webauthn_credentials: i64,
+    #[serde(default)]
+    webauthn_uv_credentials: i64,
+}
+impl Member {
+    fn custody_error(&self) -> Option<&'static str> {
+        if self.webauthn_credentials < 1 {
+            Some("selected WebAuthn holder has no registered credentials; use external PGP or register a passkey")
+        } else if self.webauthn_credentials > 64 {
+            Some("selected WebAuthn holder has more than 64 credentials; reduce the credential count or use external PGP")
+        } else if self.webauthn_uv_credentials < 1 {
+            Some("selected WebAuthn holder must verify a passkey with PIN/biometrics in Dashboard Authentication, or use external PGP")
+        } else {
+            None
+        }
+    }
 }
 #[derive(Clone, Debug, Serialize)]
 struct Participant {
@@ -392,7 +407,7 @@ fn pgp_selection_menu(member: &Member, explicit: Option<bool>) -> String {
     for (index, key) in member.pgp_keys.iter().enumerate() {
         menu.push_str(&format!("\n  {}: PGP {} ({})", index + 1, crate::share_release::terminal_label(&key.fingerprint), key.id));
     }
-    if member.webauthn_credentials > 0 && explicit.is_none() {
+    if member.custody_error().is_none() && explicit.is_none() {
         menu.push_str(&format!("\n  0: Caution-backed WebAuthn ({} registered passkeys, one share)", member.webauthn_credentials));
     }
     menu
@@ -486,9 +501,9 @@ fn select_participants_with_choice(
             ));
         }
         if key_id.is_none() && !webauthn {
-            if member.pgp_keys.is_empty() && member.webauthn_credentials == 0 {
+            if member.pgp_keys.is_empty() && member.custody_error().is_some() {
                 return Err(InitError::invalid(
-                    "no usable custody: selected member has no registered PGP keys or passkeys",
+                    member.custody_error().unwrap(),
                 ));
             }
             if member.pgp_keys.len() == 1 {
@@ -496,7 +511,7 @@ fn select_participants_with_choice(
             } else if interactive {
                 eprintln!("{}", pgp_selection_menu(member, explicit.get(user_id).copied()));
                 let index = choose("Selection: ")?;
-                if index == 0 && member.webauthn_credentials > 0 && !explicit.contains_key(user_id)
+                if index == 0 && member.custody_error().is_none() && !explicit.contains_key(user_id)
                 {
                     webauthn = true;
                 } else {
@@ -515,10 +530,8 @@ fn select_participants_with_choice(
             }
         }
         if webauthn {
-            if member.webauthn_credentials == 0 {
-                return Err(InitError::invalid(
-                    "selected WebAuthn holder has no registered credentials",
-                ));
+            if let Some(reason) = member.custody_error() {
+                return Err(InitError::invalid(reason));
             }
             participants.push(Participant {
                 user_id: *user_id,

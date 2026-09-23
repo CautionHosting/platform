@@ -148,8 +148,9 @@ it. Each file must contain exactly one public certificate and be no larger than
 
 `caution secret init` creates a hosted v1 quorum; `new` remains an alias.
 Use `--keymaker-url` for direct PGP-only creation. WebAuthn and mixed quorums
-require Platform mediation and are currently blocked on upstream certificate-proof
-verification. See [selection, trust policies and dependency limits](../../docs/org-user-quorums.md).
+use Platform mediation. Caution-backed holders need 1–64 registered credentials
+and at least one passkey verified with PIN/biometrics. Existing passkeys can be
+verified under Dashboard → Authentication → Verify for recovery. See [selection, trust policies and dependency limits](../../docs/org-user-quorums.md).
 
 ### Encrypt Env Secrets
 

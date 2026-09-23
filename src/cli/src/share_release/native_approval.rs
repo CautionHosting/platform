@@ -1,4 +1,4 @@
-//! Own the worker outside any future that recovery cancellation can drop.
+//! Own native and browser cleanup outside any cancellable recovery future.
 use super::*;
 use auth::cancellation::Cancellation;
 use tokio::task::JoinHandle;
@@ -6,12 +6,13 @@ use tokio::task::JoinHandle;
 type Approval = Result<webauthn_rs_proto::PublicKeyCredential, InitError>;
 
 #[derive(Default)]
-pub(super) struct NativeApproval {
+pub(super) struct RecoveryApproval {
     cancel: Cancellation,
     task: Option<JoinHandle<Approval>>,
+    relay: Option<(reqwest::Client, String, String)>,
 }
 
-impl NativeApproval {
+impl RecoveryApproval {
     pub(super) async fn run<T>(
         deadline: Duration,
         operation: impl AsyncFnOnce(&mut Self) -> Result<T, InitError>,
@@ -25,6 +26,18 @@ impl NativeApproval {
         };
         native.cancel_and_join().await;
         result
+    }
+
+    pub(super) fn register_relay(&mut self, client: &ApiClient, token: &str) {
+        self.relay = Some((
+            client.client.clone(),
+            [
+                client.base_url.trim_end_matches('/'),
+                "/auth/qr-release/cancel",
+            ]
+            .concat(),
+            token.to_owned(),
+        ));
     }
 
     pub(super) async fn approve(
@@ -62,10 +75,24 @@ impl NativeApproval {
             // worker ensures its input guard has restored the terminal first.
             let _ = task.await;
         }
+        if let Some((client, url, token)) = self.relay.take() {
+            let result = tokio::time::timeout(Duration::from_secs(2), async {
+                client
+                    .post(url)
+                    .json(&json!({"token": token}))
+                    .send()
+                    .await?
+                    .error_for_status()
+            })
+            .await;
+            if !matches!(result, Ok(Ok(_))) {
+                output::warning("Unable to cancel the browser approval link; it may remain active until expiry.");
+            }
+        }
     }
 }
 
-impl Drop for NativeApproval {
+impl Drop for RecoveryApproval {
     fn drop(&mut self) {
         self.cancel.cancel();
     }

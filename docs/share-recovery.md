@@ -463,3 +463,18 @@ middleware.
 
 The quorum checks include equivalent subkeys within one holder, coexistence with
 an independent holder, and cross-holder collision rejection in both orders.
+
+## Browser approval cancellation cleanup
+
+The CLI owns the browser requester token outside the cancellable recovery future.
+Once it receives a token, success, errors, destination disconnection, timeout and
+Ctrl-C all await a cancellation request before returning, with a two-second
+cleanup limit. Native approval workers still finish terminal cleanup before exit.
+The recovery deadline itself is unchanged; cleanup may add up to two seconds.
+Cancellation while awaiting approval cannot advance to share submission.
+
+If cleanup fails, the CLI preserves the original recovery result and warns that
+the approval link may remain active until server expiry. A request interrupted
+before its token is received also relies on server expiry. Rebuild the CLI to
+pick up this behavior; existing binaries do not gain cancellation cleanup from a
+gateway restart alone.

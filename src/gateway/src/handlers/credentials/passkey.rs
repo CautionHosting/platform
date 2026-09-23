@@ -30,6 +30,7 @@ pub struct PasskeySummary {
     pub created_at: String,
     pub last_used_at: Option<String>,
     pub is_current_session: bool,
+    pub uv_verified: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -45,6 +46,11 @@ pub struct PasskeyBeginRequest {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum PasskeyError {
+    #[error("Verify this passkey with a PIN or biometric before using it for recovery. [{location}]")]
+    UserVerificationRequired {
+        #[location]
+        location: Location,
+    },
     #[error("No matching passkey registration state found. Please start over. [{location}]")]
     NoRegistrationState {
         #[location]
@@ -126,6 +132,10 @@ pub enum PasskeyError {
 impl IntoResponse for PasskeyError {
     fn into_response(self) -> Response {
         match self {
+            Self::UserVerificationRequired { .. } => (
+                StatusCode::BAD_REQUEST,
+                "This passkey must verify a PIN or biometric for recovery.",
+            ).into_response(),
             error @ Self::Auth { .. } => {
                 tracing::warn!(?error, "Passkey management: authentication failed");
                 generic_auth_failure_response().into_response()
@@ -268,6 +278,7 @@ pub async fn list_passkeys_handler(
             let transports = parse_transports(credential.transport.as_ref());
             PasskeySummary {
                 id: credential.id,
+                uv_verified: credential.uv_verified,
                 name: credential.name,
                 credential_id: hex::encode(&credential.credential_id),
                 kind: passkey_kind_from_transports(&transports).to_string(),

@@ -114,7 +114,7 @@
 
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
-import { initialSelection, recoveryMethods, creationRequest, parsePublicHolder, validateHolderFingerprints, MAX_DASHBOARD_HOLDERS, MAX_KEYRING_BYTES } from '../utils/quorumCreation.js'
+import { cautionCustodyUnavailable, initialSelection, recoveryMethods, creationRequest, parsePublicHolder, validateHolderFingerprints, MAX_DASHBOARD_HOLDERS, MAX_KEYRING_BYTES } from '../utils/quorumCreation.js'
 const props = defineProps({ fetchMembers: { type: Function, required: true }, submit: { type: Function, required: true } })
 const emit = defineEmits(['cancel', 'created', 'check-bundles', 'busy'])
 const name = ref(''), search = ref(''), threshold = ref(2)
@@ -139,8 +139,9 @@ function selectedFingerprint(member) {
 function availability(member) {
   const parts = []
   if (member.pgp_keys.length) parts.push(`${member.pgp_keys.length} PGP key${member.pgp_keys.length === 1 ? '' : 's'}`)
-  if (member.webauthn_credentials > 0) parts.push(`${member.webauthn_credentials} passkey${member.webauthn_credentials === 1 ? '' : 's'} · Caution custody`)
-  return parts.join(' · ') || 'No eligible key'
+  if (!cautionCustodyUnavailable(member)) parts.push(`${member.webauthn_credentials} passkey${member.webauthn_credentials === 1 ? '' : 's'} · Caution custody`)
+  if (cautionCustodyUnavailable(member)) parts.push(cautionCustodyUnavailable(member))
+  return parts.join(' · ')
 }
 function toggleMember(member, checked) {
   if (checked && holderCount.value >= MAX_DASHBOARD_HOLDERS) return

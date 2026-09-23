@@ -1187,6 +1187,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             reg_states: Arc::new(RwLock::new(HashMap::new())),
             passkey_reg_states: Arc::new(RwLock::new(HashMap::new())),
+            recovery_verifications: Arc::new(RwLock::new(HashMap::new())),
             auth_states: Arc::new(RwLock::new(HashMap::new())),
             sign_challenges: Arc::new(RwLock::new(HashMap::new())),
             session_timeout_hours: 24,

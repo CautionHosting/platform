@@ -105,14 +105,16 @@ pub struct OrgQuorumMember {
     pub username: String,
     pub pgp_keys: Vec<RegisteredPgpKey>,
     pub webauthn_credentials: i64,
+    pub webauthn_uv_credentials: i64,
 }
 
 pub async fn list_participants(
     pool: &PgPool,
     org_id: Uuid,
 ) -> Result<Vec<OrgQuorumMember>, OrgQuorumError> {
-    let users: Vec<(Uuid, String, i64)> = sqlx::query_as(
-        "SELECT u.id, u.username, (SELECT count(*) FROM fido2_credentials f WHERE f.user_id = u.id)
+    let users: Vec<(Uuid, String, i64, i64)> = sqlx::query_as(
+        "SELECT u.id, u.username, (SELECT count(*) FROM fido2_credentials f WHERE f.user_id = u.id),
+         (SELECT count(*) FROM fido2_credentials f WHERE f.user_id = u.id AND f.uv_verified)
          FROM organization_members om JOIN users u ON u.id = om.user_id
          WHERE om.organization_id = $1 AND u.is_active = true ORDER BY u.username, u.id",
     )
@@ -124,7 +126,7 @@ pub async fn list_participants(
         "unable to list quorum participants",
     ))?;
     let mut members = Vec::with_capacity(users.len());
-    for (user_id, username, webauthn_credentials) in users {
+    for (user_id, username, webauthn_credentials, webauthn_uv_credentials) in users {
         let pgp_keys = sqlx::query_as(
             "SELECT id, fingerprint, public_key FROM pgp_keys
              WHERE user_id = $1 AND removed_at IS NULL ORDER BY fingerprint, id",
@@ -141,6 +143,7 @@ pub async fn list_participants(
             username,
             pgp_keys,
             webauthn_credentials,
+            webauthn_uv_credentials,
         });
     }
     Ok(members)
@@ -273,14 +276,23 @@ fn validate_keyring(keyring: &[Key], at: Option<SystemTime>) -> Result<(), OrgQu
     Ok(())
 }
 
-fn credential_snapshot(rows: Vec<Vec<u8>>) -> Result<Vec<String>, OrgQuorumError> {
+// Must match Locksmith Authorizer::begin; count every credential, never truncate.
+const MAX_HOLDER_CREDENTIALS: usize = 64;
+
+fn credential_snapshot(rows: Vec<(Vec<u8>, bool)>) -> Result<Vec<String>, OrgQuorumError> {
     if rows.is_empty() {
         return Err(OrgQuorumError::invalid(
             "Caution-backed holder has no registered WebAuthn credentials",
         ));
     }
+    if rows.len() > MAX_HOLDER_CREDENTIALS {
+        return Err(OrgQuorumError::invalid("Caution-backed holder has more than 64 credentials; reduce the credential count before generation"));
+    }
+    if !rows.iter().any(|(_, verified)| *verified) {
+        return Err(OrgQuorumError::invalid("Caution-backed holder must verify a passkey with PIN/biometrics in Dashboard Authentication before generation, or use external PGP"));
+    }
     rows.into_iter()
-        .map(|bytes| {
+        .map(|(bytes, _)| {
             let credential: SecurityKey = serde_json::from_slice(&bytes).with_context(Ctx::new(
                 StatusCode::BAD_REQUEST,
                 "invalid registered WebAuthn credential",
@@ -338,8 +350,8 @@ async fn resolve_holders(
                 })?));
             }
             OrgQuorumKeySource::CautionBackedPgp => {
-                let rows = sqlx::query_scalar(
-                    "SELECT public_key FROM fido2_credentials WHERE user_id = $1 ORDER BY credential_id")
+                let rows = sqlx::query_as(
+                    "SELECT public_key, uv_verified FROM fido2_credentials WHERE user_id = $1 ORDER BY credential_id")
                     .bind(participant.user_id).fetch_all(pool).await
                     .with_context(Ctx::new(StatusCode::INTERNAL_SERVER_ERROR, "unable to load holder credentials"))?;
                 holders.push(Holder::WebAuthn(credential_snapshot(rows)?));

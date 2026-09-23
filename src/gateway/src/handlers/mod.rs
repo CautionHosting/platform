@@ -22,6 +22,7 @@ pub(crate) use e2e::e2e_login_handler;
 pub(crate) use user_profile::{claim_username_handler, get_username_status_handler};
 
 pub(crate) use credentials::{
+    begin_recovery_verification, finish_recovery_verification,
     add_pgp_key_handler, add_ssh_key_handler, begin_add_passkey_handler, delete_passkey_handler,
     delete_ssh_key_handler, finish_add_passkey_handler, list_passkeys_handler,
     list_pgp_keys_handler, list_ssh_keys_handler, remove_pgp_key_handler,

@@ -12,7 +12,7 @@
 #   6. Verify /auth/reset/begin rejects an expired token (insert known hash, expired)
 #   7. Verify /auth/reset/begin rejects an already-used token
 #   8. Verify /auth/reset/begin rejects a nonexistent token
-#   9. Verify the public gateway does NOT route /internal/webauthn/reset (404)
+#   9. Verify the public gateway does NOT route /internal/webauthn/reset (404/405)
 #  10. Verify missing secret returns 401
 #  11. Verify nonexistent user returns 404
 #  12. Verify gateway serves /reset SPA route (200, not 404)
@@ -36,7 +36,7 @@ TOTAL_STEPS=12
 log()  { echo "[webauthn-reset] $*"; }
 fail() { STEP_NUM=$((STEP_NUM + 1)); echo "[webauthn-reset] ✗ step $STEP_NUM FAILED: $*" >&2; exit 1; }
 pass() { STEP_NUM=$((STEP_NUM + 1)); log "✓ step $STEP_NUM: $*"; }
-psql_q() { docker exec "$DB_CONTAINER" psql -U postgres -d "$DB_NAME" -tAc "$1"; }
+psql_q() { docker exec "$DB_CONTAINER" psql -U postgres -d "$DB_NAME" -qtAc "$1"; }
 
 # ── Step 1: gateway health ───────────────────────────────────────────
 for i in $(seq 1 30); do
@@ -116,8 +116,9 @@ PUBLIC_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
     -X POST "$GATEWAY_URL/internal/webauthn/reset" \
     -H "Content-Type: application/json" \
     -d "{\"user_id\": \"$USER_ID\"}")
-[ "$PUBLIC_RESPONSE" = "404" ] || fail "gateway should not route /internal/* (got $PUBLIC_RESPONSE)"
-pass "public gateway returns 404 for /internal/webauthn/reset"
+# ServeDir rejects POST to an unmatched route with 405; either response denies access.
+[ "$PUBLIC_RESPONSE" = "404" ] || [ "$PUBLIC_RESPONSE" = "405" ] || fail "gateway should not route /internal/* (got $PUBLIC_RESPONSE)"
+pass "public gateway denies /internal/webauthn/reset (status=$PUBLIC_RESPONSE)"
 
 # ── Step 10: missing secret returns 401 ──────────────────────────────
 NO_SECRET_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
