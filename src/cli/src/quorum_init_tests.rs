@@ -405,6 +405,78 @@ fn saved_policy_is_preserved_and_replacement_is_rejected() {
     fs::remove_dir_all(dir).unwrap();
 }
 
+#[test]
+fn verified_hashes_are_saved_in_runtime_compatible_format() {
+    let flat = serde_json::json!({
+        "pcr0": "ab".repeat(48), "pcr1": "cd".repeat(48), "pcr2": "ef".repeat(48),
+        "verified_at": "2026-09-24T13:10:39Z",
+        "tls": {"domain": "keymaker.example.com", "certfp": "metadata"}
+    })
+    .to_string();
+    let normalized = normalize_policy(&flat).unwrap();
+    // Exercise the unchanged, pinned Locksmith parser, not only the CLI parser.
+    let policy = KeymakerPcrPolicy::from_json(&normalized).unwrap();
+    assert_eq!(policy.sets.len(), 1);
+    assert_eq!(policy.sets[0].pcrs[&0], vec![0xab; 48]);
+    assert_eq!(policy.sets[0].expires_at_unix_seconds, None);
+    let dir = std::env::temp_dir().join(format!("quorum-normalize-{}", Uuid::new_v4()));
+    fs::create_dir(&dir).unwrap();
+    let path = dir.join("policy.json");
+    save_policy_if_absent(&path, &normalized, &policy).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), normalized);
+    // Also support selecting a flat file already at the destination path.
+    fs::write(&path, &flat).unwrap();
+    check_saved_policy(&path, &policy).unwrap();
+    save_policy_if_absent(&path, &normalized, &policy).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), normalized);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn normalization_preserves_multiple_sets_and_expiries() {
+    let text = serde_json::json!({"sets": [
+        {"pcrs": {"0": "ab".repeat(48), "1": "cd".repeat(48), "2": "ef".repeat(48)},
+         "expires_at_unix_seconds": 42},
+        {"pcrs": {"0": "12".repeat(48), "1": "34".repeat(48), "2": "56".repeat(48)}}
+    ]})
+    .to_string();
+    assert_eq!(normalize_policy(&text).unwrap(), text);
+    let policy = parse_policy(&text).unwrap();
+    assert_eq!(policy.sets.len(), 2);
+    assert_eq!(policy.sets[0].expires_at_unix_seconds, Some(42));
+}
+
+#[test]
+fn normalization_rejects_incomplete_debug_and_ambiguous_inputs() {
+    let valid = serde_json::json!({
+        "pcr0": "ab".repeat(48), "pcr1": "cd".repeat(48), "pcr2": "ef".repeat(48)
+    });
+    for field in ["pcr0", "pcr1", "pcr2"] {
+        let mut missing = valid.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(normalize_policy(&missing.to_string()).is_err());
+        for bad in [
+            "00".repeat(48),
+            "zz".repeat(48),
+            "ab".repeat(47),
+            "ab".repeat(49),
+        ] {
+            let mut input = valid.clone();
+            input[field] = bad.into();
+            assert!(normalize_policy(&input.to_string()).is_err());
+        }
+    }
+    for (field, value) in [
+        ("sets", serde_json::json!([])),
+        ("expires_at_unix_seconds", serde_json::json!(42)),
+        ("pcr3", serde_json::json!("ab".repeat(48))),
+    ] {
+        let mut input = valid.clone();
+        input[field] = value;
+        assert!(normalize_policy(&input.to_string()).is_err());
+    }
+}
+
 /// Uses downloaded envelopes from the mock stack and a loopback app lookup.
 /// No enclave connection or real share release is attempted.
 #[cfg(feature = "e2e-testing-unsafe")]

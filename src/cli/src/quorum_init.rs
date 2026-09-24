@@ -77,7 +77,7 @@ pub(crate) struct Options {
     /// Call this Keymaker directly (PGP-only); overrides KEYMAKER_URL.
     #[arg(long)]
     pub keymaker_url: Option<String>,
-    /// Expected Keymaker PCRs, independently established by the operator.
+    /// Expected Keymaker PCRs: sets policy or Keymaker's verified trusted_hashes.json.
     #[arg(long, value_name = "FILE")]
     pub keymaker_pcr_policy: Option<PathBuf>,
 }
@@ -388,6 +388,35 @@ fn parse_policy(text: &str) -> Result<KeymakerPcrPolicy, InitError> {
     Ok(policy)
 }
 
+// Normalize only at the CLI boundary; deployed consumers still receive `sets`.
+fn normalize_policy(text: &str) -> Result<String, InitError> {
+    let value: serde_json::Value = serde_json::from_str(text)
+        .with_context(Ctx::new("invalid Keymaker PCR policy JSON"))?;
+    if value.get("sets").is_some() {
+        parse_policy(text)?;
+        return Ok(text.to_owned());
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct VerifiedHashes {
+        pcr0: String,
+        pcr1: String,
+        pcr2: String,
+        #[serde(default, rename = "verified_at")]
+        _verified_at: Option<String>,
+        #[serde(default, rename = "tls")]
+        _tls: Option<serde::de::IgnoredAny>,
+    }
+    let hashes: VerifiedHashes = serde_json::from_str(text)
+        .with_context(Ctx::new("expected a sets policy or verified PCR0/1/2 file"))?;
+    let normalized = serde_json::to_string_pretty(&serde_json::json!({
+        "sets": [{"pcrs": {"0": hashes.pcr0, "1": hashes.pcr1, "2": hashes.pcr2}}]
+    }))
+    .with_context(Ctx::new("unable to encode Keymaker PCR policy"))?;
+    parse_policy(&normalized)?;
+    Ok(normalized)
+}
+
 fn check_quorum_parameters(
     bundle: &v1::GenerateQuorumResponse,
     threshold: u8,
@@ -596,7 +625,7 @@ fn check_saved_policy(path: &Path, selected: &KeymakerPcrPolicy) -> Result<(), I
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         result => result.with_context(Ctx::new("unable to read saved local PCR policy"))?,
     };
-    let saved = parse_policy(&text).with_context(Ctx::new(
+    let saved = parse_policy(&normalize_policy(&text)?).with_context(Ctx::new(
         "saved local PCR policy is invalid; explicitly repair it before generating a quorum",
     ))?;
     if saved != *selected {
@@ -621,7 +650,15 @@ fn save_policy_if_absent(
             .write_all(text.as_bytes())
             .with_context(Ctx::new("unable to save accepted PCR policy")),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            check_saved_policy(path, policy)
+            check_saved_policy(path, policy)?;
+            let saved = fs::read_to_string(path)
+                .with_context(Ctx::new("unable to read saved local PCR policy"))?;
+            let normalized = normalize_policy(&saved)?;
+            if normalized != saved {
+                fs::write(path, normalized)
+                    .with_context(Ctx::new("unable to normalize saved local PCR policy"))?;
+            }
+            Ok(())
         }
         Err(error) => Err(error).with_context(Ctx::new("unable to create accepted PCR policy")),
     }
@@ -701,6 +738,7 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
     let policy_file = policy_path(options.keymaker_pcr_policy.as_deref());
     let policy_text = fs::read_to_string(&policy_file)
         .with_context(Ctx::new("unable to read Keymaker PCR policy"))?;
+    let policy_text = normalize_policy(&policy_text)?;
     let policy = parse_policy(&policy_text)?;
     let saved_policy_path = Path::new(".caution/keymaker-pcr-policy.json");
     check_saved_policy(saved_policy_path, &policy)?;

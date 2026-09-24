@@ -58,6 +58,16 @@ caution secret init root-holders.asc --threshold 2 \
 jq -r '.data.public_key' .caution/quorum-bundle.json > .caution/caution-ca.asc
 ```
 
+After successful `caution verify` in the Keymaker checkout, its
+`.caution/trusted_hashes.json` can be passed directly as `--keymaker-pcr-policy`.
+`secret init` validates the flat PCR0/1/2 input and saves a single non-expiring
+`sets` policy in `.caution/keymaker-pcr-policy.json`; package that saved file.
+The CLI ignores verification-time/TLS metadata for policy purposes and rejects
+mixed formats, unknown fields, incomplete PCRs and debug measurements. Existing
+`sets` input retains all approved measurement sets and per-set cutoffs unchanged.
+This needs an updated CLI, not a Locksmith runtime upgrade. A file's format does
+not establish trust: use only the intended Keymaker's successfully verified output.
+
 Keep private keys with their holders. Preserve the public/proofed bundle and its
 policy for every restart. The root must be recoverable without the key
 service: do not bootstrap it with that service's passkeys. Production root
