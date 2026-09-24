@@ -61,8 +61,8 @@ pub(crate) struct Options {
     pub name: Option<String>,
     #[arg(long = "label", value_name = "KEY=VALUE")]
     pub labels: Vec<String>,
-    /// Explicit custody for an organization holder: USER=external-pgp or USER=webauthn.
-    #[arg(long = "holder", value_name = "USER=CUSTODY", conflicts_with_all = ["from_org_users", "caution_backed"])]
+    /// Explicit approval method for an organization holder: USER=external-pgp or USER=webauthn.
+    #[arg(long = "holder", value_name = "USER=METHOD", conflicts_with_all = ["from_org_users", "caution_backed"])]
     pub holders: Vec<HolderSelection>,
     /// Deprecated: organization holders, selected by UUID or username.
     #[arg(long, value_delimiter = ',', value_name = "USER")]
@@ -98,7 +98,7 @@ impl std::str::FromStr for HolderSelection {
             "webauthn" => true,
             _ => {
                 return Err(InitError::invalid(
-                    "custody must be external-pgp or webauthn",
+                    "approval method must be external-pgp or webauthn",
                 ));
             }
         };
@@ -402,13 +402,13 @@ fn check_quorum_parameters(
 }
 
 fn pgp_selection_menu(member: &Member, explicit: Option<bool>) -> String {
-    let choice = if explicit == Some(false) { "PGP key" } else { "custody" };
+    let choice = if explicit == Some(false) { "PGP key" } else { "approval method" };
     let mut menu = format!("Select {choice} for {}:", crate::share_release::terminal_label(&member.username));
     for (index, key) in member.pgp_keys.iter().enumerate() {
         menu.push_str(&format!("\n  {}: PGP {} ({})", index + 1, crate::share_release::terminal_label(&key.fingerprint), key.id));
     }
     if member.custody_error().is_none() && explicit.is_none() {
-        menu.push_str(&format!("\n  0: Caution-backed WebAuthn ({} registered passkeys, one share)", member.webauthn_credentials));
+        menu.push_str(&format!("\n  0: Passkey · Caution Enclave-held key ({} registered passkeys, one share)", member.webauthn_credentials));
     }
     menu
 }
@@ -420,7 +420,7 @@ fn participant_summary(member: &Member, participant: &Participant) -> String {
             let key = member.pgp_keys.iter().find(|key| key.id == id).expect("resolved registered key");
             format!("{name} · External PGP · {}", crate::share_release::terminal_label(&key.fingerprint))
         }
-        None => format!("{name} · Passkey"),
+        None => format!("{name} · Passkey · Caution Enclave-held key"),
     }
 }
 
@@ -431,7 +431,7 @@ fn select_participants(
     direct: bool,
 ) -> Result<(Vec<Participant>, Vec<String>), InitError> {
     select_participants_with_choice(options, members, interactive, direct, |question| {
-        prompt::select(question).with_context(Ctx::new("unable to read custody selection"))
+        prompt::select(question).with_context(Ctx::new("unable to read approval method selection"))
     })
 }
 
@@ -472,7 +472,7 @@ fn select_participants_with_choice(
             ));
         }
         if explicit.get(&user_id) == Some(&true) {
-            return Err(InitError::invalid("--pgp-key conflicts with explicit WebAuthn custody"));
+            return Err(InitError::invalid("--pgp-key conflicts with explicit WebAuthn approval"));
         }
         overrides.insert(user_id, selection.key.resolve(member)?);
     }
@@ -519,13 +519,13 @@ fn select_participants_with_choice(
                         member
                             .pgp_keys
                             .get(index.wrapping_sub(1))
-                            .ok_or_else(|| InitError::invalid("invalid custody selection"))?
+                            .ok_or_else(|| InitError::invalid("invalid approval method selection"))?
                             .id,
                     );
                 }
             } else {
                 return Err(InitError::invalid(
-                    "multiple keys or custody choices: specify --pgp-key USER=KEY (registration UUID or full fingerprint), or explicitly select WebAuthn custody",
+                    "multiple keys or approval methods: specify --pgp-key USER=KEY (registration UUID or full fingerprint), or explicitly select WebAuthn approval",
                 ));
             }
         }
@@ -725,7 +725,7 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
         .any(|p| p.key_source == "caution_backed_pgp")
     {
         eprintln!(
-            "Caution’s enclave holds the PGP private key. Your registered passkey authorizes re-encryption of your share to the verified application enclave. The private key is never released."
+            "Your passkey authorizes release of one share. The private key stays inside the key-service enclave. The share is re-encrypted to the verified application enclave."
         );
 
     }
@@ -847,7 +847,7 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
         || bundle.label != expected_labels
     {
         return Err(InitError::invalid(
-            "returned quorum custody, certificates or labels differ from selection",
+            "returned quorum approval methods, certificates or labels differ from selection",
         ));
     }
     Cert::from_bytes(bundle.public_key.as_bytes())

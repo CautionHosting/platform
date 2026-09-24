@@ -86,5 +86,5 @@ check explicitly detaches stdin, so the harness can also be launched from a term
 Before claiming production support, record a real Nitro recovery with an existing
 legacy bundle and an OpenPGP-card import/release smoke test. Local software-key
 and synthetic tests are separate evidence. Publish the aligned Locksmith revision
-before building Platform from a clean remote checkout. No new custody, Bootproof,
+before building Platform from a clean remote checkout. No new key-service, Bootproof,
 WebAuthn or V1-generation behavior is introduced.

@@ -89,7 +89,7 @@ fn summary(
     for (index, key) in data.keyring.iter().enumerate() {
         let (cert, custody, credentials) = match key {
             Key::OpenPGP { cert } => (cert, "External PGP", None),
-            Key::WebAuthn { cert, credential } => (cert, "Passkey", Some(credential.len())),
+            Key::WebAuthn { cert, credential } => (cert, "Passkey · Caution Enclave-held key", Some(credential.len())),
         };
         let fingerprint = Cert::from_bytes(cert.as_bytes()).with_context(Ctx::new("invalid holder certificate"))?.fingerprint().to_string();
         let name = names.get(&fingerprint).filter(|name| names.values().filter(|other| *other == *name).count() == 1)
@@ -99,10 +99,11 @@ fn summary(
     }
     let width = rows.iter().map(|row| row.0.chars().count()).max().unwrap_or(0).max(6);
     let passkeys = rows.iter().any(|row| row.3.is_some());
-    lines.push(format!("\n{:<width$}  {:<12}  {:<17}{}", "HOLDER", "CUSTODY", "CERTIFICATE", if passkeys { "  PASSKEYS" } else { "" }));
+    let method_width = rows.iter().map(|row| row.1.chars().count()).max().unwrap_or(0).max("APPROVAL METHOD".len());
+    lines.push(format!("\n{:<width$}  {:<method_width$}  {:<17}{}", "HOLDER", "APPROVAL METHOD", "CERTIFICATE", if passkeys { "  PASSKEYS" } else { "" }));
     for (name, custody, certificate, credentials) in rows {
         let count = if passkeys { format!("  {}", credentials.map(|n| n.to_string()).unwrap_or_else(|| "—".into())) } else { String::new() };
-        lines.push(format!("{name:<width$}  {custody:<12}  {certificate:<17}{count}"));
+        lines.push(format!("{name:<width$}  {custody:<method_width$}  {certificate:<17}{count}"));
     }
     if passkeys { lines.push("Multiple included passkeys still contribute one share per holder.".into()); }
     if !names.is_empty() { lines.push("\nNames reflect current Platform registrations, not authorization evidence.".into()); }

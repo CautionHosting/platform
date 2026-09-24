@@ -21,7 +21,7 @@ const server = createServer(async (request, response) => {
     const input = JSON.parse(body)
     response.setHeader('content-type', 'application/json')
     if (path.endsWith('/read') && readStatus !== 200) { response.writeHead(readStatus); return response.end('{}') }
-    if (path.endsWith('/read')) return response.end(JSON.stringify({ options, context: { bundle_id: Array(16).fill(1), holder: 'cd'.repeat(20), bundle_hash: 'ef'.repeat(32), holder_position: 1, certificate_index: 0, expires_at_unix_seconds: expires, organization_id: Array(16).fill(3), version: 'V1', destination_policy: { 0: 'ab'.repeat(48), 1: 'ab'.repeat(48), 2: 'ab'.repeat(48) } }, custody_policy: { 0: 'bc'.repeat(48), 1: 'bc'.repeat(48), 2: 'bc'.repeat(48) }, approval_origin: origin, destination_attestation_hash: 'de'.repeat(32), destination_key: Array(32).fill(2), context_hash: 'edcd12bf40e1c288' + '0'.repeat(48), metadata: includeMetadata ? { application: { name: appName, id: 'test-app', public_ip: recordedAddress, domain: 'app.example.test', state: 'running' }, organization: { name: 'My organization' }, bundle: { username: 'alice', threshold: 2, holders: 3, eligible_passkeys: 2 } } : null, reported: { destination_address: '203.0.113.42:49504', custody_url: 'https://custody.example.test' } }))
+    if (path.endsWith('/read')) return response.end(JSON.stringify({ options, context: { bundle_id: Array(16).fill(1), holder: 'cd'.repeat(20), bundle_hash: 'ef'.repeat(32), holder_position: 1, certificate_index: 0, expires_at_unix_seconds: expires, organization_id: Array(16).fill(3), version: 'V1', destination_policy: { 0: 'ab'.repeat(48), 1: 'ab'.repeat(48), 2: 'ab'.repeat(48) } }, custody_policy: { 0: 'bc'.repeat(48), 1: 'bc'.repeat(48), 2: 'bc'.repeat(48) }, approval_origin: origin, destination_attestation_hash: 'de'.repeat(32), destination_key: Array(32).fill(2), context_hash: 'edcd12bf40e1c288' + '0'.repeat(48), metadata: includeMetadata ? { application: { name: appName, id: 'test-app', public_ip: recordedAddress, domain: 'app.example.test', state: 'running' }, organization: { name: 'My organization' }, bundle: { username: 'alice', threshold: 2, holders: 3, eligible_passkeys: 2 } } : null, reported: { destination_address: '203.0.113.42:49504', custody_url: 'https://key-service.example.com' } }))
     if (input.assertion === null && cancellationDelay) await new Promise(resolve => setTimeout(resolve, cancellationDelay))
     finish = input
     finishCount++
@@ -104,6 +104,7 @@ try {
   await page.focus('#tab-0')
   await page.keyboard.press('ArrowRight')
   assert.equal(await page.$eval('#tab-1', e => e.getAttribute('aria-selected')), 'true')
+  assert.equal(await page.$eval('#tab-1', e => e.textContent.trim()), 'Key service')
   await assertPlainFields(['User verification', 'Lifetime', 'Expires at'])
   await page.click('[aria-label="Copy PCR0"]')
   assert.equal(await page.evaluate(() => window.copiedValue), 'bc'.repeat(48))
@@ -221,19 +222,22 @@ try {
   if (process.env.RELEASE_SCREENSHOT_PATH) {
     appName = 'dummy_locksmith_test_app'; recordedAddress = '203.0.113.42'
     expires = Math.floor(Date.now()/1000) + 120
-    await page.setViewport({ width: 1360, height: 900 })
-    await page.goto(`${origin}/qr-release?attempt=layout#layout`)
-    await page.waitForSelector('button.primary')
-    assert.ok(await page.$eval('.card', e => e.getBoundingClientRect().bottom <= window.innerHeight), 'normal desktop card fits without scrolling')
-    await page.screenshot({ path: process.env.RELEASE_SCREENSHOT_PATH, fullPage: true })
-    await page.click('.details-trigger')
-    await page.screenshot({ path: process.env.RELEASE_SCREENSHOT_PATH.replace('.png', '-drawer.png') })
-    await page.keyboard.press('Escape')
-    await page.setViewport({ width: 390, height: 844 })
-    await page.screenshot({ path: process.env.RELEASE_SCREENSHOT_PATH.replace('.png', '-mobile.png'), fullPage: true })
-    await page.click('.details-trigger')
-    assert.equal(await page.$eval('dialog', e => e.getBoundingClientRect().top), 0)
-    await page.screenshot({ path: process.env.RELEASE_SCREENSHOT_PATH.replace('.png', '-mobile-drawer.png') })
+    for (const theme of ['light', 'dark']) {
+      for (const width of [1360, 390]) {
+        await page.setViewport({ width, height: 900 })
+        await page.goto(`${origin}/qr-release?attempt=layout#layout`)
+        await page.waitForSelector('button.primary')
+        await page.evaluate(theme => { document.documentElement.dataset.theme = theme }, theme)
+        assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'approval fits viewport')
+        if (width === 1360) assert.ok(await page.$eval('.card', e => e.getBoundingClientRect().bottom <= window.innerHeight), 'normal desktop card fits without scrolling')
+        await page.screenshot({ path: process.env.RELEASE_SCREENSHOT_PATH.replace('.png', `-${theme}-${width}.png`), fullPage: true })
+        await page.click('.details-trigger')
+        await page.click('#tab-1')
+        if (width === 390) assert.equal(await page.$eval('dialog', e => e.getBoundingClientRect().top), 0)
+        assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'key-service panel fits viewport')
+        await page.screenshot({ path: process.env.RELEASE_SCREENSHOT_PATH.replace('.png', `-${theme}-${width}-key-service.png`) })
+      }
+    }
   }
   console.log('PASS: browser approval, raw signature/UV, cancellation, pending-request expiry, metadata escaping, copy and mobile layout (mock relay; no Nitro)')
 } finally {

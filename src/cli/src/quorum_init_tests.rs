@@ -154,12 +154,12 @@ fn creation_summary_uses_names_custody_and_fingerprints() {
     assert_eq!(participant_summary(&member, &participant), format!("alice · External PGP · {}", "AB".repeat(20)));
     participant.key_source = "caution_backed_pgp";
     participant.pgp_key_id = None;
-    assert_eq!(participant_summary(&member, &participant), "alice · Passkey");
+    assert_eq!(participant_summary(&member, &participant), "alice · Passkey · Caution Enclave-held key");
     let explicit = pgp_selection_menu(&member, Some(false));
     assert!(explicit.starts_with("Select PGP key for alice:"));
-    assert!(!explicit.contains("WebAuthn"));
+    assert!(!explicit.contains("Passkey"));
     let legacy = pgp_selection_menu(&member, None);
-    assert!(legacy.starts_with("Select custody for alice:") && legacy.contains("WebAuthn"));
+    assert!(legacy.starts_with("Select approval method for alice:") && legacy.contains("Passkey"));
 }
 
 #[test]
@@ -783,6 +783,6 @@ fn passkey_eligibility_fails_closed_on_unknown_uv_and_oversized_snapshots() {
         value["webauthn_credentials"] = serde_json::json!(count);
         let member: Member = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(member.custody_error().is_none(), (1..=64).contains(&count));
-        assert_eq!(pgp_selection_menu(&member, None).contains("0: Caution-backed"), (1..=64).contains(&count));
+        assert_eq!(pgp_selection_menu(&member, None).contains("0: Passkey · Caution Enclave-held key"), (1..=64).contains(&count));
     }
 }
