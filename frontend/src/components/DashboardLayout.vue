@@ -337,6 +337,7 @@
         >
       </div>
       <div class="footer-right">
+        <a href="/components">Components</a>
         <a
           href="https://docs.caution.co/"
           target="_blank"

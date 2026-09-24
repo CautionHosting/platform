@@ -42,6 +42,7 @@ mod org_quorum;
 mod organizations;
 mod provisioning;
 mod resources;
+mod service_observations;
 mod subscriptions;
 mod suspension;
 mod types;
@@ -463,6 +464,7 @@ async fn build_inputs() -> impl IntoResponse {
         bootproof: enclave_builder::build::ToolSource,
         steve: enclave_builder::build::ToolSource,
         locksmith: enclave_builder::build::ToolSource,
+        services: service_observations::Snapshot,
     }
     #[derive(serde::Serialize)]
     struct PlatformSource {
@@ -485,6 +487,7 @@ async fn build_inputs() -> impl IntoResponse {
         bootproof: tools.bootproof,
         steve: tools.steve,
         locksmith: tools.locksmith,
+        services: service_observations::snapshot().await,
     })
 }
 
@@ -3434,6 +3437,8 @@ mod build_inputs_tests {
                 "missing {tool}.repo"
             );
         }
+        assert!(json["services"]["pending"].is_boolean());
+        assert!(json["services"]["entries"].is_array());
         drop(platform_sha);
     }
 }
