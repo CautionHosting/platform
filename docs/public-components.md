@@ -42,6 +42,25 @@ The page loads once, supports manual Refresh and follows an initial pending
 check for at most ten seconds. A refresh inside the cache interval returns the
 same snapshot. Readiness and verification are shown separately.
 
+Service cards keep readiness, attestation authentication and each policy result
+separate. Relative check age refers to the Platform snapshot; the exact timestamp
+is available on the time label. Source revisions remain service-reported, while
+the compact framework table lists build dependencies.
+
+**Check attestation** opens the existing `/verify?url=…` page in a new tab for
+fresh browser verification. The link carries only the endpoint, never an expected
+PCR baseline. Import independently trusted measurements in that verifier to check
+the intended image. Browser verification does not reproduce source; the copyable
+CLI command performs independent build reproduction.
+
+The evidence disclosure compares observed and allowed PCRs for each approved set.
+Individual equal values do not establish overall policy acceptance or override
+cutoffs. “No expiry” means no policy timestamp cutoff, not certificate expiry.
+Only valid all-zero, unpinned measurements outside PCR0/1/2 are collapsed by
+default. **Show all PCRs** reveals them; required, policy-pinned, missing and
+malformed values remain visible. **Show full values** and copy controls retain
+access to complete hashes. Discovery JSON retains every measurement.
+
 Example independent verification:
 
 ```sh
