@@ -35,6 +35,7 @@ mod quorum_legacy;
 mod quorum_inspect;
 mod share_release;
 mod secrets;
+mod service_trust;
 mod ssh_keys;
 mod verify;
 
@@ -483,9 +484,12 @@ enum Commands {
         force: bool,
     },
     #[command(
-        about = "Verify enclave attestation against the local source at the manifest commit."
+        about = "Verify an application from local source, or discover and verify a hosted service."
     )]
     Verify {
+        /// Discover, reproduce and save trust for a hosted service on the selected Platform.
+        #[arg(long, value_enum, conflicts_with_all = ["attestation_url", "from_local", "from_tarball", "app_source_url", "pcrs", "save_pcrs", "inspect_attestation"])]
+        service: Option<service_trust::Service>,
         #[arg(
             long,
             help = "Attestation endpoint URL (default: inferred from .caution/deployment)"
@@ -3692,6 +3696,7 @@ pub async fn run() -> Result<(), RunError> {
             }
         }
         Commands::Verify {
+            service,
             attestation_url,
             from_local,
             from_tarball,
@@ -3701,19 +3706,25 @@ pub async fn run() -> Result<(), RunError> {
             save_pcrs,
             inspect_attestation,
         } => {
-            verify::verify(
-                &client,
-                attestation_url,
-                from_local,
-                from_tarball,
-                app_source_url,
-                pcrs,
-                no_cache,
-                save_pcrs,
-                inspect_attestation,
-            )
-            .await
-            .with_context(Ctx::command_dispatch())?;
+            if let Some(service) = service {
+                service_trust::run(&client, service, no_cache)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
+            } else {
+                verify::verify(
+                    &client,
+                    attestation_url,
+                    from_local,
+                    from_tarball,
+                    app_source_url,
+                    pcrs,
+                    no_cache,
+                    save_pcrs,
+                    inspect_attestation,
+                )
+                .await
+                .with_context(Ctx::command_dispatch())?;
+            }
         }
         Commands::Apps { command } => match command {
             AppCommands::Create => {
@@ -3892,7 +3903,7 @@ pub async fn run() -> Result<(), RunError> {
                 secrets_dir,
                 allow_legacy,
             } => {
-                secrets::encrypt(keys, env_file, bundle, secrets_dir, allow_legacy)
+                secrets::encrypt(&client, keys, env_file, bundle, secrets_dir, allow_legacy)
                     .with_context(Ctx::command_dispatch())?;
             }
             SecretCommands::Rename { id, name } => {

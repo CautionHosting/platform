@@ -826,6 +826,9 @@ fn parse_git_rev_parse_output(success: bool, stdout: &[u8]) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
+#[path = "verify_hosted_source.rs"]
+pub(crate) mod hosted_source;
+
 struct StagedSource {
     path: PathBuf,
     cache_key: String,
@@ -2061,6 +2064,13 @@ async fn verify_tls_binding(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum VerifyError {
+    #[error("hosted service verification failed [{location:?}]")]
+    HostedService {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
     #[error("failed to resolve attestation URL [{location:?}]")]
     GetAttestationUrl {
         #[location]
@@ -2289,8 +2299,83 @@ pub(crate) enum VerifyError {
     },
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) struct VerifiedImage {
+    pub(crate) pcrs: attestation::AttestationPcrs,
+    pub(crate) verified_at: String,
+    pub(crate) tls: Option<TrustedTls>,
+    pub(crate) source: serde_json::Value,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn verify(
+    client: &ApiClient,
+    attestation_url: Option<String>,
+    from_local: bool,
+    from_tarball: Option<PathBuf>,
+    app_source_url: Option<String>,
+    pcrs: Option<String>,
+    no_cache: bool,
+    save_pcrs: bool,
+    inspect_attestation: bool,
+) -> Result<(), VerifyError> {
+    use VerifyErrorCtx as Ctx;
+    if let Some(image) = verify_result(
+        client,
+        attestation_url,
+        from_local,
+        from_tarball,
+        app_source_url,
+        pcrs,
+        no_cache,
+        save_pcrs,
+        inspect_attestation,
+        false,
+    )
+    .await?
+    {
+        let trusted = TrustedHashes {
+            pcr0: &image.pcrs.pcr0,
+            pcr1: &image.pcrs.pcr1,
+            pcr2: &image.pcrs.pcr2,
+            verified_at: image.verified_at,
+            tls: image.tls,
+        };
+        let path = PathBuf::from(".caution/trusted_hashes.json");
+        let backup =
+            persist_trusted_hashes(&path, &trusted).with_context(Ctx::persist_trusted_hashes())?;
+        output::status(format_args!("Trusted state: {}", path.display()));
+        if let Some(backup) = backup {
+            output::status(format_args!("Previous state: {}", backup.display()));
+        }
+        crate::env_notice::verify_reminder();
+    }
+    Ok(())
+}
+
+pub(crate) async fn verify_service(
+    client: &ApiClient,
+    endpoint: &str,
+    no_cache: bool,
+) -> Result<VerifiedImage, VerifyError> {
+    let url = [endpoint.trim_end_matches('/'), "/attestation"].concat();
+    let image = verify_result(
+        client,
+        Some(url),
+        false,
+        None,
+        None,
+        None,
+        no_cache,
+        false,
+        false,
+        true,
+    )
+    .await?;
+    Ok(image.expect("verification without inspection returns verified measurements"))
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn verify_result(
     client: &ApiClient,
     attestation_url_opt: Option<String>,
     from_local: bool,
@@ -2300,7 +2385,8 @@ pub(crate) async fn verify(
     no_cache: bool,
     save_pcrs: bool,
     inspect_attestation: bool,
-) -> Result<(), VerifyError> {
+    hosted: bool,
+) -> Result<Option<VerifiedImage>, VerifyError> {
     use VerifyErrorCtx as Ctx;
 
     if inspect_attestation {
@@ -2325,7 +2411,7 @@ pub(crate) async fn verify(
     let attestation_url =
         reqwest::Url::parse(&attestation_url).with_context(Ctx::parse_attestation_url())?;
 
-    let nonce = {
+    let mut nonce = {
         use rand::RngCore;
         let mut nonce = vec![0u8; 32];
         rand::thread_rng().fill_bytes(&mut nonce);
@@ -2363,7 +2449,7 @@ pub(crate) async fn verify(
             location: std::panic::Location::caller(),
         });
     }
-    let attestation_leaf = peer_certificate_der(&response);
+    let mut attestation_leaf = peer_certificate_der(&response);
 
     let attest_resp = bounded_attestation_response_json(response)
         .await
@@ -2389,7 +2475,7 @@ pub(crate) async fn verify(
         client.verbose,
         format!("Received attestation: {} bytes", attestation_b64.len()),
     );
-    let attestation_bytes = base64::engine::general_purpose::STANDARD
+    let mut attestation_bytes = base64::engine::general_purpose::STANDARD
         .decode(attestation_b64)
         .with_context(Ctx::decode_attestation())?;
 
@@ -2404,11 +2490,11 @@ pub(crate) async fn verify(
             attestation_inspection_json(&nonce, &attestation_payload, attest_resp.get("manifest"))
                 .with_context(Ctx::inspection_json())?;
         output::data_ln(inspection_json).with_context(Ctx::write_inspection_data())?;
-        return Ok(());
+        return Ok(None);
     }
 
     output::status("\nExtracting remote attestation values...");
-    let remote_pcrs =
+    let mut remote_pcrs =
         attestation::extract_pcrs(&attestation_payload).with_context(Ctx::extract_pcrs())?;
 
     output::status("\nRemote PCR values (unverified until verification succeeds):");
@@ -2436,7 +2522,7 @@ pub(crate) async fn verify(
         .transpose()
         .with_context(Ctx::parse_manifest())?;
 
-    if let Some(ref m) = manifest {
+    if let Some(m) = manifest.as_ref().filter(|_| !hosted) {
         output::status("\nResponse manifest information (unsigned):");
         if let Some(ref app_src) = m.app_source {
             if app_src.urls.len() == 1 {
@@ -2526,8 +2612,26 @@ pub(crate) async fn verify(
         }
     }
 
+    if hosted {
+        crate::service_trust::approve_source(manifest.as_ref())
+            .with_context(Ctx::hosted_service())?;
+    }
+
     let pcr_only = pcrs_file.is_some();
-    let reproduction = if let Some(pcrs_path) = pcrs_file {
+    let reproduction = if hosted {
+        // Preserve the approved manifest exactly, including branch and archive URLs.
+        // The explicit --app-source-url path intentionally overrides those fields.
+        let app = manifest
+            .as_ref()
+            .and_then(|m| m.app_source.as_ref())
+            .expect("hosted source approval requires an application source");
+        let source = hosted_source::stage(app)
+            .await
+            .with_context(Ctx::hosted_service())?;
+        build_and_get_pcrs(client, manifest.clone(), no_cache, Some(&source))
+            .await
+            .with_context(Ctx::build_and_get_pcrs())?
+    } else if let Some(pcrs_path) = pcrs_file {
         output::status(format!("\nReading expected PCRs from file: {}", pcrs_path));
         ReproductionResult {
             pcrs: read_pcrs_from_file(&pcrs_path).with_context(Ctx::read_pcrs_from_file())?,
@@ -2636,6 +2740,42 @@ pub(crate) async fn verify(
     ]
     .into_iter()
     .collect();
+    if hosted {
+        // Reproduction can be slow: issue a new challenge only after it finishes.
+        use rand::RngCore;
+        rand::thread_rng().fill_bytes(&mut nonce);
+        let response = attestation_client
+            .post(attestation_url.clone())
+            .timeout(Duration::from_secs(60))
+            .json(&serde_json::json!({"nonce": general_purpose::STANDARD.encode(&nonce)}))
+            .send()
+            .await
+            .with_context(Ctx::fetch_attestation())?;
+        if !response.status().is_success() {
+            return Err(VerifyError::FetchAttestationStatus {
+                status: response.status(),
+                location: std::panic::Location::caller(),
+            });
+        }
+        attestation_leaf = peer_certificate_der(&response);
+        let fresh = bounded_attestation_response_json(response)
+            .await
+            .with_context(Ctx::bounded_attestation_response())?;
+        let encoded = fresh
+            .get("attestation_document")
+            .or_else(|| fresh.get("document"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| VerifyError::MissingAttestationDocument {
+                fields: "fresh service response".to_owned(),
+                location: std::panic::Location::caller(),
+            })?;
+        attestation_bytes = general_purpose::STANDARD
+            .decode(encoded)
+            .with_context(Ctx::decode_attestation())?;
+        let payload =
+            attestation::parse(&attestation_bytes).with_context(Ctx::parse_attestation())?;
+        remote_pcrs = attestation::extract_pcrs(&payload).with_context(Ctx::extract_pcrs())?;
+    }
     let nitro =
         Nitro::new(attestation_bytes, expected_nitro_pcrs).with_context(Ctx::build_nitro())?;
     let duration_since_epoch = std::time::SystemTime::now()
@@ -2677,27 +2817,29 @@ pub(crate) async fn verify(
                 }
             }
 
-            let trusted = TrustedHashes {
-                pcr0: &verified_pcrs.pcr0,
-                pcr1: &verified_pcrs.pcr1,
-                pcr2: &verified_pcrs.pcr2,
+            if hosted
+                && matches!(
+                    tls,
+                    TlsVerification::SkippedNoDns | TlsVerification::PcrOnly
+                )
+            {
+                return Err(VerifyError::HostedService {
+                    location: std::panic::Location::caller(),
+                    source: Box::new(std::io::Error::other(
+                        "required service TLS binding was not verified",
+                    )),
+                });
+            }
+            output::success("✓ Attestation verification PASSED");
+            Ok(Some(VerifiedImage {
+                pcrs: verified_pcrs,
                 verified_at: chrono::Utc::now().to_rfc3339(),
                 tls: match tls {
                     TlsVerification::Verified(tls) => Some(tls),
                     _ => None,
                 },
-            };
-            let hashes_path = PathBuf::from(".caution/trusted_hashes.json");
-            let backup = persist_trusted_hashes(&hashes_path, &trusted)
-                .with_context(Ctx::persist_trusted_hashes())?;
-            output::success("✓ Attestation verification PASSED");
-            output::status(format!("Trusted state: {}", hashes_path.display()));
-            if let Some(backup) = backup {
-                output::status(format!("Previous state: {}", backup.display()));
-            }
-            crate::env_notice::verify_reminder();
-
-            Ok(())
+                source: serde_json::to_value(&manifest).with_context(Ctx::inspection_json())?,
+            }))
         }
         Err(e) => {
             output::error("\n✗ Attestation verification FAILED");
@@ -3335,6 +3477,7 @@ async fn download_and_extract_app_source(
     }
 
     let http = reqwest::Client::builder()
+        .redirect(enclave_builder::source_transport::redirect_policy())
         .connect_timeout(std::time::Duration::from_secs(30))
         .timeout(std::time::Duration::from_secs(300)) // 5 minutes for full download
         .build()
@@ -3602,12 +3745,10 @@ pub(crate) async fn preflight_archive_urls(
         "\nChecking {} is reachable on remote...",
         label.to_lowercase()
     ));
-    // Always follow redirects (reqwest's default policy, up to 10 hops). The
-    // URL comes from the user's own manifest, so there is no threat model where
-    // a redirect matters; forges legitimately redirect (GitHub → codeload,
-    // reverse-proxied Forgejo), and disabling redirects would misclassify those
-    // valid archives as unavailable.
+    // Forges may redirect to HTTPS mirrors/CDNs, but must never downgrade a
+    // reviewed HTTPS source to an unauthenticated HTTP transport.
     let http_client = reqwest::Client::builder()
+        .redirect(enclave_builder::source_transport::redirect_policy())
         .build()
         .with_context(Ctx::build_client())?;
     let attempts = ARCHIVE_PREFLIGHT_ATTEMPTS;

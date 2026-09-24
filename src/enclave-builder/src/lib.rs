@@ -80,6 +80,7 @@ fn classify_enclave_source(
 
 pub mod build;
 pub mod compile;
+pub mod source_transport;
 pub mod docker;
 pub mod extract;
 pub mod manifest;

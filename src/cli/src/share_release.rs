@@ -23,10 +23,10 @@ pub(crate) struct Options {
     /// Without this option, a unique private-keyring match or sole holder is selected.
     #[arg(long)]
     pub holder: Option<String>,
-    /// Key-service enclave HTTP endpoint; identity is checked against --recryptor-pcr-policy.
+    /// Key-service endpoint override; otherwise use saved Platform trust or discovery.
     #[arg(long)]
     pub recryptor_url: Option<String>,
-    /// Independently verified key-service enclave PCR0/1/2 JSON policy.
+    /// Verified key-service PCR0/1/2 policy; otherwise use the project policy or saved Platform trust.
     #[arg(long)]
     pub recryptor_pcr_policy: Option<PathBuf>,
 }
@@ -439,36 +439,9 @@ pub(crate) async fn recover(
     destination_policy: Measurements,
     generation_time: Option<std::time::SystemTime>,
 ) -> Result<SendSignedEncryptedShardResponse, InitError> {
-    RecoveryApproval::run(release::TTL, async |native| {
-        recover_inner(
-            client, options, bundle, holder, summary, destination_policy, generation_time, native,
-        )
-        .await
-    })
-    .await
-}
-async fn recover_inner(
-    client: &ApiClient,
-    options: &Options,
-    bundle: GenerateQuorumResponse,
-    holder: String,
-    summary: ReleaseSummary,
-    destination_policy: Measurements,
-    generation_time: Option<std::time::SystemTime>,
-    native: &mut RecoveryApproval,
-) -> Result<SendSignedEncryptedShardResponse, InitError> {
-    let address = summary.address;
-    let url = options
-        .recryptor_url
-        .clone()
-        .or_else(|| std::env::var("RECRYPTOR_URL").ok())
-        .ok_or_else(|| InitError::invalid("specify --recryptor-url or RECRYPTOR_URL"))?;
-    let policy_path = options
-        .recryptor_pcr_policy
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(".caution/recryptor-pcr-policy.json"));
-    let policy = crate::quorum_init::load_policy(&policy_path)?;
-    // Release uses one current live identity, not a generation-time historical policy.
+    // Source reproduction/approval must not consume the release session's lifetime.
+    let (url, policy) = crate::service_trust::release_config(client, options).await
+        .with_context(Ctx::new("resolve key-service trust; use caution verify --service key-service to update saved trust"))?;
     if policy.sets.len() != 1 || policy.sets[0].expires_at_unix_seconds.is_some() {
         return Err(InitError::invalid(
             "recryptor live policy requires one non-expiring PCR set",
@@ -480,6 +453,34 @@ async fn recover_inner(
         .map(|(&i, v)| (i, hex::encode(v)))
         .collect();
     release::pcrs(&trusted).with_context(Ctx::new("recryptor PCR policy"))?;
+    RecoveryApproval::run(release::TTL, async |native| {
+        recover_inner(
+            client,
+            &url,
+            trusted,
+            bundle,
+            holder,
+            summary,
+            destination_policy,
+            generation_time,
+            native,
+        )
+        .await
+    })
+    .await
+}
+async fn recover_inner(
+    client: &ApiClient,
+    url: &str,
+    trusted: Measurements,
+    bundle: GenerateQuorumResponse,
+    holder: String,
+    summary: ReleaseSummary,
+    destination_policy: Measurements,
+    generation_time: Option<std::time::SystemTime>,
+    native: &mut RecoveryApproval,
+) -> Result<SendSignedEncryptedShardResponse, InitError> {
+    let address = summary.address;
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::none())
@@ -499,7 +500,7 @@ async fn recover_inner(
     )
     .await?;
     release::verify_response(&begun, &trusted, &begin.client_nonce)
-        .with_context(Ctx::new("verify key-service enclave"))?;
+        .with_context(Ctx::new("verify key-service enclave; trust unchanged. Review an upgrade with caution verify --service key-service, or update the explicit policy"))?;
     if begun.data.request_hash != release::hash(&begin).with_context(Ctx::new("begin binding"))? {
         return Err(InitError::invalid("release begin request was substituted"));
     }
@@ -541,10 +542,44 @@ async fn recover_inner(
     let attested_prepared = prepared;
     let prepared = &attested_prepared.data;
     let context_hash = release::hash(&prepared).with_context(Ctx::new("approval hash"))?;
-    output::verbose(client.verbose, format!("Application ID: {}; holder certificate: {}; bundle ID: {}; bundle hash: {}", terminal_label(&summary.application_id), prepared.context.holder, hex::encode(prepared.context.bundle_id), prepared.context.bundle_hash));
-    output::verbose(client.verbose, format!("Destination session key: {}; attestation hash: {}; release context hash: {context_hash}", hex::encode(prepared.destination_key), prepared.destination_attestation_hash));
-    output::verbose(client.verbose, format!("Destination PCR policy: {:?}; key-service PCR policy: {:?}; key-service policy file: {}; key-service URL: {}", prepared.context.destination_policy, trusted, terminal_label(&policy_path.display().to_string()), terminal_label(&url)));
-    output::verbose(client.verbose, format!("Protocol: {:?}; organization ID: {}; holder position: {}; certificate index: {}; expiry: {}", prepared.context.version, hex::encode(prepared.context.organization_id), prepared.context.holder_position, prepared.context.certificate_index, prepared.context.expires_at_unix_seconds));
+    output::verbose(
+        client.verbose,
+        format!(
+            "Application ID: {}; holder certificate: {}; bundle ID: {}; bundle hash: {}",
+            terminal_label(&summary.application_id),
+            prepared.context.holder,
+            hex::encode(prepared.context.bundle_id),
+            prepared.context.bundle_hash
+        ),
+    );
+    output::verbose(
+        client.verbose,
+        format!(
+            "Destination session key: {}; attestation hash: {}; release context hash: {context_hash}",
+            hex::encode(prepared.destination_key),
+            prepared.destination_attestation_hash
+        ),
+    );
+    output::verbose(
+        client.verbose,
+        format!(
+            "Destination PCR policy: {:?}; key-service PCR policy: {:?}; key-service URL: {}",
+            prepared.context.destination_policy,
+            trusted,
+            terminal_label(url)
+        ),
+    );
+    output::verbose(
+        client.verbose,
+        format!(
+            "Protocol: {:?}; organization ID: {}; holder position: {}; certificate index: {}; expiry: {}",
+            prepared.context.version,
+            hex::encode(prepared.context.organization_id),
+            prepared.context.holder_position,
+            prepared.context.certificate_index,
+            prepared.context.expires_at_unix_seconds
+        ),
+    );
     let approval = async {
         if client.qr {
             browser_assertion(client, &attested_prepared, &prepare.client_nonce, &json!({

@@ -20,7 +20,7 @@ pub(crate) struct Options {
     /// Saved proofed V1 or imported legacy quorum bundle to inspect.
     #[arg(long, default_value = ".caution/quorum-bundle.json")]
     bundle: PathBuf,
-    /// Trusted Keymaker PCR policy (otherwise environment or .caution default).
+    /// Trusted Keymaker policy (otherwise environment, project policy, or saved Platform trust).
     #[arg(long, conflicts_with = "unverified")]
     keymaker_pcr_policy: Option<PathBuf>,
     /// Show unauthenticated contents without proof verification or Platform lookup.
@@ -31,15 +31,23 @@ pub(crate) struct Options {
 fn load(
     text: &str,
     options: &Options,
+    client: Option<&ApiClient>,
 ) -> Result<(GenerateQuorumBundle, Option<SystemTime>), InitError> {
     let response: GenerateQuorumResponse = serde_json::from_str(text)
         .with_context(Ctx::new("invalid proofed V1 quorum bundle JSON"))?;
     if options.unverified {
         return Ok((response.data, None));
     }
-    let policy = quorum_init::load_policy(&quorum_init::policy_path(
-        options.keymaker_pcr_policy.as_deref(),
-    ))?;
+    let policy = if let Some(client) = client {
+        let text =
+            crate::service_trust::keymaker_policy(client, options.keymaker_pcr_policy.as_deref())
+                .with_context(Ctx::new("resolve saved Keymaker trust"))?;
+        quorum_init::parse_policy(&text)?
+    } else {
+        quorum_init::load_policy(&quorum_init::policy_path(
+            options.keymaker_pcr_policy.as_deref(),
+        ))?
+    };
     locksmith::bundle::load_response_with_timestamp(response, &policy)
         .with_context(Ctx::new("unable to verify proofed V1 quorum bundle"))
 }
@@ -112,8 +120,22 @@ fn summary(
         lines.push(format!("Bundle ID: {id}"));
         lines.push(format!("Bundle hash: {}", hex::encode(deterministic_bundle_hash(bundle).with_context(Ctx::new("hash bundle"))?)));
         // Match Dashboard hashing of the exact UTF-8 public-key text.
-        lines.push(format!("Public key SHA-256: {}", hex::encode(Sha256::digest(data.public_key.as_bytes()))));
-        if !options.unverified { lines.push(format!("Verification policy: {}", terminal_label(&quorum_init::policy_path(options.keymaker_pcr_policy.as_deref()).display().to_string()))); }
+        lines.push(format!(
+            "Public key SHA-256: {}",
+            hex::encode(Sha256::digest(data.public_key.as_bytes()))
+        ));
+        if !options.unverified {
+            let path = quorum_init::policy_path(options.keymaker_pcr_policy.as_deref());
+            let origin = if options.keymaker_pcr_policy.is_some()
+                || std::env::var_os("KEYMAKER_PCR_POLICY_PATH").is_some()
+                || path.exists()
+            {
+                terminal_label(&path.display().to_string())
+            } else {
+                "saved Keymaker trust for the selected Platform".to_owned()
+            };
+            lines.push(format!("Verification policy: {origin}"));
+        }
     }
     Ok(lines.join("\n"))
 }
@@ -140,7 +162,7 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
         output::status(lines.join("\n"));
         return Ok(());
     }
-    let (bundle, at) = load(&text, &options)?;
+    let (bundle, at) = load(&text, &options, Some(client))?;
     let display = if options.unverified {
         share_release::BundleDisplay::default()
     } else {
@@ -294,11 +316,11 @@ mod tests {
     fn unverified_skips_policy_but_rejects_malformed_contents() {
         let bundle = fixture();
         assert_eq!(
-            load(&envelope(&bundle), &options()).unwrap(),
+            load(&envelope(&bundle), &options(), None).unwrap(),
             (bundle, None)
         );
-        assert!(load("{}", &options()).is_err());
-        assert!(load("not json", &options()).is_err());
+        assert!(load("{}", &options(), None).is_err());
+        assert!(load("not json", &options(), None).is_err());
         let mut bundle = fixture();
         let GenerateQuorumBundle::V1(data) = &mut bundle;
         data.threshold = 0;
@@ -315,11 +337,11 @@ mod tests {
             ..options()
         };
         let text = envelope(&fixture());
-        assert!(load(&text, &opts).is_err());
+        assert!(load(&text, &opts, None).is_err());
         std::fs::write(&path, "{}").unwrap();
-        assert!(load(&text, &opts).is_err());
+        assert!(load(&text, &opts, None).is_err());
         std::fs::write(&path, serde_json::json!({"sets":[{"pcrs":{"0":"11".repeat(48),"1":"11".repeat(48),"2":"11".repeat(48)}}]}).to_string()).unwrap();
-        assert!(load(&text, &opts).is_err());
+        assert!(load(&text, &opts, None).is_err());
     }
 
     #[test]

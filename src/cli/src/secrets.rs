@@ -114,13 +114,19 @@ pub enum ParseQuorumBundlePublicKeyError {
 fn parse_quorum_bundle_public_key(
     bundle_text: &str,
     allow_legacy: bool,
+    client: Option<&ApiClient>,
 ) -> Result<(String, bool), ParseQuorumBundlePublicKeyError> {
     use ParseQuorumBundlePublicKeyErrorCtx as Ctx;
 
-    let (bundle, _) = crate::quorum_legacy::load(bundle_text, allow_legacy, None)
+    let (bundle, _) = crate::quorum_legacy::load(bundle_text, allow_legacy, None, client)
         .with_context(Ctx::parse_json())?;
-    if bundle.recovery().legacy { output::status("Legacy V0 — no Keymaker generation proof (--allow-legacy accepted)"); }
-    Ok((bundle.recovery().public_key.to_owned(), bundle.recovery().legacy))
+    if bundle.recovery().legacy {
+        output::status("Legacy V0 — no Keymaker generation proof (--allow-legacy accepted)");
+    }
+    Ok((
+        bundle.recovery().public_key.to_owned(),
+        bundle.recovery().legacy,
+    ))
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
@@ -456,6 +462,7 @@ fn encrypt_env_file(
     secrets_dir: &Path,
     requested_keys: &[String],
     allow_legacy: bool,
+    client: Option<&ApiClient>,
 ) -> Result<usize, EncryptEnvFileError> {
     use EncryptEnvFileErrorCtx as Ctx;
 
@@ -508,7 +515,7 @@ fn encrypt_env_file(
 
     let bundle_text =
         fs::read_to_string(bundle_file).with_context(Ctx::read_bundle_file(bundle_file))?;
-    let (public_key, legacy) = parse_quorum_bundle_public_key(&bundle_text, allow_legacy)
+    let (public_key, legacy) = parse_quorum_bundle_public_key(&bundle_text, allow_legacy, client)
         .with_context(Ctx::parse_bundle(bundle_file))?;
     let recipient = load_recipient_cert(&public_key).with_context(Ctx::load_recipient())?;
 
@@ -1132,7 +1139,8 @@ pub enum EncryptError {
 }
 
 /// Encrypt env file values into `.caution/secrets/*.asc`.
-pub fn encrypt(
+pub(crate) fn encrypt(
+    client: &ApiClient,
     keys: Vec<String>,
     env_file: PathBuf,
     bundle: PathBuf,
@@ -1141,8 +1149,15 @@ pub fn encrypt(
 ) -> Result<(), EncryptError> {
     use EncryptErrorCtx as Ctx;
 
-    encrypt_env_file(&env_file, &bundle, &secrets_dir, &keys, allow_legacy)
-        .with_context(Ctx::encrypt_env_file())?;
+    encrypt_env_file(
+        &env_file,
+        &bundle,
+        &secrets_dir,
+        &keys,
+        allow_legacy,
+        Some(client),
+    )
+    .with_context(Ctx::encrypt_env_file())?;
 
     Ok(())
 }
@@ -1872,8 +1887,20 @@ pub async fn send_shard(
     // Parse the quorum bundle
     let bundle_text =
         fs::read_to_string(&bundle_file).with_context(Ctx::read_bundle_file(&bundle_file))?;
-    let (bundle, generation_time) = crate::quorum_legacy::load(&bundle_text, release_options.allow_legacy, None).with_context(Ctx::parse_bundle())?;
-    let proof: serde_json::Value = serde_json::from_str(&bundle_text).with_context(Ctx::parse_bundle())?;
+    if !locksmith::legacy::is_imported_json(&bundle_text).with_context(Ctx::parse_bundle())? {
+        crate::service_trust::ensure_keymaker(client, None)
+            .await
+            .with_context(Ctx::parse_bundle())?;
+    }
+    let (bundle, generation_time) = crate::quorum_legacy::load(
+        &bundle_text,
+        release_options.allow_legacy,
+        None,
+        Some(client),
+    )
+    .with_context(Ctx::parse_bundle())?;
+    let proof: serde_json::Value =
+        serde_json::from_str(&bundle_text).with_context(Ctx::parse_bundle())?;
     let names = crate::share_release::holder_names(client, &proof).await;
     let view = bundle.recovery();
     if view.legacy {
@@ -1965,8 +1992,11 @@ mod tests {
         let original = serde_json::to_vec(&imported).unwrap();
         std::fs::write(&bundle, &original).unwrap();
         std::fs::write(&env, "SECRET=legacy-expired-recipient\n").unwrap();
-        assert!(encrypt_env_file(&env, &bundle, &output, &[], false).is_err());
-        assert_eq!(encrypt_env_file(&env, &bundle, &output, &[], true).unwrap(), 1);
+        assert!(encrypt_env_file(&env, &bundle, &output, &[], false, None).is_err());
+        assert_eq!(
+            encrypt_env_file(&env, &bundle, &output, &[], true, None).unwrap(),
+            1
+        );
         assert_eq!(std::fs::read(bundle).unwrap(), original);
     }
 
@@ -1990,7 +2020,15 @@ mod tests {
         std::fs::write(&imported, include_str!("../../../tests/fixtures/imported-v0.json")).unwrap();
         let selected = super::local_quorum_bundle(work.path()).unwrap();
         assert_eq!(selected, imported);
-        assert!(crate::quorum_legacy::load(&std::fs::read_to_string(selected).unwrap(), true, None).is_ok());
+        assert!(
+            crate::quorum_legacy::load(
+                &std::fs::read_to_string(selected).unwrap(),
+                true,
+                None,
+                None
+            )
+            .is_ok()
+        );
         assert_eq!(std::fs::read_to_string(source).unwrap(), "raw V0");
     }
 
@@ -2003,11 +2041,19 @@ mod tests {
         let text = include_str!("../../../tests/fixtures/imported-v0.json");
         std::fs::write(&env, "SECRET=legacy-test\n").unwrap();
         std::fs::write(&bundle, text).unwrap();
-        assert!(encrypt_env_file(&env, &bundle, &output, &[], false).is_err());
+        assert!(encrypt_env_file(&env, &bundle, &output, &[], false, None).is_err());
         assert!(!output.exists());
-        assert_eq!(encrypt_env_file(&env, &bundle, &output, &[], true).unwrap(), 1);
+        assert_eq!(
+            encrypt_env_file(&env, &bundle, &output, &[], true, None).unwrap(),
+            1
+        );
         let legacy: serde_json::Value = serde_json::from_str(text).unwrap();
-        assert_eq!(super::parse_quorum_bundle_public_key(text, true).unwrap().0, legacy["original"]["public_key"].as_str().unwrap());
+        assert_eq!(
+            super::parse_quorum_bundle_public_key(text, true, None)
+                .unwrap()
+                .0,
+            legacy["original"]["public_key"].as_str().unwrap()
+        );
         assert!(output.join("SECRET.asc").exists());
     }
 
@@ -2181,6 +2227,7 @@ UNREQUESTED=nope\n",
                 &secrets_dir,
                 &["FOO".to_string(), "QUOTED".to_string()],
                 false,
+                None,
             )
             .is_err()
         );
