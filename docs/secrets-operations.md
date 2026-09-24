@@ -2,18 +2,14 @@
 
 For existing unversioned PGP bundles, follow [Legacy V0 import and recovery](legacy-v0.md).
 
-Source status, 22 September 2026: Platform `dd869d0a684e798be7ae3c21f19d187f81270513`
-selects Locksmith `d2876e971c15c89a5891ee455917e22bad607b30` for API/CLI dependencies,
-the mock helper and the default enclave runtime. The pins are aligned; this is
-source configuration, not a deployment record. Bootproof SDK consumers remain at
+Source status, 28 September 2026: Platform selects Locksmith
+`accc9d36c3c47fc1ea2802f46266f508a19f02d0` for API/CLI dependencies,
+the mock helper and the default enclave runtime. This revision adds a 60-second
+future-skew allowance for external-PGP share signatures and bounded rejection
+logging. The pins are aligned; this is source configuration, not a deployment
+record. Bootproof SDK consumers remain at
 `821b5c63e80f082f6d67ba3695c11416933489ec`; the builder's default Bootproof daemon
 is `b03721957e3850931f5b53627e7c3d1c302a06fe`.
-
-The latest published Locksmith feature revision is
-`8dcd4f1e37599fb2c805545c2115de5dd8c927bc`. Its changes since `d2876e9` fix only
-the Keymaker client example's certificate parsing, with tests and documentation;
-service/runtime and shared model code are unchanged. Platform retains the aligned
-`d2876e9` pins; the example fix does not require a runtime or dependency update.
 
 Current V1 creation, proof verification, PGP/passkey/mixed recovery, native and
 browser approval, issuance bearer authentication and certified holder-index
@@ -57,6 +53,16 @@ caution secret init root-holders.asc --threshold 2 \
   --keymaker-pcr-policy /path/to/verified-keymaker-policy.json --no-upload
 jq -r '.data.public_key' .caution/quorum-bundle.json > .caution/caution-ca.asc
 ```
+
+After successful `caution verify` in the Keymaker checkout, its
+`.caution/trusted_hashes.json` can be passed directly as `--keymaker-pcr-policy`.
+`secret init` validates the flat PCR0/1/2 input and saves a single non-expiring
+`sets` policy in `.caution/keymaker-pcr-policy.json`; package that saved file.
+The CLI ignores verification-time/TLS metadata for policy purposes and rejects
+mixed formats, unknown fields, incomplete PCRs and debug measurements. Existing
+`sets` input retains all approved measurement sets and per-set cutoffs unchanged.
+This needs an updated CLI, not a Locksmith runtime upgrade. A file's format does
+not establish trust: use only the intended Keymaker's successfully verified output.
 
 Keep private keys with their holders. Preserve the public/proofed bundle and its
 policy for every restart. The root must be recoverable without the key
@@ -108,7 +114,7 @@ token and is part of that trust boundary.
 Rebuild/redeploy API, gateway, CLI and application images at the aligned revisions;
 review any `LOCKSMITH_COMMIT` override. Existing environment files take precedence
 over the builder default and are not updated when `env.example` changes. Update
-the override to `d2876e971c15c89a5891ee455917e22bad607b30`, or remove it to use the
+the override to `accc9d36c3c47fc1ea2802f46266f508a19f02d0`, or remove it to use the
 default, before rebuilding. The old `2db332a` daemon only loads raw V0 bundles and
 cannot load current V1 or ImportedV0 artifacts. Configure:
 

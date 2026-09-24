@@ -36,9 +36,11 @@ file SHA-256 is `82e74d053976b47edba6e4f11b143c3184bc422c67b3a16c3599bee924e0403
 This is not fresh real-Nitro, physical-device or deployment evidence.
 
 Shared Rust dependencies and the default enclave runtime select Locksmith
-`d2876e971c15c89a5891ee455917e22bad607b30`, including explicit ImportedV0 recovery,
+`accc9d36c3c47fc1ea2802f46266f508a19f02d0`, including explicit ImportedV0 recovery,
 expired nonparticipant handling, durable legacy fixtures, the V1 key-service
 profile, certified release indices, ECDH identity checks and smartcard PIN fixes.
+It also allows up to 60 seconds of future skew for external-PGP share signatures
+and logs bounded rejection categories without raw parser input.
 Rebuild/install the CLI to use its fixes with existing bundles. Rebuild/redeploy
 enclave images to update their daemon; `LOCKSMITH_COMMIT` overrides that default
 and must be reviewed when upgrading. Service deployment and trusted PCR-policy
@@ -48,8 +50,13 @@ Create with explicit per-holder approval methods:
 
 ```sh
 caution secret init --holder alice=external-pgp --holder bob=webauthn \
-  --threshold 2 --keymaker-pcr-policy keymaker-pcr-policy.json
+  --threshold 2
 ```
+
+Hosted creation discovers Keymaker and offers independent verification if no trusted
+policy exists. For explicit/self-hosted configuration, retain
+`--keymaker-pcr-policy keymaker-pcr-policy.json`. Discovery does not enable direct
+`--keymaker-url` mode.
 
 `--pgp-key USER=KEY` selects one active registered external key by registration
 UUID or full fingerprint (40 or 64 hexadecimal characters, case/whitespace
@@ -62,17 +69,55 @@ Caution’s enclave holds the PGP private key. Your registered passkey authorize
 re-encryption of your share to the verified application enclave. The private key
 is never released. Multiple registered credentials on a holder remain one share.
 
-After independently verifying the application and key service measurements:
+Verify the application with `caution verify`. Establish shared hosted-service trust
+in advance, or follow the first-use prompts:
+
+```sh
+export CAUTION_BACKEND_URL=https://platform.example.com
+caution verify --service keymaker
+caution verify --service key-service
+caution secret inspect
+caution secret send-shard --holder CERTIFICATE_FINGERPRINT
+# Add the global --qr option for phone/local-browser approval:
+caution --qr secret send-shard --holder CERTIFICATE_FINGERPRINT
+```
+
+With `CAUTION_BACKEND_URL` exported, `--url` is optional. An explicit `--url`
+overrides the environment variable for that command. Replace the placeholder URL
+with your Platform endpoint.
+
+Use the same selected Platform for setup and release. Verification reviews source
+and build inputs, reproduces measurements, checks fresh attestation and asks before
+saving trust. It never replaces the app's `.caution/trusted_hashes.json`.
+
+Keymaker policy precedence is `--keymaker-pcr-policy` where supported, then
+`KEYMAKER_PCR_POLICY_PATH`, `.caution/keymaker-pcr-policy.json`, then saved trust for
+the selected Platform. `secret init` still saves the accepted policy beside its
+bundle for packaging. `secret inspect` and encryption may read existing saved
+trust but do not initiate discovery or write project policy files. For a dashboard
+bundle, package its matching independently verified policy separately; the `policy`
+field in the saved Keymaker trust record contains the public `sets` document. Keep historical bundle policies when updating
+hosted Keymaker trust; do not replace them with the current image's measurements.
+
+For release, `--recryptor-url`/`RECRYPTOR_URL` and
+`--recryptor-pcr-policy`/`.caution/recryptor-pcr-policy.json` override saved settings.
+An explicit endpoint may reuse saved trust only when its URL matches the saved
+endpoint; otherwise supply its verified policy. A local policy without an endpoint
+uses the saved endpoint or discovery, with that local policy enforcing attestation.
+Fully explicit settings remain available:
 
 ```sh
 caution secret send-shard --holder CERTIFICATE_FINGERPRINT \
   --recryptor-url https://key-service.example.com \
   --recryptor-pcr-policy recryptor-pcr-policy.json
-# Add the global --qr option for phone/local-browser approval:
-caution --qr secret send-shard --holder CERTIFICATE_FINGERPRINT \
-  --recryptor-url https://key-service.example.com \
-  --recryptor-pcr-policy recryptor-pcr-policy.json
 ```
+
+Setup completes before the recovery deadline starts. PGP release does not require
+key-service. Later operations reuse saved trust; a mismatch fails and requires
+explicit re-verification with `caution verify --service key-service` (or an update
+to the explicit policy). Scripts require pre-established trust or explicit settings.
+Neither setup command changes operator policies or the CA on Platform. See
+[discovery and client trust](public-components.md#cli-discovery-and-client-trust).
 
 The live key-service policy has one non-expiring PCR0/1/2 set, in the same JSON shape
 as Keymaker policies. Do not obtain trusted PCRs from the endpoint being verified.

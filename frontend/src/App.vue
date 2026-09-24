@@ -32,6 +32,7 @@ import QrLogin from './views/QrLogin.vue'
 import QrRelease from './views/QrRelease.vue'
 import InviteAccept from './views/InviteAccept.vue'
 import ResetAccept from './views/ResetAccept.vue'
+import Components from './views/Components.vue'
 import PublicAttestation from './views/PublicAttestation.vue'
 import PublicE2ee from './views/PublicE2ee.vue'
 import LegalAcceptanceModal from './components/LegalAcceptanceModal.vue'
@@ -52,6 +53,7 @@ export default {
     InviteAccept,
     ResetAccept,
     PublicAttestation,
+    Components,
     PublicE2ee,
     LegalAcceptanceModal
   },
@@ -133,6 +135,11 @@ export default {
         title: 'CLI signing • Caution',
         description: 'Approve a Caution CLI signing request.',
         path: '/qr-sign'
+      },
+      '/components': {
+        title: 'Components • Caution',
+        description: 'Hosted services and framework build inputs.',
+        path: '/components'
       },
       '/verify': {
         title: 'Verify an application • Caution',
@@ -407,6 +414,8 @@ export default {
         // Public route - QR code CLI signing (no auth required)
         // Same component as QrLogin — it detects sign vs login from the path
         return 'QrLogin'
+      } else if (path === '/components') {
+        return 'Components'
       } else if (path === '/verify') {
         // Public route - client-side enclave attestation verification
         return 'PublicAttestation'
@@ -427,7 +436,7 @@ export default {
 
     onMounted(() => {
       // Public verification must not be gated by account or legal status.
-      if (window.location.pathname === '/verify' || isPublicE2eeLocation(window.location.pathname)) {
+      if (window.location.pathname === '/components' || window.location.pathname === '/verify' || isPublicE2eeLocation(window.location.pathname)) {
         authChecked.value = true
       } else {
         checkAuth()

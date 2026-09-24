@@ -39,6 +39,7 @@ pub(crate) fn load(
     text: &str,
     allow_legacy: bool,
     policy_path: Option<&Path>,
+    client: Option<&ApiClient>,
 ) -> Result<(LoadedBundle, Option<SystemTime>), InitError> {
     let legacy = legacy::is_imported_json(text).with_context(Ctx::new("invalid bundle format"))?;
     let policy = if legacy {
@@ -48,9 +49,13 @@ pub(crate) fn load(
             .with_context(Ctx::new(
                 "expected proofed V1 or ImportedV0; raw V0 requires secret import-legacy",
             ))?;
-        Some(quorum_init::load_policy(&quorum_init::policy_path(
-            policy_path,
-        ))?)
+        Some(if let Some(client) = client {
+            let text = crate::service_trust::keymaker_policy(client, policy_path)
+                .with_context(Ctx::new("resolve saved Keymaker trust"))?;
+            quorum_init::parse_policy(&text)?
+        } else {
+            quorum_init::load_policy(&quorum_init::policy_path(policy_path))?
+        })
     };
     locksmith::bundle::load_recovery_json(text, policy.as_ref(), allow_legacy)
         .with_context(Ctx::new("unable to load quorum bundle"))
@@ -139,12 +144,20 @@ mod tests {
     #[test]
     fn legacy_use_is_explicit_without_a_keymaker_policy() {
         let text = include_str!("../../../tests/fixtures/imported-v0.json");
-        assert!(load(text, false, None).is_err());
-        let (bundle, at) = load(text, true, None).unwrap();
+        assert!(load(text, false, None, None).is_err());
+        let (bundle, at) = load(text, true, None, None).unwrap();
         assert!(bundle.recovery().legacy);
         assert!(bundle.bundle_id().is_none());
         assert!(at.is_none());
-        assert!(load(r#"{"data":{"version":"V1"},"necroproof":[]}"#, true, None).is_err());
+        assert!(
+            load(
+                r#"{"data":{"version":"V1"},"necroproof":[]}"#,
+                true,
+                None,
+                None
+            )
+            .is_err()
+        );
     }
     #[test]
     fn output_is_not_overwritten() {

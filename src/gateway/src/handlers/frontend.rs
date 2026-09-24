@@ -56,6 +56,7 @@ pub(crate) fn build_frontend_routes(frontend_dir: &Path) -> Router {
         .route_service("/qr-login", ServeFile::new(frontend_index.clone()))
         .route_service("/qr-release", ServeFile::new(frontend_index.clone()))
         .route_service("/qr-sign", ServeFile::new(frontend_index.clone()))
+        .route_service("/components", ServeFile::new(frontend_index.clone()))
         .route_service("/verify", ServeFile::new(frontend_index.clone()))
         .route("/verify-e2ee", get(redirect_verify_e2ee))
         .route_service("/verify-e2ee/", ServeFile::new(frontend_index.clone()))
@@ -78,6 +79,19 @@ mod tests {
         app.call(Request::builder().uri(path).body(Body::empty()).unwrap())
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn components_is_public_html() {
+        let (_dir, mut app) = test_frontend();
+        let response = get(&mut app, "/components").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .contains("text/html")
+        );
     }
 
     fn test_frontend() -> (tempfile::TempDir, axum::Router) {
