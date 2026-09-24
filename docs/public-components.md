@@ -14,7 +14,9 @@ No new configuration is required:
 
 URLs must be HTTPS without credentials, queries or fragments. Policy files are
 reread during each refresh. Share release retains its requirement for exactly
-one non-expiring PCR set. Expired sets are displayed but cannot match live quotes.
+one non-expiring set containing exactly PCR0/1/2. Keymaker and certificate-issuance
+policies may pin additional authenticated PCRs (for example PCR3, PCR4 or PCR8).
+Expired sets are displayed but cannot match live quotes.
 
 One process-local snapshot covers both services. A request starts a refresh if
 the previous refresh started at least 60 seconds ago; concurrent requests share
@@ -26,8 +28,9 @@ Checks send a fresh nonce to `/attestation` and separately GET `/health`.
 Requests have five-second deadlines, reject redirects and limit JSON responses
 to 1 MiB for attestation and 16 KiB for health. No issuance token or incoming
 credentials are forwarded. Signatures, certificate chains and nonce are checked
-before comparing authenticated PCRs against configured policies. Zero/debug PCRs
-are rejected. Observed measurements never become trusted policy entries.
+before comparing authenticated PCRs against configured policies. Zero/debug
+PCR0/1/2 values are rejected; unused additional PCRs may legitimately be zero.
+Observed measurements never become trusted policy entries.
 
 Only service URLs, checks, PCRs/policy cutoffs, checked time and selected source
 fields are public. Configuration paths, tokens and arbitrary manifest fields are

@@ -21,7 +21,7 @@ fn policy_json(pcrs: &HashMap<u8, Vec<u8>>, expiry: Option<u64>) -> String {
 
 #[test]
 fn authentic_evidence_wrong_nonce_signature_and_expired_chain() {
-    assert_eq!(measured().len(), 3);
+    assert!(measured().contains_key(&3));
     assert!(authenticate(&fixture(), &[5; 32], Duration::from_secs(1766510416)).is_err());
     let mut bytes = QUOTE.to_vec();
     let last = bytes.len() - 1;
@@ -88,6 +88,61 @@ fn policy_matching_expiry_debug_and_distinct_release_constraints() {
             .status,
         "failed"
     );
+}
+
+#[test]
+fn additional_authenticated_pcrs_match_without_widening_share_release() {
+    let pcrs = measured();
+    let mut pinned: HashMap<_, _> = pcrs
+        .iter()
+        .filter(|(index, _)| **index <= 2)
+        .map(|(index, value)| (*index, value.clone()))
+        .collect();
+    let base_policy = KeymakerPcrPolicy::from_json(&policy_json(&pinned, None)).unwrap();
+    assert_eq!(
+        evaluate_policy("release", Some(&base_policy), true, Some(&pcrs), 100)
+            .result
+            .status,
+        "passed"
+    );
+    // PCR3 is supplied by the real signed fixture, not synthetic attestation.
+    pinned.insert(3, pcrs[&3].clone());
+    let extended = KeymakerPcrPolicy::from_json(&policy_json(&pinned, None)).unwrap();
+    for purpose in ["Bundle generation", "Certificate issuance"] {
+        assert_eq!(
+            evaluate_policy(purpose, Some(&extended), false, Some(&pcrs), 100)
+                .result
+                .status,
+            "passed"
+        );
+    }
+    assert_eq!(
+        evaluate_policy("release", Some(&extended), true, Some(&pcrs), 100)
+            .result
+            .status,
+        "failed"
+    );
+    pinned.get_mut(&3).unwrap()[0] ^= 1;
+    let mismatched = KeymakerPcrPolicy::from_json(&policy_json(&pinned, None)).unwrap();
+    assert_eq!(
+        evaluate_policy("issuance", Some(&mismatched), false, Some(&pcrs), 100)
+            .result
+            .status,
+        "failed"
+    );
+    let mut missing = pcrs.clone();
+    missing.remove(&3);
+    assert_eq!(
+        evaluate_policy("issuance", Some(&extended), false, Some(&missing), 100)
+            .result
+            .status,
+        "failed"
+    );
+    let mut unused = pcrs.clone();
+    unused.insert(8, vec![0; 48]);
+    assert!(reject_debug(&unused).is_ok());
+    unused.insert(0, vec![0; 48]);
+    assert!(reject_debug(&unused).is_err());
 }
 
 #[test]

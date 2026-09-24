@@ -318,12 +318,18 @@ fn extract_pcrs(payload: &Cbor) -> Option<HashMap<u8, Vec<u8>>> {
     let Cbor::Map(pcrs) = map.get(&Cbor::Text("pcrs".into()))? else {
         return None;
     };
-    (0..=2)
-        .map(|i| match pcrs.get(&Cbor::Integer(i as i128))? {
-            Cbor::Bytes(bytes) if bytes.len() == 48 => Some((i, bytes.clone())),
+    let measurements: HashMap<u8, Vec<u8>> = pcrs
+        .iter()
+        .map(|(index, value)| match (index, value) {
+            (Cbor::Integer(index), Cbor::Bytes(bytes)) if bytes.len() == 48 => {
+                Some((u8::try_from(*index).ok()?, bytes.clone()))
+            }
             _ => None,
         })
-        .collect()
+        .collect::<Option<_>>()?;
+    (0..=2)
+        .all(|i| measurements.contains_key(&i))
+        .then_some(measurements)
 }
 
 fn authenticate(
@@ -363,7 +369,8 @@ fn authenticate(
 }
 
 fn reject_debug(pcrs: &HashMap<u8, Vec<u8>>) -> Result<(), ProbeError> {
-    if pcrs.values().any(|v| v.iter().all(|b| *b == 0)) {
+    // Unused additional PCRs can be zero in a non-debug enclave.
+    if (0..=2).any(|i| !pcrs.get(&i).is_some_and(|v| v.iter().any(|b| *b != 0))) {
         return Err(failure("Debug measurements are not accepted"));
     }
     Ok(())
@@ -403,8 +410,13 @@ fn evaluate_policy(
     {
         return result;
     }
-    if live && (policy.sets.len() != 1 || policy.sets[0].expires_at_unix_seconds.is_some()) {
-        result.result = Check::failure("Share release requires one non-expiring PCR set");
+    if live
+        && (policy.sets.len() != 1
+            || policy.sets[0].expires_at_unix_seconds.is_some()
+            || policy.sets[0].pcrs.len() != 3)
+    {
+        result.result =
+            Check::failure("Share release requires one non-expiring exact PCR0/1/2 set");
         return result;
     }
     result.result = match measured {
