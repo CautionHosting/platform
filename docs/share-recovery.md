@@ -2,7 +2,7 @@
 
 For existing unversioned PGP bundles, follow [Legacy V0 import and recovery](legacy-v0.md).
 
-For deployment order, Caution custody responsibilities and application setup, see
+For deployment order, Caution key-service responsibilities and application setup, see
 the [secrets operator runbook](secrets-operations.md).
 
 The selected Locksmith revision's V1 contract requires exactly one critical, hashed organization
@@ -30,21 +30,21 @@ are unchanged by this test-clock fix.
 Local validation on 21 September: seven API certificate tests passed with the local
 Locksmith patch in a temporary workspace; that validation left the source
 checkout's pins and lockfile unchanged. Locksmith models (6), library (40, one PTY-driver test ignored) and
-service (19) tests passed. Synthetic release tests (12) and the actual custody
+service (19) tests passed. Synthetic release tests (12) and the actual key-service
 HTTP/destination test passed, including mixed/WebAuthn-only recovery. The fixture
 file SHA-256 is `82e74d053976b47edba6e4f11b143c3184bc422c67b3a16c3599bee924e0403a`.
 This is not fresh real-Nitro, physical-device or deployment evidence.
 
 Shared Rust dependencies and the default enclave runtime select Locksmith
 `d2876e971c15c89a5891ee455917e22bad607b30`, including explicit ImportedV0 recovery,
-expired nonparticipant handling, durable legacy fixtures, the V1 custody
+expired nonparticipant handling, durable legacy fixtures, the V1 key-service
 profile, certified release indices, ECDH identity checks and smartcard PIN fixes.
 Rebuild/install the CLI to use its fixes with existing bundles. Rebuild/redeploy
 enclave images to update their daemon; `LOCKSMITH_COMMIT` overrides that default
 and must be reviewed when upgrading. Service deployment and trusted PCR-policy
 updates remain separate, as described below.
 
-Create with explicit per-holder custody:
+Create with explicit per-holder approval methods:
 
 ```sh
 caution secret init --holder alice=external-pgp --holder bob=webauthn \
@@ -62,19 +62,19 @@ Caution’s enclave holds the PGP private key. Your registered passkey authorize
 re-encryption of your share to the verified application enclave. The private key
 is never released. Multiple registered credentials on a holder remain one share.
 
-After independently verifying the application and custody service measurements:
+After independently verifying the application and key service measurements:
 
 ```sh
 caution secret send-shard --holder CERTIFICATE_FINGERPRINT \
-  --recryptor-url http://CUSTODY_SERVICE:8080 \
+  --recryptor-url https://key-service.example.com \
   --recryptor-pcr-policy recryptor-pcr-policy.json
 # Add the global --qr option for phone/local-browser approval:
 caution --qr secret send-shard --holder CERTIFICATE_FINGERPRINT \
-  --recryptor-url http://CUSTODY_SERVICE:8080 \
+  --recryptor-url https://key-service.example.com \
   --recryptor-pcr-policy recryptor-pcr-policy.json
 ```
 
-The live custody policy has one non-expiring PCR0/1/2 set, in the same JSON shape
+The live key-service policy has one non-expiring PCR0/1/2 set, in the same JSON shape
 as Keymaker policies. Do not obtain trusted PCRs from the endpoint being verified.
 The CLI displays the bundle, selected certificate, destination key and release
 context hash. Compare browser details with the CLI. Browser approval runs on the
@@ -113,7 +113,7 @@ sends no share. The actual release still verifies a fresh, nonce-bound attestati
 on its own submission connection. Noninteractive invocations validate holder
 selection first so missing or invalid `--holder` arguments remain actionable.
 
-A **destination PCR mismatch** concerns the application, not the custody service's
+A **destination PCR mismatch** concerns the application, not the key service's
 `--recryptor-pcr-policy`. No share is sent. If the deployment changed intentionally,
 complete `caution verify` from the intended application checkout, then retry;
 do not copy measurements from the failing endpoint into the trusted policy.
@@ -121,7 +121,7 @@ Connection and invalid-attestation failures are reported separately. Rebuild/ins
 the CLI for this preflight; no service redeployment or bundle change is needed.
 
 The distinct browser relay transports a raw assertion. Gateway login is not
-permission to release. The custody enclave verifies the assertion, consumes its
+permission to release. The key-service enclave verifies the assertion, consumes its
 three-minute authorization state, and derives/decrypts/re-encrypts one share.
 Cancelling, expiry, replay or losing the destination connection requires a fresh
 attempt. These operations never consume Keymaker.
@@ -140,18 +140,18 @@ for this packaging change; see [legacy recovery](legacy-v0.md).
 Run affected Rust and frontend tests, `make test-quorum-db`, and
 `make test-quorum-mock`, and `make test-share-release-browser` (install the browser
 harness dependencies/Chromium first, or set `PUPPETEER_EXECUTABLE_PATH`). The mock
-suite includes actual custody HTTP handlers, software-passkey authorization,
+suite includes actual key-service HTTP handlers, software-passkey authorization,
 synthetic evidence, WebAuthn-only/mixed threshold recovery, and duplicate-holder
 rejection. The browser test uses the actual Vue page and a Chromium virtual
 platform authenticator, verifies its signature/UV, and exercises cancellation. USB devices, Touch ID and
 cross-device browser behavior still require manual acceptance. StageX API,
-custody-service and Locksmith runtime builds must pass before deployment.
+key-service and Locksmith runtime builds must pass before deployment.
 
 Dependency publication requires separate authorization. Local test overrides
 must never enter committed dependency manifests or lockfiles. The pinned Locksmith commit must be published before other machines can build
 this Platform revision. No local-path dependency is committed.
 
-Then reuse the same external-PGP-bootstrapped custody root and existing WebAuthn
+Then reuse the same external-PGP-bootstrapped key service root key and existing WebAuthn
 bundle for the consolidated Nitro test. Verify locked-below-threshold and expected
 plaintext-at-threshold behavior, native/browser approval, replay rejection, one
 share per holder and restart recovery. Generate one mixed bundle with a **fresh
@@ -165,7 +165,7 @@ production root management remain separate. This does not close #7/#10/#11/#12.
 
 ## Snapshot lifetimes
 
-WebAuthn custody keys remain authorized by their unchanged proof-bound bundle.
+WebAuthn-authorized keys remain authorized by their unchanged proof-bound bundle.
 The CLI passes the authenticated generation timestamp to the shared Locksmith
 verifier: certificate/subkey eligibility is checked at generation, while the
 current transport signature is checked without backdating. External-PGP behavior
@@ -176,7 +176,7 @@ discovery and credential/root rotation remain separate work.
 
 ## Authenticated browser approval
 
-Before enabling `--qr`, place the independently verified custody-service policy at
+Before enabling `--qr`, place the independently verified key-service policy at
 `~/.config/caution/policies/recryptor-pcr-policy.json` on the Platform host and set
 `RECRYPTOR_PCR_POLICY_PATH=/run/config/recryptor-pcr-policy.json` for the gateway.
 The Makefile and systemd gateway launchers mount this directory read-only. Use the
@@ -185,12 +185,12 @@ format as the CLI: exactly one non-expiring set of non-debug PCR0/1/2 values.
 Missing or invalid configuration disables browser release approval, not login.
 Upgrade CLI and gateway together; the old unattested relay request is rejected.
 
-The CLI forwards the complete custody-attested Prepare response and its nonce.
+The CLI forwards the complete key-service-attested Prepare response and its nonce.
 The gateway verifies the live Nitro proof, PCRs, response hash, expiry, RP ID and
 required user verification before publishing any approval. Displayed bundle,
 holder, destination and context hash are derived only from that verified response.
 Requester-provided login challenges and invented display context are rejected.
-The gateway relays the resulting assertion; the custody enclave still verifies it
+The gateway relays the resulting assertion; the key-service enclave still verifies it
 and atomically authorizes the share release.
 
 Native approval serializes client data once, using the frontend origin, and returns
@@ -228,7 +228,7 @@ bundle-bound credentials and certificates used to authorize release.
 The browser groups the destination and your contribution in one approval card,
 with a prominent four-group comparison code and approval controls.
 **Verification & technical details** opens a drawer, closed by default, with
-Destination, Custody and Bundle tabs. Each tab explains the checks and groups its
+Destination, Key service and Bundle tabs. Each tab explains the checks and groups its
 related values. The drawer fills the screen on phones; Escape or Close returns
 to approval without cancelling it.
 The CLI and browser display the same grouped 16-hex-character prefix of the full
@@ -239,14 +239,14 @@ not authenticate descriptive app labels or CLI-reported addresses.
 - **Authenticated release context:** organization/bundle IDs, holder fingerprint
   and position, certificate index, bundle hash, destination session key,
   attestation hash, approved destination PCRs, protocol and expiry. The gateway
-  verifies custody evidence before publishing the approval screen. Its accepted
-  custody PCR policy is displayed separately.
+  verifies key-service evidence before publishing the approval screen. Its accepted
+  key-service PCR policy is displayed separately.
 - **Platform metadata:** accessible organization/app names, app ID/domain/recorded
   IP/state, and current holder username. Bundle threshold, holder count and eligible
   passkey count are displayed only after matching the stored bundle's deterministic
   hash and selected certificate/position to the authenticated context. Multiple
   passkeys still represent one share. Labels are not attested app identities.
-- **CLI-reported context:** actual destination socket address and custody URL.
+- **CLI-reported context:** actual destination socket address and key-service URL.
   These describe the connection attempt; the enclave evidence does not establish
   the hostname or a unique Platform app identity. Recorded IP and reported socket
   are displayed separately, including when they differ.
@@ -301,7 +301,7 @@ for QR approval, after the QR/link so the code remains visible while waiting.
 
 `--holder USERNAME_OR_FINGERPRINT` skips the chooser. A private-keyring file with
 one matching external-PGP holder is inferred; an OpenPGP smartcard still uses the
-selected holder. No custody choice or cryptographic checks are changed.
+selected holder. No approval method choice or cryptographic checks are changed.
 
 The destination policy is loaded from `.caution/trusted_hashes.json`; its recorded
 verification timestamp is metadata, not proof that the file was never edited.
@@ -332,7 +332,7 @@ Missing policies and invalid proofs fail; there is no automatic unverified fallb
 `--unverified` cannot be combined with an explicit policy flag.
 
 The compact summary shows the embedded bundle ID prefix, saved name/labels,
-threshold, custody and a holder table with shortened certificate fingerprints
+threshold, approval methods and a holder table with shortened certificate fingerprints
 and included passkey counts. Multiple passkeys represent one share.
 Verified output includes the authenticated generation time: this proves historical
 provenance, not live authorization or current application state. Synthetic test
@@ -383,14 +383,14 @@ USB/FIDO2 dependency diagnostics; existing environment warnings remain unchanged
 ## Public-service hardening
 
 Certificate issuance now requires backend-only `PUBLIC_CERTIFICATE_SERVICE_TOKEN`,
-shared with the custody enclave through `env::vault`. The encrypted token replaces
+shared with the key-service enclave through `env::vault`. The encrypted token replaces
 the dummy `CERTIFICATE_BOOTSTRAP` marker in the deployment example. Keep the same
 root quorum and CA; update packaging/startup/preflight together before deployment.
 Platform sends the token only to the HTTPS certificate endpoint, without redirects.
 The TLS terminator is trusted with that credential; attestation response verification
 does not hide the token from it. PGP-only creation does not require the token.
 
-The custody service caches readiness for two seconds, coalesces health refreshes,
+The key service caches readiness for two seconds, coalesces health refreshes,
 and admits four blocking release workers with a 60-second request budget. Workers
 retain permits through actual completion, including after timeout or disconnect.
 Sessions retain their three-minute expiry and global 64 limit, plus eight per

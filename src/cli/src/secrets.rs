@@ -1620,7 +1620,7 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Destination PCR mismatch ({pcr}) at {address}: the app does not match .caution/trusted_hashes.json. No share was sent. If you intended to change the deployment, complete `caution verify` from the intended app checkout before retrying. --recryptor-pcr-policy verifies the custody service, not this app [{location:?}]")]
+    #[error("Destination PCR mismatch ({pcr}) at {address}: the app does not match .caution/trusted_hashes.json. No share was sent. If you intended to change the deployment, complete `caution verify` from the intended app checkout before retrying. --recryptor-pcr-policy verifies the key service, not this app [{location:?}]")]
     DestinationPcrMismatch {
         address: std::net::SocketAddr,
         pcr: String,

@@ -3,7 +3,7 @@
 `caution secret init` (`new` is a visible alias) creates proofed V1 bundles.
 Hosted creation supports PGP, WebAuthn and mixed holders when the corresponding
 services and independent trust files are configured. WebAuthn/mixed recovery now
-uses the custody enclave with native or browser passkey approval; see
+uses the key-service enclave with native or browser passkey approval; see
 [share recovery](share-recovery.md) for configuration and the pending Nitro gate.
 Existing unversioned PGP bundles have a separate
 [holder-assisted V0 import path](legacy-v0.md); no new quorum is generated.
@@ -46,20 +46,20 @@ to the API, preserving selection order. Each key selector must match exactly one
 active registration belonging to its selected user; missing, removed, wrong-user
 and ambiguous keys fail before generation. A registration UUID can disambiguate
 multiple registrations of the same fingerprint. Confirmation shows username,
-**External PGP** and fingerprint, or username and **Passkey**. Internal UUIDs and
-wire custody names remain in the exact signed request, not this summary.
-Username/UUID resolution precedes custody prompts and generation; direct-mode
+**External PGP** and fingerprint, or username and **Passkey · Caution Enclave-held key**. Internal UUIDs and
+wire field names remain in the exact signed request, not this summary.
+Username/UUID resolution precedes approval method prompts and generation; direct-mode
 organization selections require authenticated participant discovery too.
 
 Repeated `--pgp-key` selects registered
-PGP certificates, one per selected user. Explicit external-PGP custody prompts
-“Select PGP key” when multiple keys exist; legacy custody selection retains
-“Select custody.” Without an override, a sole registered PGP certificate is selected;
-other cases require an interactive custody choice or explicit noninteractive
+PGP certificates, one per selected user. Explicit external-PGP approval method prompts
+“Select PGP key” when multiple keys exist; legacy approval method selection retains
+“Select approval method.” Without an override, a sole registered PGP certificate is selected;
+other cases require an interactive approval method choice or explicit noninteractive
 selection. `--caution-backed` explicitly selects WebAuthn for users without PGP
-overrides. The CLI presents custody and threshold for confirmation when interactive.
-Automatic custody selection rejects members with neither registered PGP keys nor
-passkeys with a "no usable custody" error before prompting. Register a PGP key
+overrides. The CLI presents approval methods and threshold for confirmation when interactive.
+Automatic approval method selection rejects members with neither registered PGP keys nor
+passkeys with a "no usable approval method" error before prompting. Register a PGP key
 before selecting such a member.
 The threshold defaults to one; `--max`, if supplied, must equal the holder count.
 API and CLI creation support 1–254 holders in total, including local certificates
@@ -109,7 +109,7 @@ does not require certificate-service configuration.
 Store `certificate-pcr-policy.json` and the public `caution-ca.asc` alongside the
 Keymaker policy in `~/.config/caution/policies/`; the existing `/run/config`
 read-only mount exposes them to the API. Set the certificate-service variables in `env.example`. The token must match the
-custody service vault secret. It is sent only to `/v1/public-certificates`, over
+key service vault secret. It is sent only to `/v1/public-certificates`, over
 HTTPS, without redirects; do not expose it in frontend configuration or logs.
 Loopback HTTP requires the explicit unsafe E2E build and runtime flag. Obtain both the service PCRs and Caution CA independently;
 neither is learned from a service response. Missing configuration only fails
@@ -176,10 +176,10 @@ later; labels remain in the existing bundle management controls.
 For organization members, the UI shows registered PGP keys and passkey counts.
 Selecting a member opts into the displayed sole approval method; when both are
 available, choose explicitly. A key selector appears only when several PGP keys
-exist; the selected full fingerprint is displayed beneath the custody controls. Members with no credentials cannot be selected. Multiple passkeys still
-count as one holder/share. Caution-backed private keys stay in enclave custody;
+exist; the selected full fingerprint is displayed beneath the approval method controls. Members with no credentials cannot be selected. Multiple passkeys still
+count as one holder/share. Caution-backed private keys stay in the key-service enclave;
 passkeys authorize unlocking secrets. Credentials are snapshotted at creation. Expand
-**About passkey custody** for this explanation when passkey holders are selected.
+**How passkey approval works** for this explanation when passkey holders are selected.
 
 For each external holder, choose **Add PGP holder**, upload or paste one armored
 public certificate, then choose **Add holder**. Review its user ID and full
@@ -194,14 +194,14 @@ submission. The final signed request is limited to 1 MiB. Dashboard creation is
 limited to **10 holders total**, combining members and manual PGP holders; CLI/API
 limits remain unchanged. Browser parsing does not replace backend cryptographic
 eligibility or independence checks. Imported certificates are not registered as
-organization-member keys and use external PGP custody.
+organization-member keys and use external PGP approval.
 
 The dashboard **Quorum threshold** starts at **2**, independently of the CLI default. Set
 it explicitly between 1 and the selected holder count. The Holders heading initially
 shows **No holders selected · Max 10** and the threshold input is disabled. Its count
 updates as holders are selected; the threshold row shows quorum counts only when valid. Removing a holder never
 silently lowers the threshold. Review shows exactly the holder choices and
-threshold that will be sent. Review consolidates the name, quorum and nonzero custody
+threshold that will be sent. Review consolidates the name, quorum and nonzero approval-method
 totals in its header, followed by holder details and full PGP fingerprints.
 **Create bundle** uses the requester's existing
 WebAuthn signed-request flow; it does not collect the holders' quorum approvals.
@@ -238,7 +238,7 @@ passed. The browser harness passed member/mixed and keyring creation, file/paste
 import, private-key rejection, signed-body verification, cancellation, duplicate
 submission protection, uncertain outcomes, downloads, focus and light/dark
 layouts. Compact-layout checks additionally cover Configure, import and Review in
-both themes, long holder names, full fingerprints, the custody disclosure and
+both themes, long holder names, full fingerprints, the passkey approval disclosure and
 narrow holder rows. These results cover this UI worktree, not a deployed revision.
 
 ## Dashboard bundle management
@@ -253,7 +253,7 @@ does not establish trust or import a raw V0 bundle. The dashboard has no importe
 use [the CLI import flow](legacy-v0.md), with optional signed upload.
 
 Bundles appear newest first, with local search by name or bundle ID. Compact rows
-separate the name and short ID from quorum, custody and creation date. The quiet
+separate the name and short ID from quorum, approval methods and creation date. The quiet
 Download action saves the complete JSON; the single overflow menu contains
 public-key/shard-file downloads, Rename and Delete. Signed management and
 cancellation behavior are unchanged.
@@ -354,7 +354,7 @@ matching the API/CLI loader. `LOCKSMITH_COMMIT` still overrides this default.
 The standalone mock E2E helper uses the same revision. This revision includes
 holder-identity checks during shard submission, certified release indices, and
 shared signing/encryption key rejection between holders in Keymaker. Equivalent
-encryption subkeys within one holder are allowed. It also includes the V1 custody
+encryption subkeys within one holder are allowed. It also includes the V1 key-service
 profile and explicit ImportedV0 recovery with expired nonparticipant handling.
 `LOCKSMITH_COMMIT` selects the
 deployed daemon only; it does not override the API/CLI Cargo dependencies. Keep both pins aligned when upgrading.
@@ -582,7 +582,7 @@ eligibility and organization/bundle/index checks are never bypassed. Production
 builds reject both synthetic formats, even when the runtime flag is set.
 
 The certificate HTTP mock generates temporary CA-signed PGP certificates; it does
-not run the real derivation service or test the custody root. The creator registers
+not run the real derivation service or test the key service root key. The creator registers
 a second software passkey through the gateway; a second holder uses a disposable
 public-credential database fixture. WebAuthn-only and mixed creation must preserve
 certificate order, compact indices, bundle ID, threshold and both holders' bindings.
@@ -590,7 +590,7 @@ The creator's two passkeys remain one share. Wrong CA, signature, context, count
 order, eligibility or proof must result in no Keymaker call and no stored bundle.
 Downloaded bundles are consumed by CLI encryption. An isolated CLI test invokes
 `send_shard` with these exact files and mock application metadata, requiring
-explicit holder selection in noninteractive use. Additional custody HTTP tests
+explicit holder selection in noninteractive use. Additional key-service HTTP tests
 exercise WebAuthn-only/mixed recovery and threshold/duplicate-holder checks.
 
 The harness also places a loopback proxy before Keymaker, changing a requested
@@ -628,7 +628,7 @@ preventing Keymaker calls and existing HTTP failure/timeout cases. Certificate
 checks use locally signed test certificates; no genuine Nitro certificate-service
 response or WebAuthn recovery was exercised.
 
-Mock custody validation (2026-09-16): all 15 API quorum tests passed in both
+Mock key-service validation (2026-09-16): all 15 API quorum tests passed in both
 default and `e2e-testing-unsafe` builds, including subprocess-isolated runtime-flag
 and policy/proof rejection cases. `make test-quorum-mock` passed the existing PGP
 flow, new WebAuthn/mixed creation, negative certificate responses and the CLI

@@ -23,10 +23,10 @@ pub(crate) struct Options {
     /// Without this option, a unique private-keyring match or sole holder is selected.
     #[arg(long)]
     pub holder: Option<String>,
-    /// Custody enclave HTTP endpoint; identity is checked against --recryptor-pcr-policy.
+    /// Key-service enclave HTTP endpoint; identity is checked against --recryptor-pcr-policy.
     #[arg(long)]
     pub recryptor_url: Option<String>,
-    /// Independently verified custody enclave PCR0/1/2 JSON policy.
+    /// Independently verified key-service enclave PCR0/1/2 JSON policy.
     #[arg(long)]
     pub recryptor_pcr_policy: Option<PathBuf>,
 }
@@ -158,7 +158,7 @@ pub(crate) fn short_fingerprint(value: &str) -> String {
 
 pub(crate) fn holder_label(keys: &[Key], holder: &str, webauthn: bool, names: &HolderNames) -> String {
     let unique_name = names.get(holder).filter(|name| names.values().filter(|other| *other == *name).count() == 1);
-    let kind = if webauthn { "Passkey" } else { "External PGP" };
+    let kind = if webauthn { "Passkey · Caution Enclave-held key" } else { "External PGP" };
     let short = short_fingerprint(holder);
     if let Some(name) = unique_name {
         if webauthn { format!("{} · {kind}", terminal_label(name)) } else { format!("{} · {kind} · {short}", terminal_label(name)) }
@@ -499,7 +499,7 @@ async fn recover_inner(
     )
     .await?;
     release::verify_response(&begun, &trusted, &begin.client_nonce)
-        .with_context(Ctx::new("verify custody enclave"))?;
+        .with_context(Ctx::new("verify key-service enclave"))?;
     if begun.data.request_hash != release::hash(&begin).with_context(Ctx::new("begin binding"))? {
         return Err(InitError::invalid("release begin request was substituted"));
     }
@@ -543,7 +543,7 @@ async fn recover_inner(
     let context_hash = release::hash(&prepared).with_context(Ctx::new("approval hash"))?;
     output::verbose(client.verbose, format!("Application ID: {}; holder certificate: {}; bundle ID: {}; bundle hash: {}", terminal_label(&summary.application_id), prepared.context.holder, hex::encode(prepared.context.bundle_id), prepared.context.bundle_hash));
     output::verbose(client.verbose, format!("Destination session key: {}; attestation hash: {}; release context hash: {context_hash}", hex::encode(prepared.destination_key), prepared.destination_attestation_hash));
-    output::verbose(client.verbose, format!("Destination PCR policy: {:?}; custody PCR policy: {:?}; custody policy file: {}; custody URL: {}", prepared.context.destination_policy, trusted, terminal_label(&policy_path.display().to_string()), terminal_label(&url)));
+    output::verbose(client.verbose, format!("Destination PCR policy: {:?}; key-service PCR policy: {:?}; key-service policy file: {}; key-service URL: {}", prepared.context.destination_policy, trusted, terminal_label(&policy_path.display().to_string()), terminal_label(&url)));
     output::verbose(client.verbose, format!("Protocol: {:?}; organization ID: {}; holder position: {}; certificate index: {}; expiry: {}", prepared.context.version, hex::encode(prepared.context.organization_id), prepared.context.holder_position, prepared.context.certificate_index, prepared.context.expires_at_unix_seconds));
     let approval = async {
         if client.qr {
@@ -686,7 +686,7 @@ mod holder_selection_tests {
         let names = matched_names(&bundle, &[row]).unwrap();
         let (fp, webauthn) = select_holder(&keys, Some("bob"), None, &names).unwrap();
         assert!(webauthn);
-        assert_eq!(holder_label(&keys, &fp, true, &names), "bob · Passkey");
+        assert_eq!(holder_label(&keys, &fp, true, &names), "bob · Passkey · Caution Enclave-held key");
         assert_eq!(select_holder(&keys, Some(&fp), None, &names).unwrap(), (fp.clone(), true));
         assert!(select_holder(&keys, Some("Bob"), None, &names).is_err());
         let pgp = select_holder(&keys, Some("alice"), None, &names).unwrap();
