@@ -19,6 +19,23 @@ pub async fn upsert_tracked_resource(
     region: Option<&str>,
     metadata: &serde_json::Value,
 ) -> Result<()> {
+    // BYOC runners must not enter managed metering on deploy or unsuspend.
+    // Inactive credentials do not transfer ownership to the platform.
+    let is_byoc_runner: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM cloud_credentials
+            WHERE organization_id = $1 AND resource_id = $2 AND managed_on_prem = true
+        )",
+    )
+    .bind(organization_id)
+    .bind(application_id)
+    .fetch_one(&state.db)
+    .await
+    .context("Failed to determine runner billing ownership")?;
+    if is_byoc_runner {
+        return Ok(());
+    }
+
     sqlx::query(
         r#"
         INSERT INTO tracked_resources (
