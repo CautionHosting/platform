@@ -7,6 +7,18 @@ use uuid::Uuid;
 /// Failure modes for [`upsert_tracked_resource`].
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum UpsertTrackedResourceError {
+    #[error(
+        "Failed to query cloud credentials for organization '{organization_id}' and application '{application_id}' [{location}]"
+    )]
+    QueryCloudCredentials {
+        organization_id: Uuid,
+        application_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
     #[error("Failed to upsert tracked resource '{resource_id}' [{location}]")]
     Upsert {
         #[context(borrow = str)]
@@ -35,6 +47,26 @@ pub async fn upsert_tracked_resource(
     metadata: &serde_json::Value,
 ) -> Result<(), UpsertTrackedResourceError> {
     use UpsertTrackedResourceErrorCtx as Ctx;
+
+    // BYOC runners must not enter managed metering on deploy or unsuspend.
+    // Inactive credentials do not transfer ownership to the platform.
+    let is_byoc_runner: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM cloud_credentials
+            WHERE organization_id = $1 AND resource_id = $2 AND managed_on_prem = true
+        )",
+    )
+    .bind(organization_id)
+    .bind(application_id)
+    .fetch_one(&state.db)
+    .await
+    .with_context(Ctx::query_cloud_credentials(
+        organization_id,
+        application_id,
+    ))?;
+    if is_byoc_runner {
+        return Ok(());
+    }
 
     sqlx::query(
         r#"

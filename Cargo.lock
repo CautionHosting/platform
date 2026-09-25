@@ -1431,6 +1431,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bootproof-sdk"
+version = "0.1.0"
+source = "git+https://codeberg.org/caution/bootproof.git?rev=b346db17523ad9b13ef41eb9c14df3328bbd80d1#b346db17523ad9b13ef41eb9c14df3328bbd80d1"
+dependencies = [
+ "coset 0.4.2",
+ "ring",
+ "serde_cbor",
+ "thiserror 2.0.20",
+ "tracing",
+ "webpki",
+ "x509-parser 0.18.1",
+]
+
+[[package]]
 name = "bs58"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1811,7 +1825,7 @@ version = "0.1.0"
 dependencies = [
  "authenticator",
  "base64 0.22.1",
- "bootproof-sdk",
+ "bootproof-sdk 0.1.0 (git+https://codeberg.org/caution/bootproof.git?rev=b346db17523ad9b13ef41eb9c14df3328bbd80d1)",
  "caution-config",
  "caution-environment-heuristics",
  "chrono",
@@ -2914,7 +2928,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bollard",
- "bootproof-sdk",
+ "bootproof-sdk 0.1.0 (git+https://codeberg.org/caution/bootproof.git?rev=b346db17523ad9b13ef41eb9c14df3328bbd80d1)",
  "coset 0.3.8",
  "dterror 0.3.0",
  "flate2",
@@ -4659,7 +4673,7 @@ dependencies = [
  "anyhow",
  "blahaj",
  "bootproof",
- "bootproof-sdk",
+ "bootproof-sdk 0.1.0 (git+https://codeberg.org/caution/bootproof.git?rev=b03721957e3850931f5b53627e7c3d1c302a06fe)",
  "card-backend",
  "card-backend-pcsc",
  "cfg-if",
