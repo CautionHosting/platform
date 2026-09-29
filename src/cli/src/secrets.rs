@@ -42,19 +42,15 @@ fn is_valid_env_key(key: &str) -> bool {
 }
 
 fn parse_env_value(value: &str) -> String {
-    // Parse the first shell compatible word
-    // $() and embedded variations will be maintained, but quotes will be stripped.
-    let first_word = if let Some(mut words) = shlex::split(value)
+    // Encrypt the parsed value itself. Shell escaping belongs at export time,
+    // otherwise the application receives the quoting characters as secret data.
+    if let Some(mut words) = shlex::split(value)
         && !words.is_empty()
     {
         words.swap_remove(0)
     } else {
         String::new()
-    };
-
-    shlex::try_quote(&first_word)
-        .expect("only possible error is null byte, impossible with str")
-        .into()
+    }
 }
 
 fn parse_env_assignments(content: &str) -> Vec<EnvAssignment> {
@@ -1975,6 +1971,10 @@ pub async fn send_shard(
 }
 
 #[cfg(test)]
+#[path = "secrets_value_tests.rs"]
+mod value_tests;
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn imported_bundle_allows_unchanged_expired_recipient_only_with_opt_in() {
@@ -2180,11 +2180,11 @@ export MISSING_EQUALS\n",
             vec![
                 ("FOO", "bar"),
                 ("BAR", "baz"),
-                ("EMPTY", "''"),
-                ("INLINE", "'value # preserved'"),
+                ("EMPTY", ""),
+                ("INLINE", "value # preserved"),
                 ("SPACED", "no"),
-                ("PADDED", "' spaced '"),
-                ("ESCAPED", "'say \"hi\"'"),
+                ("PADDED", " spaced "),
+                ("ESCAPED", "say \"hi\""),
                 ("COMMENTED", "bar"),
             ]
         );
