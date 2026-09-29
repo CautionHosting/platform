@@ -161,6 +161,19 @@ env -u KEYMAKER_URL caution secret init \
 caution secret encrypt DATABASE_URL --env-file /private/path/app.env
 ```
 
+The CLI encrypts the parsed value, without adding shell quotes to the encrypted
+data. For example, `MESSAGE="hello world"` encrypts `hello world`; quotes that
+are part of the value itself remain data. Shell syntax is parsed without
+executing commands or expanding variables. Empty values are skipped. Shell
+escaping for environment export is handled separately inside the enclave.
+
+Ciphertext previously created with extra shell quotes must be re-encrypted from
+the original plaintext using the corrected CLI and included in a new application
+deployment. Updating the CLI alone does not rewrite existing ciphertext. Do not
+strip quotes from decrypted values automatically: they may be intentional data.
+The current Locksmith exporter also trims leading/trailing whitespace; CLI
+preservation of those bytes in ciphertext does not remove that runtime limitation.
+
 Credentials are snapshotted into the bundle; multiple passkeys still count as one
 holder. Copy these inputs into the final application image:
 
