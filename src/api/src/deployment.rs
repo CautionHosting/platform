@@ -3,6 +3,7 @@
 
 use dterror::{BoxError, CtxError, Location};
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, LazyLock};
@@ -157,33 +158,46 @@ pub async fn get_or_generate_lockfile(data_dir: &str) -> Option<PathBuf> {
 /// Failure modes for [`run_with_timeout`].
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum RunCommandError {
-    #[error("could not spawn command [{location}]")]
+    #[error("Failed to spawn command [{location}]")]
     Spawn {
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("could not wait on command [{location}]")]
+    #[error("Failed to start {stream} reader [{location}]")]
+    StartReader {
+        stream: &'static str,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("Failed to wait on command [{location}]")]
     Wait {
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("could not read command output [{location}]")]
+    #[error("Failed to read output [{location}]")]
     ReadOutput {
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("command timed out after {timeout_secs}s [{location}]")]
+    #[error(
+        "Command timed out after {timeout_secs}s\nstdout: {stdout}\nstderr: {stderr} [{location}]"
+    )]
     TimedOut {
         timeout_secs: u64,
+        stdout: String,
+        stderr: String,
+        #[location]
         location: Location,
     },
-    #[error("command timed out after {timeout_secs}s; failed to read output [{location}]")]
+    #[error("Command timed out after {timeout_secs}s; failed to read output [{location}]")]
     TimedOutReadOutput {
         timeout_secs: u64,
         #[location]
@@ -244,7 +258,8 @@ pub(crate) enum TofuDestroyError {
     },
 }
 
-/// Run a command with a timeout. Kills the process if deadline expires.
+/// Drain both output pipes while waiting, so verbose commands cannot block on output.
+/// Kill and reap the child when its deadline expires.
 #[tracing::instrument(skip_all, err)]
 fn run_with_timeout(
     cmd: &mut Command,
@@ -258,45 +273,82 @@ fn run_with_timeout(
             .spawn(),
         Ctx::spawn(),
     )?;
-
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
-    loop {
-        let status = dterror::ResultExt::with_context(child.try_wait(), Ctx::wait())?;
-        match status {
-            Some(_) => {
-                return dterror::ResultExt::with_context(
-                    child.wait_with_output(),
-                    Ctx::read_output(),
-                );
+    std::thread::scope(|scope| {
+        let stdout = child.stdout.take();
+        let stdout = std::thread::Builder::new().spawn_scoped(scope, move || {
+            let mut bytes = Vec::new();
+            stdout
+                .ok_or_else(|| std::io::Error::other("Missing stdout pipe"))?
+                .read_to_end(&mut bytes)?;
+            Ok::<_, std::io::Error>(bytes)
+        });
+        let stdout = match stdout {
+            Ok(reader) => reader,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return dterror::ResultExt::with_context(Err(error), Ctx::start_reader("stdout"));
             }
-            None => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    match child.wait_with_output() {
-                        Ok(output) => {
-                            tracing::error!(
-                                stdout = %String::from_utf8_lossy(&output.stdout),
-                                stderr = %String::from_utf8_lossy(&output.stderr),
-                                "command timed out"
-                            );
-                            return Err(RunCommandError::TimedOut {
-                                timeout_secs,
-                                location: std::panic::Location::caller(),
-                            });
-                        }
-                        Err(e) => {
-                            return dterror::ResultExt::with_context(
-                                std::result::Result::<std::process::Output, _>::Err(e),
-                                Ctx::timed_out_read_output(timeout_secs),
-                            );
-                        }
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_millis(500));
+        };
+        let stderr = child.stderr.take();
+        let stderr = std::thread::Builder::new().spawn_scoped(scope, move || {
+            let mut bytes = Vec::new();
+            stderr
+                .ok_or_else(|| std::io::Error::other("Missing stderr pipe"))?
+                .read_to_end(&mut bytes)?;
+            Ok::<_, std::io::Error>(bytes)
+        });
+        let stderr = match stderr {
+            Ok(reader) => reader,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout.join();
+                return dterror::ResultExt::with_context(Err(error), Ctx::start_reader("stderr"));
             }
+        };
+
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(Some(status)),
+                Ok(None) if std::time::Instant::now() >= deadline => break Ok(None),
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(500)),
+                Err(error) => break Err(error),
+            }
+        };
+        if !matches!(status, Ok(Some(_))) {
+            let _ = child.kill();
+            let _ = child.wait();
         }
-    }
+        // Join both readers even if waiting or one reader failed.
+        let stdout = stdout
+            .join()
+            .unwrap_or_else(|_| Err(std::io::Error::other("Stdout reader panicked")));
+        let stderr = stderr
+            .join()
+            .unwrap_or_else(|_| Err(std::io::Error::other("Stderr reader panicked")));
+        let status = dterror::ResultExt::with_context(status, Ctx::wait())?;
+        let output = stdout.and_then(|stdout| stderr.map(|stderr| (stdout, stderr)));
+        if let Some(status) = status {
+            let (stdout, stderr) = dterror::ResultExt::with_context(output, Ctx::read_output())?;
+            Ok(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            })
+        } else {
+            let (stdout, stderr) =
+                dterror::ResultExt::with_context(output, Ctx::timed_out_read_output(timeout_secs))?;
+            Err(RunCommandError::TimedOut {
+                timeout_secs,
+                stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                location: std::panic::Location::caller(),
+            })
+        }
+    })
 }
 
 #[derive(Clone)]
@@ -662,6 +714,79 @@ async fn scale_down_asg(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn test_run_with_timeout_large_output() {
+        let output = run_with_timeout(
+            Command::new("sh").args([
+                "-c",
+                "head -c 1048576 /dev/zero; head -c 1048576 /dev/zero >&2",
+            ]),
+            10,
+        )
+        .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, vec![0; 1_048_576]);
+        assert_eq!(output.stderr, vec![0; 1_048_576]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_run_with_timeout_nonzero_exit() {
+        let output = run_with_timeout(
+            Command::new("sh").args(["-c", "printf out; printf err >&2; exit 17"]),
+            10,
+        )
+        .unwrap();
+        assert_eq!(output.status.code(), Some(17));
+        assert_eq!(output.stdout, b"out");
+        assert_eq!(output.stderr, b"err");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_run_with_timeout_kills_noisy_child() {
+        let started = std::time::Instant::now();
+        let error = run_with_timeout(
+            Command::new("sh").args([
+                "-c",
+                "printf '%s\\n' \"$$\"; while :; do printf out; printf err >&2; done",
+            ]),
+            1,
+        )
+        .unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        let RunCommandError::TimedOut {
+            timeout_secs,
+            stdout,
+            stderr,
+            ..
+        } = error
+        else {
+            panic!("Expected a command timeout");
+        };
+        assert_eq!(timeout_secs, 1);
+        assert!(stdout.contains("out"));
+        assert!(stderr.starts_with("err"));
+        let pid = stdout.lines().next().unwrap();
+        assert!(pid.parse::<u32>().is_ok());
+        assert!(
+            !Command::new("kill")
+                .args(["-0", pid])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+
+    #[test]
+    fn test_run_with_timeout_spawn_failure() {
+        // Reject before execution: emulation can report missing executables as exit 127.
+        let error = run_with_timeout(&mut Command::new("invalid\0command"), 1).unwrap_err();
+        assert!(matches!(error, RunCommandError::Spawn { .. }));
+    }
 
     fn norm(s: &str) -> String {
         s.split_whitespace().collect::<Vec<_>>().join(" ")
