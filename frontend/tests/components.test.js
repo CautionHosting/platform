@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { safeUrl, verificationTarget, checkPresentation, servicePresentation, measurementRows, policyRows, relativeCheckTime, repositoryLabel } from '../src/utils/components.js'
+import { safeUrl, verificationTarget, checkPresentation, servicePresentation, measurementRows, policyRows, policySets, relativeCheckTime, repositoryLabel, serviceKey, selectedServiceKey } from '../src/utils/components.js'
 
 const hash = 'a'.repeat(96)
 const zero = '0'.repeat(96)
@@ -79,7 +79,6 @@ test('check timestamps tolerate only five seconds around the current time', () =
   assert.notEqual(relativeCheckTime(new Date(now - 5001).toISOString(), now), 'Checked just now')
 })
 
-
 test('hosted CLI commands use stable service IDs and the displayed Platform', () => {
   for (const id of ['keymaker', 'key-service']) {
     const target = verificationTarget('https://service.example.com', id, 'https://alpha.example.com')
@@ -89,4 +88,48 @@ test('hosted CLI commands use stable service IDs and the displayed Platform', ()
   assert.match(verificationTarget('https://service.example.com', undefined, 'https://alpha.example.com').command, /--attestation-url/)
   assert.match(verificationTarget('https://service.example.com', 'unrecognized; command', 'https://alpha.example.com').command, /--attestation-url/)
   for (const origin of ['javascript:alert(1)', 'https://user:secret@platform.example.com', 'https://platform.example.com/?x=1']) assert.equal(verificationTarget('https://service.example.com', 'keymaker', origin), null)
+})
+
+test('service summaries require every configured purpose and keep failure types distinct', () => {
+  const passed = { status: 'passed' }
+  const policy = purpose => ({ purpose, result: passed })
+  const service = { id: 'key-service', readiness: passed, attestation: passed, policies: [policy('Certificate issuance'), policy('Share release')] }
+  assert.equal(servicePresentation(service).summary.label, 'Configured checks passed')
+  for (const policies of [[], [policy('Certificate issuance')], [policy('Share release')]]) {
+    assert.equal(servicePresentation({ ...service, policies }).summary.tone, 'unavailable')
+  }
+  assert.equal(servicePresentation({}).summary.tone, 'unavailable')
+  assert.equal(servicePresentation({ ...service, readiness: { status: 'failed', reason: 'Service is not ready' } }).summary.label, 'Service not ready')
+  assert.equal(servicePresentation({ ...service, attestation: { status: 'pending' } }).summary.tone, 'pending')
+  assert.equal(servicePresentation({ ...service, attestation: { status: 'failed', reason: 'Request timed out' } }).summary.tone, 'unavailable')
+  assert.equal(servicePresentation({ ...service, attestation: { status: 'failed', reason: 'Attestation authentication failed' } }).summary.tone, 'failed')
+  assert.equal(servicePresentation({ ...service, policies: [policy('Certificate issuance'), { purpose: 'Share release', result: { status: 'failed', reason: 'Policy missing or invalid' } }] }).summary.tone, 'failed')
+})
+
+test('accepted sets use only authenticated server references and preserve original indices', () => {
+  const sets = [{ pcrs: { 0: hash }, expires_at_unix_seconds: 1 }, { pcrs: { 0: hash } }, { pcrs: { 0: zero } }]
+  const policy = { sets, result: { status: 'passed' }, matched_set_indices: [2, 1, 1, -1, 3, '0', 0.5] }
+  const grouped = policySets(policy, true)
+  assert.deepEqual(grouped.accepted.map(set => set.index), [1, 2])
+  assert.deepEqual(grouped.other.map(set => set.index), [0])
+  assert.equal(grouped.accepted[0].accepted, true)
+  assert.equal(grouped.other[0].accepted, false)
+  for (const metadata of [undefined, null, {}, [], [-1, 99, '1']]) {
+    assert.equal(policySets({ ...policy, matched_set_indices: metadata }, true).accepted.length, 0)
+  }
+  assert.equal(policySets(policy, false).accepted.length, 0)
+  assert.equal(policySets({ ...policy, result: { status: 'failed' } }, true).accepted.length, 0)
+  assert.deepEqual(policySets({}, true), { accepted: [], other: [] })
+  assert.deepEqual(sets.map(set => Object.hasOwn(set, 'accepted')), [false, false, false])
+})
+
+test('fragment selection supports stable IDs, legacy names and invalid fragments', () => {
+  const services = [{ id: 'keymaker', name: 'Keymaker' }, { id: 'key-service', name: 'Key service' }]
+  assert.equal(selectedServiceKey(services, '#key-service'), 'key-service')
+  assert.equal(selectedServiceKey(services, '#key%2Dservice'), 'key-service')
+  for (const fragment of ['', '#unknown', '#%E0%A4%A', '#keymaker']) assert.equal(selectedServiceKey(services, fragment), 'keymaker')
+  assert.equal(selectedServiceKey([], '#key-service'), null)
+  assert.equal(serviceKey({ name: 'Key service' }), 'key-service')
+  assert.equal(selectedServiceKey([{ name: 'Keymaker' }, { name: 'Key service' }], '#key-service'), 'key-service')
+  assert.equal(serviceKey({ name: 'Other service' }), 'Other service')
 })

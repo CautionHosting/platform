@@ -10,4 +10,4 @@ const shortened = computed(() => props.technical && /^[0-9a-f]{32,}$/i.test(text
 const shown = computed(() => shortened.value && !revealed.value ? `${text.value.slice(0, 8)}…${text.value.slice(-8)}` : text.value)
 async function copy() { try { await navigator.clipboard.writeText(text.value); copied.value = true; failed.value = false } catch { failed.value = true } }
 </script>
-<style scoped>.value { overflow-wrap:anywhere; }.technical { font-family:monospace; } button { color:#b8a5ff; background:transparent; border:0; text-decoration:underline; font-size:.8rem; padding:.2rem .3rem; cursor:pointer; } button:focus-visible { outline:2px solid #bcaaff; }</style>
+<style scoped>.value { overflow-wrap:anywhere; }.technical { font-family:monospace; } button { color:var(--theme-accent); background:transparent; border:0; text-decoration:underline; font-size:.8rem; padding:.2rem .3rem; cursor:pointer; } button:focus-visible { outline:2px solid var(--theme-focus); }</style>

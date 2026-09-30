@@ -36,15 +36,43 @@ export function servicePresentation(service) {
   const checks = [
     { label: 'Readiness', result: service.readiness, success: 'Ready' },
     { label: 'Attestation', result: service.attestation, success: 'Authenticated' },
-    ...(service.policies || []).map(policy => ({ label: policy.purpose + ' policy', result: policy.result, success: 'Matches' })),
+    ...(service.policies || []).map(policy => ({ label: policy.purpose + ' policy', result: policy.result, success: 'Matches', policy })),
   ].map(check => ({ ...check, presentation: checkPresentation(check.result, check.success),
     reason: transportFailure(check.result) || check.result?.reason === 'No authenticated measurements' ? null : check.result?.reason }))
   return {
     checks,
+    summary: serviceSummary(service, checks),
     transportDetails: checks.filter(check => transportFailure(check.result)),
     unreachable: transportFailure(service.readiness) && transportFailure(service.attestation),
     hasMeasurements: service.attestation?.status === 'passed' && Object.keys(service.measurements || {}).length > 0,
   }
+}
+
+function serviceSummary(service, checks) {
+  if (checks.some(check => check.presentation.tone === 'failed')) return { tone: 'failed', icon: '×', label: 'Configured check failed' }
+  if (checks.some(check => check.presentation.tone === 'pending')) return { tone: 'pending', icon: '◌', label: service.readiness?.reason === 'Service is not ready' ? 'Service not ready' : 'Checks pending' }
+  const required = { keymaker: ['Bundle generation'], 'key-service': ['Certificate issuance', 'Share release'] }[serviceKey(service)]
+  const complete = required ? required.every(purpose => service.policies?.some(policy => policy.purpose === purpose)) : service.policies?.length > 0
+  if (complete && checks.every(check => check.presentation.tone === 'passed')) return { tone: 'passed', icon: '✓', label: 'Configured checks passed' }
+  return { tone: 'unavailable', icon: '—', label: 'Checks incomplete' }
+}
+
+export function serviceKey(service) {
+  return service.id || { Keymaker: 'keymaker', 'Key service': 'key-service' }[service.name] || service.name
+}
+
+export function selectedServiceKey(services, fragment) {
+  let key
+  try { key = decodeURIComponent(fragment.replace(/^#/, '')) } catch { key = '' }
+  return services.find(service => serviceKey(service) === key) ? key : services.length ? serviceKey(services[0]) : null
+}
+
+export function policySets(policy, authenticated) {
+  const sets = policy.sets || []
+  const indices = authenticated && policy.result?.status === 'passed' && Array.isArray(policy.matched_set_indices)
+    ? new Set(policy.matched_set_indices.filter(index => Number.isInteger(index) && index >= 0 && index < sets.length)) : new Set()
+  const entries = sets.map((set, index) => ({ ...set, index, accepted: indices.has(index) }))
+  return { accepted: entries.filter(set => set.accepted), other: entries.filter(set => !set.accepted) }
 }
 
 export function checkPresentation(check, success) {

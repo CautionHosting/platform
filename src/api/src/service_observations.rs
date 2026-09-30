@@ -65,6 +65,7 @@ struct Policy {
     purpose: &'static str,
     result: Check,
     sets: Vec<PolicySet>,
+    matched_set_indices: Vec<usize>,
 }
 #[derive(Clone, Serialize)]
 struct PolicySet {
@@ -375,6 +376,7 @@ fn evaluate_policy(
         purpose,
         result: Check::failure("Policy missing or invalid"),
         sets: vec![],
+        matched_set_indices: vec![],
     };
     let Some(policy) = policy else {
         return result;
@@ -407,19 +409,28 @@ fn evaluate_policy(
             Check::failure("Share release requires one non-expiring exact PCR0/1/2 set");
         return result;
     }
-    result.result = match measured {
-        None => Check::failure("No authenticated measurements"),
-        Some(measured)
-            if policy.sets.iter().any(|s| {
-                s.expires_at_unix_seconds.is_none_or(|expiry| now < expiry)
-                    && s.pcrs
-                        .iter()
-                        .all(|(i, expected)| measured.get(i) == Some(expected))
-            }) =>
-        {
-            Check::success()
-        }
-        Some(_) => Check::failure("Authenticated measurements do not match an active policy set"),
+    let Some(measured) = measured else {
+        result.result = Check::failure("No authenticated measurements");
+        return result;
+    };
+    result.matched_set_indices = policy
+        .sets
+        .iter()
+        .enumerate()
+        .filter(|(_, set)| {
+            set.expires_at_unix_seconds
+                .is_none_or(|expiry| now < expiry)
+                && set
+                    .pcrs
+                    .iter()
+                    .all(|(i, expected)| measured.get(i) == Some(expected))
+        })
+        .map(|(index, _)| index)
+        .collect();
+    result.result = if result.matched_set_indices.is_empty() {
+        Check::failure("Authenticated measurements do not match an active policy set")
+    } else {
+        Check::success()
     };
     result
 }

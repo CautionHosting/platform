@@ -297,125 +297,73 @@
       </div>
 
       <!-- Apps list (when user has apps) -->
-      <div v-else-if="apps.length > 0" class="content-card">
-        <div class="content-header content-header--with-search">
+      <div v-else-if="apps.length > 0" class="content-card apps-list-card">
+        <div class="content-header">
           <div class="content-header-text">
             <h2 class="content-header-title">Applications</h2>
             <p class="content-header-description">
-              Applications running in secure enclaves.
+              Manage your enclave applications.
             </p>
+          </div>
+        </div>
+        <div class="apps-toolbar">
+          <div class="apps-search-container">
+            <svg class="apps-search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="11" cy="11" r="8"/>
+              <path d="m21 21-4.34-4.34"/>
+            </svg>
+            <input
+              v-model="appSearchQuery"
+              type="search"
+              class="apps-search-input"
+              placeholder="Search applications..."
+              aria-label="Search applications"
+            />
           </div>
           <div class="apps-list-controls">
             <label class="apps-terminated-filter">
               <input
                 type="checkbox"
-                :checked="hideTerminatedApps"
-                @change="setHideTerminatedApps($event.target.checked)"
+                :checked="!hideTerminatedApps"
+                @change="setHideTerminatedApps(!$event.target.checked)"
               />
-              <span>Hide terminated ({{ terminatedAppsCount }})</span>
+              <span>Show terminated ({{ terminatedAppsCount }})</span>
             </label>
-            <div class="apps-search-container">
-              <svg class="apps-search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="11" cy="11" r="8"/>
-                <path d="m21 21-4.34-4.34"/>
-              </svg>
-              <input
-                v-model="appSearchQuery"
-                type="search"
-                class="apps-search-input"
-                placeholder="Search apps..."
-                aria-label="Search applications"
-              />
+            <div class="apps-sort-controls">
+              <label class="apps-sort-label">
+                Sort by
+                <select :value="appSortColumn" @change="sortAppsBy($event.target.value)">
+                  <option value="name">Name</option>
+                  <option value="status">Status</option>
+                  <option value="deployment">Deployment</option>
+                  <option value="region">Region</option>
+                  <option value="created">Created</option>
+                </select>
+              </label>
+              <button
+                type="button"
+                class="apps-sort-direction"
+                :aria-label="`Sort ${appSortDirection === 'asc' ? 'descending' : 'ascending'}`"
+                :title="`Sorted ${appSortDirection === 'asc' ? 'ascending' : 'descending'}`"
+                @click="sortAppsBy(appSortColumn)"
+              >
+                <span aria-hidden="true">{{ appSortDirection === 'asc' ? '↑' : '↓' }}</span>
+              </button>
             </div>
           </div>
         </div>
         <div class="apps-table-container">
-          <table class="apps-table">
+          <table class="apps-table" aria-label="Applications">
             <thead>
               <tr>
-                <th class="col-name" :aria-sort="getAppSortAria('name')">
-                  <button
-                    type="button"
-                    class="apps-sort-button"
-                    :aria-label="getAppSortButtonLabel('name', 'Name')"
-                    @click="sortAppsBy('name')"
-                  >
-                    Name
-                    <span class="apps-sort-indicator" :class="{ active: appSortColumn === 'name' }" aria-hidden="true">
-                      {{ getAppSortIndicator('name') }}
-                    </span>
-                  </button>
-                </th>
-                <th class="col-status" :aria-sort="getAppSortAria('status')">
-                  <button
-                    type="button"
-                    class="apps-sort-button"
-                    :aria-label="getAppSortButtonLabel('status', 'Status')"
-                    @click="sortAppsBy('status')"
-                  >
-                    Status
-                    <span class="apps-sort-indicator" :class="{ active: appSortColumn === 'status' }" aria-hidden="true">
-                      {{ getAppSortIndicator('status') }}
-                    </span>
-                  </button>
-                </th>
-                <th class="col-deployment" :aria-sort="getAppSortAria('deployment')">
-                  <span class="apps-table-heading-row">
-                    <button
-                      type="button"
-                      class="apps-sort-button"
-                      :aria-label="getAppSortButtonLabel('deployment', 'Deployment')"
-                      @click="sortAppsBy('deployment')"
-                    >
-                      Deployment
-                      <span class="apps-sort-indicator" :class="{ active: appSortColumn === 'deployment' }" aria-hidden="true">
-                        {{ getAppSortIndicator('deployment') }}
-                      </span>
-                    </button>
-                    <span class="tooltip-wrapper">
-                      <button type="button" class="tooltip-trigger" aria-label="Learn more about deployment types">
-                        <img src="/assets/icons/info.svg" alt="" class="tooltip-icon" />
-                      </button>
-                      <span class="tooltip-content" role="tooltip">
-                        <strong>Fully managed:</strong> Workloads execute in Caution‑operated infrastructure. Provisioning, patching, monitoring, and security controls are administered entirely by Caution.<br><br>
-                        <strong>Customer-managed:</strong> Workloads execute within the customer's infrastructure (on-premises or in a cloud account) using customer-owned credentials, while lifecycle management, configuration, and operational control of the service are performed by Caution.
-                      </span>
-                    </span>
-                  </span>
-                </th>
-                <th class="col-region" :aria-sort="getAppSortAria('region')">
-                  <button
-                    type="button"
-                    class="apps-sort-button"
-                    :aria-label="getAppSortButtonLabel('region', 'Region')"
-                    @click="sortAppsBy('region')"
-                  >
-                    Region
-                    <span class="apps-sort-indicator" :class="{ active: appSortColumn === 'region' }" aria-hidden="true">
-                      {{ getAppSortIndicator('region') }}
-                    </span>
-                  </button>
-                </th>
-                <th class="col-attestation">Attestation</th>
-                <th class="col-created" :aria-sort="getAppSortAria('created')">
-                  <button
-                    type="button"
-                    class="apps-sort-button"
-                    :aria-label="getAppSortButtonLabel('created', 'Created')"
-                    @click="sortAppsBy('created')"
-                  >
-                    Created
-                    <span class="apps-sort-indicator" :class="{ active: appSortColumn === 'created' }" aria-hidden="true">
-                      {{ getAppSortIndicator('created') }}
-                    </span>
-                  </button>
-                </th>
-                <th class="col-chevron"></th>
+                <th scope="col">Name</th>
+                <th scope="col" class="col-status">Status</th>
+                <th scope="col" class="col-attestation">Attestation</th>
               </tr>
             </thead>
             <tbody>
               <tr v-if="filteredApps.length === 0">
-                <td colspan="7" class="apps-table-empty">
+                <td colspan="3" class="apps-table-empty">
                   <span>No applications match the current search and filter.</span>
                   <button
                     v-if="hideTerminatedApps && !appSearchQuery.trim() && terminatedAppsCount"
@@ -429,49 +377,47 @@
               </tr>
               <tr v-for="app in filteredApps" :key="app.id" class="apps-table-row" @click="openAppDetail(app)">
                 <td class="app-name-cell">
-                  <span class="app-name-text">{{ app.resource_name || "Unnamed App" }}</span>
+                  <button
+                    type="button"
+                    class="app-name-text"
+                    :title="app.resource_name || 'Unnamed App'"
+                    :aria-label="`Open ${app.resource_name || 'Unnamed App'}`"
+                    @click.stop="openAppDetail(app)"
+                  >
+                    {{ app.resource_name || "Unnamed App" }}
+                  </button>
+                  <div class="app-row-metadata">
+                    <span>{{ getDeploymentLabel(app) }}</span>
+                    <span v-if="app.region" class="region-code">{{ app.region }}</span>
+                  </div>
                 </td>
                 <td class="app-status-cell">
                   <span :class="['app-status-badge', `status-${app.state.toLowerCase()}`]">
-                    {{ app.state }}
+                    {{ formatStatusLabel(app.state) }}
                   </span>
-                </td>
-                <td class="app-type-cell">
-                  <span :class="['app-type-badge', isManaged(app) ? 'type-managed' : 'type-hosted']">
-                    {{ getDeploymentLabel(app) }}
-                  </span>
-                </td>
-                <td class="app-region-cell">
-                  <span v-if="app.state === 'running' && app.region" class="region-code">{{ app.region }}</span>
-                  <span v-else class="app-region-empty">-</span>
                 </td>
                 <td class="app-attestation-cell">
                   <button
                     v-if="app.state === 'running' && app.public_ip"
+                    type="button"
                     @click.stop="attestationApp = app"
                     class="app-attestation-btn"
-                    title="Verify attestation"
+                    :aria-label="`Verify attestation for ${app.resource_name || 'Unnamed App'}`"
                   >
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                       <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
                     </svg>
                     Verify
                   </button>
-                  <span v-else class="app-attestation-empty">-</span>
-                </td>
-                <td class="app-created-cell">
-                  <span v-if="app.created_at">{{ formatRelativeTime(app.created_at) }}</span>
-                  <span v-else class="app-created-empty">-</span>
-                </td>
-                <td class="app-chevron-cell">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <polyline points="9 18 15 12 9 6"/>
-                  </svg>
+                  <span v-else class="app-attestation-empty" aria-label="Verification unavailable">—</span>
                 </td>
               </tr>
             </tbody>
           </table>
         </div>
+        <p class="apps-list-count" role="status">
+          {{ filteredApps.length }} {{ filteredApps.length === 1 ? 'application' : 'applications' }}
+        </p>
       </div>
 
       <!-- Starter Screen (default home screen when no apps) -->
@@ -2108,7 +2054,6 @@ import {
   formatStatusLabel,
   getDeploymentLabel,
   getDnsGuidance,
-  isManaged,
 } from "../utils/appDetails.js";
 import {
   countTerminatedApps,
@@ -2319,23 +2264,6 @@ export default {
 
     const sortAppsBy = (sortColumn) => {
       setAppListPreferences(getNextAppListPreferences(appListPreferences.value, sortColumn));
-    };
-
-    const getAppSortAria = (sortColumn) => {
-      if (appSortColumn.value !== sortColumn) return undefined;
-      return appSortDirection.value === 'asc' ? 'ascending' : 'descending';
-    };
-
-    const getAppSortIndicator = (sortColumn) => {
-      if (appSortColumn.value !== sortColumn) return '↕';
-      return appSortDirection.value === 'asc' ? '↑' : '↓';
-    };
-
-    const getAppSortButtonLabel = (sortColumn, label) => {
-      if (appSortColumn.value !== sortColumn) {
-        return `Sort by ${label}, ${sortColumn === 'created' ? 'newest first' : 'ascending'}`;
-      }
-      return `Sort by ${label}, ${appSortDirection.value === 'asc' ? 'descending' : 'ascending'}`;
     };
 
     const handleAppListStorageChange = (event) => {
@@ -5034,29 +4962,6 @@ export default {
       return `Last used ${years} year${years === 1 ? '' : 's'} ago`;
     };
 
-    const formatRelativeTime = (dateValue) => {
-      if (!dateValue) return '';
-      const date = parseDate(dateValue);
-      if (!date || isNaN(date.getTime())) return '';
-
-      const now = new Date();
-      const diffMs = now - date;
-      const diffMins = Math.floor(diffMs / (1000 * 60));
-      const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-
-      if (diffMins < 1) return 'just now';
-      if (diffMins < 60) return `${diffMins}m ago`;
-      if (diffHours < 24) return `${diffHours}h ago`;
-      if (diffDays < 7) return `${diffDays}d ago`;
-      if (diffDays < 30) {
-        const weeks = Math.floor(diffDays / 7);
-        return `${weeks}w ago`;
-      }
-      // For older deployments, show the actual date
-      return formatDate(dateValue);
-    };
-
     const startGuide = () => {
       handleTabChange("guide");
       setupStep.value = 1;
@@ -5349,11 +5254,9 @@ export default {
       hideTerminatedApps,
       terminatedAppsCount,
       appSortColumn,
+      appSortDirection,
       setHideTerminatedApps,
       sortAppsBy,
-      getAppSortAria,
-      getAppSortIndicator,
-      getAppSortButtonLabel,
       loadingApps,
       destroyingApp,
       attestationApp,
@@ -5574,8 +5477,6 @@ export default {
       formatTimeOnly,
       formatTimeWithTimezone,
       formatLastUsed,
-      formatRelativeTime,
-      isManaged,
       getAppUrl,
       getRegionFlag,
       truncateId,
