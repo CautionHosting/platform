@@ -63,6 +63,13 @@ Start the platform services:
 make up
 ```
 
+The API drains OpenTofu stdout and stderr concurrently so verbose plans cannot
+block deployment or teardown. Each OpenTofu init, apply, or destroy command has
+a ten-minute timeout; timeout errors retain the captured output for diagnosis.
+Run `cargo test --locked -p api deployment::tests` for the local regression suite;
+these tests require no AWS credentials or running services. The spawn-error test
+uses invalid command input so it also works under execution emulation.
+
 The experimental development-server admin explorer is documented in
 [docs/admin.md](docs/admin.md).
 
