@@ -91,6 +91,58 @@ fn policy_matching_expiry_debug_and_distinct_release_constraints() {
 }
 
 #[test]
+fn accepted_policy_sets_keep_original_indices_and_server_cutoffs() {
+    let pcrs = measured();
+    let base: Value = serde_json::from_str(&policy_json(&pcrs, None)).unwrap();
+    let matching = base["sets"][0].clone();
+    let mut different = matching.clone();
+    different["pcrs"]["0"] = json!(hex::encode(vec![1; 48]));
+    let mut expired = matching.clone();
+    expired["expires_at_unix_seconds"] = json!(100);
+    let mut expiring = matching.clone();
+    expiring["expires_at_unix_seconds"] = json!(101);
+    let sets = json!([different, expired, matching, expiring]);
+    let policy = KeymakerPcrPolicy::from_json(&json!({"sets": sets}).to_string()).unwrap();
+
+    let accepted = evaluate_policy("test", Some(&policy), false, Some(&pcrs), 100);
+    assert_eq!(accepted.result.status, "passed");
+    assert_eq!(accepted.matched_set_indices, [2, 3]);
+    let serialized = serde_json::to_value(&accepted).unwrap();
+    assert_eq!(serialized["matched_set_indices"], json!([2, 3]));
+    assert_eq!(serialized["sets"], sets);
+    assert_eq!(
+        evaluate_policy("test", Some(&policy), false, Some(&pcrs), 101).matched_set_indices,
+        [2]
+    );
+
+    for rejected in [
+        evaluate_policy("test", None, false, Some(&pcrs), 100),
+        evaluate_policy("test", Some(&policy), false, None, 100),
+        evaluate_policy("test", Some(&policy), true, Some(&pcrs), 100),
+        evaluate_policy("test", Some(&policy), false, Some(&HashMap::new()), 100),
+    ] {
+        assert_eq!(rejected.result.status, "failed");
+        assert!(rejected.matched_set_indices.is_empty());
+        assert_eq!(
+            serde_json::to_value(rejected).unwrap()["matched_set_indices"],
+            json!([])
+        );
+    }
+    let expired = KeymakerPcrPolicy::from_json(&policy_json(&pcrs, Some(100))).unwrap();
+    let rejected = evaluate_policy("test", Some(&expired), false, Some(&pcrs), 100);
+    assert_eq!(rejected.result.status, "failed");
+    assert!(rejected.matched_set_indices.is_empty());
+
+    let zero = HashMap::from([(0, vec![0; 48]), (1, vec![0; 48]), (2, vec![0; 48])]);
+    let invalid = KeymakerPcrPolicy::from_json(&policy_json(&zero, None)).unwrap();
+    assert!(
+        evaluate_policy("test", Some(&invalid), false, Some(&zero), 100)
+            .matched_set_indices
+            .is_empty()
+    );
+}
+
+#[test]
 fn additional_authenticated_pcrs_match_without_widening_share_release() {
     let pcrs = measured();
     let mut pinned: HashMap<_, _> = pcrs
@@ -109,12 +161,9 @@ fn additional_authenticated_pcrs_match_without_widening_share_release() {
     pinned.insert(3, pcrs[&3].clone());
     let extended = KeymakerPcrPolicy::from_json(&policy_json(&pinned, None)).unwrap();
     for purpose in ["Bundle generation", "Certificate issuance"] {
-        assert_eq!(
-            evaluate_policy(purpose, Some(&extended), false, Some(&pcrs), 100)
-                .result
-                .status,
-            "passed"
-        );
+        let accepted = evaluate_policy(purpose, Some(&extended), false, Some(&pcrs), 100);
+        assert_eq!(accepted.result.status, "passed");
+        assert_eq!(accepted.matched_set_indices, [0]);
     }
     assert_eq!(
         evaluate_policy("release", Some(&extended), true, Some(&pcrs), 100)

@@ -5,6 +5,12 @@
 this response without authentication. The dashboard footer links to it. Entries
 include stable `id` values `keymaker` and `key-service`; `name` remains a display label.
 
+Each policy includes `matched_set_indices`, an array of zero-based references into
+its unchanged `sets` array. It identifies every set accepted by the same server
+evaluation that produces `result`, including policy cutoffs and purpose-specific
+configuration rules. Failed or unevaluated policies return an empty array. These
+references describe Platform's snapshot, not an independently trusted baseline.
+
 No new configuration is required:
 
 | Service / purpose | Existing configuration |
@@ -47,9 +53,17 @@ which may take roughly five seconds plus local verification if a service times o
 The page retains pending-response polling for older APIs, within its ten-second
 deadline. Readiness and verification are shown separately.
 
-Service cards keep readiness, attestation authentication and each policy result
-separate. Transport failures appear as muted **Unavailable** checks, with details
-collapsed; policies lacking authenticated measurements show **Not evaluated**.
+The service selector opens one **Service evidence** panel. Links
+`/components#keymaker` and `/components#key-service` select the corresponding
+service and support browser back/forward; missing or unknown fragments select the
+first available service. Selection and evidence disclosures survive refreshes and
+theme changes. The selector stacks above the evidence panel on narrow screens.
+
+Each panel keeps readiness, attestation authentication and each policy result
+separate, with expandable evidence. **Configured checks passed** requires every
+required check to pass, including both key-service purposes. Transport failures
+appear as muted **Unavailable** checks, with details collapsed; policies lacking
+authenticated measurements show **Not evaluated**.
 Actual authentication, configuration and policy failures remain visible in red.
 A responding service that is not ready shows **Not ready**, independently of its
 attestation. When measurements are unavailable, the evidence section retains
@@ -66,7 +80,12 @@ PCR baseline. Import independently trusted measurements in that verifier to chec
 the intended image. Browser verification does not reproduce source; the copyable
 CLI command performs independent build reproduction.
 
-The evidence disclosure compares observed and allowed PCRs for each approved set.
+Policy disclosures show server-accepted sets first, retaining their original
+one-based display numbers; **Other approved sets** contains the alternatives.
+Older APIs without accepted-set references retain comparisons without a per-set
+acceptance claim. Equal PCRs in expired or alternative sets do not imply acceptance.
+The attestation disclosure retains the full authenticated measurement table.
+Policy disclosures compare observed and allowed PCRs for each approved set.
 Individual equal values do not establish overall policy acceptance or override
 cutoffs. “No expiry” means no policy timestamp cutoff, not certificate expiry.
 Only valid all-zero, unpinned measurements outside PCR0/1/2 are collapsed by
@@ -74,8 +93,9 @@ default. **Show all PCRs** reveals them; required, policy-pinned, missing and
 malformed values remain visible. **Show full values** and copy controls retain
 access to complete hashes. Discovery JSON retains every measurement.
 
-Each service card displays its CLI verification command as selectable text with an
-adjacent Copy control. Services with stable IDs use `caution --url <this-platform>
+**Reproduce with CLI** reveals selectable command text with an adjacent Copy
+control. Framework build inputs are collapsed by default and remain separate from
+deployed-service source revisions. Services with stable IDs use `caution --url <this-platform>
 verify --service keymaker` (or `key-service`), explicitly selecting the Platform
 hosting the page. Older discovery responses without recognized IDs retain the
 explicit `--attestation-url` command, which must run from the service checkout.

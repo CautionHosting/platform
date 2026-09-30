@@ -63,12 +63,8 @@ Start the platform services:
 make up
 ```
 
-The API drains OpenTofu stdout and stderr concurrently so verbose plans cannot
-block deployment or teardown. Each OpenTofu init, apply, or destroy command has
-a ten-minute timeout; timeout errors retain the captured output for diagnosis.
-Run `cargo test --locked -p api deployment::tests` for the local regression suite;
-these tests require no AWS credentials or running services. The spawn-error test
-uses invalid command input so it also works under execution emulation.
+For Key Services setup, quorum creation, and secret recovery, see the
+[secrets operator runbook](docs/secrets-operations.md).
 
 The experimental development-server admin explorer is documented in
 [docs/admin.md](docs/admin.md).
@@ -386,21 +382,6 @@ Resuming a fully managed app starts the same instance and reattaches the
 Elastic IP tagged to that app. Redeployment is not required.
 
 ## Reference
-
-### Service build dependencies
-
-Every service image (api, gateway, email-service, metering, cli,
-drift-detector) fetches locked Cargo dependencies before compiling with
-`--frozen` and `--network=none`. Git dependencies are retained in the fetch
-layer, rather than a mutable BuildKit cache, so the compile step has the exact
-fetched revisions. Registry and compilation caches remain enabled.
-
-Cargo resolves the whole workspace even when only one binary is built, so every
-image needs the git checkouts, not just the API.
-
-If an older build fails with `can't checkout ... offline mode (--frozen)` after
-a successful fetch, update to the corrected Containerfile and rerun that
-service's build target. Do not remove the frozen/offline compilation checks.
 
 ### Limitations
 
