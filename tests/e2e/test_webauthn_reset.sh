@@ -50,7 +50,7 @@ pass "gateway healthy"
 STAMP=$(date +%s)
 USERNAME="resettest$STAMP"
 EMAIL="resettest${STAMP}@example.com"
-USER_ID=$(psql_q "INSERT INTO users (username, email, is_active) VALUES ('$USERNAME', '$EMAIL', true) RETURNING id;")
+USER_ID=$(psql_q "INSERT INTO users (username, email, is_active) VALUES ('$USERNAME', '$EMAIL', true) RETURNING id::text;")
 [ -n "$USER_ID" ] || fail "failed to seed test user"
 pass "seeded user id=$USER_ID username=$USERNAME email=$EMAIL"
 
