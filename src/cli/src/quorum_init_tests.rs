@@ -399,7 +399,9 @@ fn saved_policy_is_preserved_and_replacement_is_rejected() {
     assert!(save_policy_if_absent(&path, "unused", &other).is_err());
     assert_eq!(fs::read_to_string(&path).unwrap(), formatted);
     fs::write(&path, "broken").unwrap();
-    assert!(check_saved_policy(&path, &policy).is_err());
+    let error = check_saved_policy(&path, &policy).unwrap_err();
+    assert!(error.to_string().contains("saved local PCR policy is invalid"));
+    assert!(std::error::Error::source(&error).is_some());
     assert!(save_policy_if_absent(&path, &text, &policy).is_err());
     assert_eq!(fs::read_to_string(&path).unwrap(), "broken");
     fs::remove_dir_all(dir).unwrap();

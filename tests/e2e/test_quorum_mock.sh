@@ -18,7 +18,11 @@ trap 'exit 143' TERM
 # API currently binds port 8080. Refuse an occupied port; never stop another stack.
 python3 - <<'PY'
 import socket
-with socket.socket() as s: s.bind(('127.0.0.1',8080))
+with socket.socket() as s:
+    # Match the server's reusable listener; a previous run's TIME_WAIT is harmless.
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(('0.0.0.0',8080))
+    s.listen(1)
 PY
 cd "$ROOT"
 # Separate artifacts keep ordinary build targets free of unsafe features.
@@ -35,7 +39,7 @@ p=next(p for p in json.load(sys.stdin)["packages"] if p["name"]=="keymaker-model
 print(pathlib.Path(p["manifest_path"]).parents[2])')
 cargo build --locked --manifest-path "$LOCKSMITH_SOURCE/Cargo.toml" \
     -p keymaker --no-default-features --features unsafe-e2e
-cargo build --locked --manifest-path tests/e2e/soft-authenticator/Cargo.toml
+cargo build --locked --manifest-path tests/e2e/soft-authenticator/Cargo.toml --features key-service-e2e
 # Actual WebAuthn verification + selected-share decryption + unchanged receiver
 # transport, with deliberately synthetic Nitro evidence in an isolated process.
 CAUTION_UNSAFE_KEY_SERVICE_E2E=1 cargo test --locked --manifest-path "$LOCKSMITH_SOURCE/Cargo.toml" \
@@ -137,7 +141,8 @@ PIDS="$PIDS $!"
     BUILDER_SUBNET_ID=test BUILDER_INSTANCE_PROFILE=test \
     AWS_ENDPOINT_URL=http://127.0.0.1:9 \
     "$CARGO_TARGET_DIR/debug/api" > api.log 2>&1 &
-PIDS="$PIDS $!"
+API_PID=$!
+PIDS="$PIDS $API_PID"
 "${COMMON[@]}" PORT="$(cat gateway.port)" SSH_PORT="$(cat ssh.port)" \
     RP_ID=localhost RP_ORIGINS="$GATEWAY_URL" API_SERVICE_URL=http://127.0.0.1:8080 \
     SSH_HOST_KEY_PATH="$WORK/ssh_host_key" CSRF_SECRET=quorum-test-only \
@@ -205,3 +210,41 @@ PY
 
 QUORUM_RECOVERY_TEST_DIR="$WORK" "$RECOVERY_TEST" --ignored --exact \
     share_release::holder_selection_tests::real_api_metadata_names_downloaded_holders --nocapture
+
+# Keep adversarial certificate mocks above; use actual issuance and release below.
+KEY_SERVICE_ORIGIN=https://localhost
+"${COMMON[@]}" TMPDIR="$WORK" RP_ORIGIN="$KEY_SERVICE_ORIGIN" \
+    "$CARGO_TARGET_DIR/debug/key-service-fixture" "$WORK" > key-service.log 2>&1 &
+KEY_SERVICE_PID=$!
+PIDS="$PIDS $KEY_SERVICE_PID"
+for _ in $(seq 1 60); do
+    [ -s key-service.url ] && break
+    kill -0 "$KEY_SERVICE_PID" 2>/dev/null || { cat key-service.log; exit 1; }
+    sleep 1
+done
+REAL_KEY_SERVICE_URL=$(cat key-service.url) || { cat key-service.log; exit 1; }
+curl -fsS "$REAL_KEY_SERVICE_URL/health" >/dev/null || { cat key-service.log; exit 1; }
+# The API's endpoint/CA configuration is fixed at process startup.
+kill "$API_PID"
+wait "$API_PID" || true
+LIVE_PIDS=""
+for pid in $PIDS; do
+    if [ "$pid" != "$API_PID" ]; then LIVE_PIDS="$LIVE_PIDS $pid"; fi
+done
+PIDS="$LIVE_PIDS"
+"${COMMON[@]}" PUBLIC_CERTIFICATE_SERVICE_URL="$REAL_KEY_SERVICE_URL" \
+    CAUTION_CA_CERT_PATH="$WORK/policies/recovery-ca.asc" \
+    BUILDER_AMI_ID=test BUILDER_SECURITY_GROUP_ID=test BUILDER_SUBNET_ID=test \
+    BUILDER_INSTANCE_PROFILE=test AWS_ENDPOINT_URL=http://127.0.0.1:9 \
+    "$CARGO_TARGET_DIR/debug/api" > recovery-api.log 2>&1 &
+PIDS="$PIDS $!"
+for _ in $(seq 1 60); do curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1 && break; sleep 1; done
+curl -fsS http://127.0.0.1:8080/health >/dev/null || { cat recovery-api.log; exit 1; }
+docker exec "$CONTAINER" psql -U postgres -d caution_quorum_test -v ON_ERROR_STOP=1 -c \
+    "INSERT INTO beta_codes(code) VALUES ('quorum-recovery-test');" >/dev/null
+"${COMMON[@]}" PUBLIC_CERTIFICATE_SERVICE_URL="$REAL_KEY_SERVICE_URL" \
+    GATEWAY_URL="$GATEWAY_URL" RP_ORIGIN="$GATEWAY_URL" \
+    KEY_SERVICE_ORIGIN="$KEY_SERVICE_ORIGIN" \
+    ALPHA_CODE=quorum-recovery-test USERNAME=quorumrecovery \
+    QUORUM_RECOVERY_E2E_DIR="$WORK" QUORUM_CLI="$CARGO_TARGET_DIR/debug/caution" \
+    "$CARGO_TARGET_DIR/debug/soft-authenticator" || { cat key-service.log recovery-api.log gateway.log; exit 1; }

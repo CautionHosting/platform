@@ -569,8 +569,16 @@ The runner uses example configuration and an empty service environment, not the
 operator's configuration. Native services read the temporary policy by host path;
 container-based tests can use the `KEYMAKER_POLICY_DIR` read-only mount above.
 
-The shared `unsafe-e2e` feature is forwarded only through API/CLI
-`e2e-testing-unsafe`. Acceptance additionally requires
+The CLI rejects malformed or conflicting saved PCR policies before contacting
+Keymaker, identifies the saved local policy in the error, and preserves the
+existing policy and bundle files.
+
+Gateway relay tests check the `relayed` acknowledgement for both assertion
+submission and browser cancellation, alongside single-use delivery and expiry.
+
+The shared `unsafe-e2e` feature is forwarded through API/CLI
+`e2e-testing-unsafe` and the standalone test helper's opt-in `key-service-e2e`
+feature. Acceptance additionally requires
 `CAUTION_UNSAFE_KEY_SERVICE_E2E=1`, one non-expiring policy set with exactly PCRs
 0/1/2 each equal to `ab` repeated 48 times, and a proof equal to the nonce
 recomputed from the canonical bundle hash. Never use these values or binaries
@@ -594,6 +602,26 @@ Downloaded bundles are consumed by CLI encryption. An isolated CLI test invokes
 `send_shard` with these exact files and mock application metadata, requiring
 explicit holder selection in noninteractive use. Additional key-service HTTP tests
 exercise WebAuthn-only/mixed recovery and threshold/duplicate-holder checks.
+
+The final phase switches the API to a real key-service HTTP router backed by a
+disposable Keyforkd root and its derived CA. A newly registered software passkey
+completes recovery verification, then signs creation of a mixed 2-of-2 quorum
+through the gateway/API, real certificate issuance and local Keymaker. The exact
+downloaded bundle is verified and used both for CLI secret encryption and the
+Locksmith TCP receiver. Real key-service release endpoints verify the passkey and
+re-encrypt its share to that receiver. One share leaves the receiver locked and a
+replayed approval is rejected; the external PGP holder supplies the second share.
+The test derives the bundle key from the reconstructed entropy and decrypts the
+CLI ciphertext, requiring the original plaintext. Attestation remains synthetic;
+neither certificates nor the creation/release HTTP responses are mocked in this
+phase. Only the runner's own API process is restarted; its temporary services and
+database are cleaned up on exit.
+
+The obsolete `test_secret_new.sh` has been retired. Its useful CLI cases now run
+in this harness with checked exit statuses: `secret keygen`, concatenated public
+keyrings, the `secret new` alias, explicit threshold/count, saved and piped bundle
+output, and missing/malformed/ineligible keyring and missing direct-endpoint
+rejection. Invalid inputs must preserve the saved bundle and never reach Keymaker.
 
 The harness also places a loopback proxy before Keymaker, changing a requested
 3-of-5 into 1-of-5 before generation. The API rejects the resulting valid synthetic

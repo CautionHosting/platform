@@ -15,6 +15,14 @@ publish = false
 name = "soft-authenticator"
 path = "src/main.rs"
 
+[[bin]]
+name = "key-service-fixture"
+path = "src/bin/key-service-fixture.rs"
+required-features = ["key-service-e2e"]
+
+[features]
+key-service-e2e = ["dep:public-cert-service", "dep:locksmith", "dep:keyforkd", "dep:keyforkd-client", "dep:keyfork-derive-openpgp", "dep:keyfork-mnemonic", "dep:tokio", "dep:axum", "dep:serde"]
+
 [dependencies]
 # Software passkey. `softpasskey` transitively enables `crypto` (OpenSSL) + the
 # blanket AuthenticatorBackend impl we call through WebauthnAuthenticator.
@@ -33,6 +41,15 @@ public-certificate-models = { git = "https://codeberg.org/caution/locksmith.git"
 serde_cbor = "0.11"
 hex = "0.4"
 uuid = { version = "1", features = ["v4"] }
+public-cert-service = { git = "https://codeberg.org/caution/locksmith.git", rev = "accc9d36c3c47fc1ea2802f46266f508a19f02d0", features = ["unsafe-e2e"], optional = true }
+locksmith = { git = "https://codeberg.org/caution/locksmith.git", rev = "accc9d36c3c47fc1ea2802f46266f508a19f02d0", features = ["unsafe-e2e"], optional = true }
+keyforkd = { version = "0.1.5", registry = "distrust", default-features = false, optional = true }
+keyforkd-client = { version = "0.2.2", registry = "distrust", default-features = false, features = ["ed25519"], optional = true }
+keyfork-derive-openpgp = { version = "0.2.1", registry = "distrust", default-features = false, optional = true }
+keyfork-mnemonic = { version = "0.4.2", registry = "distrust", default-features = false, optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time"], optional = true }
+axum = { version = "0.8", optional = true }
+serde = { version = "1", optional = true }
 
 # Detach from the parent workspace.
 [workspace]

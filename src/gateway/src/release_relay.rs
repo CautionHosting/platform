@@ -226,12 +226,13 @@ mod tests {
         }))
         .await
         .is_ok());
-        finish(Json(Finish {
+        let response = finish(Json(Finish {
             token: browser.clone(),
             assertion: Some(json!({"raw":"assertion"})),
         }))
         .await
         .unwrap();
+        assert_eq!(response.0, json!({"status":"relayed"}));
         assert!(finish(Json(Finish {
             token: browser,
             assertion: Some(json!({}))
@@ -262,12 +263,13 @@ mod tests {
     #[tokio::test]
     async fn cancellation_and_expiry_are_terminal() {
         let (requester, browser) = pending();
-        finish(Json(Finish {
+        let response = finish(Json(Finish {
             token: browser,
             assertion: None,
         }))
         .await
         .unwrap();
+        assert_eq!(response.0, json!({"status":"relayed"}));
         assert_eq!(
             status(Json(Token { token: requester })).await.unwrap().0["status"],
             "cancelled"

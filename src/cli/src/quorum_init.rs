@@ -626,9 +626,11 @@ fn check_saved_policy(path: &Path, selected: &KeymakerPcrPolicy) -> Result<(), I
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         result => result.with_context(Ctx::new("unable to read saved local PCR policy"))?,
     };
-    let saved = parse_policy(&normalize_policy(&text)?).with_context(Ctx::new(
-        "saved local PCR policy is invalid; explicitly repair it before generating a quorum",
-    ))?;
+    let saved = normalize_policy(&text)
+        .and_then(|normalized| parse_policy(&normalized))
+        .with_context(Ctx::new(
+            "saved local PCR policy is invalid; explicitly repair it before generating a quorum",
+        ))?;
     if saved != *selected {
         return Err(InitError::invalid(
             "selected PCR policy differs from the saved local policy; explicitly replace the saved policy before generating a quorum",
