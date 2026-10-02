@@ -48,13 +48,16 @@
   </main>
 </template>
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { releaseOptions, releaseAssertion } from '../composables/releaseApproval.js'
 import { hex, uuid, comparisonCode, secondsRemaining, destinationAddressDiffers } from '../composables/releaseDetails.js'
 import ReleaseValue from '../components/ReleaseValue.vue'
 const token = window.location.hash.slice(1)
 const request = ref(null), state = ref('loading'), status = ref('Loading release request…'), remaining = ref(0), delivering = ref(false)
 let controller, timer
+let disposed = false
+const requests = new AbortController()
+const isCurrentAttempt = () => !disposed && window.location.pathname === '/qr-release' && window.location.hash.slice(1) === token
 const inactiveMessage = 'This approval link is no longer active. Start a fresh attempt in the CLI.'
 const uncertainMessage = 'Approval delivery could not be confirmed. Check your terminal for the result. This page will not retry the submission.'
 const active = computed(() => request.value !== null && ['pending', 'submitting'].includes(state.value))
@@ -104,7 +107,8 @@ const groups = computed(() => {
   ].map(group => ({ ...group, sections: group.sections.filter(section => section.items.length) }))
 })
 async function post(path, body) {
-  const response = await fetch(`/auth/qr-release/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, ...body }) })
+  if (!isCurrentAttempt()) throw new DOMException('Approval attempt replaced', 'AbortError')
+  const response = await fetch(`/auth/qr-release/${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, ...body }), signal: requests.signal })
   if (!response.ok) {
     const error = new Error(`Approval service returned HTTP ${response.status}.`)
     error.status = response.status
@@ -113,6 +117,7 @@ async function post(path, body) {
   return response.json()
 }
 function end(next, message) {
+  if (!isCurrentAttempt()) return
   drawer.value?.close()
   selectedTab.value = 0
   state.value = next
@@ -122,7 +127,7 @@ function end(next, message) {
   request.value = null
 }
 function tick() {
-  if (!active.value) return
+  if (!isCurrentAttempt() || !active.value) return
   remaining.value = secondsRemaining(request.value.context.expires_at_unix_seconds)
   if (!remaining.value) {
     if (delivering.value) end('error', uncertainMessage)
@@ -135,7 +140,9 @@ function tick() {
 onMounted(async () => {
   try {
     if (!token) { end('unavailable', inactiveMessage); return }
-    request.value = await post('read', {})
+    const loaded = await post('read', {})
+    if (!isCurrentAttempt()) return
+    request.value = loaded
     state.value = 'pending'
     status.value = ''
     tick()
@@ -144,29 +151,36 @@ onMounted(async () => {
     end(error.status === 410 ? 'unavailable' : 'error', error.status === 410 ? inactiveMessage : 'Unable to load approval. Check your connection and reload this page while the CLI attempt is pending.')
   }
 })
-onUnmounted(() => { clearInterval(timer); controller?.abort() })
+onBeforeUnmount(() => {
+  disposed = true
+  state.value = 'unavailable'
+  request.value = null
+  clearInterval(timer)
+  requests.abort()
+  controller?.abort()
+})
 async function cancel() {
-  if (!active.value || delivering.value) return
+  if (!isCurrentAttempt() || !active.value || delivering.value) return
   end('cancelled', 'Approval cancelled. Start a fresh attempt in the CLI to retry.')
   try { await post('finish', { assertion: null }) } catch { /* No assertion was submitted by this page. */ }
 }
 async function approve() {
   tick()
-  if (state.value !== 'pending') return
+  if (!isCurrentAttempt() || state.value !== 'pending') return
   state.value = 'submitting'
   status.value = 'Waiting for your passkey…'
   controller = new AbortController()
   try {
     const credential = await navigator.credentials.get({ publicKey: releaseOptions(request.value.options), signal: controller.signal })
     tick()
-    if (!active.value) return
+    if (!isCurrentAttempt() || !active.value) return
     delivering.value = true
     status.value = 'Sending approval…'
     await post('finish', { assertion: releaseAssertion(credential) })
-    if (!active.value) return
+    if (!isCurrentAttempt() || !active.value) return
     end('relayed', 'Approval sent. Check your terminal for share acceptance and quorum status.')
   } catch (error) {
-    if (!active.value) return
+    if (!isCurrentAttempt() || !active.value) return
     if (delivering.value) end(error.status === 410 ? 'unavailable' : 'error', error.status === 410 ? inactiveMessage : uncertainMessage)
     else {
       await cancel()

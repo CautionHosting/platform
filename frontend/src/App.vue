@@ -9,6 +9,7 @@
     <component
       v-if="currentView"
       :is="currentView"
+      :key="currentView === 'QrRelease' ? currentLocation.hash : currentView"
       :legal-blocked="showLegalModal"
     />
     <LegalAcceptanceModal
@@ -456,6 +457,7 @@ export default {
 
     return {
       currentView,
+      currentLocation,
       isAuthenticated,
       userStatus,
       showPreviewBanner,

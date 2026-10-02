@@ -594,9 +594,25 @@ pub(crate) async fn wait_for_health(
     }
 }
 
+/// Host setup alone is insufficient, including in debug mode. Bootproof starts
+/// before application unlock; this checks availability, not PCR authenticity.
+#[tracing::instrument(skip_all, err)]
+pub(crate) async fn wait_for_deployment_health(
+    public_ip: &str,
+    timeout_secs: u64,
+) -> Result<(), WaitForHealthError> {
+    wait_for_health(public_ip, timeout_secs).await?;
+    wait_for_attestation_health(public_ip, timeout_secs).await
+}
+
 #[cfg(test)]
 mod deployment_health_tests {
-    use super::wait_for_health;
+    use super::{WaitForHealthError, wait_for_deployment_health, wait_for_health};
+    use axum::{
+        Router,
+        http::StatusCode,
+        routing::{get, post},
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
@@ -623,6 +639,61 @@ mod deployment_health_tests {
                 .contains("Health endpoint did not become healthy within 0 seconds")
         );
         server.await.unwrap();
+    }
+
+    async fn readiness_server(
+        host: StatusCode,
+        enclave: StatusCode,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new()
+            .route(
+                "/.well-known/caution/health",
+                get(move || async move { host }),
+            )
+            .route("/attestation", post(move || async move { enclave }))
+            // A Locksmith-backed application's HTTP server may still be locked.
+            .route("/", get(|| async { StatusCode::SERVICE_UNAVAILABLE }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (address, server)
+    }
+
+    #[tokio::test]
+    async fn completed_host_setup_without_enclave_is_not_ready() {
+        // Initial launch failed with restart=never: Caddy is up, but no enclave
+        // serves attestation. Debug deployments use this same readiness gate.
+        let (address, server) = readiness_server(StatusCode::OK, StatusCode::BAD_GATEWAY).await;
+        let result = wait_for_deployment_health(&address, 0).await;
+        server.abort();
+        assert!(matches!(
+            result,
+            Err(WaitForHealthError::AttestationTimeout { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn enclave_ready_before_application_unlock_is_accepted() {
+        let (address, server) = readiness_server(StatusCode::OK, StatusCode::OK).await;
+        let application = reqwest::get(["http://", &address, "/"].concat())
+            .await
+            .unwrap();
+        let result = wait_for_deployment_health(&address, 0).await;
+        server.abort();
+        assert_eq!(application.status().as_u16(), 503);
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn enclave_response_does_not_bypass_host_readiness() {
+        let (address, server) =
+            readiness_server(StatusCode::SERVICE_UNAVAILABLE, StatusCode::OK).await;
+        let result = wait_for_deployment_health(&address, 0).await;
+        server.abort();
+        assert!(matches!(
+            result,
+            Err(WaitForHealthError::HealthTimeout { .. })
+        ));
     }
 }
 
@@ -4573,8 +4644,9 @@ async fn deploy_logic(
 
     let health_timeout_secs = deployment_health_timeout_secs();
 
-    tracing::info!("Waiting for health endpoint to become healthy...");
-    let health_result = wait_for_health(&deployment_result.public_ip, health_timeout_secs).await;
+    tracing::info!("Waiting for host and enclave readiness...");
+    let health_result =
+        wait_for_deployment_health(&deployment_result.public_ip, health_timeout_secs).await;
     if let Err(ref source) = health_result {
         tracing::error!("Health check failed: {}", source);
         if let Some(reservation) = capacity_reservation.as_ref() {
@@ -4596,35 +4668,6 @@ async fn deploy_logic(
         }
     }
     health_result.with_context(Ctx::enclave_unhealthy())?;
-
-    if debug_enabled {
-        tracing::info!("Skipping attestation check: enclave is in debug mode");
-    } else {
-        tracing::info!("Waiting for attestation endpoint to become healthy...");
-        let attestation_result =
-            wait_for_attestation_health(&deployment_result.public_ip, health_timeout_secs).await;
-        if let Err(ref source) = attestation_result {
-            tracing::error!("Attestation health check failed: {}", source);
-            if let Some(reservation) = capacity_reservation.as_ref() {
-                fully_managed_capacity::release_reservation(&state.db, reservation).await;
-            }
-            if let Err(recover_error) = recover_deploy_failure(
-                &state,
-                req.org_id,
-                resource_id,
-                deploy_attempt_id,
-                &app_name,
-                previous_state,
-                should_cleanup_on_failure,
-                &deployed_region,
-            )
-            .await
-            {
-                tracing::error!(?recover_error, "failed to recover from deploy failure");
-            }
-        }
-        attestation_result.with_context(Ctx::enclave_unhealthy())?;
-    }
 
     let managed_dns_enabled = state.managed_dns.is_some();
     let resource_update = sqlx::query_as::<_, (String, Option<String>)>(
