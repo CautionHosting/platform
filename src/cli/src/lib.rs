@@ -32,6 +32,7 @@ mod pgp_keys;
 mod quorum_init;
 mod quorum_legacy;
 mod quorum_inspect;
+mod quorum_upload;
 mod share_release;
 mod secrets;
 mod service_trust;
@@ -750,6 +751,8 @@ enum SecretCommands {
         after_help = "Always saves .caution/quorum-bundle.json and .caution/keymaker-pcr-policy.json in the current directory. Redirected stdout also receives the bundle JSON."
     )]
     Init(quorum_init::Options),
+    #[command(about = "Upload a saved proofed V1 bundle without generating a new quorum")]
+    Upload(quorum_upload::Options),
     #[command(about = "Import historical PGP quorum metadata without reconstructing its secret")]
     ImportLegacy(quorum_legacy::Options),
     #[command(about = "Inspect a saved quorum bundle (verifies its proof by default)")]
@@ -3857,6 +3860,11 @@ pub async fn run() -> Result<(), RunError> {
             }
             SecretCommands::Init(options) => {
                 quorum_init::run(&client, options)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
+            }
+            SecretCommands::Upload(options) => {
+                quorum_upload::run(&client, options)
                     .await
                     .with_context(Ctx::command_dispatch())?;
             }

@@ -152,6 +152,23 @@ use Platform mediation. Caution-backed holders need 1–64 registered credential
 and at least one passkey verified with PIN/biometrics. Existing passkeys can be
 verified under Dashboard → Authentication → Verify for quorum approval. See [selection, trust policies and dependency limits](../../docs/org-user-quorums.md).
 
+If direct generation succeeds but its Platform upload fails, keep the saved
+bundle and retry its upload with:
+
+```sh
+caution secret upload --bundle .caution/quorum-bundle.json
+# For a bundle outside the current app checkout, supply its trusted policy:
+caution --qr secret upload --bundle /path/to/quorum-bundle.json \
+  --keymaker-pcr-policy /path/to/verified-keymaker-policy.json
+```
+
+Upload verifies the existing V1 proof before authentication and signs the existing
+artifact; it never contacts Keymaker or rewrites local files. It first checks the
+selected Platform for the same bundle ID and complete data, returning success
+without another upload if already present. Conflicting data is rejected. This
+check reconciles a previous uncertain upload; it does not prevent simultaneous
+uploads from racing. ImportedV0 continues to use `import-legacy --upload`.
+
 ### Encrypt Env Secrets
 
 After generating a quorum bundle with Keymaker, encrypt local `.env` values into
