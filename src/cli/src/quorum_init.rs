@@ -940,9 +940,11 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
             )
             .await
             .with_context(Ctx::new(
-                "bundle created; upload failed, do not regenerate it",
+                "bundle created; upload failed, do not regenerate it; retry with caution secret upload --bundle .caution/quorum-bundle.json",
             ))?;
-        checked_response(client, response).await?;
+        checked_response(client, response).await.with_context(Ctx::new(
+            "bundle saved locally; check Platform before retrying caution secret upload --bundle .caution/quorum-bundle.json",
+        ))?;
         output::status("Bundle uploaded to Platform.");
         output::status(
             "Local files: .caution/quorum-bundle.json and .caution/keymaker-pcr-policy.json",

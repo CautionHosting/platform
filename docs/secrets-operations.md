@@ -167,6 +167,22 @@ are part of the value itself remain data. Shell syntax is parsed without
 executing commands or expanding variables. Empty values are skipped. Shell
 escaping for environment export is handled separately inside the enclave.
 
+If direct Keymaker creation saved a V1 bundle but upload failed, retry the saved
+artifact instead of running `secret init` again:
+
+```sh
+caution secret upload --bundle .caution/quorum-bundle.json
+```
+
+The command verifies the proof against configured Keymaker trust before
+authentication, checks existing Platform records, then requests a signed upload
+if absent. An identical existing bundle needs no second upload; conflicting data
+under the same bundle ID is rejected. `--qr` selects browser approval, and
+`--keymaker-pcr-policy PATH` selects an explicitly verified policy. Local bundle
+and policy files remain unchanged. A failed response can leave the server outcome
+unknown; retry this same command to check the record before submitting again.
+Concurrent uploads can still race; this command adds no server uniqueness rule.
+
 Ciphertext previously created with extra shell quotes must be re-encrypted from
 the original plaintext using the corrected CLI and included in a new application
 deployment. Updating the CLI alone does not rewrite existing ciphertext. Do not
