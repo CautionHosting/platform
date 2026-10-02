@@ -569,6 +569,10 @@ The runner uses example configuration and an empty service environment, not the
 operator's configuration. Native services read the temporary policy by host path;
 container-based tests can use the `KEYMAKER_POLICY_DIR` read-only mount above.
 
+The CLI rejects malformed or conflicting saved PCR policies before contacting
+Keymaker, identifies the saved local policy in the error, and preserves the
+existing policy and bundle files.
+
 The shared `unsafe-e2e` feature is forwarded only through API/CLI
 `e2e-testing-unsafe`. Acceptance additionally requires
 `CAUTION_UNSAFE_KEY_SERVICE_E2E=1`, one non-expiring policy set with exactly PCRs
