@@ -143,6 +143,14 @@ fn main() -> Result<()> {
         )?;
     }
 
+    #[cfg(feature = "key-service-e2e")]
+    if let Some(work) = std::env::var_os("QUORUM_RECOVERY_E2E_DIR") {
+        quorum::recovery::run(
+            &http, &mut authenticator, &origin, &base, &session_id,
+            std::path::Path::new(&work),
+        );
+    }
+
     println!("\nPASS: software-passkey register + login round-trip");
     Ok(())
 }
