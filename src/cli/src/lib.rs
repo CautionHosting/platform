@@ -2905,11 +2905,16 @@ enclave "default" {{
       port      = 8080
     }}
 
+    # As generated: raw TCP ingress, with no platform-provided TLS.
+    # Optional HTTP example below: STEVE end-to-end encryption; requires STEVE clients.
+    # An http block without e2e_encryption uses host TLS; the host can read traffic.
+    # For Attested TLS (mode = "tls"), follow the DNS, egress and verification steps:
+    # https://docs.caution.co/reference/deployment-configuration/#attested-tls-compatibility-mode
     # http {{
     #   domain = "app.example.com"
     #   port   = 8080
     #   e2e_encryption {{
-    #     enabled      = true
+    #     mode         = "steve"
     #     cors_origins = ["https://app.example.com"]
     #     key_exchange = "x25519"
     #     allow_plaintext_fallback = false
@@ -4638,6 +4643,30 @@ containerfile: Missing.Containerfile\n",
                 config.err()
             );
             assert!(hcl.contains("key_exchange = \"x25519\""));
+            let config = config.unwrap();
+            let network = configured_enclave(&config)
+                .unwrap()
+                .network
+                .as_ref()
+                .unwrap();
+            assert!(network.http.is_none());
+
+            let (before, rest) = hcl.split_once("    # http {").unwrap();
+            let (http, after) = rest.split_once("    # }\n").unwrap();
+            let http_example = format!(
+                "{before}    http {{{}    }}\n{after}",
+                http.replace("    # ", "    ")
+            );
+            let config = ConfigurationFile::from_str(&http_example).unwrap();
+            let network = configured_enclave(&config)
+                .unwrap()
+                .network
+                .as_ref()
+                .unwrap();
+            let http = network.http.as_ref().unwrap();
+            let e2e = http.e2e_encryption.as_ref().unwrap();
+            assert_eq!(e2e.mode, Some(caution_config::E2eMode::Steve));
+            assert!(!e2e.allow_plaintext_fallback());
         }
     }
 
