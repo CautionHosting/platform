@@ -41,6 +41,13 @@ The service retains its failure status and selected restart policy; `never` does
 not acquire retries. Unrelated setup failures still abort bootstrap. Completed
 host setup does not mean the enclave is ready.
 
+Platform requires both host health and a responding enclave `/attestation`
+endpoint before marking a deployment `Running`, including in debug mode. A
+failed launch with `never` therefore fails deployment readiness even if Caddy
+is healthy. This is an availability check, not cryptographic PCR verification;
+debug measurements remain unsuitable for trusted verification. Bootproof starts
+before Locksmith unlock, so application startup need not have completed.
+
 Systemd's start-rate limits and the existing two-second pre-start sleep remain.
 Zero restart delay removes neither that sleep nor enclave boot time. For
 Keymaker, its ten-second selfnuke deadline also remains. Requests during restart

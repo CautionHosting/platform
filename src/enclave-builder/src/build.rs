@@ -175,14 +175,6 @@ pub enum StageEifComponentsError {
         source: dterror::BoxError,
     },
 
-    #[error("could not verify locksmith artifacts [{location}]")]
-    CheckArtifacts {
-        #[location]
-        location: dterror::Location,
-        #[source]
-        source: dterror::BoxError,
-    },
-
     #[error("could not create directory {path} [{location}]")]
     CreateDir {
         #[context(borrow = Path)]
@@ -314,10 +306,6 @@ pub async fn stage_eif_components(
     use StageEifComponentsErrorCtx as Ctx;
 
     validate_key_exchange(e2e_key_exchange).with_context(Ctx::validate_key_exchange())?;
-    if locksmith {
-        crate::artifacts::check(user_fs_path).with_context(Ctx::check_artifacts())?;
-    }
-
     let stage_dir = work_dir.join("eif-stage");
     fs::create_dir_all(&stage_dir)
         .await

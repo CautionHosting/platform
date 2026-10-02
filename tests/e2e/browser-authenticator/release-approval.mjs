@@ -150,6 +150,95 @@ try {
   assert.equal(JSON.parse(clientData).origin, origin)
   assert.equal(authData[32] & 5, 5, 'presence and verified UV must be set')
   assert.ok(verify('sha256', Buffer.concat([authData, createHash('sha256').update(clientData).digest()]), createPublicKey({ key: Buffer.from(registration.publicKey), format: 'der', type: 'spki' }), Buffer.from(assertion.response.signature, 'base64url')))
+
+  // A fragment-only transition must replace the attempt without a document load.
+  async function replaceFragment(token) {
+    appName = token
+    await page.evaluate(token => { window.location.hash = token }, token)
+    await page.waitForFunction(token => document.body.textContent.includes(token) && !!document.querySelector('button.primary'), {}, token)
+    assert.equal(await page.evaluate(() => window.sameDocument), true)
+  }
+  await page.evaluate(() => { window.sameDocument = true })
+  const beforeReplacement = finishCount
+  await replaceFragment('fragment-B')
+  await page.click('button.primary')
+  await page.waitForFunction(() => document.body.textContent.includes('Approval sent'))
+  assert.equal(finish.token, 'fragment-B')
+  assert.equal(finishCount, beforeReplacement + 1, 'replacement does not cancel or replay the previous attempt')
+
+  // Hold detached HTTP responses so even an abort-ignoring completion arrives
+  // after replacement. Also observe that real requests receive an abort signal.
+  await page.evaluate(() => {
+    const originalFetch = window.fetch.bind(window)
+    const originalInterval = window.setInterval.bind(window)
+    window.approvalIntervals = 0
+    window.setInterval = (...args) => { window.approvalIntervals++; return originalInterval(...args) }
+    window.fetch = async (url, init) => {
+      const input = init?.body && JSON.parse(init.body)
+      const holdRead = url.endsWith('/qr-release/read') && input.token === 'loading-A'
+      const holdFinish = url.endsWith('/qr-release/finish') && input.token === 'delivery-A'
+      if (!holdRead && !holdFinish) return originalFetch(url, init)
+      init.signal.addEventListener('abort', () => { window.heldRequestAborted = true })
+      const response = await originalFetch(url, init)
+      const body = await response.text()
+      return new Promise(resolve => {
+        window.completeHeldResponse = () => resolve(new Response(body, { status: response.status, headers: { 'content-type': 'application/json' } }))
+      })
+    }
+  })
+  appName = 'loading-A'
+  await page.evaluate(() => { window.location.hash = 'loading-A' })
+  await page.waitForFunction(() => !!window.completeHeldResponse)
+  const beforeStaleRead = finishCount
+  await replaceFragment('loading-B')
+  const intervals = await page.evaluate(() => window.approvalIntervals)
+  assert.equal(await page.evaluate(() => window.heldRequestAborted), true)
+  await page.evaluate(async () => { window.completeHeldResponse(); await new Promise(resolve => setTimeout(resolve, 0)) })
+  assert.ok((await page.evaluate(() => document.body.innerText)).includes('loading-B'))
+  assert.equal(await page.evaluate(() => window.approvalIntervals), intervals, 'stale read cannot install another expiry timer')
+  assert.equal(finishCount, beforeStaleRead, 'stale read cannot cancel the old attempt')
+
+  // Resolve a passkey in the same turn as a hash change, before Vue has had a
+  // chance to unmount. URL identity must guard submission as well as disposal.
+  await replaceFragment('passkey-A')
+  await page.evaluate(() => {
+    const originalGet = navigator.credentials.get.bind(navigator.credentials)
+    window.restoreCredentials = () => Object.defineProperty(navigator.credentials, 'get', { configurable: true, value: originalGet })
+    Object.defineProperty(navigator.credentials, 'get', { configurable: true, value: ({ signal }) => new Promise(resolve => {
+      window.completeOldCredential = resolve
+      signal.addEventListener('abort', () => { window.oldCredentialAborted = true })
+    }) })
+  })
+  await page.click('button.primary')
+  await page.waitForFunction(() => !!window.completeOldCredential)
+  const beforeStaleCredential = finishCount
+  appName = 'passkey-B'
+  await page.evaluate(() => { window.location.hash = 'passkey-B'; window.completeOldCredential({}) })
+  await page.waitForFunction(() => document.body.textContent.includes('passkey-B') && !!document.querySelector('button.primary'))
+  assert.equal(await page.evaluate(() => window.oldCredentialAborted), true)
+  assert.equal(finishCount, beforeStaleCredential, 'stale credential cannot submit or cancel A')
+  await page.evaluate(() => window.restoreCredentials())
+  await page.click('button.primary')
+  await page.waitForFunction(() => document.body.textContent.includes('Approval sent'))
+  assert.equal(finish.token, 'passkey-B')
+  assert.equal(finishCount, beforeStaleCredential + 1)
+
+  // Once finish has reached the relay, navigation cannot recall it and must
+  // neither retry it nor send a compensating cancellation.
+  await replaceFragment('delivery-A')
+  await page.evaluate(() => { window.completeHeldResponse = null; window.heldRequestAborted = false })
+  const beforeHeldFinish = finishCount
+  await page.click('button.primary')
+  await page.waitForFunction(() => !!window.completeHeldResponse)
+  assert.equal(finishCount, beforeHeldFinish + 1)
+  assert.equal(finish.token, 'delivery-A')
+  await replaceFragment('delivery-B')
+  assert.equal(await page.evaluate(() => window.heldRequestAborted), true)
+  await page.evaluate(async () => { window.completeHeldResponse(); await new Promise(resolve => setTimeout(resolve, 0)) })
+  assert.ok((await page.evaluate(() => document.body.innerText)).includes('delivery-B'))
+  assert.ok(await page.$('button.primary'), 'late finish cannot mark B complete')
+  assert.equal(finishCount, beforeHeldFinish + 1, 'navigation never retries or cancels an already sent assertion')
+
   finish = undefined
   cancellationDelay = 150
   await page.goto(`${origin}/qr-release?attempt=cancel#cancellation-test`)
@@ -239,7 +328,7 @@ try {
       }
     }
   }
-  console.log('PASS: browser approval, raw signature/UV, cancellation, pending-request expiry, metadata escaping, copy and mobile layout (mock relay; no Nitro)')
+  console.log('PASS: browser approval, fragment replacement and stale async work, raw signature/UV, cancellation, pending-request expiry, metadata escaping, copy and mobile layout (mock relay; no Nitro)')
 } finally {
   await browser?.close()
   await new Promise(resolve => server.close(resolve))

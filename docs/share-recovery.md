@@ -171,14 +171,28 @@ three-minute authorization state, and derives/decrypts/re-encrypts one share.
 Cancelling, expiry, replay or losing the destination connection requires a fresh
 attempt. These operations never consume Keymaker.
 
+Opening another approval fragment in the same page replaces the entire local
+attempt: pending reads and WebAuthn are aborted, timers are cleared, and stale
+responses cannot submit an approval or change the new page. Navigation does not
+send cancellation or retry an assertion. An assertion already sent may still be
+accepted; check the originating CLI for its result. Unsubmitted old attempts
+remain subject to the existing CLI cancellation and expiry rules.
+
 V1 Locksmith-enabled application images must include non-empty
 `/etc/caution/bundle.json`, `/etc/caution/keymaker-pcr-policy.json`, and encrypted
-`/etc/caution/secrets/*.asc`. The builder checks these before EIF staging.
+`/etc/caution/secrets/*.asc`. New deployment builds check these before EIF staging,
+including remote builds supplied with a manifest.
 Cryptographic proof verification remains the runtime loader's responsibility.
 ImportedV0 requires only the non-empty bundle and encrypted secrets. The builder
 reads the explicit format tag to waive the policy-file requirement; Locksmith
 still validates the imported artifact at startup. Rebuild the Platform builder
 for this packaging change; see [legacy recovery](legacy-v0.md).
+
+Manifest-bound verification reproductions use the historical image inputs and
+runtime pins without applying today's deployment packaging preflight. This
+allows unchanged raw-V0 images without a Keymaker policy to reach staging. It
+does not enable raw V0 in the current runtime or waive PCR comparison. A build
+without a historical manifest still uses current preflight rules.
 
 ## Acceptance gate
 
