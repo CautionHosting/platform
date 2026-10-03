@@ -69,8 +69,9 @@ fn retry_io<T>(
 
 /// A successful TAP write is exactly one frame, never a write_all remainder.
 #[tracing::instrument(skip_all, err)]
-fn stream_to_tap(mut stream: impl Read, mut tap: impl Write) -> Result<(), FramingError> {
+fn stream_to_tap(stream: impl Read, mut tap: impl Write) -> Result<(), FramingError> {
     use FramingErrorCtx as Ctx;
+    let mut stream = io::BufReader::with_capacity(8 * 1024, stream);
     let mut frame = [0; MAX_FRAME];
     loop {
         let mut header = [0; 4];
@@ -100,19 +101,17 @@ fn stream_to_tap(mut stream: impl Read, mut tap: impl Write) -> Result<(), Frami
 #[tracing::instrument(skip_all, err)]
 fn tap_to_stream(mut tap: impl Read, mut stream: impl Write) -> Result<(), FramingError> {
     use FramingErrorCtx as Ctx;
-    let mut frame = [0; MAX_FRAME + 1];
+    let mut frame = [0; 4 + MAX_FRAME + 1];
     loop {
-        let length = retry_io("read TAP frame", || tap.read(&mut frame))?;
+        let length = retry_io("read TAP frame", || tap.read(&mut frame[4..]))?;
         if length == 0 {
             return Ok(());
         }
         validate_length(length)?;
+        frame[..4].copy_from_slice(&(length as u32).to_be_bytes());
         stream
-            .write_all(&(length as u32).to_be_bytes())
-            .with_context(Ctx::io("write frame header"))?;
-        stream
-            .write_all(&frame[..length])
-            .with_context(Ctx::io("write frame body"))?;
+            .write_all(&frame[..4 + length])
+            .with_context(Ctx::io("write frame"))?;
         retry_io("flush frame", || stream.flush())?;
     }
 }
@@ -579,6 +578,22 @@ mod tests {
     }
 
     #[test]
+    fn tap_packets_use_one_stream_write_per_record() {
+        let frames = vec![vec![0x12; 14], vec![0x34; 64], vec![0x56; 1518]];
+        let mut stream = PacketSink::default();
+        tap_to_stream(PacketSource(frames.clone().into_iter()), &mut stream)
+            .expect("complete records are written without buffering delay");
+        assert_eq!(
+            stream.0.len(),
+            frames.len(),
+            "one write per complete record"
+        );
+        for (record, frame) in stream.0.iter().zip(&frames) {
+            assert_eq!(*record, wire(std::slice::from_ref(frame)));
+        }
+    }
+
+    #[test]
     fn oversized_tap_packet_is_rejected_instead_of_silently_truncated() {
         for length in [1519, 65536] {
             let mut stream = Vec::new();
@@ -724,7 +739,7 @@ mod tests {
             ),
             (
                 tap_to_stream(PacketSource(vec![vec![0x12; 14]].into_iter()), FailingIo),
-                "write frame header",
+                "write frame",
                 io::ErrorKind::BrokenPipe,
             ),
             (
@@ -784,6 +799,38 @@ mod tests {
             assert!(stream_to_tap(encoded.as_slice(), &mut tap).is_err());
             assert_eq!(tap.0.as_slice(), std::slice::from_ref(&first));
         }
+    }
+
+    struct CountedReads<R> {
+        inner: R,
+        calls: usize,
+    }
+
+    impl<R: Read> Read for CountedReads<R> {
+        fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+            self.calls += 1;
+            self.inner.read(bytes)
+        }
+    }
+
+    #[test]
+    fn coalesced_records_amortize_stream_reads_across_frames() {
+        let frames: Vec<_> = (0..256)
+            .map(|index| vec![index as u8; if index % 2 == 0 { 64 } else { 1518 }])
+            .collect();
+        let encoded = wire(&frames);
+        let mut stream = CountedReads {
+            inner: encoded.as_slice(),
+            calls: 0,
+        };
+        let mut tap = PacketSink::default();
+        stream_to_tap(&mut stream, &mut tap).expect("decode across buffered read boundaries");
+        assert_eq!(tap.0, frames);
+        assert!(
+            stream.calls < frames.len(),
+            "coalesced records should not require a stream read per frame: {} reads",
+            stream.calls
+        );
     }
 
     #[test]
