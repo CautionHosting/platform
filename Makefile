@@ -805,14 +805,14 @@ prepare-byoc-provisioner:
 test-unit:
 	cargo test --workspace
 	@if [ "$$(uname -s)" = Linux ]; then \
-		cargo test --locked --manifest-path src/enclave-builder/templates/tap-framer/Cargo.toml; \
+		cargo test --locked --manifest-path src/tap-framer/Cargo.toml; \
 	fi
 
 # Requires Linux user/network namespaces, /dev/net/tun, iproute2 and Python 3.
 .PHONY: test-tap-framer
 test-tap-framer:
-	cargo build --locked --manifest-path src/enclave-builder/templates/tap-framer/Cargo.toml
-	unshare --user --map-root-user --net python3 tests/test_tap_framer.py "$$(cargo metadata --no-deps --format-version=1 --manifest-path src/enclave-builder/templates/tap-framer/Cargo.toml | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"] + "/debug/tap-framer")')"
+	cargo build --locked --manifest-path src/tap-framer/Cargo.toml
+	unshare --user --map-root-user --net python3 tests/test_tap_framer.py "$$(cargo metadata --no-deps --format-version=1 --manifest-path src/tap-framer/Cargo.toml | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"] + "/debug/tap-framer")')"
 
 test-live-caddy-nitro:
 	@test -n "$(CADDY_E2E_URL)" || { echo "CADDY_E2E_URL is required"; exit 1; }

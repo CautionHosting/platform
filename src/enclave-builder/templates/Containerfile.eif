@@ -119,7 +119,7 @@ ENV CARGO_HOME=/usr/local/cargo
 ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
 ENV TARGET_ARCH="x86_64-unknown-linux-musl"
 WORKDIR /build-tap-framer
-COPY tap-framer/ /build-tap-framer/
+COPY components/tap-framer/ /build-tap-framer/
 RUN cargo fetch --locked --target $TARGET_ARCH
 RUN --network=none cargo build --release --frozen --target ${TARGET_ARCH} && \
     install -D -m 0755 target/${TARGET_ARCH}/release/tap-framer /binaries/tap-framer

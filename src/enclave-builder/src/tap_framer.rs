@@ -16,7 +16,7 @@ pub struct ArtifactError {
     source: dterror::BoxError,
 }
 
-/// Stage the helper from the selected framework's templates, not the current CLI.
+/// Stage the helper from the selected framework, including historical layouts.
 #[tracing::instrument(skip_all, err)]
 pub async fn stage_sources(
     templates: &Path,
@@ -24,15 +24,21 @@ pub async fn stage_sources(
     containerfile: &str,
 ) -> Result<(), ArtifactError> {
     use ArtifactErrorCtx as Ctx;
-    if !containerfile.contains("COPY tap-framer/") {
+    let (source_dir, destination) = if containerfile.contains("COPY components/tap-framer/") {
+        (
+            templates.join("../../tap-framer"),
+            stage.join("components/tap-framer"),
+        )
+    } else if containerfile.contains("COPY tap-framer/") {
+        (templates.join("tap-framer"), stage.join("tap-framer"))
+    } else {
         return Ok(());
-    }
-    let destination = stage.join("tap-framer");
+    };
     tokio::fs::create_dir_all(destination.join("src"))
         .await
         .with_context(Ctx::new(&destination))?;
     for name in ["Cargo.toml", "Cargo.lock", "src/main.rs", "src/vsock.rs"] {
-        let source = templates.join("tap-framer").join(name);
+        let source = source_dir.join(name);
         tokio::fs::copy(&source, destination.join(name))
             .await
             .with_context(Ctx::new(&source))?;
@@ -49,7 +55,9 @@ pub async fn export_binary(work_dir: &Path, output_eif: &Path) -> Result<(), Art
         .await
         .with_context(Ctx::new(&recipe))?;
     let sidecar = output_eif.with_extension("tap-framer");
-    if !containerfile.contains("COPY tap-framer/") {
+    if !containerfile.contains("COPY components/tap-framer/")
+        && !containerfile.contains("COPY tap-framer/")
+    {
         return match tokio::fs::remove_file(&sidecar).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -81,35 +89,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_templates_require_each_helper_source() {
+    async fn templates_require_each_selected_helper_source() {
         let names = ["Cargo.toml", "Cargo.lock", "src/main.rs", "src/vsock.rs"];
-        for missing in names {
-            let dir = tempfile::tempdir().unwrap();
-            let templates = dir.path().join("templates");
-            for name in names {
-                if name != missing {
-                    let source = templates.join("tap-framer").join(name);
-                    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
-                    std::fs::write(source, name).unwrap();
+        for (relative_source, recipe) in [
+            ("tap-framer", "COPY tap-framer/ /build/"),
+            ("../../tap-framer", "COPY components/tap-framer/ /build/"),
+        ] {
+            for missing in names {
+                let dir = tempfile::tempdir().unwrap();
+                let templates = dir.path().join("src/enclave-builder/templates");
+                std::fs::create_dir_all(&templates).unwrap();
+                for name in names {
+                    if name != missing {
+                        let source = templates.join(relative_source).join(name);
+                        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+                        std::fs::write(source, name).unwrap();
+                    }
                 }
+                let error = stage_sources(&templates, &dir.path().join("stage"), recipe)
+                    .await
+                    .expect_err("every selected helper source is required");
+                assert_eq!(error.path, templates.join(relative_source).join(missing));
+                assert_eq!(
+                    error
+                        .source
+                        .downcast_ref::<std::io::Error>()
+                        .unwrap()
+                        .kind(),
+                    std::io::ErrorKind::NotFound
+                );
             }
-            let error = stage_sources(
-                &templates,
-                &dir.path().join("stage"),
-                "COPY tap-framer/ /build/",
-            )
+        }
+    }
+
+    #[tokio::test]
+    async fn stages_component_from_selected_framework_not_template_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let templates = dir.path().join("selected/src/enclave-builder/templates");
+        let stage = dir.path().join("stage");
+        std::fs::create_dir_all(&templates).unwrap();
+        for name in ["Cargo.toml", "Cargo.lock", "src/main.rs", "src/vsock.rs"] {
+            for (root, contents) in [
+                (templates.join("../../tap-framer"), "selected-component"),
+                (templates.join("tap-framer"), "stale-template-copy"),
+            ] {
+                let source = root.join(name);
+                std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+                std::fs::write(source, format!("{contents}:{name}")).unwrap();
+            }
+        }
+        stage_sources(&templates, &stage, "COPY components/tap-framer/ /build/\n")
             .await
-            .expect_err("every helper source is required");
-            assert_eq!(error.path, templates.join("tap-framer").join(missing));
+            .unwrap();
+        for name in ["Cargo.toml", "Cargo.lock", "src/main.rs", "src/vsock.rs"] {
             assert_eq!(
-                error
-                    .source
-                    .downcast_ref::<std::io::Error>()
-                    .unwrap()
-                    .kind(),
-                std::io::ErrorKind::NotFound
+                std::fs::read_to_string(stage.join("components/tap-framer").join(name)).unwrap(),
+                format!("selected-component:{name}")
             );
         }
+        assert!(!stage.join("tap-framer").exists());
     }
 
     #[tokio::test]
@@ -135,36 +173,38 @@ mod tests {
 
     #[tokio::test]
     async fn exports_built_helper_beside_eif() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("eif-stage/output/tap-framer");
-        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
-        std::fs::write(
-            dir.path().join("eif-stage/Containerfile.eif"),
+        for recipe in [
             "COPY tap-framer/ /build/",
-        )
-        .unwrap();
-        std::fs::write(source, b"built helper").unwrap();
-        export_binary(dir.path(), &dir.path().join("enclave.eif"))
-            .await
-            .unwrap();
-        assert_eq!(
-            std::fs::read(dir.path().join("enclave.tap-framer")).unwrap(),
-            b"built helper"
-        );
+            "COPY components/tap-framer/ /build/",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let source = dir.path().join("eif-stage/output/tap-framer");
+            std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+            std::fs::write(dir.path().join("eif-stage/Containerfile.eif"), recipe).unwrap();
+            std::fs::write(source, b"built helper").unwrap();
+            export_binary(dir.path(), &dir.path().join("enclave.eif"))
+                .await
+                .unwrap();
+            assert_eq!(
+                std::fs::read(dir.path().join("enclave.tap-framer")).unwrap(),
+                b"built helper"
+            );
+        }
     }
 
     #[tokio::test]
     async fn missing_built_helper_fails_export() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir(dir.path().join("eif-stage")).unwrap();
-        std::fs::write(
-            dir.path().join("eif-stage/Containerfile.eif"),
+        for recipe in [
             "COPY tap-framer/ /build/",
-        )
-        .unwrap();
-        assert!(export_binary(dir.path(), &dir.path().join("enclave.eif"))
-            .await
-            .is_err());
+            "COPY components/tap-framer/ /build/",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir(dir.path().join("eif-stage")).unwrap();
+            std::fs::write(dir.path().join("eif-stage/Containerfile.eif"), recipe).unwrap();
+            assert!(export_binary(dir.path(), &dir.path().join("enclave.eif"))
+                .await
+                .is_err());
+        }
     }
 
     #[tokio::test]
