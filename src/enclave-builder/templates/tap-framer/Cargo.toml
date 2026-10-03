@@ -1,0 +1,13 @@
+[package]
+name = "tap-framer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+dterror = "0.3"
+libc = "0.2"
+thiserror = "1"
+tracing = "0.1"

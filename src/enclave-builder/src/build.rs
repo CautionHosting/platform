@@ -243,6 +243,14 @@ pub enum StageEifComponentsError {
         source: dterror::BoxError,
     },
 
+    #[error("could not stage TAP tunnel helper [{location}]")]
+    StageTapFramer {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
     #[error("could not render Containerfile.eif template [{location}]")]
     RenderContainerfile {
         #[location]
@@ -442,6 +450,10 @@ pub async fn stage_eif_components(
     )
     .await
     .with_context(Ctx::render_containerfile())?;
+
+    crate::tap_framer::stage_sources(&templates_dir, &stage_dir, &containerfile_content)
+        .await
+        .with_context(Ctx::stage_tap_framer())?;
 
     let run_sh_path = stage_dir.join("run.sh");
     fs::write(&run_sh_path, &run_sh_content)
@@ -871,6 +883,14 @@ pub enum BuildEifFromFilesystemsError {
         location: dterror::Location,
     },
 
+    #[error("could not export paired TAP tunnel helper [{location}]")]
+    ExportTapFramer {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
     #[error("failed to copy EIF from {from} to {to} [{location}]")]
     CopyEif {
         #[context(borrow = Path)]
@@ -1109,6 +1129,12 @@ pub async fn build_eif_from_filesystems(
     fs::copy(&built_eif, &output_path)
         .await
         .with_context(Ctx::copy_eif(&built_eif, &output_path))?;
+
+    if egress {
+        crate::tap_framer::export_binary(work_dir, &output_path)
+            .await
+            .with_context(Ctx::export_tap_framer())?;
+    }
 
     let built_pcrs = output_dir_absolute.join("enclave.pcrs");
     let pcrs_path = output_path.with_extension("pcrs");
@@ -2839,7 +2865,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(rendered.contains("VSOCK-CONNECT:3:3"));
+        assert!(rendered.contains("/bin/tap-framer --connect 3 3 eth0"));
+        assert!(!rendered.contains("TUN,tun-type=tap"));
         assert!(rendered.contains("nameserver 10.0.100.1"));
     }
 
@@ -2863,7 +2890,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(!rendered.contains("VSOCK-CONNECT:3:3"));
+        assert!(!rendered.contains("tap-framer"));
         assert!(!rendered.contains("udhcpc"));
         assert!(rendered.contains("nameserver 127.0.0.1"));
         assert!(rendered.contains(

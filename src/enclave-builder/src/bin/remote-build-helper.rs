@@ -75,6 +75,13 @@ enum RemoteBuildError {
         path: PathBuf,
         location: Location,
     },
+    #[error("could not export paired TAP tunnel helper [{location}]")]
+    ExportTapFramer {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
     #[error("failed to copy EIF to {} [{location}]", path.display())]
     CopyEif {
         #[context(borrow = Path)]
@@ -321,6 +328,12 @@ async fn main() -> Result<(), RemoteBuildError> {
     tokio::fs::copy(&generated_pcrs, &output_pcrs)
         .await
         .with_context(Ctx::copy_pcrs(&output_pcrs))?;
+
+    if egress {
+        enclave_builder::tap_framer::export_binary(&builder.work_dir, &output_eif)
+            .await
+            .with_context(Ctx::export_tap_framer())?;
+    }
 
     println!("EIF written to {}", output_eif.display());
     println!("PCRs written to {}", output_pcrs.display());

@@ -112,6 +112,18 @@ RUN cargo fetch --locked --target $TARGET_ARCH
 RUN cargo build --release --locked --target ${TARGET_ARCH} -p init \
       && install -D -m 0755 /build-enclave/target/${TARGET_ARCH}/release/init /binaries/init
 
+FROM pallet-rust AS tap-framer-builder
+COPY --from=ca-certificates . /
+ENV SOURCE_DATE_EPOCH=1
+ENV CARGO_HOME=/usr/local/cargo
+ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
+ENV TARGET_ARCH="x86_64-unknown-linux-musl"
+WORKDIR /build-tap-framer
+COPY tap-framer/ /build-tap-framer/
+RUN cargo fetch --locked --target $TARGET_ARCH
+RUN --network=none cargo build --release --frozen --target ${TARGET_ARCH} && \
+    install -D -m 0755 target/${TARGET_ARCH}/release/tap-framer /binaries/tap-framer
+
 FROM busybox AS eif-builder
 
 COPY --from=musl . /
@@ -130,6 +142,7 @@ WORKDIR /build
 
 COPY --from=enclave-builder /binaries/ /build/binaries/
 COPY --from=bootproof-builder /binaries/ /build/binaries/
+COPY --from=tap-framer-builder /binaries/tap-framer /build/binaries/tap-framer
 # {STEVE
 COPY --from=steve-builder /binaries/steve /build/binaries/steve
 # }STEVE
@@ -212,6 +225,8 @@ RUN cp /bin/init /build/initramfs/init && \
 
 RUN cp /build/run.sh /build/initramfs/run.sh && \
     chmod +x /build/initramfs/run.sh
+
+RUN install -m 0755 /build/binaries/tap-framer /build/initramfs/bin/tap-framer
 
 RUN cp /build/udhcpc-script.sh /build/initramfs/bin/udhcpc-script && \
     chmod +x /build/initramfs/bin/udhcpc-script
@@ -303,6 +318,7 @@ RUN eif_build \
     --cmdline "reboot=k panic=1 pci=off nomodules console=ttyS0 i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd nit.target=/run.sh"
 
 FROM scratch AS output
+COPY --from=tap-framer-builder /binaries/tap-framer /tap-framer
 COPY --from=eif-builder /build/enclave.eif /enclave.eif
 COPY --from=eif-builder /build/enclave.pcrs /enclave.pcrs
 COPY --from=eif-builder /build/rootfs.cpio.gz /rootfs.cpio.gz

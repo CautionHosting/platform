@@ -409,6 +409,13 @@ pub(crate) enum DeployNitroEnclaveError {
         #[source]
         source: BoxError,
     },
+    #[error("failed to upload paired TAP tunnel helper [{location}]")]
+    UploadTapFramer {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
     #[error("failed to upload EIF to S3 [{location}]")]
     UploadEifS3 {
         #[location]
@@ -501,6 +508,10 @@ pub async fn deploy_nitro_enclave(
             )?
         };
         dterror::ResultExt::with_context(
+            upload_tap_framer(&request, &eif_s3_path).await,
+            Ctx::upload_tap_framer(),
+        )?;
+        dterror::ResultExt::with_context(
             provision_managed_onprem(&request, &eif_s3_path, &config).await,
             Ctx::provision_managed_onprem(),
         )
@@ -526,6 +537,10 @@ pub async fn deploy_nitro_enclave(
             )
             .await,
             Ctx::upload_eif_s3(),
+        )?;
+        dterror::ResultExt::with_context(
+            upload_tap_framer(&request, &eif_s3_path).await,
+            Ctx::upload_tap_framer(),
         )?;
         dterror::ResultExt::with_context(
             provision_nitro_enclave(&request, &eif_s3_path, &config).await,
@@ -956,6 +971,35 @@ mod tests {
         assert!(norm(&main_tf).contains(r#"egress = "true""#));
     }
 
+    #[tokio::test]
+    async fn test_tunnel_upload_skips_disabled_egress() {
+        let mut request = deployment_request("/missing/enclave.eif", None);
+        request.egress = false;
+        upload_tap_framer(&request, "not-an-s3-uri").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_tunnel_upload_skips_dedicated_builder_artifacts() {
+        let mut request = deployment_request("/missing/enclave.eif", None);
+        request.egress = true;
+        request.managed_onprem = None;
+        request.eif_s3_key = Some("eifs/test.eif".to_string());
+        upload_tap_framer(&request, "s3://platform/eifs/test.eif")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_tunnel_upload_rejects_invalid_destination_before_io() {
+        let mut request = deployment_request("/missing/enclave.eif", None);
+        request.egress = true;
+        request.eif_s3_key = None;
+        assert!(matches!(
+            upload_tap_framer(&request, "not-an-s3-uri").await,
+            Err(TapFramerUploadError::InvalidDestination { .. })
+        ));
+    }
+
     #[test]
     fn test_user_data_proxy_guarded_by_egress() {
         let user_data = std::fs::read_to_string(
@@ -964,6 +1008,10 @@ mod tests {
                 .join("terraform/modules/aws/nitro-enclave/user-data.sh"),
         )
         .unwrap();
+        assert!(user_data.contains("${eif_s3_path}.tap-framer"));
+        assert!(!user_data.contains("VSOCK-LISTEN:3,"));
+        assert!(user_data.contains("/usr/local/bin/tap-framer --listen 3 enclave0"));
+        assert!(!user_data.contains("TUN,tun-type=tap"));
         let needle = "Setting up vsock network proxy for enclave";
         let egress_if = r#"%{ if egress == "true" ~}"#;
         let if_pos = user_data.find(egress_if).expect("egress guard present");
@@ -1912,6 +1960,105 @@ pub(crate) enum UploadEifToS3Error {
         #[source]
         source: BoxError,
     },
+}
+
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+enum TapFramerUploadError {
+    #[error("invalid tunnel artifact destination [{location}]")]
+    InvalidDestination { location: dterror::Location },
+    #[error("could not transfer tunnel artifact '{artifact}' [{location}]")]
+    Transfer {
+        #[context(borrow = str)]
+        artifact: String,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
+async fn upload_tap_framer(
+    request: &NitroDeploymentRequest,
+    destination_eif: &str,
+) -> std::result::Result<(), TapFramerUploadError> {
+    use dterror::ResultExt;
+    use TapFramerUploadErrorCtx as Ctx;
+    if !request.egress {
+        return Ok(());
+    }
+    if request.eif_s3_key.is_some()
+        && (request.managed_onprem.is_none()
+            || request.managed_onprem.as_ref().is_some_and(|managed| {
+                managed_onprem_uses_direct_customer_bucket(request, managed)
+            }))
+    {
+        return Ok(());
+    }
+    let (bucket, key) = destination_eif
+        .strip_prefix("s3://")
+        .and_then(|path| path.split_once('/'))
+        .filter(|(bucket, key)| !bucket.is_empty() && !key.is_empty())
+        .ok_or_else(|| TapFramerUploadError::InvalidDestination {
+            location: std::panic::Location::caller(),
+        })?;
+    let key = format!("{key}.tap-framer");
+    let platform_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .load()
+        .await;
+    let body = if let Some(source_key) = &request.eif_s3_key {
+        let source_bucket = std::env::var("EIF_S3_BUCKET")
+            .unwrap_or_else(|_| format!("caution-eif-storage-{}", request.aws_account_id));
+        let source_key = format!("{source_key}.tap-framer");
+        let object = ResultExt::with_context(
+            aws_sdk_s3::Client::new(&platform_config)
+                .get_object()
+                .bucket(source_bucket)
+                .key(&source_key)
+                .send()
+                .await,
+            Ctx::transfer(&source_key),
+        )?;
+        ResultExt::with_context(object.body.collect().await, Ctx::transfer(&source_key))?
+            .into_bytes()
+            .into()
+    } else {
+        let path = Path::new(&request.eif_path).with_extension("tap-framer");
+        ResultExt::with_context(
+            aws_sdk_s3::primitives::ByteStream::from_path(path).await,
+            Ctx::transfer(&request.eif_path),
+        )?
+    };
+    let config = if let Some(credentials) = request
+        .credentials
+        .as_ref()
+        .filter(|_| request.managed_onprem.is_some())
+    {
+        aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new(credentials.region.clone()))
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                &credentials.access_key_id,
+                &credentials.secret_access_key,
+                None,
+                None,
+                "caution-managed-onprem",
+            ))
+            .load()
+            .await
+    } else {
+        platform_config
+    };
+    ResultExt::with_context(
+        aws_sdk_s3::Client::new(&config)
+            .put_object()
+            .bucket(bucket)
+            .key(&key)
+            .body(body)
+            .send()
+            .await,
+        Ctx::transfer(&key),
+    )?;
+    Ok(())
 }
 
 #[tracing::instrument(skip_all, err)]
