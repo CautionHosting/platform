@@ -24,8 +24,9 @@ use crate::{
 const REMOTE_BUILDER_HELPER: &str = "remote-build-helper";
 const MANAGED_ONPREM_DEPLOYMENT_TAG_KEY: &str = "caution:deployment-id";
 
+/// Stable identity of the platform database that launched the builder.
+const PLATFORM_ID_TAG: &str = "caution:platform-id";
 /// Tag key on EC2 instances holding the UUID of the owning organization.
-/// Build runners are tagged with their owning organization at launch.
 const ORG_ID_TAG: &str = "org_id";
 /// Tag key marking the entity that created an EC2 instance.
 const MANAGED_BY_TAG: &str = "ManagedBy";
@@ -123,6 +124,7 @@ impl BuilderSizesConfig {
 /// Configuration for the builder infrastructure.
 #[derive(Clone, Debug)]
 pub struct BuilderConfig {
+    pub platform_id: Uuid,
     pub ami_id: String,
     pub security_group_id: String,
     pub subnet_id: String,
@@ -152,9 +154,30 @@ pub enum BuilderConfigFromEnvError {
 }
 
 impl BuilderConfig {
-    pub fn from_env() -> Result<Self, BuilderConfigFromEnvError> {
+    fn instance_tags(&self, org_id: Uuid, build_id: Uuid) -> Vec<(String, String)> {
+        let mut tags = vec![
+            (
+                NAME_TAG.to_owned(),
+                format!("{BUILDER_NAME_PREFIX}{}", &build_id.to_string()[..8]),
+            ),
+            (ORG_ID_TAG.to_owned(), org_id.to_string()),
+            (MANAGED_BY_TAG.to_owned(), MANAGED_BY_BUILDER.to_owned()),
+            (BUILD_ID_TAG.to_owned(), build_id.to_string()),
+            (PLATFORM_ID_TAG.to_owned(), self.platform_id.to_string()),
+        ];
+        tags.extend(
+            self.additional_instance_tags
+                .iter()
+                .filter(|(key, _)| key != PLATFORM_ID_TAG && key != MANAGED_BY_TAG)
+                .cloned(),
+        );
+        tags
+    }
+
+    pub fn from_env(platform_id: Uuid) -> Result<Self, BuilderConfigFromEnvError> {
         let region = std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string());
         Ok(Self {
+            platform_id,
             ami_id: std::env::var("BUILDER_AMI_ID").map_err(|_| {
                 BuilderConfigFromEnvError::MissingAmiId {
                     location: std::panic::Location::caller(),
@@ -294,6 +317,7 @@ pub fn build_managed_onprem_builder_config(
     instance_profile: String,
 ) -> BuilderConfig {
     BuilderConfig {
+        platform_id: default_config.platform_id,
         ami_id,
         security_group_id,
         subnet_id,
@@ -942,16 +966,7 @@ pub async fn execute_remote_build(
         &helper_artifact.sha256,
     )
     .with_context(Ctx::generate_user_data())?;
-    let mut instance_tags = vec![
-        (
-            "Name".to_string(),
-            format!("caution-builder-{}", &build_id.to_string()[..8]),
-        ),
-        ("org_id".to_string(), request.org_id.to_string()),
-        ("ManagedBy".to_string(), "caution-builder".to_string()),
-        ("BuildId".to_string(), build_id.to_string()),
-    ];
-    instance_tags.extend(config.additional_instance_tags.clone());
+    let instance_tags = config.instance_tags(request.org_id, build_id);
     let instance_id = match ec2
         .run_instances(&RunInstancesParams {
             image_id: config.ami_id.clone(),
@@ -1758,11 +1773,17 @@ async fn bill_builder_usage(
     );
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn reap_orphaned_builders(
     db: &PgPool,
     ec2: &Ec2Client,
+    platform_id: Uuid,
     instance_pricing: impl Fn(&str) -> Option<AppliedPricing>,
 ) {
+    if platform_id.is_nil() {
+        tracing::error!("Refusing builder cleanup without a platform identity");
+        return;
+    }
     let rows = match sqlx::query_as::<_, (Uuid, Option<String>, Uuid, Option<Uuid>, Option<String>, Option<chrono::DateTime<chrono::Utc>>, String)>(
         "SELECT id, builder_instance_id, organization_id, app_id, builder_instance_type, started_at, status FROM eif_builds
          WHERE created_at < NOW() - INTERVAL '30 minutes'"
@@ -1778,6 +1799,31 @@ pub async fn reap_orphaned_builders(
 
     let mut orphaned_per_org: HashMap<Uuid, usize> = HashMap::new();
     for (build_id, instance_id, org_id, app_id, instance_type, started_at, status) in rows {
+        let owned_instance_exists = if let Some(iid) = &instance_id {
+            match ec2
+                .describe_instances(&[Filter::new("instance-id", &[iid.as_str()])])
+                .await
+            {
+                Ok(instances) => match instances
+                    .iter()
+                    .find(|instance| &instance.instance_id == iid)
+                {
+                    Some(instance) if is_caution_builder(&instance.tags, platform_id) => true,
+                    Some(_) => {
+                        tracing::warn!(instance_id = %iid, "Skipping builder without matching platform ownership");
+                        continue;
+                    }
+                    None => false,
+                },
+                Err(error) => {
+                    tracing::error!(instance_id = %iid, %error, "Could not verify builder ownership");
+                    continue;
+                }
+            }
+        } else {
+            false
+        };
+
         // Every build older than 30 minutes is a candidate regardless of build
         // status: a builder instance can be left behind by a timeout, a
         // failure, or even a successful build. Only builds still stuck in
@@ -1791,25 +1837,38 @@ pub async fn reap_orphaned_builders(
                 instance_id
             );
 
-            if let Some(ref iid) = instance_id {
-                // Check if this builder was tracked by the metering collection loop
-                let was_tracked: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM tracked_resources WHERE resource_id = $1)",
+            if let Some(iid) = &instance_id {
+                // A disappeared instance still needs its local meter stopped.
+                // Foreign/untagged instances and failed lookups were skipped above.
+                let was_tracked: bool = match sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM tracked_resources WHERE resource_id = $1 AND organization_id = $2)",
                 )
                 .bind(iid)
+                .bind(org_id)
                 .fetch_one(db)
-                .await
-                .unwrap_or(false);
+                .await {
+                    Ok(tracked) => tracked,
+                    Err(error) => {
+                        tracing::error!(instance_id = %iid, %error, "Could not verify builder metering");
+                        continue;
+                    }
+                };
 
                 if was_tracked {
-                    // Stop metering — the collection loop already billed for runtime
-                    let _ = sqlx::query(
-                        "UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW() WHERE resource_id = $1 AND status = 'running'"
+                    // Stop the meter before timing out the build so failures retry.
+                    if let Err(error) = sqlx::query(
+                        "UPDATE tracked_resources SET status = 'stopped', stopped_at = NOW() WHERE resource_id = $1 AND organization_id = $2 AND status = 'running'"
                     )
                     .bind(iid)
+                    .bind(org_id)
                     .execute(db)
-                    .await;
-                } else if let (Some(itype), Some(started)) = (&instance_type, started_at) {
+                    .await {
+                        tracing::error!(instance_id = %iid, %error, "Could not stop builder metering");
+                        continue;
+                    }
+                } else if owned_instance_exists
+                    && let (Some(itype), Some(started)) = (&instance_type, started_at)
+                {
                     // Fallback: metering tracking failed, bill directly for the full duration
                     if let Some(pricing) = instance_pricing(itype) {
                         bill_builder_usage(
@@ -1836,33 +1895,10 @@ pub async fn reap_orphaned_builders(
             .await;
         }
 
-        // Terminate the builder only if the instance still exists; a build in
-        // a terminal state, or one reaped on an earlier pass, has no instance
-        // left to clean up.
-        let Some(iid) = instance_id else { continue };
-        let still_exists = match ec2
-            .describe_instances(&[Filter::new("instance-id", &[iid.as_str()])])
-            .await
-        {
-            Ok(instances) => !instances.is_empty(),
-            Err(e) => {
-                tracing::error!(
-                    "Failed to check instance {} existence for build {}: {}",
-                    iid,
-                    build_id,
-                    e
-                );
-                continue;
-            }
-        };
-        if !still_exists {
-            tracing::debug!(
-                "Skipping build {} (instance {} no longer exists)",
-                build_id,
-                iid
-            );
+        if !owned_instance_exists {
             continue;
         }
+        let Some(iid) = instance_id else { continue };
 
         *orphaned_per_org.entry(org_id).or_default() += 1;
         if let Err(e) = ec2.terminate_instances(std::slice::from_ref(&iid)).await {
@@ -1888,19 +1924,17 @@ pub async fn reap_orphaned_builders(
     }
 }
 
-/// Whether an EC2 instance's tags identify it as a Caution build machine.
-///
-/// Builders launched by [`execute_remote_build`] carry `ManagedBy:
-/// caution-builder`, a `BuildId` tag, and a `Name` tag prefixed with
-/// `caution-builder-`. Any of the three markers is sufficient, mirroring the
-/// drift detector's builder classification.
-fn is_caution_builder(tags: &HashMap<String, String>) -> bool {
-    tags.get(MANAGED_BY_TAG)
-        .is_some_and(|value| value == MANAGED_BY_BUILDER)
-        || tags.contains_key(BUILD_ID_TAG)
-        || tags
-            .get(NAME_TAG)
-            .is_some_and(|value| value.starts_with(BUILDER_NAME_PREFIX))
+/// Require explicit builder and platform ownership; names and build IDs alone
+/// are not authority to delete an instance. Legacy untagged builders are skipped.
+#[tracing::instrument(skip_all)]
+fn is_caution_builder(tags: &HashMap<String, String>, platform_id: Uuid) -> bool {
+    !platform_id.is_nil()
+        && tags
+            .get(PLATFORM_ID_TAG)
+            .is_some_and(|value| value == &platform_id.to_string())
+        && tags
+            .get(MANAGED_BY_TAG)
+            .is_some_and(|value| value == MANAGED_BY_BUILDER)
 }
 
 /// Whether an instance's `org_id` tag names one of the active organizations.
@@ -1917,7 +1951,9 @@ fn attached_to_active_org(tags: &HashMap<String, String>, active_orgs: &HashSet<
 /// Terminate build machines running with no organization attached.
 ///
 /// Build runners are tagged with their owning organization (`org_id`) at
-/// launch, so a running instance recognized as a Caution builder whose
+/// launch. Only builders explicitly tagged with this platform identity are
+/// candidates; legacy untagged and foreign resources are never adopted. Within
+/// that boundary, a running instance recognized as a Caution builder whose
 /// `org_id` tag is missing, unparseable, or names an organization that no
 /// longer exists is a leak (typically a manually launched instance or one
 /// stranded by a failed launch). This complements [`reap_orphaned_builders`]:
@@ -1933,7 +1969,12 @@ fn attached_to_active_org(tags: &HashMap<String, String>, active_orgs: &HashSet<
 /// are left for [`reap_orphaned_builders`]: terminating them here would
 /// strand the `eif_builds` row in `building` and wedge the app's build slot
 /// until the timeout reaper runs.
-pub async fn reap_unattributed_builders(db: &PgPool, ec2: &Ec2Client) {
+#[tracing::instrument(skip_all)]
+pub async fn reap_unattributed_builders(db: &PgPool, ec2: &Ec2Client, platform_id: Uuid) {
+    if platform_id.is_nil() {
+        tracing::error!("Refusing builder cleanup without a platform identity");
+        return;
+    }
     let active_orgs: HashSet<Uuid> =
         match sqlx::query_scalar("SELECT id FROM organizations WHERE is_active = true")
             .fetch_all(db)
@@ -2015,7 +2056,13 @@ pub async fn reap_unattributed_builders(db: &PgPool, ec2: &Ec2Client) {
     for region in regions {
         tracing::debug!(region, "Searching for instances");
         let region_ec2 = ec2.for_region(&region);
-        let instances = match region_ec2.describe_instances(&[]).await {
+        let instances = match region_ec2
+            .describe_instances(&[
+                Filter::new("tag:caution:platform-id", &[&platform_id.to_string()]),
+                Filter::new("tag:ManagedBy", &[MANAGED_BY_BUILDER]),
+            ])
+            .await
+        {
             Ok(instances) => instances,
             Err(e) => {
                 tracing::error!(
@@ -2033,7 +2080,7 @@ pub async fn reap_unattributed_builders(db: &PgPool, ec2: &Ec2Client) {
                 region,
                 instance.tags.get(ORG_ID_TAG)
             );
-            if !is_caution_builder(&instance.tags) {
+            if !is_caution_builder(&instance.tags, platform_id) {
                 continue;
             }
             if attached_to_active_org(&instance.tags, &active_orgs) {
@@ -2271,42 +2318,29 @@ mod tests {
     }
 
     #[test]
-    fn test_is_caution_builder_recognizes_launch_tags() {
-        let launch_tags = tags(&[
-            ("Name", "caution-builder-12345678"),
-            ("org_id", "550e8400-e29b-41d4-a716-446655440000"),
-            ("ManagedBy", "caution-builder"),
-            ("BuildId", "12345678-1234-1234-1234-123456789abc"),
+    fn test_builder_ownership_requires_both_explicit_tags() {
+        let platform_id = Uuid::new_v4();
+        let mut owned = tags(&[
+            (PLATFORM_ID_TAG, &platform_id.to_string()),
+            (MANAGED_BY_TAG, MANAGED_BY_BUILDER),
         ]);
-
-        assert!(is_caution_builder(&launch_tags));
-    }
-
-    #[test]
-    fn test_is_caution_builder_requires_caution_marker() {
-        let unrelated = tags(&[
-            ("Name", "web-1"),
-            ("ManagedBy", "CloudFormation"),
-            ("org_id", "550e8400-e29b-41d4-a716-446655440000"),
-        ]);
-
-        assert!(!is_caution_builder(&unrelated));
-        assert!(!is_caution_builder(&HashMap::new()));
-    }
-
-    #[test]
-    fn test_is_caution_builder_accepts_each_marker_independently() {
-        let by_managed_by = tags(&[("ManagedBy", "caution-builder")]);
-        let by_build_id = tags(&[("BuildId", "b-123")]);
-        let by_name_prefix = tags(&[("Name", "caution-builder-abc12345")]);
-        let foreign_managed_by = tags(&[("ManagedBy", "CloudFormation")]);
-        let non_prefixed_name = tags(&[("Name", "caution-builder")]);
-
-        assert!(is_caution_builder(&by_managed_by));
-        assert!(is_caution_builder(&by_build_id));
-        assert!(is_caution_builder(&by_name_prefix));
-        assert!(!is_caution_builder(&foreign_managed_by));
-        assert!(!is_caution_builder(&non_prefixed_name));
+        assert!(is_caution_builder(&owned, platform_id));
+        assert!(!is_caution_builder(&owned, Uuid::new_v4()));
+        assert!(!is_caution_builder(&owned, Uuid::nil()));
+        owned.remove(PLATFORM_ID_TAG);
+        owned.insert(BUILD_ID_TAG.to_owned(), Uuid::new_v4().to_string());
+        owned.insert(NAME_TAG.to_owned(), "caution-builder-12345678".to_owned());
+        assert!(!is_caution_builder(&owned, platform_id));
+        for invalid in ["", "not-a-uuid"] {
+            owned.insert(PLATFORM_ID_TAG.to_owned(), invalid.to_owned());
+            assert!(!is_caution_builder(&owned, platform_id));
+        }
+        owned.insert(PLATFORM_ID_TAG.to_owned(), platform_id.to_string());
+        owned.remove(MANAGED_BY_TAG);
+        assert!(!is_caution_builder(&owned, platform_id));
+        owned.insert(MANAGED_BY_TAG.to_owned(), "CloudFormation".to_owned());
+        assert!(!is_caution_builder(&owned, platform_id));
+        assert!(!is_caution_builder(&HashMap::new(), platform_id));
     }
 
     #[test]
@@ -2803,6 +2837,7 @@ mod tests {
     #[test]
     fn test_build_managed_onprem_builder_config_uses_customer_settings() {
         let default_config = BuilderConfig {
+            platform_id: Uuid::new_v4(),
             ami_id: "ami-platform".to_string(),
             security_group_id: "sg-platform".to_string(),
             subnet_id: "subnet-platform".to_string(),
@@ -2835,6 +2870,19 @@ mod tests {
             "builder-profile".to_string(),
         );
 
+        assert_eq!(resolved.platform_id, default_config.platform_id);
+        let instance_tags: HashMap<_, _> = resolved
+            .instance_tags(Uuid::new_v4(), Uuid::new_v4())
+            .into_iter()
+            .collect();
+        assert!(is_caution_builder(
+            &instance_tags,
+            default_config.platform_id
+        ));
+        assert_eq!(
+            instance_tags.get(MANAGED_ONPREM_DEPLOYMENT_TAG_KEY),
+            Some(&managed_onprem.deployment_id)
+        );
         assert_eq!(resolved.ami_id, "ami-customer");
         assert_eq!(resolved.security_group_id, "sg-customer");
         assert_eq!(resolved.subnet_id, "subnet-customer");
@@ -2848,6 +2896,22 @@ mod tests {
                 "dep-123".to_string(),
             )]
         );
+        let mut conflicting = resolved;
+        conflicting.additional_instance_tags.extend([
+            (PLATFORM_ID_TAG.to_owned(), Uuid::new_v4().to_string()),
+            (MANAGED_BY_TAG.to_owned(), "foreign-manager".to_owned()),
+        ]);
+        let launch_tags = conflicting.instance_tags(Uuid::new_v4(), Uuid::new_v4());
+        for key in [PLATFORM_ID_TAG, MANAGED_BY_TAG] {
+            assert_eq!(
+                launch_tags.iter().filter(|(name, _)| name == key).count(),
+                1
+            );
+        }
+        assert!(is_caution_builder(
+            &launch_tags.into_iter().collect(),
+            conflicting.platform_id
+        ));
     }
 
     // --- generate_builder_userdata ---
@@ -2855,6 +2919,7 @@ mod tests {
     #[test]
     fn test_userdata_contains_required_sections() {
         let config = BuilderConfig {
+            platform_id: Uuid::new_v4(),
             ami_id: "ami-test".to_string(),
             security_group_id: "sg-test".to_string(),
             subnet_id: "subnet-test".to_string(),
@@ -3065,6 +3130,7 @@ mod tests {
     #[test]
     fn test_userdata_uses_resolved_containerfile() {
         let config = BuilderConfig {
+            platform_id: Uuid::new_v4(),
             ami_id: "ami-test".to_string(),
             security_group_id: "sg-test".to_string(),
             subnet_id: "subnet-test".to_string(),
@@ -3124,6 +3190,7 @@ mod tests {
     #[test]
     fn test_userdata_uses_explicit_custom_containerfile() {
         let config = BuilderConfig {
+            platform_id: Uuid::new_v4(),
             ami_id: "ami-test".to_string(),
             security_group_id: "sg-test".to_string(),
             subnet_id: "subnet-test".to_string(),
@@ -3182,6 +3249,7 @@ mod tests {
     #[test]
     fn test_userdata_has_no_user_build_command() {
         let config = BuilderConfig {
+            platform_id: Uuid::new_v4(),
             ami_id: "ami-test".to_string(),
             security_group_id: "sg-test".to_string(),
             subnet_id: "subnet-test".to_string(),
@@ -3246,6 +3314,7 @@ mod tests {
     #[test]
     fn test_userdata_rejects_unsafe_containerfile_path() {
         let config = BuilderConfig {
+            platform_id: Uuid::new_v4(),
             ami_id: "ami-test".to_string(),
             security_group_id: "sg-test".to_string(),
             subnet_id: "subnet-test".to_string(),
@@ -3308,6 +3377,7 @@ mod tests {
     #[test]
     fn test_userdata_size_under_16kb_limit() {
         let config = BuilderConfig {
+            platform_id: Uuid::new_v4(),
             ami_id: "ami-test".to_string(),
             security_group_id: "sg-test".to_string(),
             subnet_id: "subnet-test".to_string(),
@@ -3412,6 +3482,7 @@ mod tests {
     #[test]
     fn test_xwing_userdata_carries_suite_to_helper_and_manifest() {
         let config = BuilderConfig {
+            platform_id: Uuid::new_v4(),
             ami_id: "ami-test".to_string(),
             security_group_id: "sg-test".to_string(),
             subnet_id: "subnet-test".to_string(),
@@ -3447,6 +3518,7 @@ mod tests {
     #[test]
     fn test_build_script_sets_caution_egress() {
         let config = BuilderConfig {
+            platform_id: Uuid::new_v4(),
             ami_id: "ami-test".to_string(),
             security_group_id: "sg-test".to_string(),
             subnet_id: "subnet-test".to_string(),
@@ -3474,6 +3546,7 @@ mod tests {
     #[test]
     fn test_tls_userdata_pins_platform_commit_in_manifest() {
         let config = BuilderConfig {
+            platform_id: Uuid::new_v4(),
             ami_id: "ami-test".to_string(),
             security_group_id: "sg-test".to_string(),
             subnet_id: "subnet-test".to_string(),

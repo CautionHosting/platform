@@ -39,6 +39,7 @@ mod metering;
 mod middleware;
 mod onboarding;
 mod organizations;
+mod platform_identity;
 mod provisioning;
 mod resources;
 mod subscriptions;
@@ -4870,6 +4871,14 @@ async fn reconcile_managed_dns(state: Arc<AppState>, managed_dns: managed_dns::M
 /// Failure modes for the process entry point [`main`].
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum MainError {
+    #[error("could not load platform identity [{location}]")]
+    PlatformIdentity {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
     #[error("could not connect to the database [{location}]")]
     DatabaseConnect {
         #[location]
@@ -4972,6 +4981,10 @@ async fn main() -> Result<(), MainError> {
         .with_context(Ctx::database_connect())?;
 
     info!("Connected to database");
+    let platform_id = platform_identity::load(&pool)
+        .await
+        .with_context(Ctx::platform_identity())?;
+    info!(%platform_id, "Loaded platform identity");
 
     let encryptor = match encryption::Encryptor::from_env() {
         Ok(e) => {
@@ -5025,8 +5038,8 @@ async fn main() -> Result<(), MainError> {
     let builder_sizes =
         builder::BuilderSizesConfig::load().with_context(Ctx::builder_sizes_load())?;
 
-    let builder_config =
-        builder::BuilderConfig::from_env().with_context(Ctx::builder_config_from_env())?;
+    let builder_config = builder::BuilderConfig::from_env(platform_id)
+        .with_context(Ctx::builder_config_from_env())?;
     info!("Dedicated builder enabled");
 
     let eif_cache_size_gb: u64 = std::env::var("EIF_CACHE_SIZE_GB")
@@ -5311,11 +5324,19 @@ async fn main() -> Result<(), MainError> {
                 region: std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()),
             };
             let ec2 = crate::ec2::Ec2Client::new(&platform_creds);
-            builder::reap_orphaned_builders(&reaper_state.db, &ec2, |itype| {
-                reaper_state.pricing.instance_pricing(itype)
-            })
+            builder::reap_orphaned_builders(
+                &reaper_state.db,
+                &ec2,
+                reaper_state.builder_config.platform_id,
+                |itype| reaper_state.pricing.instance_pricing(itype),
+            )
             .await;
-            builder::reap_unattributed_builders(&reaper_state.db, &ec2).await;
+            builder::reap_unattributed_builders(
+                &reaper_state.db,
+                &ec2,
+                reaper_state.builder_config.platform_id,
+            )
+            .await;
             tokio::time::sleep(std::time::Duration::from_secs(300)).await;
         }
     });
