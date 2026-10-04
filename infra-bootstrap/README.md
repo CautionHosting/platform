@@ -13,8 +13,15 @@ Run this once per AWS account you want to deploy into.
 ## Prerequisites
 
 - **AWS admin credentials** for the target account
-- **AWS CLI** installed and configured
+- **AWS CLI v2** installed and configured (`aws login` requires v2.32.0 or newer)
 - **OpenTofu** or **Terraform** installed (only needed for this bootstrap step; the platform containers include OpenTofu)
+- **jq** for the entrypoint's JSON output handling (included in the bootstrap container)
+
+The bootstrap requires AWS provider **6.22.1 or newer within v6**, which supports
+native `aws login` profiles. After upgrading an existing checkout from provider
+v5, run `tofu init -upgrade` (or `terraform init -upgrade`) and review the plan
+before applying it to existing infrastructure. Do not delete or replace existing
+bootstrap state to resolve authentication problems.
 
 ### Verify Prerequisites
 
@@ -69,10 +76,42 @@ caution-eif-storage-123456789012
 ### Option 1: Using entrypoint script
 
 ```bash
-./entrypoint.sh
+./entrypoint.sh plan \
+  -var="state_bucket_name=caution-terraform-state-123456789012" \
+  -var="eif_bucket_name=caution-eif-storage-123456789012"
+
+./entrypoint.sh apply \
+  -var="state_bucket_name=caution-terraform-state-123456789012" \
+  -var="eif_bucket_name=caution-eif-storage-123456789012"
 ```
 
-The script will check prerequisites, initialize Terraform, show the plan, and ask for confirmation.
+`plan` never applies changes. `apply` (the default command) asks for confirmation
+and applies the saved plan, including the supplied `-var` and `-var-file` values.
+Use the correct AWS account and the existing bootstrap working directory/state.
+This is account-level bootstrap, not an isolated per-developer environment:
+builder IAM names are currently shared within an account.
+
+For native login, authenticate on the host and select that profile:
+
+```bash
+aws login --profile dev
+AWS_PROFILE=dev ./entrypoint.sh plan -var-file=dev.tfvars
+# Alternatively, build/run the bootstrap tools in Docker:
+AWS_PROFILE=dev ./run.sh plan -var-file=dev.tfvars
+```
+
+The Docker wrapper mounts host AWS configuration read-only and the native login
+cache read-write so the SDK can refresh it. It forwards static/session credential
+environment variables when supplied; do not mix them with an unrelated profile.
+The container runs with your host UID/GID so generated state, plans, and private
+exports remain readable by you without making credentials world-readable.
+Rebuild with `docker build -t infra-bootstrap -f Containerfile .` after updating the container or
+entrypoint. Cached credentials are still sensitive; do not commit them.
+
+Successful apply writes private `outputs.json` and `aws-credentials.env` files,
+without printing secret keys. No access key is created unless explicitly requested.
+Bucket checks use the bootstrap identity, not a mixture of new service keys and
+the bootstrap session token.
 
 ### Option 2: Direct Terraform/OpenTofu
 
@@ -122,14 +161,15 @@ The builder subnet should already have the outbound connectivity your builders n
 
 ## 3. Configure the platform
 
-Go back to the root of the project and set up the `.env` file using the credentials from the bootstrap output:
+Return to the repository root and install the user service units and configuration
+examples. Setup preserves existing configuration and does not start services:
 
 ```bash
 cd ..
-cp env.example .env
+make setup
 ```
 
-Set these values in `.env`. By default bootstrap does not create or rotate a
+Set these values in `$HOME/.config/caution/.env`. By default bootstrap does not create or rotate a
 platform access key; continue using the operationally managed credentials
 already deployed to the service. For a first-time installation only, pass
 `-var="create_platform_access_key=true"` and securely capture the sensitive

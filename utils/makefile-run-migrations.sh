@@ -1,6 +1,7 @@
 : "${MIGRATION_DB_HOST:=postgres}"
-: "${MIGRATION_DB_USER:=postgres}"
-: "${MIGRATION_DB_NAME:=caution}"
+: "${MIGRATION_DB_USER:=${POSTGRES_USER:-postgres}}"
+: "${MIGRATION_DB_NAME:=${POSTGRES_DB:-caution}}"
+export PGPASSWORD="${PGPASSWORD:-${POSTGRES_PASSWORD:-}}"
 
 for migration in /migrations/*.sql; do
 	psql -v ON_ERROR_STOP=1 \

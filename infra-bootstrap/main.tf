@@ -6,8 +6,9 @@ terraform {
 
   required_providers {
     aws = {
+      # Native `aws login` support requires AWS SDK config v1.32.0 or newer.
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = ">= 6.22.1, < 7.0"
     }
   }
 }
@@ -548,6 +549,11 @@ output "iam_user_name" {
 output "policy_arn" {
   description = "ARN of the deploy policy"
   value       = aws_iam_policy.platform_deploy.arn
+}
+
+output "aws_region" {
+  description = "AWS region used for bootstrap resources"
+  value       = var.aws_region
 }
 
 output "aws_access_key_id" {

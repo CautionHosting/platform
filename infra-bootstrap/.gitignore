@@ -1,0 +1,6 @@
+# Bootstrap artifacts may contain credentials or sensitive Terraform values.
+/outputs.json
+/aws-credentials.env
+/tfplan
+/.outputs.json.*
+/.aws-credentials.env.*

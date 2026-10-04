@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y \
     gnupg \
     git \
     bash \
+    jq \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -25,7 +26,7 @@ RUN aws --version && tofu --version
 
 WORKDIR /workspace
 
-COPY main.tf variables.tf ./
+COPY main.tf variables.tf .terraform.lock.hcl ./
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
