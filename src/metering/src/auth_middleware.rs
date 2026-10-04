@@ -17,7 +17,7 @@ pub(crate) enum LoadSecretError {
     Missing { location: dterror::Location },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) fn load_internal_service_secret() -> Result<String, LoadSecretError> {
     std::env::var("INTERNAL_SERVICE_SECRET")
         .ok()

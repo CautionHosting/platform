@@ -518,14 +518,14 @@ pub enum SessionAuthError {
 
 impl IntoResponse for SessionAuthError {
     fn into_response(self) -> Response {
-        match self {
+        let (status, body) = match &self {
             Self::MissingSessionId { .. } | Self::InvalidSession { .. } => {
                 tracing::debug!(?self, "Login session missing/invalid");
-                (StatusCode::UNAUTHORIZED, "authentication required").into_response()
+                (StatusCode::UNAUTHORIZED, "authentication required")
             }
             Self::Csrf { .. } => {
                 tracing::warn!(?self, "CSRF validation failed");
-                (StatusCode::FORBIDDEN, "Request validation failed").into_response()
+                (StatusCode::FORBIDDEN, "Request validation failed")
             }
             Self::SessionValidation { .. } | Self::UserLookup { .. } => {
                 tracing::error!(?self, "Session auth lookup failed");
@@ -533,14 +533,14 @@ impl IntoResponse for SessionAuthError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "An internal error occurred",
                 )
-                    .into_response()
             }
-        }
+        };
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
 #[allow(clippy::result_large_err)]
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn fido2_auth_middleware(
     State(state): State<AppState>,
     mut req: Request,
@@ -641,8 +641,8 @@ pub enum UsernameGateError {
 
 impl IntoResponse for UsernameGateError {
     fn into_response(self) -> Response {
-        match self {
-            Self::UsernameRequired { .. } => (
+        let (status, body) = match &self {
+            Self::UsernameRequired { .. } => return (
                 StatusCode::FORBIDDEN,
                 axum::Json(serde_json::json!({ "error": "username_required" })),
             )
@@ -653,9 +653,9 @@ impl IntoResponse for UsernameGateError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "An internal error occurred",
                 )
-                    .into_response()
             }
-        }
+        };
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
@@ -667,7 +667,7 @@ impl IntoResponse for UsernameGateError {
 /// applies uniformly to web, CLI, and QR clients since it's enforced at the
 /// gateway rather than in UI.
 #[allow(clippy::result_large_err)]
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn username_claim_gate_middleware(
     State(state): State<AppState>,
     req: Request,
@@ -803,7 +803,7 @@ fn ssh_signed_request_error_response(error: VerifySshSignedRequestError) -> Resp
     error.into_response()
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn verify_ssh_signed_request(
     state: &AppState,
     req: Request,
@@ -1108,70 +1108,98 @@ impl IntoResponse for Fido2SignError {
             Self::SshSigned { source, .. } => ssh_signed_request_error_response(source),
             Self::InvalidChallengeId { .. } => {
                 tracing::debug!(?self, "Signed request: invalid challenge ID header");
-                (StatusCode::BAD_REQUEST, "Invalid challenge ID header").into_response()
+                sentry_middleware::error_response(
+                    StatusCode::BAD_REQUEST,
+                    "Invalid challenge ID header",
+                    self,
+                )
             }
             Self::SignatureRequired { .. } => {
                 tracing::debug!(?self, "Signed request: signature required");
-                (
+                sentry_middleware::error_response(
                     StatusCode::FORBIDDEN,
                     "This operation requires signature verification",
+                    self,
                 )
-                    .into_response()
             }
             Self::MissingResponseHeader { .. } => {
                 tracing::debug!(?self, "Signed request: missing response header");
-                (StatusCode::BAD_REQUEST, "Missing FIDO2 response header").into_response()
+                sentry_middleware::error_response(
+                    StatusCode::BAD_REQUEST,
+                    "Missing FIDO2 response header",
+                    self,
+                )
             }
             Self::InvalidResponseBase64 { .. } | Self::InvalidResponseFormat { .. } => {
                 tracing::warn!(?self, "Signed request: malformed response");
-                (StatusCode::BAD_REQUEST, "Invalid FIDO response format").into_response()
+                sentry_middleware::error_response(
+                    StatusCode::BAD_REQUEST,
+                    "Invalid FIDO response format",
+                    self,
+                )
             }
             Self::ChallengeNotFound { .. } | Self::ChallengeExpired { .. } => {
                 tracing::debug!(?self, "Signed request: challenge missing or expired");
-                (StatusCode::UNAUTHORIZED, "Invalid or expired challenge").into_response()
+                sentry_middleware::error_response(
+                    StatusCode::UNAUTHORIZED,
+                    "Invalid or expired challenge",
+                    self,
+                )
             }
             Self::RequestMismatch { .. } => {
                 tracing::error!(?self, "Signed request: request/challenge mismatch");
-                (
+                sentry_middleware::error_response(
                     StatusCode::FORBIDDEN,
                     "Request does not match signed challenge",
+                    self,
                 )
-                    .into_response()
             }
             Self::ReadBody { .. } => {
                 tracing::warn!(?self, "Signed request: could not read body");
-                (StatusCode::BAD_REQUEST, "Failed to read body").into_response()
+                sentry_middleware::error_response(
+                    StatusCode::BAD_REQUEST,
+                    "Failed to read body",
+                    self,
+                )
             }
             Self::BodyHashMismatch { .. } => {
                 tracing::error!(?self, "Signed request: body hash mismatch");
-                (StatusCode::FORBIDDEN, "Body does not match signed hash").into_response()
+                sentry_middleware::error_response(
+                    StatusCode::FORBIDDEN,
+                    "Body does not match signed hash",
+                    self,
+                )
             }
             Self::CredentialLookup { .. } | Self::CredentialParse { .. } => {
                 tracing::error!(?self, "Signed request: credential lookup/parse failure");
-                (
+                sentry_middleware::error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Failed to verify signature",
+                    self,
                 )
-                    .into_response()
             }
             Self::SignatureInvalid { .. } => {
                 tracing::warn!(?self, "Signed request: signature verification failed");
-                (StatusCode::UNAUTHORIZED, "Invalid signature").into_response()
+                sentry_middleware::error_response(
+                    StatusCode::UNAUTHORIZED,
+                    "Invalid signature",
+                    self,
+                )
             }
             Self::SerializeAuthState { .. } | Self::AuditRecord { .. } => {
                 tracing::error!(?self, "Signed request: audit recording failure");
-                (
+                sentry_middleware::error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Failed to record signed request",
+                    self,
                 )
-                    .into_response()
             }
         }
     }
 }
 
 #[allow(clippy::result_large_err)]
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn fido2_sign_middleware(
     State(state): State<AppState>,
     mut req: Request,
@@ -1208,7 +1236,7 @@ pub async fn fido2_sign_middleware(
     fido2_sign_flow(State(state), req, next).await
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn fido2_sign_flow(
     State(state): State<AppState>,
     req: Request,

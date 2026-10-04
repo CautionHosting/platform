@@ -88,7 +88,7 @@ pub(crate) enum UserHasOrganizationError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn user_has_organization(
     db: &PgPool,
     user_id: Uuid,
@@ -141,11 +141,11 @@ impl IntoResponse for ListOrganizationsError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
 pub async fn list_organizations(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -245,11 +245,11 @@ impl IntoResponse for CreateOrganizationError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
 pub async fn create_organization(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -339,11 +339,11 @@ impl IntoResponse for GetOrganizationError {
             }
             GetOrganizationError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found"),
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub async fn get_organization(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -406,11 +406,11 @@ impl IntoResponse for UpdateOrganizationError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub async fn update_organization(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -490,11 +490,11 @@ impl IntoResponse for DeleteOrganizationError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub async fn delete_organization(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -551,11 +551,11 @@ impl IntoResponse for GetOrgSettingsError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub async fn get_org_settings(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -629,11 +629,11 @@ impl IntoResponse for UpdateOrgSettingsError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub async fn update_org_settings(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -705,11 +705,11 @@ impl IntoResponse for ListMembersError {
             }
             ListMembersError::Query { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub async fn list_members(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -783,11 +783,11 @@ impl IntoResponse for InviteMemberError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub async fn invite_member(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -975,11 +975,11 @@ impl IntoResponse for ListActiveInvitationsError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub async fn list_active_invitations(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1050,11 +1050,11 @@ impl IntoResponse for CancelInvitationError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub async fn cancel_invitation(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1195,11 +1195,11 @@ impl IntoResponse for AddMemberError {
             AddMemberError::AlreadyMember { .. } => (StatusCode::CONFLICT, "conflict"),
             AddMemberError::Insert { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub async fn add_member(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1285,11 +1285,11 @@ impl IntoResponse for UpdateMemberError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub async fn update_member(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1366,11 +1366,11 @@ impl IntoResponse for RemoveMemberError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub async fn remove_member(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,

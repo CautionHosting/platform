@@ -9,6 +9,7 @@ members = [
     "src/email-service",
     "src/enclave-builder",
     "src/metering",
+    "src/sentry-middleware",
     "src/environment-heuristics",
     "src/caution-config", 
     "src/caution-admin",
@@ -84,6 +85,8 @@ dirs = "5"
 
 # OpenPGP — force RustCrypto backend across all crates (locksmith defaults to Nettle)
 sequoia-openpgp = { version = "1" }
+
+sentry = { version = "0.49.3", features = ["tracing"] }
 
 # The generated EC2 SDK exhausts LLVM memory when release-optimized as one
 # codegen unit. The drift detector is network-bound, so optimize its code but

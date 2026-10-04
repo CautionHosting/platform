@@ -125,52 +125,47 @@ pub enum PasskeyError {
 
 impl IntoResponse for PasskeyError {
     fn into_response(self) -> Response {
-        match self {
-            error @ Self::Auth { .. } => {
-                tracing::warn!(?error, "Passkey management: authentication failed");
-                generic_auth_failure_response().into_response()
+        let (status, body) = match &self {
+            Self::Auth { .. } => {
+                tracing::warn!(?self, "Passkey management: authentication failed");
+                let response = generic_auth_failure_response().into_response();
+                return sentry_middleware::attach(response, self);
             }
             Self::NoRegistrationState { .. } => (
                 StatusCode::GONE,
                 "No matching passkey registration state found. Please start over.",
-            )
-                .into_response(),
+            ),
             Self::ChallengeExpired { .. } => (
                 StatusCode::GONE,
                 "Passkey registration challenge has expired. Please try again.",
-            )
-                .into_response(),
+            ),
             Self::CredentialAlreadyRegistered { .. } => {
-                (StatusCode::CONFLICT, "This passkey is already registered.").into_response()
+                (StatusCode::CONFLICT, "This passkey is already registered.")
             }
             Self::TooManyPending { .. } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many pending passkey registrations. Please try again later.",
-            )
-                .into_response(),
+            ),
             Self::CredentialNotFound { .. } => {
-                (StatusCode::NOT_FOUND, "Passkey not found.").into_response()
+                (StatusCode::NOT_FOUND, "Passkey not found.")
             }
             Self::LastCredential { .. } => (
                 StatusCode::CONFLICT,
                 "You must keep at least one passkey on your account.",
-            )
-                .into_response(),
+            ),
             Self::BadRequest { .. } => {
-                (StatusCode::BAD_REQUEST, "Invalid passkey request.").into_response()
+                (StatusCode::BAD_REQUEST, "Invalid passkey request.")
             }
             Self::Forbidden { .. } => (
                 StatusCode::FORBIDDEN,
                 "Passkey registration does not belong to this session.",
-            )
-                .into_response(),
+            ),
             Self::MissingWebAuthnHandle { .. } => {
                 tracing::error!("user is missing a WebAuthn handle");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "An internal error occurred",
                 )
-                    .into_response()
             }
             Self::Internal { ref source, .. } => {
                 tracing::error!(?source, "Passkey management error");
@@ -178,9 +173,9 @@ impl IntoResponse for PasskeyError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "An internal error occurred",
                 )
-                    .into_response()
             }
-        }
+        };
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
@@ -217,7 +212,7 @@ fn get_session_id_from_headers(headers: &HeaderMap) -> Option<String> {
         .or_else(|| crate::csrf::get_cookie(headers, "caution_session"))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn list_passkeys_handler(
     State(state): State<AppState>,
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
@@ -285,7 +280,7 @@ pub async fn list_passkeys_handler(
     Ok(Json(passkeys))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn begin_add_passkey_handler(
     State(state): State<AppState>,
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
@@ -366,7 +361,7 @@ pub async fn begin_add_passkey_handler(
     }))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn finish_add_passkey_handler(
     State(state): State<AppState>,
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
@@ -450,7 +445,7 @@ pub async fn finish_add_passkey_handler(
     }))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn delete_passkey_handler(
     State(state): State<AppState>,
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,

@@ -34,7 +34,7 @@ pub enum UpsertTrackedResourceError {
 /// real-time metering. If a stopped row is resumed, reset billing timestamps so
 /// downtime is not charged.
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
+#[tracing::instrument(skip_all, fields(resource_id = %resource_id))]
 pub async fn upsert_tracked_resource(
     state: &crate::AppState,
     resource_id: &str,
@@ -136,7 +136,7 @@ pub enum StopTrackedResourceError {
 
 /// Ask the metering service to collect any final usage and stop tracking a
 /// resource. Falls back to the configured internal service secret.
-#[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
+#[tracing::instrument(skip_all, fields(resource_id = %resource_id))]
 pub async fn stop_tracked_resource(
     internal_service_secret: Option<&str>,
     resource_id: &str,

@@ -27,11 +27,11 @@ pub(crate) enum SyncAwsCostsError {
 impl IntoResponse for SyncAwsCostsError {
     fn into_response(self) -> Response {
         tracing::error!(?self, "sync AWS costs error");
-        (
+        sentry_middleware::error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": "internal error"})),
+            self,
         )
-            .into_response()
     }
 }
 
@@ -49,11 +49,11 @@ pub(crate) enum GetAwsOrgCostsError {
 impl IntoResponse for GetAwsOrgCostsError {
     fn into_response(self) -> Response {
         tracing::error!(?self, "get AWS org costs error");
-        (
+        sentry_middleware::error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": "internal error"})),
+            self,
         )
-            .into_response()
     }
 }
 
@@ -71,11 +71,11 @@ pub(crate) enum GetAllAwsCostsError {
 impl IntoResponse for GetAllAwsCostsError {
     fn into_response(self) -> Response {
         tracing::error!(?self, "get all AWS costs error");
-        (
+        sentry_middleware::error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": "internal error"})),
+            self,
         )
-            .into_response()
     }
 }
 
@@ -88,7 +88,7 @@ pub(crate) struct SyncAwsCostsRequest {
 }
 
 /// Sync costs from AWS Cost Explorer for all orgs and record as usage
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn sync_aws_costs(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SyncAwsCostsRequest>,
@@ -183,7 +183,7 @@ pub(crate) struct GetAwsCostsQuery {
 }
 
 /// Get AWS costs for a specific org
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub(crate) async fn get_aws_org_costs(
     axum::extract::Path(org_id): axum::extract::Path<String>,
     axum::extract::Query(query): axum::extract::Query<GetAwsCostsQuery>,
@@ -207,7 +207,7 @@ pub(crate) async fn get_aws_org_costs(
 }
 
 /// Get AWS costs for all orgs (summary)
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn get_all_aws_costs(
     axum::extract::Query(query): axum::extract::Query<GetAwsCostsQuery>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), GetAllAwsCostsError> {

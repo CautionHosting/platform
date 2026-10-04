@@ -162,7 +162,7 @@ pub async fn claim_username(pool: &PgPool, user_id: Uuid, username: &str) -> Res
 }
 
 /// Returns `(username, username_is_placeholder)` for the given user.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn get_username_status(pool: &PgPool, user_id: Uuid) -> Result<(String, bool), DbError> {
     let row: (String, bool) =
         sqlx::query_as("SELECT username, username_is_placeholder FROM users WHERE id = $1")
@@ -603,7 +603,7 @@ where
     Ok(exists)
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn get_all_credential_public_keys(pool: &PgPool) -> Result<Vec<Vec<u8>>, DbError> {
     let keys: Vec<Vec<u8>> = sqlx::query_scalar("SELECT public_key FROM fido2_credentials")
         .fetch_all(pool)
@@ -616,7 +616,7 @@ pub async fn get_all_credential_public_keys(pool: &PgPool) -> Result<Vec<Vec<u8>
     Ok(keys)
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn get_credential_public_key(
     pool: &PgPool,
     credential_id: &[u8],
@@ -639,7 +639,7 @@ pub async fn get_credential_public_key(
     })
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn get_user_id_by_credential(
     pool: &PgPool,
     credential_id: &[u8],
@@ -697,7 +697,7 @@ pub async fn get_user_id_by_username(
 
 /// Fetch the serialized `SecurityKey` public keys for every credential
 /// belonging to a user, for building a username-scoped `allowCredentials` list.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn get_credential_public_keys_by_user_id(
     pool: &PgPool,
     user_id: Uuid,
@@ -870,7 +870,7 @@ where
     Ok(())
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn validate_auth_session(
     pool: &PgPool,
     session_id: &str,
@@ -1190,7 +1190,7 @@ impl RecordSignedRequestAuditError {
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn record_signed_request_audit(
     pool: &PgPool,
     audit: &NewSignedRequestAudit<'_>,
@@ -1265,7 +1265,7 @@ impl CompleteSignedRequestAuditError {
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn complete_signed_request_audit(
     pool: &PgPool,
     audit_id: Uuid,

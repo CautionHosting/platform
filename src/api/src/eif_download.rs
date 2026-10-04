@@ -175,7 +175,7 @@ impl IntoResponse for DownloadEifError {
                 "failed to prepare cached EIF",
             ),
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
@@ -203,7 +203,7 @@ impl EifDownloadCache {
         self.data_dir.join(SUBDIR).join(sanitized)
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub(crate) async fn ensure_cached(
         &self,
         s3_client: &aws_sdk_s3::Client,
@@ -276,7 +276,7 @@ impl EifDownloadCache {
         Ok(cache_path)
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     async fn evict_lru(&self) -> Result<(), EvictLruError> {
         use EvictLruErrorCtx as Ctx;
 
@@ -333,7 +333,7 @@ struct BuildDownloadRow {
     resource_name: Option<String>,
 }
 
-#[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
+#[tracing::instrument(skip_all, fields(resource_id = %resource_id))]
 pub(crate) async fn download_eif(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,

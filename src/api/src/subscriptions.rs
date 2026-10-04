@@ -36,7 +36,7 @@ pub(crate) enum RequireBillingManagerError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn require_billing_manager(
     state: &AppState,
     user_id: Uuid,
@@ -67,7 +67,7 @@ pub(crate) enum PaddleHttpClientError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn paddle_http_client() -> Result<reqwest::Client, PaddleHttpClientError> {
     use PaddleHttpClientErrorCtx as Ctx;
 
@@ -145,7 +145,7 @@ pub(crate) enum PaddleJsonRequestError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn paddle_json_request(
     state: &AppState,
     method: reqwest::Method,
@@ -228,7 +228,7 @@ pub(crate) enum CloseOpenSubscriptionSegmentError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn close_open_subscription_segment(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     subscription_id: Uuid,
@@ -305,11 +305,11 @@ impl IntoResponse for GetSubscriptionError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
 pub async fn get_subscription(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -483,11 +483,11 @@ impl IntoResponse for CheckoutSubscriptionError {
                 (StatusCode::BAD_GATEWAY, "upstream error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
 pub async fn checkout_subscription(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -496,7 +496,7 @@ pub async fn checkout_subscription(
     perform_checkout(&state, &auth, &req).await
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn perform_checkout(
     state: &AppState,
     auth: &AuthContext,
@@ -696,7 +696,7 @@ async fn perform_checkout(
     })))
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
 pub async fn subscribe(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -880,11 +880,11 @@ impl IntoResponse for ChangeSubscriptionTierError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn change_paddle_subscription(
     state: &AppState,
     auth: &AuthContext,
@@ -1039,7 +1039,7 @@ async fn change_paddle_subscription(
     })))
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
 pub async fn change_subscription_tier(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1279,11 +1279,11 @@ impl IntoResponse for CancelSubscriptionError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
 pub async fn cancel_subscription(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,

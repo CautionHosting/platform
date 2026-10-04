@@ -24,6 +24,7 @@ dotenvy = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 caution-config = { path = "../caution-config" }
+sentry-middleware = { path = "../sentry-middleware" }
 chrono = { workspace = true }
 futures = "0.3"
 

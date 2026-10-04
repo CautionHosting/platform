@@ -251,7 +251,7 @@ pub enum ValidateRemoteContainerfilePathError {
     UnsupportedCharacter { character: char, location: Location },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub fn validate_remote_containerfile_path(
     containerfile: &str,
 ) -> Result<String, ValidateRemoteContainerfilePathError> {
@@ -335,7 +335,7 @@ pub enum ResolveManagedOnpremBuilderConfigError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn resolve_managed_onprem_builder_config(
     default_config: &BuilderConfig,
     credentials: &AwsCredentials,
@@ -452,7 +452,7 @@ pub enum RequirePlatformFrameworkCommitError {
     Invalid { location: Location },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub fn require_platform_framework_commit(
     platform_git_sha: Option<&str>,
 ) -> Result<String, RequirePlatformFrameworkCommitError> {
@@ -491,7 +491,7 @@ pub enum CheckBuildCacheError {
 }
 
 /// Check if a completed build exists in the cache for this org + cache_key.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn check_build_cache(
     db: &PgPool,
     org_id: Uuid,
@@ -555,7 +555,7 @@ pub enum UploadSourceArchiveError {
 
 /// Archive the source at a given commit and upload to S3 for the builder.
 /// Returns the uploaded artifact metadata.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn upload_source_archive(
     s3: &aws_sdk_s3::Client,
     bucket: &str,
@@ -615,7 +615,7 @@ pub enum ResolveRemoteBuilderHelperPathError {
     NotFound { helper: String, location: Location },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn resolve_remote_builder_helper_path() -> Result<PathBuf, ResolveRemoteBuilderHelperPathError> {
     if let Ok(path) = std::env::var("REMOTE_BUILDER_HELPER_PATH") {
         let path = PathBuf::from(path);
@@ -678,7 +678,7 @@ pub(crate) enum UploadRemoteBuilderHelperError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn upload_remote_builder_helper(
     s3: &aws_sdk_s3::Client,
     bucket: &str,
@@ -731,7 +731,7 @@ pub(crate) enum EnsureManagedOnpremBuilderSecurityGroupError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn ensure_managed_onprem_builder_security_group(
     ec2: &Ec2Client,
     deployment_id: &str,
@@ -857,7 +857,7 @@ pub enum ExecuteRemoteBuildError {
 /// 4. Record results in DB
 /// 5. Terminate builder instance
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn execute_remote_build(
     db: &PgPool,
     ec2: &Ec2Client,
@@ -1196,7 +1196,7 @@ impl BuildPhaseStateMachine {
     }
 
     /// Returns all milestone messages for phases traversed since the last call.
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     fn increment(
         &mut self,
         latest_status: &BuildStatus,
@@ -1281,7 +1281,7 @@ pub(crate) enum PollBuildStatusError {
 
 /// Poll S3 for status.json until the build completes or times out.
 #[allow(clippy::result_large_err)]
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn poll_build_status(
     s3: &aws_sdk_s3::Client,
     bucket: &str,
@@ -1390,7 +1390,7 @@ pub(crate) enum GenerateBuilderUserdataError {
 }
 
 /// Generate the user-data shell script for the builder instance.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn generate_builder_userdata(
     build_id: Uuid,
     config: &BuilderConfig,

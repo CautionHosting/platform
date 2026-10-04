@@ -16,7 +16,7 @@ pub struct DestroyNextQuery {
     pub force: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 #[serde(tag = "status")]
 pub enum DestroyNextResponse {
     #[serde(rename = "deleted")]
@@ -27,14 +27,26 @@ pub enum DestroyNextResponse {
     Error { error: String },
 }
 
+impl std::fmt::Display for DestroyNextResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Deleted { resource_id } => write!(f, "resource {} deleted", resource_id),
+            Self::Done => write!(f, "no resources to destroy"),
+            Self::Error { error } => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for DestroyNextResponse {}
+
 impl IntoResponse for DestroyNextResponse {
     fn into_response(self) -> Response {
-        let (status, body) = match &self {
-            DestroyNextResponse::Deleted { .. } => (StatusCode::OK, Json(&self)),
-            DestroyNextResponse::Done => (StatusCode::OK, Json(&self)),
-            DestroyNextResponse::Error { .. } => (StatusCode::INTERNAL_SERVER_ERROR, Json(&self)),
+        let status = match &self {
+            DestroyNextResponse::Deleted { .. } | DestroyNextResponse::Done => StatusCode::OK,
+            DestroyNextResponse::Error { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        (status, body).into_response()
+        let body = Json(self.clone());
+        sentry_middleware::error_response(status, body, self)
     }
 }
 

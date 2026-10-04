@@ -13,7 +13,7 @@ use super::super::{RegisterBeginResponse, RegisterError, RegisterErrorCtx as Ctx
 use super::register::begin_registration_challenge;
 use dterror::ResultExt;
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn invite_preview_handler(
     State(state): State<AppState>,
     Query(params): Query<InvitePreviewQuery>,
@@ -42,7 +42,7 @@ pub async fn invite_preview_handler(
     }))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn begin_invite_register_handler(
     State(state): State<AppState>,
     Json(req): Json<InviteRegisterBeginRequest>,

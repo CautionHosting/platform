@@ -63,14 +63,13 @@ pub(crate) enum PaddleWebhookError {
 
 impl IntoResponse for PaddleWebhookError {
     fn into_response(self) -> Response {
-        match self {
+        let (status, body) = match &self {
             Self::SignatureVerification { .. } | Self::InvalidSignature { .. } => {
                 tracing::warn!(error = ?self, "paddle webhook signature rejected");
                 (
                     StatusCode::UNAUTHORIZED,
                     Json(serde_json::json!({"error": "invalid signature"})),
                 )
-                    .into_response()
             }
             Self::MalformedPayload { .. } => {
                 tracing::warn!(error = ?self, "malformed paddle webhook payload");
@@ -78,7 +77,6 @@ impl IntoResponse for PaddleWebhookError {
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({"error": "malformed webhook payload"})),
                 )
-                    .into_response()
             }
             Self::Processing { .. } => {
                 tracing::error!(error = ?self, "paddle webhook processing failed");
@@ -86,14 +84,14 @@ impl IntoResponse for PaddleWebhookError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({"error": "internal error"})),
                 )
-                    .into_response()
             }
-        }
+        };
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
 /// Handle incoming Paddle webhooks
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn paddle_webhook_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -241,7 +239,7 @@ pub(crate) struct HandleSubscriptionEventError {
     source: Option<BoxError>,
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn handle_subscription_event(
     state: &AppState,
     payload: &PaddleWebhookPayload,
@@ -622,7 +620,7 @@ pub(crate) enum ClearCreditSuspensionError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn clear_credit_suspension_if_needed(
     state: &AppState,
     org_id: uuid::Uuid,
@@ -696,7 +694,7 @@ pub(crate) enum HandleTransactionCompletedError {
 }
 
 /// Handle transaction.completed — payment was collected successfully
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn handle_transaction_completed(
     state: &AppState,
     payload: &PaddleWebhookPayload,
@@ -850,7 +848,7 @@ pub(crate) enum HandleTransactionBilledError {
 }
 
 /// Handle transaction.billed — invoice was created/issued
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn handle_transaction_billed(
     state: &AppState,
     payload: &PaddleWebhookPayload,
@@ -953,7 +951,7 @@ pub(crate) enum HandlePaymentFailedError {
 }
 
 /// Handle transaction.payment_failed — payment collection failed
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn handle_payment_failed(
     state: &AppState,
     payload: &PaddleWebhookPayload,
@@ -1059,7 +1057,7 @@ pub(crate) enum HandlePaddleTransactionTestError {
 }
 
 /// Public entry point for test simulation
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn handle_paddle_transaction_test(
     state: &AppState,
     payload: PaddleWebhookPayload,
@@ -1113,7 +1111,7 @@ pub(crate) enum SendInvoiceEmailError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn send_invoice_email(
     state: &AppState,
     user_id: uuid::Uuid,
@@ -1196,7 +1194,7 @@ pub(crate) enum SendPaymentConfirmationEmailError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn send_payment_confirmation_email(
     state: &AppState,
     user_id: uuid::Uuid,
@@ -1258,7 +1256,7 @@ pub(crate) enum SendPaymentFailureEmailError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn send_payment_failure_email(
     state: &AppState,
     user_id: uuid::Uuid,

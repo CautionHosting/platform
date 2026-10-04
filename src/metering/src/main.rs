@@ -42,7 +42,11 @@ async fn main() {
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
         ))
         .with(tracing_subscriber::fmt::layer())
+        // .with(sentry_middleware::sentry_tracing_layer())  -- enable for performance traces
+        .with(sentry_middleware::RequestBreadcrumbLayer::new())
         .init();
+
+    let _sentry_guard = sentry_middleware::init_from_env();
 
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
         eprintln!("FATAL: DATABASE_URL must be set");
@@ -233,6 +237,7 @@ async fn main() {
     let app = Router::new()
         .merge(api_routes)
         .merge(public_routes)
+        .layer(sentry_middleware::SentryLayer)
         .layer(CorsLayer::permissive())
         .with_state(state);
 

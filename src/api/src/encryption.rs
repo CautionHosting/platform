@@ -134,7 +134,7 @@ impl Encryptor {
         Ok(Self { cipher })
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, EncryptError> {
         let mut nonce_bytes = [0u8; NONCE_SIZE];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
@@ -157,7 +157,7 @@ impl Encryptor {
         Ok(result)
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub fn decrypt(&self, encrypted: &[u8]) -> Result<Vec<u8>, DecryptError> {
         if encrypted.len() < NONCE_SIZE {
             return Err(DecryptError::TooShort {
@@ -177,7 +177,7 @@ impl Encryptor {
         }
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub fn encrypt_json<T: serde::Serialize>(
         &self,
         value: &T,
@@ -190,7 +190,7 @@ impl Encryptor {
         Ok(encrypted)
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub fn decrypt_json<T: serde::de::DeserializeOwned>(
         &self,
         encrypted: &[u8],

@@ -41,6 +41,7 @@ russh = "0.61"
 ssh-key = { version = "0.6.7", features = ["crypto"] }
 thiserror = { workspace = true }
 dterror = { workspace = true }
+sentry-middleware = { path = "../sentry-middleware" }
 bytes = "1"
 rand010 = { package = "rand", version = "0.10", features = ["thread_rng"] }
 futures = "0.3"

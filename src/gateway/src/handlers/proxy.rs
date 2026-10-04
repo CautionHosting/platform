@@ -22,7 +22,7 @@ pub struct BuildTargetUrlError {
     location: dterror::Location,
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn build_api_target_url(
     api_service_url: &str,
     path: &str,
@@ -86,7 +86,7 @@ fn is_internal_api_target(target_url: &reqwest::Url) -> bool {
 }
 
 /// Proxy webhooks to the metering service (no auth — verified by signature)
-#[tracing::instrument(skip_all, err(Debug))]
+#[tracing::instrument(skip_all)]
 #[allow(clippy::result_large_err)]
 pub async fn metering_proxy_handler(
     State(state): State<AppState>,
@@ -155,7 +155,7 @@ pub async fn metering_proxy_handler(
     })
 }
 
-#[tracing::instrument(skip_all, err(Debug))]
+#[tracing::instrument(skip_all)]
 #[allow(clippy::result_large_err)]
 pub async fn proxy_handler(
     State(state): State<AppState>,

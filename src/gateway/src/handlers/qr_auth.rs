@@ -188,44 +188,52 @@ pub enum QrLoginFinishError {
 
 impl IntoResponse for QrLoginFinishError {
     fn into_response(self) -> Response {
-        match self {
-            // Session/challenge lifecycle errors are folded into the same
-            // generic 401 as credential-verification failures (same oracle
-            // rationale as `LoginError::into_response`).
-            Self::InvalidSession { .. } | Self::ChallengeExpired { .. } => {
-                tracing::debug!(?self, "QR login finish: session/challenge error");
-                generic_auth_failure_response().into_response()
+        // Session/challenge lifecycle errors and credential-verification
+        // failures all collapse to the same generic 401 response (same oracle
+        // rationale as `LoginError::into_response`).
+        let is_auth_failure = matches!(
+            self,
+            Self::InvalidSession { .. }
+                | Self::ChallengeExpired { .. }
+                | Self::UnexpectedCredentialOwner { .. }
+                | Self::DbGetPublicKeyForCredential { .. }
+                | Self::ParseSecurityKey { .. }
+                | Self::IdentifyDiscoverableCredential { .. }
+                | Self::FinishSecurityKeyAuthentication { .. }
+                | Self::FinishDiscoverableAuthentication { .. }
+        );
+
+        if is_auth_failure {
+            match &self {
+                Self::InvalidSession { .. } | Self::ChallengeExpired { .. } => {
+                    tracing::debug!(?self, "QR login finish: session/challenge error");
+                }
+                Self::UnexpectedCredentialOwner { .. } => {
+                    tracing::debug!(?self, "QR login finish: decoy/scope rejection");
+                }
+                Self::DbGetPublicKeyForCredential { .. } | Self::ParseSecurityKey { .. } => {
+                    tracing::warn!(?self, "QR login finish: credential lookup/parse failure");
+                }
+                Self::IdentifyDiscoverableCredential { .. } => {
+                    tracing::error!(?self, "QR login finish: could not identify discoverable credential");
+                }
+                Self::FinishSecurityKeyAuthentication { .. }
+                | Self::FinishDiscoverableAuthentication { .. } => {
+                    tracing::warn!(?self, "QR login finish: signature verification failed");
+                }
+                _ => {}
             }
+            let response = generic_auth_failure_response().into_response();
+            return sentry_middleware::attach(response, self);
+        }
+
+        let (status, body) = match &self {
             Self::PinRequired { .. } => (
                 StatusCode::FORBIDDEN,
                 "your organization requires PIN verification",
-            )
-                .into_response(),
+            ),
             Self::ParsePubkeyCredential { .. } => {
-                (StatusCode::BAD_REQUEST, "failed to parse pubkey credential").into_response()
-            }
-            // Every credential-verification outcome collapses to the same
-            // generic 401 response so none of them is distinguishable from
-            // another by status code or body.
-            Self::UnexpectedCredentialOwner { .. } => {
-                tracing::debug!(?self, "QR login finish: decoy/scope rejection");
-                generic_auth_failure_response().into_response()
-            }
-            Self::DbGetPublicKeyForCredential { .. } | Self::ParseSecurityKey { .. } => {
-                tracing::warn!(?self, "QR login finish: credential lookup/parse failure");
-                generic_auth_failure_response().into_response()
-            }
-            Self::IdentifyDiscoverableCredential { .. } => {
-                tracing::error!(
-                    ?self,
-                    "QR login finish: could not identify discoverable credential"
-                );
-                generic_auth_failure_response().into_response()
-            }
-            Self::FinishSecurityKeyAuthentication { .. }
-            | Self::FinishDiscoverableAuthentication { .. } => {
-                tracing::warn!(?self, "QR login finish: signature verification failed");
-                generic_auth_failure_response().into_response()
+                (StatusCode::BAD_REQUEST, "failed to parse pubkey credential")
             }
             _ => {
                 tracing::error!(?self, "QR login error");
@@ -233,9 +241,9 @@ impl IntoResponse for QrLoginFinishError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "an internal error occurred",
                 )
-                    .into_response()
             }
-        }
+        };
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
@@ -327,7 +335,7 @@ pub enum QrLoginError {
 
 impl IntoResponse for QrLoginError {
     fn into_response(self) -> Response {
-        let (status, message) = match self {
+        let (status, message) = match &self {
             Self::TokenNotFound { .. } => (
                 StatusCode::NOT_FOUND,
                 "QR login token not found".to_string(),
@@ -359,13 +367,13 @@ impl IntoResponse for QrLoginError {
                 )
             }
         };
-        (status, message).into_response()
+        sentry_middleware::error_response(status, message, self)
     }
 }
 
 /// Create a sign challenge for the given credential. Returns (challenge_response, challenge_id).
 /// Stores PendingSignChallenge in state.sign_challenges.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn create_sign_challenge(
     state: &AppState,
     credential_id: &[u8],
@@ -426,7 +434,7 @@ async fn create_sign_challenge(
 
 /// Resolve session ID from headers (X-Session-ID or caution_session cookie),
 /// validate it, and enforce CSRF for cookie-based auth. Returns credential_id.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn authenticate_session(
     state: &AppState,
     headers: &axum::http::HeaderMap,
@@ -484,7 +492,7 @@ fn get_rp_origin() -> String {
         .to_string()
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn begin_sign_request_handler(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -526,7 +534,7 @@ fn qr_login_url(requestee_token: &str) -> String {
     qr_login_url_for_origin(&get_rp_origin(), requestee_token)
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn qr_login_begin_handler(
     State(state): State<AppState>,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
@@ -570,7 +578,7 @@ pub async fn qr_login_begin_handler(
     }))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn qr_login_status_handler(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<QrLoginStatusQuery>,
@@ -653,7 +661,7 @@ pub async fn qr_login_status_handler(
     }))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn qr_login_authenticate_handler(
     State(state): State<AppState>,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
@@ -744,7 +752,7 @@ pub async fn qr_login_authenticate_handler(
     }))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn qr_login_authenticate_finish_handler(
     State(state): State<AppState>,
     Json(req): Json<crate::types::QrLoginAuthenticateFinishRequest>,
@@ -992,7 +1000,7 @@ pub enum QrSignError {
 
 impl IntoResponse for QrSignError {
     fn into_response(self) -> Response {
-        let (status, message) = match self {
+        let (status, message) = match &self {
             Self::TokenNotFound { .. } => {
                 (StatusCode::NOT_FOUND, "QR sign token not found".to_string())
             }
@@ -1011,7 +1019,7 @@ impl IntoResponse for QrSignError {
                 )
             }
         };
-        (status, message).into_response()
+        sentry_middleware::error_response(status, message, self)
     }
 }
 
@@ -1020,7 +1028,7 @@ pub struct QrSignStatusQuery {
     pub token: String,
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn qr_sign_begin_handler(
     State(state): State<AppState>,
     connect_info: ConnectInfo<std::net::SocketAddr>,
@@ -1071,7 +1079,7 @@ pub async fn qr_sign_begin_handler(
     }))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn qr_sign_status_handler(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<QrSignStatusQuery>,
@@ -1115,7 +1123,7 @@ pub async fn qr_sign_status_handler(
     }))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn qr_sign_authenticate_handler(
     State(state): State<AppState>,
     connect_info: ConnectInfo<std::net::SocketAddr>,
@@ -1166,7 +1174,7 @@ pub async fn qr_sign_authenticate_handler(
     }))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn qr_sign_authenticate_finish_handler(
     State(state): State<AppState>,
     Json(req): Json<crate::types::QrSignAuthenticateFinishRequest>,

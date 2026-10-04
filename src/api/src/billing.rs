@@ -256,7 +256,7 @@ pub enum GetLedgerBalanceCentsError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn get_ledger_balance_cents<'e, E>(
     executor: E,
     organization_id: Uuid,
@@ -292,7 +292,7 @@ pub enum GetDebitBalanceCentsError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn get_debit_balance_cents<'e, E>(
     executor: E,
     organization_id: Uuid,
@@ -346,11 +346,11 @@ impl IntoResponse for GetBillingUsageError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
 pub async fn get_billing_usage(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -663,12 +663,12 @@ impl IntoResponse for GetBillingInvoicesError {
                 "Failed to get organization",
             ),
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
 /// Get billing invoices
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
 pub async fn get_billing_invoices(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -745,7 +745,7 @@ enum ListPaddleSavedPaymentMethodsError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn list_paddle_saved_payment_methods(
     api_url: &str,
     api_key: &str,
@@ -822,7 +822,7 @@ enum SyncPaymentMethodsFromPaddleError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn sync_payment_methods_from_paddle(
     db: &PgPool,
     api_url: &str,
@@ -995,7 +995,7 @@ enum ShouldSyncPaymentMethodsError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn should_sync_payment_methods(
     db: &PgPool,
     org_id: Uuid,
@@ -1053,12 +1053,12 @@ impl IntoResponse for GetPaymentMethodsError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
 /// Get all active payment methods
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
 pub async fn get_payment_methods(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1192,12 +1192,12 @@ impl IntoResponse for DeletePaymentMethodError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
 /// Delete a specific payment method by ID
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id, method_id = %method_id))]
+#[tracing::instrument(skip_all, fields(user_id = %auth.user_id, method_id = %method_id))]
 pub async fn delete_payment_method(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1342,12 +1342,12 @@ impl IntoResponse for SetPrimaryPaymentMethodError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
 /// Set a payment method as primary
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id, method_id = %method_id))]
+#[tracing::instrument(skip_all, fields(user_id = %auth.user_id, method_id = %method_id))]
 pub async fn set_primary_payment_method(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1440,12 +1440,12 @@ impl IntoResponse for GetPaddleClientTokenError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
 /// Get Paddle client token and customer ID for frontend Paddle.js initialization
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
 pub async fn get_paddle_client_token(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1516,7 +1516,7 @@ pub struct PaddleTransactionCompletedRequest {
     card_brand: Option<String>,
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn upsert_local_payment_method(
     db: &PgPool,
     org_id: Uuid,
@@ -1679,7 +1679,7 @@ struct ValidatePaddleCheckoutBindingError {
     location: Location,
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn validate_paddle_checkout_binding(
     txn: &serde_json::Value,
     secret: &str,
@@ -1757,7 +1757,7 @@ struct ValidatePaddleSetupTransactionError {
     location: Location,
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn validate_paddle_setup_transaction(
     txn: &serde_json::Value,
     expected_setup_price_id: &str,
@@ -1895,12 +1895,12 @@ impl IntoResponse for PaddleTransactionCompletedError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
 /// Frontend callback after Paddle checkout completion — records payment method reference locally
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
 pub async fn paddle_transaction_completed(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -2043,7 +2043,7 @@ enum FetchPaddleTransactionError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn fetch_paddle_transaction(
     api_url: &str,
     api_key: &str,
@@ -2108,7 +2108,7 @@ enum GeneratePaddleCustomerAuthTokenError {
     MissingToken { location: Location },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn generate_paddle_customer_auth_token(
     api_url: &str,
     api_key: &str,
@@ -2185,7 +2185,7 @@ struct ValidateCreditPurchaseTransactionError {
     location: Location,
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn validate_credit_purchase_transaction(
     txn: &serde_json::Value,
     org_id: Uuid,
@@ -2312,11 +2312,11 @@ impl IntoResponse for GetCreditBalanceError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
 pub async fn get_credit_balance(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -2409,7 +2409,7 @@ struct ResolveCreditPurchaseRequestError {
     location: Location,
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn resolve_credit_purchase_request(
     req: &PurchaseCreditsRequest,
     credit_packages: &[CreditPackage],
@@ -2562,11 +2562,11 @@ impl IntoResponse for PurchaseCreditsError {
                 (StatusCode::PAYMENT_REQUIRED, "transaction payment failed")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
 pub async fn purchase_credits(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -2979,11 +2979,11 @@ impl IntoResponse for GetCreditLedgerError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
 pub async fn get_credit_ledger(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -3076,11 +3076,11 @@ impl IntoResponse for RedeemCreditCodeError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
 pub async fn redeem_credit_code(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -3238,7 +3238,7 @@ pub enum ApplyCreditError {
 }
 
 /// Atomically insert a credit_ledger row and return the derived balance.
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub async fn apply_credit(
     db: &PgPool,
     org_id: Uuid,

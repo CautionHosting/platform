@@ -90,22 +90,22 @@ pub(crate) enum GetBillingEstimateError {
 impl IntoResponse for TriggerMonthlyBillingError {
     fn into_response(self) -> axum::response::Response {
         tracing::error!(?self, "trigger_monthly_billing failed");
-        (
+        sentry_middleware::error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": "internal error"})),
+            self,
         )
-            .into_response()
     }
 }
 
 impl IntoResponse for GetBillingEstimateError {
     fn into_response(self) -> axum::response::Response {
         tracing::error!(?self, "get_billing_estimate failed");
-        (
+        sentry_middleware::error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": "internal error"})),
+            self,
         )
-            .into_response()
     }
 }
 
@@ -138,7 +138,7 @@ pub async fn run_monthly_billing_loop(state: Arc<AppState>) {
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn billing_user_for_org(
     pool: &PgPool,
     organization_id: uuid::Uuid,
@@ -163,7 +163,7 @@ async fn billing_user_for_org(
     Ok(user_id)
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn close_open_subscription_segment(
     tx: &mut Transaction<'_, Postgres>,
     subscription_id: uuid::Uuid,
@@ -188,7 +188,7 @@ async fn close_open_subscription_segment(
 }
 
 /// Run the monthly billing cycle
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn run_monthly_billing_cycle(state: &AppState) -> Result<(), MonthlyBillingCycleError> {
     if !try_advisory_lock(&state.pool, LOCK_MONTHLY_BILLING).await {
         tracing::debug!("Monthly billing skipped — another instance holds the lock");
@@ -199,7 +199,7 @@ async fn run_monthly_billing_cycle(state: &AppState) -> Result<(), MonthlyBillin
     result
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<(), MonthlyBillingCycleError> {
     use MonthlyBillingCycleErrorCtx as Ctx;
 
@@ -411,7 +411,7 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<(), Monthly
 }
 
 /// Check whether subscriptions should remain active.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn run_subscription_maintenance(
     state: &AppState,
 ) -> Result<(), SubscriptionMaintenanceError> {
@@ -424,7 +424,7 @@ async fn run_subscription_maintenance(
     result
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn run_subscription_maintenance_inner(
     state: &AppState,
 ) -> Result<(), SubscriptionMaintenanceError> {
@@ -517,7 +517,7 @@ async fn run_subscription_maintenance_inner(
 }
 
 /// Manually trigger monthly billing (for testing or catch-up)
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn trigger_monthly_billing(
     State(state): State<Arc<AppState>>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), TriggerMonthlyBillingError> {
@@ -548,7 +548,7 @@ pub async fn trigger_monthly_billing(
 // =============================================================================
 
 /// Get billing estimate for an org - current spend + projected end-of-month
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub async fn get_billing_estimate(
     Path(org_id): Path<String>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), GetBillingEstimateError> {

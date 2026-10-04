@@ -124,7 +124,7 @@ impl PaddleClient {
 
     /// Create a customer in Paddle
     #[allow(dead_code)]
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub(crate) async fn create_customer(
         &self,
         org_id: uuid::Uuid,
@@ -203,7 +203,7 @@ impl PaddleClient {
 
     /// Create a transaction (one-time charge) for accumulated usage
     #[allow(dead_code)]
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub(crate) async fn create_transaction(
         &self,
         customer_id: &str,
@@ -279,7 +279,7 @@ impl PaddleClient {
 
     /// Get a transaction by ID
     #[allow(dead_code)]
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub(crate) async fn get_transaction(
         &self,
         transaction_id: &str,
@@ -326,7 +326,7 @@ impl PaddleClient {
     ///
     /// Paddle sends a `Paddle-Signature` header in the format:
     /// `ts=<timestamp>;h1=<hex_signature>`
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub(crate) fn verify_webhook_signature(
         &self,
         headers: &axum::http::HeaderMap,

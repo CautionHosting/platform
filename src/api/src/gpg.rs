@@ -143,7 +143,7 @@ pub enum LoadCertError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub fn decrypt_gpg_message(encrypted_content: &str) -> Result<String, DecryptGpgMessageError> {
     use DecryptGpgMessageErrorCtx as Ctx;
 
@@ -251,7 +251,7 @@ pub fn decrypt_gpg_message(encrypted_content: &str) -> Result<String, DecryptGpg
     String::from_utf8(decrypted_data).with_context(Ctx::utf8())
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn get_private_key() -> Result<String, GetPrivateKeyError> {
     use GetPrivateKeyErrorCtx as Ctx;
 
@@ -274,7 +274,7 @@ fn get_private_key() -> Result<String, GetPrivateKeyError> {
     })
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn load_cert(key_content: &str) -> Result<Cert, LoadCertError> {
     use LoadCertErrorCtx as Ctx;
 

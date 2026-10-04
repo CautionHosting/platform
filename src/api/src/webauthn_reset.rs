@@ -68,14 +68,14 @@ impl IntoResponse for WebauthnResetError {
                 (StatusCode::BAD_GATEWAY, "email service unavailable")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
 /// Token TTL in seconds (24 hours).
 const TOKEN_TTL_SECONDS: i64 = 86_400;
 
-#[tracing::instrument(skip_all, err, fields(user_id = %req.user_id))]
+#[tracing::instrument(skip_all, fields(user_id = %req.user_id))]
 pub async fn reset_webauthn_credentials(
     State(state): State<Arc<AppState>>,
     Json(req): Json<WebauthnResetRequest>,

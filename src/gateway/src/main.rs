@@ -220,7 +220,11 @@ async fn main() -> Result<(), MainError> {
                 .unwrap_or_else(|_| "gateway=info,tower_http=debug".into()),
         )
         .with(tracing_subscriber::fmt::layer())
+        // .with(sentry_middleware::sentry_tracing_layer())  -- enable for performance traces
+        .with(sentry_middleware::RequestBreadcrumbLayer::new())
         .init();
+
+    let _sentry_guard = sentry_middleware::init_from_env();
 
     #[cfg(feature = "e2e-testing-unsafe")]
     {
@@ -594,6 +598,7 @@ async fn main() -> Result<(), MainError> {
         .merge(frontend_routes)
         .fallback_service(frontend_service)
         .layer(cors)
+        .layer(sentry_middleware::SentryLayer)
         .layer(middleware::from_fn(request_id::request_id_middleware))
         .layer(middleware::from_fn(
             security_headers::security_headers_middleware,

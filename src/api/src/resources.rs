@@ -96,11 +96,11 @@ impl IntoResponse for CreateResourceError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
 pub async fn create_resource(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -269,11 +269,11 @@ impl IntoResponse for ListResourcesError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
 pub async fn list_resources(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -361,11 +361,11 @@ impl IntoResponse for GetResourceError {
         let (status, body) = match &self {
             GetResourceError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found"),
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
+#[tracing::instrument(skip_all, fields(resource_id = %resource_id))]
 pub async fn get_resource(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -481,11 +481,11 @@ impl IntoResponse for ProxyAttestationError {
                 (StatusCode::BAD_GATEWAY, "invalid attestation response")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
+#[tracing::instrument(skip_all, fields(resource_id = %resource_id))]
 pub async fn proxy_attestation(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -605,11 +605,11 @@ impl IntoResponse for RenameResourceError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
+#[tracing::instrument(skip_all, fields(resource_id = %resource_id))]
 pub async fn rename_resource(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -788,11 +788,11 @@ impl IntoResponse for DeleteResourceError {
                 (StatusCode::SERVICE_UNAVAILABLE, "app destroy failed")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
+#[tracing::instrument(skip_all, fields(resource_id = %resource_id))]
 pub async fn delete_resource(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -947,7 +947,7 @@ impl DestroyResourceByIdError {
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn destroy_resource_by_id(
     state: &Arc<AppState>,
     resource_id: Uuid,
@@ -1153,7 +1153,7 @@ pub(crate) enum DestroyCredentialsError {
     SecretKeyUnavailable { location: Location },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn destroy_credentials(
     state: &Arc<AppState>,
     org_id: Uuid,

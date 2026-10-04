@@ -416,7 +416,7 @@ pub enum GetCredentialByIdentifierError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn create_credential(
     pool: &PgPool,
     encryptor: &Encryptor,
@@ -539,7 +539,7 @@ pub async fn create_credential(
     Ok(row)
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn list_credentials(
     pool: &PgPool,
     org_id: Uuid,
@@ -565,7 +565,7 @@ pub async fn list_credentials(
     Ok(rows)
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn get_credential(
     pool: &PgPool,
     org_id: Uuid,
@@ -592,7 +592,7 @@ pub async fn get_credential(
     Ok(row)
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn get_credential_secrets(
     pool: &PgPool,
     encryptor: &Encryptor,
@@ -625,7 +625,7 @@ pub async fn get_credential_secrets(
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn delete_credential(
     pool: &PgPool,
     org_id: Uuid,
@@ -647,7 +647,7 @@ pub async fn delete_credential(
     Ok(result.rows_affected() > 0)
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn set_default_credential(
     pool: &PgPool,
     org_id: Uuid,
@@ -777,7 +777,7 @@ fn managed_onprem_credential_data(
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn get_managed_onprem_credential(
     pool: &PgPool,
     encryptor: &Encryptor,
@@ -810,7 +810,7 @@ pub async fn get_managed_onprem_credential(
     Ok(Some(managed_onprem_credential_data(&cred, &secrets)))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn get_credential_by_resource(
     pool: &PgPool,
     org_id: Uuid,
@@ -837,7 +837,7 @@ pub async fn get_credential_by_resource(
     Ok(row)
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn get_credential_by_identifier(
     pool: &PgPool,
     org_id: Uuid,

@@ -101,7 +101,7 @@ pub enum ResetRegisterError {
 
 impl IntoResponse for ResetRegisterError {
     fn into_response(self) -> Response {
-        let (status, message) = match self {
+        let (status, message) = match &self {
             Self::InvalidToken { .. } | Self::InvalidTokenPayload { .. } => (
                 StatusCode::BAD_REQUEST,
                 "This token is invalid, expired, or has already been used.".to_string(),
@@ -142,7 +142,7 @@ impl IntoResponse for ResetRegisterError {
                 )
             }
         };
-        (status, message).into_response()
+        sentry_middleware::error_response(status, message, self)
     }
 }
 
@@ -153,7 +153,7 @@ pub struct ResetRegisterBeginRequest {
 
 /// Begin a WebAuthn registration ceremony using a valid reset token.
 /// The token identifies an existing user whose credentials were cleared by an admin.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn begin_reset_register_handler(
     State(state): State<AppState>,
     Json(req): Json<ResetRegisterBeginRequest>,
@@ -239,7 +239,7 @@ pub async fn begin_reset_register_handler(
 
 /// Finish a WebAuthn registration ceremony initiated via reset token.
 /// Marks the token as used and saves the new credential.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn finish_reset_register_handler(
     State(state): State<AppState>,
     Json(req): Json<serde_json::Value>,

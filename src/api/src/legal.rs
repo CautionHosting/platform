@@ -98,7 +98,7 @@ impl IntoResponse for ListActiveLegalDocumentsError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
@@ -107,7 +107,7 @@ impl IntoResponse for ListActiveLegalDocumentsError {
 /// account, you agree to X and Y" notice, and signup records a consent
 /// event for exactly these documents — so what's presented and what's
 /// recorded always match, however many document types are configured.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn list_active_legal_documents(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<PublicLegalDocumentSummary>>, ListActiveLegalDocumentsError> {
@@ -330,7 +330,7 @@ pub(crate) enum GetActiveDocumentError {
 }
 
 /// Get the active version for a document type, or None if no active version exists.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn get_active_document(
     pool: &PgPool,
     document_type: &str,
@@ -370,7 +370,7 @@ pub(crate) enum GetLatestUserDocumentByTypeError {
 /// "notice_shown"; if either were ever the most recent row for a document,
 /// an unfiltered "most recent event of any type" query would treat it as
 /// satisfying the document and clear requires_action without real consent.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn get_latest_user_document_by_type(
     pool: &PgPool,
     user_id: Uuid,
@@ -413,7 +413,7 @@ pub(crate) enum UserPredatesLegalTrackingError {
 /// legal tracking existed), as opposed to having history for other document
 /// types but not this one. See `compute_document_status` for why this
 /// distinction matters.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn user_predates_legal_tracking(
     pool: &PgPool,
     user_id: Uuid,
@@ -467,7 +467,7 @@ pub enum GetUserLegalStatusError {
 
 /// Get the full legal status for a user across every document type that
 /// currently has an active version.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn get_user_legal_status(
     pool: &PgPool,
     user_id: Uuid,
@@ -522,7 +522,7 @@ pub enum GetBlockingDocumentRequiringAcceptanceError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn get_blocking_document_requiring_acceptance(
     pool: &PgPool,
     user_id: Uuid,
@@ -676,13 +676,13 @@ impl IntoResponse for AcceptLegalDocumentError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
 /// Accept/acknowledge the current active version of a legal document.
 /// Records an append-only event and returns the updated legal status.
-#[tracing::instrument(skip_all, err, fields(document_type = %payload.document_type))]
+#[tracing::instrument(skip_all, fields(document_type = %payload.document_type))]
 pub async fn accept_legal_document(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -869,11 +869,11 @@ impl IntoResponse for SendLegalNoticesError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn send_legal_notices(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<SendLegalNoticesRequest>,
@@ -1071,7 +1071,7 @@ pub(crate) enum LoadLegalNoticeDocumentsError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn load_legal_notice_documents(
     pool: &PgPool,
     document_ids: Option<&[Uuid]>,
@@ -1150,7 +1150,7 @@ pub(crate) enum LegalNoticeDocumentIdsError {
 /// Validate at most one document per type in a notice batch, and collect
 /// their ids. Generalized over an arbitrary set of document types instead
 /// of two named slots.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn legal_notice_document_ids(
     documents: &[LegalNoticeDocument],
 ) -> Result<Vec<Uuid>, LegalNoticeDocumentIdsError> {
@@ -1203,7 +1203,7 @@ pub(crate) enum UpsertLegalNoticeBatchError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn upsert_legal_notice_batch(
     pool: &PgPool,
     dedupe_key: &str,
@@ -1268,7 +1268,7 @@ pub(crate) enum CountLegalNoticeRecipientsError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn count_legal_notice_recipients(
     pool: &PgPool,
     recipient_selection: &RecipientSelection,
@@ -1307,7 +1307,7 @@ pub(crate) enum CountSentLegalNoticeDeliveriesError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn count_sent_legal_notice_deliveries(
     pool: &PgPool,
     batch_id: Option<Uuid>,
@@ -1355,7 +1355,7 @@ pub(crate) enum CountPendingLegalNoticeRecipientsError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn count_pending_legal_notice_recipients(
     pool: &PgPool,
     batch_id: Option<Uuid>,
@@ -1406,7 +1406,7 @@ pub(crate) enum LoadPendingLegalNoticeRecipientsError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn load_pending_legal_notice_recipients(
     pool: &PgPool,
     batch_id: Option<Uuid>,
@@ -1522,7 +1522,7 @@ impl SendLegalNoticeEmailError {
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn send_legal_notice_email(
     client: &reqwest::Client,
     email_service_url: &str,
@@ -1571,7 +1571,7 @@ pub(crate) enum RecordLegalNoticeDeliveryError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn record_legal_notice_delivery(
     pool: &PgPool,
     batch_id: Uuid,

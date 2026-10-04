@@ -60,11 +60,11 @@ impl IntoResponse for GetCurrentUserError {
         let (status, body) = match &self {
             GetCurrentUserError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found"),
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
 pub async fn get_current_user(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -137,11 +137,11 @@ impl IntoResponse for UpdateCurrentUserError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
 pub async fn update_current_user(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -349,11 +349,11 @@ impl IntoResponse for DeleteCurrentUserError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
 pub async fn delete_current_user(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
