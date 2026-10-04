@@ -80,11 +80,11 @@ pub(crate) enum BeginLoginError {
 impl IntoResponse for BeginLoginError {
     fn into_response(self) -> Response {
         tracing::error!(?self, "Begin login error");
-        (
+        sentry_middleware::error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "An internal error occurred",
+            self,
         )
-            .into_response()
     }
 }
 
@@ -149,7 +149,7 @@ pub(crate) enum ScopedChallengeError {
 /// as an `allowCredentials` list. A malformed blob at index `i` fails the
 /// whole batch with that `index` and the JSON error boxed as the source;
 /// callers map this leaf into their own single source-bearing variant.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn deserialize_security_keys(
     public_keys: &[Vec<u8>],
 ) -> Result<Vec<SecurityKey>, DeserializeCredentialError> {
@@ -375,7 +375,7 @@ fn apply_decoy_shape(
 /// (`false`) only when `username` is provably not a real account by format
 /// alone (e.g. fails `validate_username`) — there's no real per-credential
 /// cost to match in that case, and it saves the crypto work.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn force_decoy_challenge(
     state: &AppState,
     username: &str,
@@ -430,7 +430,7 @@ async fn force_decoy_challenge(
 /// `scoped_or_decoy_challenge` rather than in `begin_login_handler`, the QR
 /// cross-device begin path (`qr_login_authenticate_handler`, which also
 /// calls this function) inherits the same per-username cap automatically.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn scoped_or_decoy_challenge(
     state: &AppState,
     username: &str,
@@ -553,7 +553,7 @@ pub(crate) async fn scoped_or_decoy_challenge(
 ///   - `login_allow_broadcast == false` -> discoverable: empty
 ///     `allowCredentials`, `mediation: "conditional"` (set automatically by
 ///     `start_discoverable_authentication`).
-#[tracing::instrument(skip_all, err(Debug))]
+#[tracing::instrument(skip_all)]
 pub async fn begin_login_handler(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
@@ -699,7 +699,7 @@ fn credential_lookup_error(error: db::DbError) -> LoginError {
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn finish_login_handler(
     State(state): State<AppState>,
     Json(req): Json<serde_json::Value>,

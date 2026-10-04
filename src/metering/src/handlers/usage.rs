@@ -27,15 +27,15 @@ pub(crate) enum GetUserUsageError {
 impl IntoResponse for GetUserUsageError {
     fn into_response(self) -> Response {
         tracing::error!(?self, "get user usage error");
-        (
+        sentry_middleware::error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": "internal error"})),
+            self,
         )
-            .into_response()
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %user_id))]
+#[tracing::instrument(skip_all, fields(user_id = %user_id))]
 pub(crate) async fn get_user_usage(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<uuid::Uuid>,

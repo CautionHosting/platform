@@ -31,25 +31,23 @@ pub(crate) enum TestSimulateUsageError {
 
 impl IntoResponse for TestSimulateUsageError {
     fn into_response(self) -> Response {
-        let err = &self;
-        match self {
+        let (status, body) = match &self {
             Self::NoPricing { .. } => {
-                tracing::error!(?err, "test simulate usage: no pricing");
+                tracing::error!(?self, "test simulate usage: no pricing");
                 (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({"error": "no pricing configured for this resource type"})),
                 )
-                    .into_response()
             }
             Self::Database { .. } => {
-                tracing::error!(?err, "test simulate usage: database error");
+                tracing::error!(?self, "test simulate usage: database error");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::json!({"error": "internal error"})),
                 )
-                    .into_response()
             }
-        }
+        };
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
@@ -67,11 +65,11 @@ pub(crate) enum TestSimulatePaddleTransactionError {
 impl IntoResponse for TestSimulatePaddleTransactionError {
     fn into_response(self) -> Response {
         tracing::error!(?self, "test simulate paddle transaction error");
-        (
+        sentry_middleware::error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": "internal error"})),
+            self,
         )
-            .into_response()
     }
 }
 
@@ -85,7 +83,7 @@ pub(crate) struct TestSimulateUsageRequest {
 }
 
 /// Simulate resource usage for testing the billing pipeline
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn test_simulate_usage(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TestSimulateUsageRequest>,
@@ -182,7 +180,7 @@ pub(crate) struct TestSimulatePaddleTransactionRequest {
 }
 
 /// Simulate a Paddle transaction webhook for testing email and billing flow
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn test_simulate_paddle_transaction(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TestSimulatePaddleTransactionRequest>,

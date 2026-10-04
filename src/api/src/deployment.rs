@@ -268,7 +268,7 @@ pub(crate) enum TofuDestroyError {
 
 /// Drain both output pipes while waiting, so verbose commands cannot block on output.
 /// Kill and reap the child when its deadline expires.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn run_with_timeout(
     cmd: &mut Command,
     timeout_secs: u64,
@@ -504,7 +504,7 @@ pub(crate) enum DeployNitroEnclaveError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn deploy_nitro_enclave(
     request: NitroDeploymentRequest,
 ) -> std::result::Result<DeploymentResult, DeployNitroEnclaveError> {
@@ -614,7 +614,7 @@ pub async fn deploy_nitro_enclave(
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn destroy_app_with_credentials(
     org_id: Uuid,
     resource_id: Uuid,
@@ -663,7 +663,7 @@ pub(crate) enum ScaleDownAsgError {
 }
 
 /// Scale down ASG to 0 and wait for instances to terminate
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn scale_down_asg(
     asg_name: &str,
     credentials: &AwsCredentials,
@@ -1424,7 +1424,7 @@ pub(crate) enum DestroyEc2Error {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn destroy_ec2_app(
     org_id: Uuid,
     resource_id: Uuid,
@@ -1556,7 +1556,7 @@ pub(crate) enum GenerateBackendConfigError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn generate_backend_config(
     work_dir: &Path,
     org_id: Uuid,
@@ -1594,7 +1594,7 @@ async fn generate_backend_config(
     Ok(())
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn run_tofu_init(
     work_dir: &Path,
     lockfile_path: Option<&Path>,
@@ -1652,7 +1652,7 @@ async fn run_tofu_init(
     Ok(())
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn run_tofu_apply_with_provider_creds(
     work_dir: &Path,
     resource_name: &str,
@@ -1747,7 +1747,7 @@ pub(crate) enum GetTofuOutputsError {
     MissingField { field: String, location: Location },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn get_tofu_outputs(work_dir: &Path) -> std::result::Result<DeploymentResult, GetTofuOutputsError> {
     use GetTofuOutputsErrorCtx as Ctx;
 
@@ -1847,7 +1847,7 @@ pub(crate) enum GetManagedOnpremOutputsError {
     MissingField { field: String, location: Location },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn get_managed_onprem_tofu_outputs(
     work_dir: &Path,
 ) -> std::result::Result<ManagedOnPremTerraformOutputs, GetManagedOnpremOutputsError> {
@@ -1933,7 +1933,7 @@ pub(crate) enum UpdateAsgLaunchTemplateError {
 }
 
 /// Update an existing ASG to use a new launch template
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn update_asg_launch_template(
     asg_name: &str,
     launch_template_id: &str,
@@ -2018,7 +2018,7 @@ pub(crate) enum WaitForAsgInstanceError {
 }
 
 /// Wait for an instance to be running in the ASG and return its instance ID
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn wait_for_asg_instance(
     asg_name: &str,
     credentials: &AwsCredentials,
@@ -2072,7 +2072,7 @@ pub(crate) enum AssociateEipWithInstanceError {
 }
 
 /// Associate an Elastic IP with an instance
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn associate_eip_with_instance(
     allocation_id: &str,
     instance_id: &str,
@@ -2097,7 +2097,7 @@ async fn associate_eip_with_instance(
     Ok(())
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn run_tofu_destroy(
     work_dir: &Path,
     resource_name: &str,
@@ -2175,7 +2175,7 @@ enum TapFramerUploadError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn upload_tap_framer(
     request: &NitroDeploymentRequest,
     destination_eif: &str,
@@ -2259,7 +2259,7 @@ async fn upload_tap_framer(
     Ok(())
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn upload_eif_to_s3(
     eif_path: &str,
     org_id: &Uuid,
@@ -2333,7 +2333,7 @@ pub(crate) enum UploadEifToCustomerBucketError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn upload_eif_to_customer_bucket(
     eif_path: &str,
     resource_id: &Uuid,
@@ -2445,7 +2445,7 @@ pub(crate) enum UploadEifFromPlatformS3Error {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn upload_eif_from_platform_s3_to_customer_bucket(
     source_s3_key: &str,
     resource_id: &Uuid,
@@ -2572,7 +2572,7 @@ pub(crate) enum ProvisionNitroEnclaveError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn provision_nitro_enclave(
     request: &NitroDeploymentRequest,
     eif_s3_path: &str,
@@ -2745,7 +2745,7 @@ pub(crate) enum ProvisionManagedOnpremError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn provision_managed_onprem(
     request: &NitroDeploymentRequest,
     eif_s3_path: &str,
@@ -2910,7 +2910,7 @@ pub(crate) enum EnclaveSizingError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) fn enclave_sizing(
     cpu_count: u32,
     memory_mb: u32,
@@ -2977,7 +2977,7 @@ pub(crate) fn host_vcpus_for_instance_type(instance_type: &str) -> Option<u32> {
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn compute_enclave_sizing(
     request: &NitroDeploymentRequest,
 ) -> std::result::Result<(u32, &'static str), EnclaveSizingError> {
@@ -3066,7 +3066,7 @@ pub(crate) enum GenerateMainTfError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn generate_nitro_deployment_main_tf(
     work_dir: &Path,
     request: &NitroDeploymentRequest,
@@ -4306,7 +4306,7 @@ pub(crate) enum GenerateOnpremTfError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn generate_managed_onprem_deployment_tf(
     work_dir: &Path,
     request: &NitroDeploymentRequest,

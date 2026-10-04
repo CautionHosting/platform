@@ -29,7 +29,7 @@ pub(crate) enum CreditLedgerOnceError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn get_ledger_balance_cents<'e, E>(
     executor: E,
     organization_id: Uuid,
@@ -69,7 +69,7 @@ pub enum CreditOutcome {
 /// idempotency. A redundant webhook/callback delivery is a no-op
 /// ([`CreditOutcome::AlreadyCredited`]); a fresh grant returns the new balance
 /// in the same transaction that inserted the row.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn credit_ledger_once(
     pool: &PgPool,
     org_id: Uuid,

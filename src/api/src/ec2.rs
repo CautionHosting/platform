@@ -428,7 +428,7 @@ impl Ec2Client {
         }
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub async fn describe_instances(
         &self,
         filters: &[Filter],
@@ -455,7 +455,7 @@ impl Ec2Client {
         Ok(parse_instance_ids(&body))
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub async fn count_vpcs(&self) -> Result<u32, CountVpcsError> {
         use CountVpcsErrorCtx as Ctx;
 
@@ -471,7 +471,7 @@ impl Ec2Client {
         Ok(parse_tag_values(&body, "vpcId").len() as u32)
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub async fn count_elastic_ips(&self) -> Result<u32, CountElasticIpsError> {
         use CountElasticIpsErrorCtx as Ctx;
 
@@ -487,7 +487,7 @@ impl Ec2Client {
         Ok(parse_tag_values(&body, "publicIp").len() as u32)
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub async fn associate_app_address(
         &self,
         resource_id: &str,
@@ -515,7 +515,7 @@ impl Ec2Client {
         Ok(public_ip)
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub async fn active_instance_types(&self) -> Result<Vec<String>, ActiveInstanceTypesError> {
         use ActiveInstanceTypesErrorCtx as Ctx;
 
@@ -530,7 +530,7 @@ impl Ec2Client {
             .collect())
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub async fn describe_regions(
         &self,
         all_regions: bool,
@@ -553,7 +553,7 @@ impl Ec2Client {
         Ok(parse_regions(&body))
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub async fn instance_type_offered(
         &self,
         instance_type: &str,
@@ -578,7 +578,7 @@ impl Ec2Client {
         Ok(!parse_tag_values(&body, "instanceType").is_empty())
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub async fn stop_instances(&self, instance_ids: &[String]) -> Result<(), StopInstancesError> {
         use StopInstancesErrorCtx as Ctx;
 
@@ -595,7 +595,7 @@ impl Ec2Client {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub async fn start_instances(
         &self,
         instance_ids: &[String],
@@ -615,7 +615,7 @@ impl Ec2Client {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub async fn run_instances(
         &self,
         params: &RunInstancesParams,
@@ -640,7 +640,7 @@ impl Ec2Client {
             })
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub async fn latest_amazon_linux_2023_ami_id(
         &self,
     ) -> Result<String, LatestAmazonLinuxAmiError> {
@@ -678,7 +678,7 @@ impl Ec2Client {
             })
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub async fn find_security_group_id(
         &self,
         vpc_id: &str,
@@ -702,7 +702,7 @@ impl Ec2Client {
         Ok(parse_first_tag_value(&body, "groupId"))
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub async fn create_security_group(
         &self,
         group_name: &str,
@@ -746,7 +746,7 @@ impl Ec2Client {
         })
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub async fn terminate_instances(
         &self,
         instance_ids: &[String],
@@ -766,7 +766,7 @@ impl Ec2Client {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub async fn associate_address(
         &self,
         allocation_id: &str,
@@ -787,7 +787,7 @@ impl Ec2Client {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     async fn signed_request(
         &self,
         params: &[(String, String)],
@@ -825,7 +825,7 @@ impl ServiceQuotasClient {
         }
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub async fn get_service_quota_value(
         &self,
         service_code: &str,
@@ -913,7 +913,7 @@ impl AsgClient {
         }
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub async fn set_desired_capacity(
         &self,
         asg_name: &str,
@@ -934,7 +934,7 @@ impl AsgClient {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub async fn update_auto_scaling_group(
         &self,
         asg_name: &str,
@@ -959,7 +959,7 @@ impl AsgClient {
         Ok(())
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     async fn signed_request(
         &self,
         params: &[(String, String)],
@@ -1011,7 +1011,7 @@ pub(crate) enum SignedRequestError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn signed_request(
     http: &reqwest::Client,
     access_key_id: &str,
@@ -1141,7 +1141,7 @@ pub(crate) enum SignedJsonRequestError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn signed_json_request(
     http: &reqwest::Client,
     access_key_id: &str,
@@ -1328,7 +1328,7 @@ fn parse_tag_set(instance_item: &str) -> std::collections::HashMap<String, Strin
     tags
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn parse_app_address(xml: &str) -> Result<(String, String, Option<String>), ParseAppAddressError> {
     let allocation_ids = parse_tag_values(xml, "allocationId");
     let public_ips = parse_tag_values(xml, "publicIp");

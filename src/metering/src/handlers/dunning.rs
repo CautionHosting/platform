@@ -42,7 +42,7 @@ pub async fn run_dunning_loop(state: Arc<AppState>) {
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn run_dunning_cycle(state: &AppState) -> Result<(), RunDunningCycleError> {
     use RunDunningCycleErrorCtx as Ctx;
 
@@ -209,7 +209,7 @@ async fn run_dunning_cycle(state: &AppState) -> Result<(), RunDunningCycleError>
 }
 
 /// Check if an org has resolved its payment issues.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn check_payment_resolved(
     pool: &sqlx::PgPool,
     org_id: uuid::Uuid,

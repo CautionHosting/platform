@@ -61,17 +61,16 @@ pub enum UsernameClaimError {
 
 impl IntoResponse for UsernameClaimError {
     fn into_response(self) -> Response {
-        match self {
+        let (status, body) = match &self {
             Self::InvalidUsername { .. } => (
                 StatusCode::BAD_REQUEST,
                 "The requested username is invalid.",
-            )
-                .into_response(),
+            ),
             Self::UsernameTaken { .. } => {
-                (StatusCode::CONFLICT, "This username is already taken.").into_response()
+                (StatusCode::CONFLICT, "This username is already taken.")
             }
             Self::AlreadyClaimed { .. } => {
-                (StatusCode::CONFLICT, "You have already set your username.").into_response()
+                (StatusCode::CONFLICT, "You have already set your username.")
             }
             Self::Internal { .. } => {
                 tracing::error!(?self, "Username claim error");
@@ -79,16 +78,16 @@ impl IntoResponse for UsernameClaimError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "An internal error occurred",
                 )
-                    .into_response()
             }
-        }
+        };
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
 /// Returns the authenticated user's current username and whether it is
 /// still the auto-generated placeholder assigned at signup. Used by the
 /// dashboard to decide whether to show the one-time username claim prompt.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn get_username_status_handler(
     State(state): State<AppState>,
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
@@ -109,7 +108,7 @@ pub async fn get_username_status_handler(
 /// real, immutable username exactly once. Subsequent attempts fail with
 /// `AlreadyClaimed` since `db::claim_username` only updates rows that are
 /// still marked as a placeholder.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn claim_username_handler(
     State(state): State<AppState>,
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,

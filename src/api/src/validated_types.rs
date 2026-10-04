@@ -24,7 +24,7 @@ pub struct JsonBodyRejection {
 
 impl IntoResponse for JsonBodyRejection {
     fn into_response(self) -> Response {
-        (StatusCode::BAD_REQUEST, "bad request").into_response()
+        sentry_middleware::error_response(StatusCode::BAD_REQUEST, "bad request", self)
     }
 }
 

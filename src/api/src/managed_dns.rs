@@ -136,7 +136,7 @@ impl AwsRoute53Api {
         }
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     fn rrset(
         name: &str,
         ttl: i64,
@@ -159,7 +159,7 @@ impl AwsRoute53Api {
             .with_context(Ctx::build_set())
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     async fn change(
         &self,
         zone_id: &str,
@@ -198,7 +198,7 @@ impl AwsRoute53Api {
 
 #[async_trait]
 impl Route53Api for AwsRoute53Api {
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     async fn upsert_a(
         &self,
         zone_id: &str,
@@ -210,7 +210,7 @@ impl Route53Api for AwsRoute53Api {
         self.change(zone_id, ChangeAction::Upsert, rrset).await
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     async fn delete_a(
         &self,
         zone_id: &str,
@@ -221,7 +221,7 @@ impl Route53Api for AwsRoute53Api {
         self.change(zone_id, ChangeAction::Delete, rrset).await
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     async fn get_a(
         &self,
         zone_id: &str,
@@ -260,7 +260,7 @@ impl Route53Api for AwsRoute53Api {
         Ok(Some(ARecordSet { ttl, values }))
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     async fn change_is_insync(&self, change_id: &str) -> Result<bool, Route53ApiError> {
         use Route53ApiErrorCtx as Ctx;
 
@@ -696,7 +696,7 @@ pub(crate) enum FetchDnsResourceError {
 }
 
 impl ManagedDns {
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub(crate) async fn from_env() -> Result<Option<Self>, FromEnvError> {
         use FromEnvErrorCtx as Ctx;
 
@@ -724,7 +724,7 @@ impl ManagedDns {
         }))
     }
 
-    #[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
+    #[tracing::instrument(skip_all, fields(resource_id = %resource_id))]
     pub(crate) async fn publish_resource(
         &self,
         pool: &PgPool,
@@ -758,7 +758,7 @@ impl ManagedDns {
         }
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     async fn publish_once(
         &self,
         pool: &PgPool,
@@ -835,7 +835,7 @@ impl ManagedDns {
         Ok(PublishProgress::Pending)
     }
 
-    #[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
+    #[tracing::instrument(skip_all, fields(resource_id = %resource_id))]
     pub(crate) async fn ensure_safe_to_release(
         &self,
         pool: &PgPool,
@@ -895,7 +895,7 @@ impl ManagedDns {
         }
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     async fn withdraw_once(
         &self,
         pool: &PgPool,
@@ -1008,7 +1008,7 @@ impl ManagedDns {
         Ok(WithdrawalProgress::Pending)
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     async fn wait_for_change(&self, change_id: &str) -> Result<(), WaitForChangeError> {
         use WaitForChangeErrorCtx as Ctx;
 
@@ -1038,7 +1038,7 @@ pub(crate) fn managed_hostname(resource_id: Uuid) -> String {
     managed_hostname_for_suffix(resource_id, &suffix)
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn configured_dns_suffix() -> Result<String, NormalizeDnsSuffixError> {
     normalize_dns_suffix(
         &std::env::var("CAUTION_APPS_DNS_SUFFIX")
@@ -1046,7 +1046,7 @@ fn configured_dns_suffix() -> Result<String, NormalizeDnsSuffixError> {
     )
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn normalize_dns_suffix(value: &str) -> Result<String, NormalizeDnsSuffixError> {
     let suffix = value.trim().trim_end_matches('.').to_ascii_lowercase();
     let valid = !suffix.is_empty()
@@ -1073,7 +1073,7 @@ fn managed_hostname_for_suffix(resource_id: Uuid, suffix: &str) -> String {
     resource_id.as_hyphenated().to_string() + "." + suffix
 }
 
-#[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
+#[tracing::instrument(skip_all, fields(resource_id = %resource_id))]
 pub(crate) async fn dns_snapshot(
     pool: &PgPool,
     resource_id: Uuid,
@@ -1089,7 +1089,7 @@ pub(crate) async fn dns_snapshot(
     Ok(DnsSnapshot { status, error })
 }
 
-#[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
+#[tracing::instrument(skip_all, fields(resource_id = %resource_id))]
 pub(crate) async fn begin_termination(
     pool: &PgPool,
     resource_id: Uuid,
@@ -1129,7 +1129,7 @@ pub(crate) async fn begin_termination(
     Ok(())
 }
 
-#[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
+#[tracing::instrument(skip_all, fields(resource_id = %resource_id))]
 pub(crate) async fn begin_owned_deploy_rollback(
     pool: &PgPool,
     resource_id: Uuid,
@@ -1176,7 +1176,7 @@ pub(crate) async fn begin_owned_deploy_rollback(
     .with_context(Ctx::query())
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn transition_to_withdrawing(
     pool: &PgPool,
     resource_id: Uuid,
@@ -1205,7 +1205,7 @@ async fn transition_to_withdrawing(
     Ok(())
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn locked_transaction<'a>(
     pool: &'a PgPool,
     resource_id: Uuid,
@@ -1221,7 +1221,7 @@ pub(crate) async fn locked_transaction<'a>(
     Ok(tx)
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn load_dns_resource(
     tx: &mut Transaction<'_, Postgres>,
     resource_id: Uuid,
@@ -1258,7 +1258,7 @@ async fn load_dns_resource(
     })
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn fetch_dns_resource(
     pool: &PgPool,
     resource_id: Uuid,

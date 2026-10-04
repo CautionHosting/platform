@@ -27,11 +27,11 @@ pub(crate) enum TrackResourceError {
 impl IntoResponse for TrackResourceError {
     fn into_response(self) -> Response {
         tracing::error!(?self, "track resource error");
-        (
+        sentry_middleware::error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": "internal error"})),
+            self,
         )
-            .into_response()
     }
 }
 
@@ -49,11 +49,11 @@ pub(crate) enum UntrackResourceError {
 impl IntoResponse for UntrackResourceError {
     fn into_response(self) -> Response {
         tracing::error!(?self, "untrack resource error");
-        (
+        sentry_middleware::error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": "internal error"})),
+            self,
         )
-            .into_response()
     }
 }
 
@@ -71,11 +71,11 @@ pub(crate) enum ListTrackedResourcesError {
 impl IntoResponse for ListTrackedResourcesError {
     fn into_response(self) -> Response {
         tracing::error!(?self, "list tracked resources error");
-        (
+        sentry_middleware::error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": "internal error"})),
+            self,
         )
-            .into_response()
     }
 }
 
@@ -93,7 +93,7 @@ pub(crate) struct TrackResourceRequest {
     metadata: Option<serde_json::Value>,
 }
 
-#[tracing::instrument(skip_all, err, fields(resource_id = %req.resource_id))]
+#[tracing::instrument(skip_all, fields(resource_id = %req.resource_id))]
 pub(crate) async fn track_resource(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TrackResourceRequest>,
@@ -145,7 +145,7 @@ pub(crate) async fn track_resource(
     ))
 }
 
-#[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
+#[tracing::instrument(skip_all, fields(resource_id = %resource_id))]
 pub(crate) async fn untrack_resource(
     State(state): State<Arc<AppState>>,
     Path(resource_id): Path<String>,
@@ -178,7 +178,7 @@ pub(crate) async fn untrack_resource(
     ))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn list_tracked_resources(
     State(state): State<Arc<AppState>>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ListTrackedResourcesError> {

@@ -113,14 +113,13 @@ pub enum DeleteSshKeyError {
 
 impl IntoResponse for AddSshKeyError {
     fn into_response(self) -> Response {
-        match self {
-            error @ Self::Input { .. } => {
-                tracing::warn!(?error, "Rejected SSH key add: invalid input");
+        let (status, body) = match &self {
+            Self::Input { .. } => {
+                tracing::warn!(?self, "Rejected SSH key add: invalid input");
                 (
                     StatusCode::BAD_REQUEST,
                     "The submitted SSH key or user ID is invalid.",
                 )
-                    .into_response()
             }
             Self::Database { .. } => {
                 tracing::error!(?self, "SSH key add error");
@@ -128,22 +127,21 @@ impl IntoResponse for AddSshKeyError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "An internal error occurred",
                 )
-                    .into_response()
             }
-        }
+        };
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
 impl IntoResponse for ListSshKeysError {
     fn into_response(self) -> Response {
-        match self {
-            error @ Self::Input { .. } => {
-                tracing::warn!(?error, "Rejected SSH key list: invalid input");
+        let (status, body) = match &self {
+            Self::Input { .. } => {
+                tracing::warn!(?self, "Rejected SSH key list: invalid input");
                 (
                     StatusCode::BAD_REQUEST,
                     "Missing or invalid authenticated user ID.",
                 )
-                    .into_response()
             }
             Self::Database { .. } => {
                 tracing::error!(?self, "SSH key list error");
@@ -151,30 +149,29 @@ impl IntoResponse for ListSshKeysError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "An internal error occurred",
                 )
-                    .into_response()
             }
-        }
+        };
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
 impl IntoResponse for DeleteSshKeyError {
     fn into_response(self) -> Response {
-        match self {
+        let (status, body) = match &self {
             Self::InvalidUserId { .. } => (
                 StatusCode::BAD_REQUEST,
                 "Missing or invalid authenticated user ID.",
-            )
-                .into_response(),
-            Self::NotFound { .. } => (StatusCode::NOT_FOUND, "SSH key not found").into_response(),
+            ),
+            Self::NotFound { .. } => (StatusCode::NOT_FOUND, "SSH key not found"),
             Self::Database { .. } => {
                 tracing::error!(?self, "SSH key delete error");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "An internal error occurred",
                 )
-                    .into_response()
             }
-        }
+        };
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
@@ -204,7 +201,7 @@ pub struct ListSshKeysResponse {
     pub keys: Vec<crate::db::SshKeyInfo>,
 }
 
-#[tracing::instrument(skip_all, err(Debug))]
+#[tracing::instrument(skip_all)]
 pub async fn add_ssh_key_handler(
     State(state): State<AppState>,
     user_id_header: axum::http::HeaderMap,
@@ -258,7 +255,7 @@ pub async fn add_ssh_key_handler(
     }))
 }
 
-#[tracing::instrument(skip_all, err(Debug))]
+#[tracing::instrument(skip_all)]
 pub async fn list_ssh_keys_handler(
     State(state): State<AppState>,
     user_id_header: axum::http::HeaderMap,
@@ -279,7 +276,7 @@ pub async fn list_ssh_keys_handler(
     Ok(Json(ListSshKeysResponse { keys }))
 }
 
-#[tracing::instrument(skip_all, err(Debug))]
+#[tracing::instrument(skip_all)]
 pub async fn delete_ssh_key_handler(
     State(state): State<AppState>,
     user_id_header: axum::http::HeaderMap,

@@ -34,7 +34,7 @@ pub(crate) struct DeploymentRequirements {
 }
 
 impl DeploymentRequirements {
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub(crate) fn for_enclave(
         cpus: u32,
         memory_mb: u32,
@@ -111,7 +111,7 @@ pub(crate) enum CandidateRegionsError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn candidate_regions() -> Result<Vec<String>, CandidateRegionsError> {
     use CandidateRegionsErrorCtx as Ctx;
 
@@ -165,7 +165,7 @@ pub(crate) enum CapacityError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn reserve_capacity(
     pool: &PgPool,
     org_id: Uuid,
@@ -369,7 +369,7 @@ pub(crate) enum RegionCapacityError {
     UnknownInstanceType { message: String, location: Location },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn region_capacity(
     tx: &mut Transaction<'_, Postgres>,
     region: &str,
@@ -457,7 +457,7 @@ pub(crate) enum UserHasWaitlistEntryError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn user_has_waitlist_entry(
     tx: &mut Transaction<'_, Postgres>,
     org_id: Uuid,
@@ -568,11 +568,11 @@ impl IntoResponse for JoinWaitlistError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub(crate) async fn join_waitlist(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -720,7 +720,7 @@ pub(crate) enum SendCapacityWaitlistAlertRequestError {
     NonSuccess { status: u16, location: Location },
 }
 
-#[tracing::instrument(skip_all, err, fields(org_id = %alert.org_id))]
+#[tracing::instrument(skip_all, fields(org_id = %alert.org_id))]
 async fn send_capacity_waitlist_alert_request(
     alert: CapacityWaitlistAlert,
 ) -> Result<(), SendCapacityWaitlistAlertRequestError> {

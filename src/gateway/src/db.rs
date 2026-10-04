@@ -188,7 +188,7 @@ pub async fn claim_username(pool: &PgPool, user_id: Uuid, username: &str) -> Res
 }
 
 /// Returns `(username, username_is_placeholder)` for the given user.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn get_username_status(pool: &PgPool, user_id: Uuid) -> Result<(String, bool), DbError> {
     let row: (String, bool) =
         sqlx::query_as("SELECT username, username_is_placeholder FROM users WHERE id = $1")
@@ -716,7 +716,7 @@ pub async fn backfill_credential_uv(pool: &PgPool) -> Result<(), DbError> {
     Ok(())
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn get_all_credential_public_keys(pool: &PgPool) -> Result<Vec<Vec<u8>>, DbError> {
     let keys: Vec<Vec<u8>> = sqlx::query_scalar("SELECT public_key FROM fido2_credentials")
         .fetch_all(pool)
@@ -731,7 +731,7 @@ pub async fn get_all_credential_public_keys(pool: &PgPool) -> Result<Vec<Vec<u8>
 
 /// Look up a credential's public key scoped to `(user_id, credential_id)` so a
 /// shared key (same rawId under multiple accounts) resolves to the correct row.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn get_credential_public_key(
     pool: &PgPool,
     user_id: Uuid,
@@ -768,7 +768,7 @@ pub async fn get_credential_public_key(
 /// the challenge was begun for (membership check), session/sign flows require
 /// exactly one owner, and release-approval checks that the requester is among
 /// the owners of every relevant credential.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn get_user_ids_by_credential(
     pool: &PgPool,
     credential_id: &[u8],
@@ -809,7 +809,7 @@ pub async fn get_user_id_by_username(
 
 /// Fetch the serialized `SecurityKey` public keys for every credential
 /// belonging to a user, for building a username-scoped `allowCredentials` list.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn get_credential_public_keys_by_user_id(
     pool: &PgPool,
     user_id: Uuid,
@@ -1024,7 +1024,7 @@ where
     Ok(())
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn validate_auth_session(
     pool: &PgPool,
     session_id: &str,
@@ -1344,7 +1344,7 @@ impl RecordSignedRequestAuditError {
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn record_signed_request_audit(
     pool: &PgPool,
     audit: &NewSignedRequestAudit<'_>,
@@ -1419,7 +1419,7 @@ impl CompleteSignedRequestAuditError {
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn complete_signed_request_audit(
     pool: &PgPool,
     audit_id: Uuid,

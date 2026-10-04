@@ -37,7 +37,7 @@ pub enum CallInternalUnsuspendError {
 }
 
 /// Helper: call the internal unsuspend endpoint after a credit purchase.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn call_internal_unsuspend(
     state: &AppState,
     org_id: Uuid,
@@ -80,14 +80,14 @@ pub enum SuspendManagedResourcesError {
 
 impl IntoResponse for SuspendManagedResourcesError {
     fn into_response(self) -> Response {
-        (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+        sentry_middleware::error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal error", self)
     }
 }
 
 /// Internal endpoint: suspend only fully-managed resources for an org (credit exhaustion).
 /// Unlike suspend_org_resources which suspends ALL resources, this only suspends resources
 /// that are NOT managed on-prem — credit exhaustion should not affect BYOC deployments.
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub async fn suspend_managed_resources(
     State(state): State<Arc<AppState>>,
     Path(org_id): Path<Uuid>,
@@ -202,13 +202,13 @@ pub enum SuspendOrgResourcesError {
 
 impl IntoResponse for SuspendOrgResourcesError {
     fn into_response(self) -> Response {
-        (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+        sentry_middleware::error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal error", self)
     }
 }
 
 /// Internal endpoint: suspend all running resources for an org (stop EC2 instances).
 /// Called by the metering service during dunning enforcement.
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub async fn suspend_org_resources(
     State(state): State<Arc<AppState>>,
     Path(org_id): Path<Uuid>,
@@ -328,13 +328,13 @@ pub enum UnsuspendOrgResourcesError {
 
 impl IntoResponse for UnsuspendOrgResourcesError {
     fn into_response(self) -> Response {
-        (StatusCode::INTERNAL_SERVER_ERROR, "internal error").into_response()
+        sentry_middleware::error_response(StatusCode::INTERNAL_SERVER_ERROR, "internal error", self)
     }
 }
 
 /// Internal endpoint: unsuspend org — restart stopped resources and clear dunning state.
 /// Called when payment is resolved (credit deposit, new payment method, etc).
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub async fn unsuspend_org_resources(
     State(state): State<Arc<AppState>>,
     Path(org_id): Path<Uuid>,
