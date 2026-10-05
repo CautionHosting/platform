@@ -12,6 +12,7 @@ fn request() -> GenerateOrgQuorumBundleRequest {
         pgp_certificates: vec![],
         allow_caution_backed_keys: true,
         labels: serde_json::Value::Null,
+        keymaker_pcr_policy: None,
     }
 }
 
@@ -368,6 +369,29 @@ fn policy_files_fail_closed_when_missing_or_invalid() {
         )
         .unwrap();
         assert_eq!(load_policy(&path).is_ok(), byte == "ab");
+    }
+}
+
+#[test]
+fn client_policy_is_optional_and_rejects_malformed_or_debug_pins() {
+    assert!(client_policy(None).unwrap().is_none());
+    for value in [
+        serde_json::json!("not a policy"),
+        serde_json::json!({"sets":[]}),
+        serde_json::json!({"sets":[{"pcrs":{"0":"ab"}}]}),
+        serde_json::json!({"sets":[{"pcrs":{"0":"ab".repeat(48)}}], "extra":true}),
+    ] {
+        assert_eq!(
+            client_policy(Some(&value)).unwrap_err().status,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    for byte in ["00", "ab"] {
+        let value = serde_json::json!({"sets":[{"pcrs":{
+            "0":byte.repeat(48), "1":byte.repeat(48), "2":byte.repeat(48)
+        }}]});
+        let result = client_policy(Some(&value));
+        assert_eq!(result.is_ok_and(|policy| policy.is_some()), byte == "ab");
     }
 }
 

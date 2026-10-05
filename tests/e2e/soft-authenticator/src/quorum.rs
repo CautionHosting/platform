@@ -468,6 +468,21 @@ pub fn run(
         "",
     )?)?;
 
+    // A proof that fails the CLI's trusted policy must not be stored.
+    let pins = "cd".repeat(48);
+    let mismatched = json!({"threshold":3, "pgp_certificates":holders, "participants":[],
+        "keymaker_pcr_policy":{"sets":[{"pcrs":{"0":pins, "1":pins, "2":pins}}]}})
+    .to_string();
+    let rejected = session.signed(Method::POST, "/quorum-bundles/from-org-users", &mismatched)?;
+    assert_eq!(rejected.status().as_u16(), 409);
+    assert!(rejected
+        .text()?
+        .contains("does not satisfy the CLI's trusted Keymaker policy"));
+    assert_eq!(
+        checked(session.get("/quorum-bundles")?)?.json::<Value>()?,
+        json!([])
+    );
+
     fs::write(work.join("downgrade-threshold"), "")?;
     let rejected = session.signed(Method::POST, "/quorum-bundles/from-org-users", &request)?;
     assert_eq!(rejected.status().as_u16(), 502);

@@ -243,6 +243,8 @@ struct HostedRequest<'a> {
     pgp_certificates: &'a [String],
     allow_caution_backed_keys: bool,
     labels: &'a HashMap<String, String>,
+    // Lets Platform refuse to store a bundle this CLI would reject.
+    keymaker_pcr_policy: serde_json::Value,
 }
 
 fn endpoint(
@@ -782,7 +784,7 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
     {
         return Ok(());
     }
-    let (response, uploaded) = if let Some(url) = endpoint {
+    let (response, uploaded, stored_id) = if let Some(url) = endpoint {
         let mut label = labels.clone();
         if let Some(name) = &options.name {
             label.entry("name".into()).or_insert_with(|| name.clone());
@@ -824,7 +826,7 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
                 "Keymaker response does not match the requested quorum",
             ));
         }
-        (response, false)
+        (response, false, None)
     } else {
         let request = HostedRequest {
             name: &options.name,
@@ -835,6 +837,8 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
                 .iter()
                 .any(|p| p.key_source == "caution_backed_pgp"),
             labels: &labels,
+            keymaker_pcr_policy: serde_json::from_str(&policy_text)
+                .with_context(Ctx::new("invalid Keymaker PCR policy JSON"))?,
         };
         let response = client
             .signed_post(
@@ -851,57 +855,71 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
             InitError::invalid("Platform response is missing the proofed bundle")
         })?)
         .with_context(Ctx::new("invalid proofed Platform quorum response"))?;
-        (response, true)
+        let stored_id = stored
+            .get("id")
+            .and_then(|id| id.as_str())
+            .map(str::to_owned);
+        (response, true, stored_id)
     };
-    let bundle = locksmith::bundle::load_response(response.clone(), &policy)
-        .with_context(Ctx::new("Keymaker proof verification failed"))?
-        .to_latest();
-    check_quorum_parameters(&bundle, threshold, count)?;
-    if bundle.keyring.len() != count {
-        return Err(InitError::invalid(
-            "returned quorum holder count differs from selection",
-        ));
-    }
-    let expected_pgp: Vec<_> = local.iter().chain(&registered).collect();
-    let actual_pgp: Vec<_> = bundle
-        .keyring
-        .iter()
-        .filter_map(|key| match key {
-            Key::OpenPGP { cert } => Some(cert),
-            _ => None,
-        })
-        .collect();
-    let expected_kinds: Vec<_> = std::iter::repeat_n(false, local.len())
-        .chain(
-            participants
-                .iter()
-                .map(|p| p.key_source == "caution_backed_pgp"),
-        )
-        .collect();
-    let actual_kinds: Vec<_> = bundle
-        .keyring
-        .iter()
-        .map(|key| matches!(key, Key::WebAuthn { .. }))
-        .collect();
-    let mut expected_labels = labels.clone();
-    if let Some(name) = &options.name {
-        expected_labels
-            .entry("name".into())
-            .or_insert_with(|| name.clone());
-    }
-    if expected_pgp != actual_pgp
-        || expected_kinds != actual_kinds
-        || bundle.label != expected_labels
-    {
-        return Err(InitError::invalid(
-            "returned quorum approval methods, certificates or labels differ from selection",
-        ));
-    }
-    Cert::from_bytes(bundle.public_key.as_bytes())
-        .with_context(Ctx::new("invalid quorum public key"))?;
-    if bundle.shardfile.is_empty() {
-        return Err(InitError::invalid("empty quorum shardfile"));
-    }
+    let verified = (|| -> Result<_, InitError> {
+        let bundle = locksmith::bundle::load_response(response.clone(), &policy)
+            .with_context(Ctx::new("Keymaker proof verification failed"))?
+            .to_latest();
+        check_quorum_parameters(&bundle, threshold, count)?;
+        if bundle.keyring.len() != count {
+            return Err(InitError::invalid(
+                "returned quorum holder count differs from selection",
+            ));
+        }
+        let expected_pgp: Vec<_> = local.iter().chain(&registered).collect();
+        let actual_pgp: Vec<_> = bundle
+            .keyring
+            .iter()
+            .filter_map(|key| match key {
+                Key::OpenPGP { cert } => Some(cert),
+                _ => None,
+            })
+            .collect();
+        let expected_kinds: Vec<_> = std::iter::repeat_n(false, local.len())
+            .chain(
+                participants
+                    .iter()
+                    .map(|p| p.key_source == "caution_backed_pgp"),
+            )
+            .collect();
+        let actual_kinds: Vec<_> = bundle
+            .keyring
+            .iter()
+            .map(|key| matches!(key, Key::WebAuthn { .. }))
+            .collect();
+        let mut expected_labels = labels.clone();
+        if let Some(name) = &options.name {
+            expected_labels
+                .entry("name".into())
+                .or_insert_with(|| name.clone());
+        }
+        if expected_pgp != actual_pgp
+            || expected_kinds != actual_kinds
+            || bundle.label != expected_labels
+        {
+            return Err(InitError::invalid(
+                "returned quorum approval methods, certificates or labels differ from selection",
+            ));
+        }
+        Cert::from_bytes(bundle.public_key.as_bytes())
+            .with_context(Ctx::new("invalid quorum public key"))?;
+        if bundle.shardfile.is_empty() {
+            return Err(InitError::invalid("empty quorum shardfile"));
+        }
+        Ok(bundle)
+    })();
+    let bundle = verified.inspect_err(|_| {
+        if let Some(id) = &stored_id {
+            output::status(format!(
+                "Platform stored bundle {id}, but this CLI rejected it; delete it in the dashboard before retrying."
+            ));
+        }
+    })?;
     let json = serde_json::to_string_pretty(&response)
         .with_context(Ctx::new("unable to encode proofed bundle"))?;
     fs::create_dir_all(".caution")
@@ -924,7 +942,10 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
             bundle.threshold,
             bundle.max,
         ));
-        for cert in &actual_pgp {
+        for key in &bundle.keyring {
+            let Key::OpenPGP { cert } = key else {
+                continue;
+            };
             let cert = Cert::from_bytes(cert.as_bytes())
                 .with_context(Ctx::new("invalid holder certificate"))?;
             output::status(format!("  PGP {}", cert.fingerprint()));

@@ -216,6 +216,8 @@ caution --qr secret send-shard --holder bob \
 
 Use certificate fingerprints if username lookup is unavailable. Alice uses her
 own smartcard or `--keyring`; omit `--qr` for Bob's native USB FIDO2 approval.
+Bob runs `--qr` under Bob's own Caution login; Platform refuses approval pages for
+another user's share.
 The application remains locked below threshold and starts with the decrypted
 environment at threshold. Wait for receiver acknowledgement, not just browser
 approval. See [share recovery](share-recovery.md) for troubleshooting.

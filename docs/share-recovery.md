@@ -82,6 +82,9 @@ caution secret send-shard --holder CERTIFICATE_FINGERPRINT
 caution --qr secret send-shard --holder CERTIFICATE_FINGERPRINT
 ```
 
+`--qr` must run under the holder's own Caution login. Platform refuses to open an
+approval page for another user's share.
+
 With `CAUTION_BACKEND_URL` exported, `--url` is optional. An explicit `--url`
 overrides the environment variable for that command. Replace the placeholder URL
 with your Platform endpoint.

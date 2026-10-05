@@ -20,14 +20,37 @@ use uuid::Uuid;
 mod metadata;
 
 struct Pending {
+    user: Uuid,
+    // Key-service session of the attested Prepared; one approval page per release attempt.
+    session: String,
     browser: String,
     deadline: Instant,
     request: Value,
     result: Option<Value>,
 }
+const CAPACITY: usize = 128;
+const PER_USER_PENDING: usize = 4;
 static PENDING: OnceLock<Mutex<HashMap<String, Pending>>> = OnceLock::new();
 fn store() -> &'static Mutex<HashMap<String, Pending>> {
     PENDING.get_or_init(Default::default)
+}
+
+fn admit_pending(
+    pending: &mut HashMap<String, Pending>,
+    token: String,
+    entry: Pending,
+) -> Result<(), StatusCode> {
+    pending.retain(|_, p| p.deadline > Instant::now());
+    if pending.values().any(|p| p.session == entry.session) {
+        return Err(StatusCode::CONFLICT);
+    }
+    if pending.len() >= CAPACITY
+        || pending.values().filter(|p| p.user == entry.user).count() >= PER_USER_PENDING
+    {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+    pending.insert(token, entry);
+    Ok(())
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -117,30 +140,38 @@ pub async fn begin(
     let started = Instant::now();
     let (mut request, lifetime) =
         verified_request(&approval, &trusted_measurements()?, &state.relying_party_id)?;
-    if let Ok(user) = crate::db::get_user_id_by_credential(&state.db, &credential).await {
-        request["metadata"] = metadata::load(&state, user, &approval.prepared.data, approval.display.as_ref()).await;
-    }
+    let user = crate::db::get_user_id_by_credential(&state.db, &credential)
+        .await
+        .map_err(|error| match error.kind {
+            crate::db::DbErrorKind::CredentialNotFound => StatusCode::UNAUTHORIZED,
+            _ => StatusCode::SERVICE_UNAVAILABLE,
+        })?;
+    // Only the holder may open an approval page for their own share.
+    request["metadata"] = metadata::admit(
+        &state,
+        user,
+        &approval.prepared.data,
+        approval.display.as_ref(),
+    )
+    .await
+    .inspect_err(|status| tracing::warn!(%status, "release relay admission rejected"))?;
     request["reported"] = serde_json::to_value(&approval.display).map_err(|_| StatusCode::BAD_REQUEST)?;
     if started.elapsed() >= lifetime { return Err(StatusCode::GONE); }
     let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let browser = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let metadata = request.get("metadata").cloned();
+    let entry = Pending {
+        user,
+        session: approval.prepared.data.session_id.clone(),
+        browser: browser.clone(),
+        deadline: started + lifetime,
+        request,
+        result: None,
+    };
     let mut pending = store()
         .lock()
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    pending.retain(|_, p| p.deadline > Instant::now());
-    if pending.len() >= 128 {
-        return Err(StatusCode::TOO_MANY_REQUESTS);
-    }
-    let metadata = request.get("metadata").cloned();
-    pending.insert(
-        token.clone(),
-        Pending {
-            browser: browser.clone(),
-            deadline: started + lifetime,
-            request,
-            result: None,
-        },
-    );
+    admit_pending(&mut pending, token.clone(), entry)?;
     // Browser and requester capabilities are distinct. Assertions are delivered only to the requester.
     Ok(Json(
         json!({"token":token,"url":format!("{}/qr-release#{}",crate::handlers::get_rp_origin(),browser),"metadata":metadata}),
@@ -197,16 +228,62 @@ mod tests {
     fn pending() -> (String, String) {
         let requester = Uuid::new_v4().to_string();
         let browser = Uuid::new_v4().to_string();
-        store().lock().unwrap().insert(
-            requester.clone(),
-            Pending {
-                browser: browser.clone(),
-                deadline: Instant::now() + Duration::from_secs(180),
-                request: json!({"context":{"holder":"test"}}),
-                result: None,
-            },
-        );
+        store()
+            .lock()
+            .unwrap()
+            .insert(requester.clone(), entry(Uuid::new_v4(), &browser));
         (requester, browser)
+    }
+    fn entry(user: Uuid, browser: &str) -> Pending {
+        Pending {
+            user,
+            session: Uuid::new_v4().to_string(),
+            browser: browser.to_owned(),
+            deadline: Instant::now() + Duration::from_secs(180),
+            request: json!({"context":{"holder":"test"}}),
+            result: None,
+        }
+    }
+    #[test]
+    fn admission_limits_each_user_and_rejects_replayed_sessions() {
+        let mut pending = HashMap::new();
+        let (alice, bob) = (Uuid::new_v4(), Uuid::new_v4());
+        let first = entry(alice, "first");
+        let mut replay = entry(bob, "replay");
+        replay.session = first.session.clone();
+        admit_pending(&mut pending, "first".into(), first).unwrap();
+        assert_eq!(
+            admit_pending(&mut pending, "replay".into(), replay),
+            Err(StatusCode::CONFLICT)
+        );
+        for index in 1..PER_USER_PENDING {
+            admit_pending(&mut pending, index.to_string(), entry(alice, "alice")).unwrap();
+        }
+        assert_eq!(
+            admit_pending(&mut pending, "over".into(), entry(alice, "over")),
+            Err(StatusCode::TOO_MANY_REQUESTS)
+        );
+        admit_pending(&mut pending, "bob".into(), entry(bob, "bob")).unwrap();
+        // Expired attempts free their slot and their session.
+        pending.get_mut("first").unwrap().deadline = Instant::now();
+        admit_pending(&mut pending, "again".into(), entry(alice, "again")).unwrap();
+        assert!(!pending.contains_key("first"));
+    }
+    #[test]
+    fn admission_keeps_the_global_capacity() {
+        let mut pending = HashMap::new();
+        for index in 0..CAPACITY {
+            admit_pending(
+                &mut pending,
+                index.to_string(),
+                entry(Uuid::new_v4(), "full"),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            admit_pending(&mut pending, "over".into(), entry(Uuid::new_v4(), "over")),
+            Err(StatusCode::TOO_MANY_REQUESTS)
+        );
     }
     #[tokio::test]
     async fn capabilities_are_separate_and_assertion_is_delivered_once() {

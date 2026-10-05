@@ -91,6 +91,10 @@ pub struct GenerateOrgQuorumBundleRequest {
     pub allow_caution_backed_keys: bool,
     #[serde(default)]
     pub labels: serde_json::Value,
+    /// The client's trusted Keymaker policy. It can only reject a proof, never accept one,
+    /// so a bundle the client would refuse is not stored.
+    #[serde(default)]
+    pub keymaker_pcr_policy: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -391,21 +395,42 @@ fn load_policy(path: &Path) -> Result<KeymakerPcrPolicy, OrgQuorumError> {
         StatusCode::SERVICE_UNAVAILABLE,
         "invalid key-service PCR policy",
     ))?;
-    if policy.sets.is_empty()
-        || policy.sets.iter().any(|set| {
-            (0..=2).any(|index| {
-                set.pcrs
-                    .get(&index)
-                    .is_none_or(|pcr| pcr.len() != 48 || pcr.iter().all(|b| *b == 0))
-            })
-        })
-    {
+    if !pins_release_pcrs(&policy) {
         return Err(OrgQuorumError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "PCR policy must pin non-debug PCR0, PCR1 and PCR2",
         ));
     }
     Ok(policy)
+}
+
+fn pins_release_pcrs(policy: &KeymakerPcrPolicy) -> bool {
+    !policy.sets.is_empty()
+        && policy.sets.iter().all(|set| {
+            (0..=2).all(|index| {
+                set.pcrs
+                    .get(&index)
+                    .is_some_and(|pcr| pcr.len() == 48 && pcr.iter().any(|b| *b != 0))
+            })
+        })
+}
+
+fn client_policy(
+    value: Option<&serde_json::Value>,
+) -> Result<Option<KeymakerPcrPolicy>, OrgQuorumError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let policy = KeymakerPcrPolicy::deserialize(value).with_context(Ctx::new(
+        StatusCode::BAD_REQUEST,
+        "invalid client Keymaker PCR policy",
+    ))?;
+    if !pins_release_pcrs(&policy) {
+        return Err(OrgQuorumError::invalid(
+            "client Keymaker PCR policy must pin non-debug PCR0, PCR1 and PCR2",
+        ));
+    }
+    Ok(Some(policy))
 }
 
 async fn post<T: Serialize, R: serde::de::DeserializeOwned>(
@@ -542,6 +567,7 @@ pub async fn generate_org_quorum_bundle(
     request: GenerateOrgQuorumBundleRequest,
 ) -> Result<crate::cryptographic_bundles::QuorumBundle, OrgQuorumError> {
     validate_request(&request)?;
+    let client_policy = client_policy(request.keymaker_pcr_policy.as_ref())?;
     let holders = resolve_holders(pool, org_id, &request).await?;
     let keymaker_url = configured("KEYMAKER_URL")?;
     let policy_path = configured("KEYMAKER_PCR_POLICY_PATH")?;
@@ -575,6 +601,12 @@ pub async fn generate_org_quorum_bundle(
         "Keymaker proof verification failed",
     ))?;
     check_response(&keymaker_request, &response)?;
+    if let Some(client_policy) = &client_policy {
+        locksmith::bundle::load_response(response.clone(), client_policy).with_context(Ctx::new(
+            StatusCode::CONFLICT,
+            "Keymaker proof does not satisfy the CLI's trusted Keymaker policy; bundle was not stored",
+        ))?;
+    }
     let data = serde_json::to_value(response).with_context(Ctx::new(
         StatusCode::INTERNAL_SERVER_ERROR,
         "unable to encode quorum bundle",

@@ -357,7 +357,21 @@ async fn browser_assertion(
         .json(&request)
         .send()
         .await
-        .with_context(Ctx::new("begin release relay"))?
+        .with_context(Ctx::new("begin release relay"))?;
+    let rejected = match response.status().as_u16() {
+        403 => Some(
+            "QR approval must be started from the holder's own Caution login, in the organization that stores the bundle; log in as the holder or omit --qr",
+        ),
+        409 => Some("this release attempt already has a pending QR approval"),
+        429 => Some(
+            "too many pending QR approvals for this account; cancel one or wait up to 3 minutes",
+        ),
+        _ => None,
+    };
+    if let Some(message) = rejected {
+        return Err(InitError::invalid(message));
+    }
+    let response = response
         .error_for_status()
         .with_context(Ctx::new("release relay rejected"))?;
     let response: Value = response
