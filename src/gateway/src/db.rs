@@ -746,6 +746,24 @@ pub async fn get_credential_public_keys_by_user_id(
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
+/// Distinct users owning any of the given credential IDs; unknown IDs are ignored.
+#[tracing::instrument(skip_all, err)]
+pub async fn get_credential_owners(
+    pool: &PgPool,
+    credential_ids: &[Vec<u8>],
+) -> Result<Vec<Uuid>, DbError> {
+    sqlx::query_scalar(
+        "SELECT DISTINCT user_id FROM fido2_credentials WHERE credential_id = ANY($1)",
+    )
+    .bind(credential_ids)
+    .fetch_all(pool)
+    .await
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "get_credential_owners",
+    ))
+}
+
 /// Opportunistically mark a credential as resident (discoverable) after it was
 /// successfully used in a discoverable (username-less) login assertion. Only
 /// touches rows where residency is still unknown (`NULL`) — never overwrites
@@ -1950,3 +1968,44 @@ mod credential_uv_tests {
 #[cfg(test)]
 #[path = "db/passkey_usage_tests.rs"]
 mod passkey_usage_tests;
+
+#[cfg(test)]
+mod credential_owner_tests {
+    use super::*;
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires DATABASE_URL pointing to disposable Postgres"]
+    async fn owners_are_distinct_and_unknown_ids_are_ignored(pool: PgPool) {
+        sqlx::raw_sql(
+            "CREATE TABLE fido2_credentials (
+                user_id UUID NOT NULL, credential_id BYTEA UNIQUE NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (alice, bob) = (Uuid::new_v4(), Uuid::new_v4());
+        for (user, id) in [(alice, b"a1".as_slice()), (alice, b"a2"), (bob, b"b1")] {
+            sqlx::query("INSERT INTO fido2_credentials (user_id, credential_id) VALUES ($1, $2)")
+                .bind(user)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let owners = |ids: &[&[u8]]| {
+            let ids: Vec<Vec<u8>> = ids.iter().map(|id| id.to_vec()).collect();
+            let pool = pool.clone();
+            async move {
+                let mut owners = get_credential_owners(&pool, &ids).await.unwrap();
+                owners.sort();
+                owners
+            }
+        };
+        assert_eq!(owners(&[b"a1", b"a2", b"unknown"]).await, [alice]);
+        let mut both = vec![alice, bob];
+        both.sort();
+        assert_eq!(owners(&[b"a1", b"b1"]).await, both);
+        assert!(owners(&[b"unknown"]).await.is_empty());
+        assert!(owners(&[]).await.is_empty());
+    }
+}

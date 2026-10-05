@@ -360,7 +360,7 @@ async fn browser_assertion(
         .with_context(Ctx::new("begin release relay"))?;
     let rejected = match response.status().as_u16() {
         403 => Some(
-            "QR approval must be started from the holder's own Caution login, in the organization that stores the bundle; log in as the holder or omit --qr",
+            "QR approval must be started from the holder's own Caution login; log in as the holder or omit --qr",
         ),
         409 => Some("this release attempt already has a pending QR approval"),
         429 => Some(

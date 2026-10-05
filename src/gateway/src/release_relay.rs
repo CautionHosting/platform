@@ -35,6 +35,11 @@ fn store() -> &'static Mutex<HashMap<String, Pending>> {
     PENDING.get_or_init(Default::default)
 }
 
+// A passkey re-registered by another user after deletion rejects rather than admits.
+fn sole_owner(owners: &[Uuid], user: Uuid) -> bool {
+    owners == [user]
+}
+
 fn admit_pending(
     pending: &mut HashMap<String, Pending>,
     token: String,
@@ -146,15 +151,31 @@ pub async fn begin(
             crate::db::DbErrorKind::CredentialNotFound => StatusCode::UNAUTHORIZED,
             _ => StatusCode::SERVICE_UNAVAILABLE,
         })?;
-    // Only the holder may open an approval page for their own share.
-    request["metadata"] = metadata::admit(
+    // Only the holder may open an approval page. The attested options list exactly the
+    // holder's snapshot passkeys, the only credentials that can approve this release.
+    let holder_credentials: Vec<Vec<u8>> = approval
+        .prepared
+        .data
+        .options
+        .public_key
+        .allow_credentials
+        .iter()
+        .map(|credential| credential.id.to_vec())
+        .collect();
+    let owners = crate::db::get_credential_owners(&state.db, &holder_credentials)
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    if !sole_owner(&owners, user) {
+        tracing::warn!("release relay requester does not own the holder's passkeys");
+        return Err(StatusCode::FORBIDDEN);
+    }
+    request["metadata"] = metadata::load(
         &state,
         user,
         &approval.prepared.data,
         approval.display.as_ref(),
     )
-    .await
-    .inspect_err(|status| tracing::warn!(%status, "release relay admission rejected"))?;
+    .await;
     request["reported"] = serde_json::to_value(&approval.display).map_err(|_| StatusCode::BAD_REQUEST)?;
     if started.elapsed() >= lifetime { return Err(StatusCode::GONE); }
     let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
@@ -268,6 +289,14 @@ mod tests {
         pending.get_mut("first").unwrap().deadline = Instant::now();
         admit_pending(&mut pending, "again".into(), entry(alice, "again")).unwrap();
         assert!(!pending.contains_key("first"));
+    }
+    #[test]
+    fn only_the_sole_owner_of_the_holder_passkeys_is_admitted() {
+        let (alice, bob) = (Uuid::new_v4(), Uuid::new_v4());
+        assert!(sole_owner(&[alice], alice));
+        assert!(!sole_owner(&[bob], alice));
+        assert!(!sole_owner(&[alice, bob], alice));
+        assert!(!sole_owner(&[], alice));
     }
     #[test]
     fn admission_keeps_the_global_capacity() {

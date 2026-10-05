@@ -415,19 +415,35 @@ fn pins_release_pcrs(policy: &KeymakerPcrPolicy) -> bool {
         })
 }
 
+const MAX_CLIENT_POLICY_SETS: usize = 8;
+
 fn client_policy(
     value: Option<&serde_json::Value>,
 ) -> Result<Option<KeymakerPcrPolicy>, OrgQuorumError> {
     let Some(value) = value else {
         return Ok(None);
     };
-    let policy = KeymakerPcrPolicy::deserialize(value).with_context(Ctx::new(
+    let mut policy = KeymakerPcrPolicy::deserialize(value).with_context(Ctx::new(
         StatusCode::BAD_REQUEST,
         "invalid client Keymaker PCR policy",
     ))?;
     if !pins_release_pcrs(&policy) {
         return Err(OrgQuorumError::invalid(
             "client Keymaker PCR policy must pin non-debug PCR0, PCR1 and PCR2",
+        ));
+    }
+    // Each set repeats attestation verification. Expired sets cannot validate a fresh
+    // generation, so drop them and bound the caller-controlled remainder.
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    policy.sets.retain(|set| {
+        set.expires_at_unix_seconds
+            .is_none_or(|expiry| expiry > now)
+    });
+    if policy.sets.is_empty() || policy.sets.len() > MAX_CLIENT_POLICY_SETS {
+        return Err(OrgQuorumError::invalid(
+            "client Keymaker PCR policy must have between 1 and 8 unexpired sets",
         ));
     }
     Ok(Some(policy))

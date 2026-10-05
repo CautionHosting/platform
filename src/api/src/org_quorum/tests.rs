@@ -396,6 +396,36 @@ fn client_policy_is_optional_and_rejects_malformed_or_debug_pins() {
 }
 
 #[test]
+fn client_policy_drops_expired_sets_and_bounds_the_rest() {
+    let set = |expiry: Option<u64>| {
+        let pins = "ab".repeat(48);
+        serde_json::json!({"pcrs":{"0":pins, "1":pins, "2":pins}, "expires_at_unix_seconds":expiry})
+    };
+    let policy = |sets: Vec<serde_json::Value>| serde_json::json!({ "sets": sets });
+    let future = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
+    // Thousands of expired sets cost nothing; only the current one is verified.
+    let mut sets = vec![set(Some(1)); 5000];
+    sets.push(set(None));
+    let accepted = client_policy(Some(&policy(sets))).unwrap().unwrap();
+    assert_eq!(accepted.sets.len(), 1);
+    let bounded = policy(vec![set(Some(future)); MAX_CLIENT_POLICY_SETS]);
+    assert!(client_policy(Some(&bounded)).is_ok());
+    for sets in [
+        vec![set(Some(future)); MAX_CLIENT_POLICY_SETS + 1],
+        vec![set(Some(1))],
+    ] {
+        assert_eq!(
+            client_policy(Some(&policy(sets))).unwrap_err().status,
+            StatusCode::BAD_REQUEST
+        );
+    }
+}
+
+#[test]
 fn conflicting_name_labels_are_rejected() {
     let mut r = request();
     r.name = Some("prod".into());
