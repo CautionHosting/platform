@@ -1503,6 +1503,8 @@ HELPER_S3_KEY="{helper_s3_key}"
 HELPER_SHA256="{helper_sha256}"
 HELPER_LOG="/build/remote-build-helper.log"
 HELPER_LOG_KEY="builds/$BUILD_ID/remote-build-helper.log"
+APP_BUILD_LOG="/build/app-build.log"
+APP_BUILD_LOG_KEY="builds/$BUILD_ID/app-build.log"
 COMMIT_SHA="{commit_sha}"
 ENCLAVEOS_COMMIT="{enclaveos_commit}"
 CONTAINERFILE="{containerfile}"
@@ -1561,6 +1563,9 @@ set_phase "launching-builder"
 
 fail() {{
     local msg="$1"
+    if [ -f "$APP_BUILD_LOG" ]; then
+        timeout 30 aws s3 cp "$APP_BUILD_LOG" "s3://$S3_BUCKET/$APP_BUILD_LOG_KEY" >/dev/null 2>&1 || true
+    fi
     if [ -f "$HELPER_LOG" ]; then
         timeout 30 aws s3 cp "$HELPER_LOG" "s3://$S3_BUCKET/$HELPER_LOG_KEY" >/dev/null 2>&1 || true
     fi
@@ -1594,7 +1599,12 @@ chmod +x /usr/local/bin/remote-build-helper
 # Build Docker image, then build EIF via remote-build-helper using that image
 cd /build/repo
 set_phase "building-application"
-docker build -f "$CONTAINERFILE" -t app-image .
+if docker build -f "$CONTAINERFILE" -t app-image . 2>&1 | tee "$APP_BUILD_LOG"; then
+    :
+else
+    fail "Application Docker build failed:
+$(tail -40 "$APP_BUILD_LOG" 2>/dev/null | tail -c 4096 | tr -d '\000-\010\013-\037\177' || echo "No build output available")"
+fi
 
 # Write manifest for remote-build-helper
 cat > /build/manifest.json << 'MANIFEST_EOF'
@@ -3035,6 +3045,17 @@ mod tests {
         assert!(
             userdata.contains("| tee \"$HELPER_LOG\""),
             "should retain the complete helper log"
+        );
+        assert!(
+            userdata.contains("-t app-image . 2>&1 | tee \"$APP_BUILD_LOG\"")
+                && userdata.contains("tail -40 \"$APP_BUILD_LOG\""),
+            "app build failures should report bounded Docker output"
+        );
+        assert!(
+            userdata.contains(
+                "timeout 30 aws s3 cp \"$APP_BUILD_LOG\" \"s3://$S3_BUCKET/$APP_BUILD_LOG_KEY\""
+            ),
+            "should upload the private application log on failure"
         );
         assert!(
             userdata.contains(
