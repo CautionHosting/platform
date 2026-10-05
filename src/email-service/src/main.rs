@@ -9,6 +9,7 @@ use axum::{
     Json, Router,
 };
 use chrono::Datelike;
+use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use lettre::{
     message::{header::ContentType, Message},
     transport::smtp::{authentication::Credentials, response::Response as SmtpResponse},
@@ -17,30 +18,151 @@ use lettre::{
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tower_http::trace::TraceLayer;
-use tracing::{error, info};
+use tracing::info;
 use uuid::Uuid;
 
 const BILLING_URL: &str = "https://dashboard.caution.co/#billing";
 
-struct AppError(anyhow::Error);
+#[derive(Debug, thiserror::Error, CtxError)]
+enum SendVerificationError {
+    #[error("invalid from address [{location:?}]")]
+    InvalidFromAddress {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("invalid recipient address '{address}' [{location:?}]")]
+    InvalidRecipient {
+        #[context(borrow = str)]
+        address: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("failed to build email message [{location:?}]")]
+    BuildMessage {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("SMTP transport not configured [{location:?}]")]
+    SmtpNotConfigured { location: dterror::Location },
+    #[error("failed to send email to '{address}' [{location:?}]")]
+    SendFailed {
+        #[context(borrow = str)]
+        address: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
 
-impl IntoResponse for AppError {
+#[derive(Debug, thiserror::Error, CtxError)]
+enum SendEmailError {
+    #[error("invalid from address [{location:?}]")]
+    InvalidFromAddress {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("invalid recipient address '{address}' [{location:?}]")]
+    InvalidRecipient {
+        #[context(borrow = str)]
+        address: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("failed to build email message [{location:?}]")]
+    BuildMessage {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("SMTP transport not configured [{location:?}]")]
+    SmtpNotConfigured { location: dterror::Location },
+    #[error("failed to send email to '{address}' [{location:?}]")]
+    SendFailed {
+        #[context(borrow = str)]
+        address: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+enum MainError {
+    #[error("FROM_EMAIL environment variable is not set [{location:?}]")]
+    MissingFromEmail {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("FROM_EMAIL is not a valid email address [{location:?}]")]
+    InvalidFromEmail {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("failed to configure SMTP relay '{host}' [{location:?}]")]
+    SmtpRelay {
+        #[context(borrow = str)]
+        host: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("failed to bind listener on '{addr}' [{location:?}]")]
+    Bind {
+        #[context(borrow = str)]
+        addr: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("server error [{location:?}]")]
+    Serve {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for SendVerificationError {
     fn into_response(self) -> Response {
-        error!("Application error: {:?}", self.0);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Internal error: {}", self.0),
-        )
-            .into_response()
+        let err = &self;
+        tracing::error!(?err, "request failed");
+        let (status, body) = match self {
+            Self::InvalidRecipient { .. } => (StatusCode::BAD_REQUEST, "invalid recipient address"),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, "could not send email"),
+        };
+        (status, body).into_response()
     }
 }
 
-impl<E> From<E> for AppError
-where
-    E: Into<anyhow::Error>,
-{
-    fn from(err: E) -> Self {
-        Self(err.into())
+impl IntoResponse for SendEmailError {
+    fn into_response(self) -> Response {
+        let err = &self;
+        tracing::error!(?err, "request failed");
+        let (status, body) = match self {
+            Self::InvalidRecipient { .. } => (StatusCode::BAD_REQUEST, "invalid recipient address"),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, "could not send email"),
+        };
+        (status, body).into_response()
     }
 }
 
@@ -90,11 +212,13 @@ struct SendEmailResponse {
     message: String,
 }
 
+#[tracing::instrument(skip_all)]
 async fn health_handler() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok", "service": "email" }))
 }
 
 /// Query sent emails (test mode only). Supports optional ?template= and ?to= filters.
+#[tracing::instrument(skip_all)]
 async fn get_sent_handler(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -113,8 +237,8 @@ async fn get_sent_handler(
 
     let filtered: Vec<&SentEmail> = sent
         .iter()
-        .filter(|e| template_filter.map_or(true, |t| &e.template == t))
-        .filter(|e| to_filter.map_or(true, |t| &e.to == t))
+        .filter(|e| template_filter.is_none_or(|t| &e.template == t))
+        .filter(|e| to_filter.is_none_or(|t| &e.to == t))
         .collect();
 
     Json(serde_json::json!({
@@ -125,6 +249,7 @@ async fn get_sent_handler(
 }
 
 /// Clear sent emails store (test mode only).
+#[tracing::instrument(skip_all)]
 async fn clear_sent_handler(State(state): State<AppState>) -> impl IntoResponse {
     if !state.test_mode {
         return (
@@ -144,11 +269,12 @@ async fn clear_sent_handler(State(state): State<AppState>) -> impl IntoResponse 
     .into_response()
 }
 
+#[tracing::instrument(skip_all, err, fields(email = %req.email, user_id = ?req.user_id))]
 async fn send_verification_handler(
     State(state): State<AppState>,
     Json(req): Json<SendVerificationRequest>,
-) -> Result<Json<SendVerificationResponse>, AppError> {
-    info!("Sending verification email to: {}", req.email);
+) -> Result<Json<SendVerificationResponse>, SendVerificationError> {
+    use SendVerificationErrorCtx as Ctx;
 
     let verification_url = format!(
         "{}/api/onboarding/verify?token={}",
@@ -244,12 +370,12 @@ async fn send_verification_handler(
         .from(
             format!("{} <{}>", state.from_name, state.from_email)
                 .parse()
-                .map_err(|e| anyhow::anyhow!("Invalid from address: {}", e))?,
+                .with_context(Ctx::invalid_from_address())?,
         )
         .to(req
             .email
             .parse()
-            .map_err(|e| anyhow::anyhow!("Invalid recipient address: {}", e))?)
+            .with_context(Ctx::invalid_recipient(&req.email))?)
         .subject("Verify Your Email - Caution")
         .multipart(
             lettre::message::MultiPart::alternative()
@@ -264,16 +390,17 @@ async fn send_verification_handler(
                         .body(html_body),
                 ),
         )
-        .map_err(|e| anyhow::anyhow!("Failed to build email: {}", e))?;
+        .with_context(Ctx::build_message())?;
 
-    let smtp_transport = state
-        .smtp_transport
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("SMTP transport not configured"))?;
+    let Some(ref smtp_transport) = state.smtp_transport else {
+        return Err(SendVerificationError::SmtpNotConfigured {
+            location: std::panic::Location::caller(),
+        });
+    };
 
     let result: SmtpResponse = smtp_transport
         .send(&email)
-        .map_err(|e| anyhow::anyhow!("Failed to send email: {}", e))?;
+        .with_context(Ctx::send_failed(&req.email))?;
 
     info!(
         "Email sent successfully to {}: {:?}",
@@ -287,12 +414,12 @@ async fn send_verification_handler(
     }))
 }
 
-// Generic email send handler with templates
+#[tracing::instrument(skip_all, err, fields(to = %req.to, template = %req.template))]
 async fn send_email_handler(
     State(state): State<AppState>,
     Json(req): Json<SendEmailRequest>,
-) -> Result<Json<SendEmailResponse>, AppError> {
-    info!("Sending {} email to: {}", req.template, req.to);
+) -> Result<Json<SendEmailResponse>, SendEmailError> {
+    use SendEmailErrorCtx as Ctx;
 
     let (subject, html_body, text_body) = match req.template.as_str() {
         "invoice" => generate_invoice_email(&req.data),
@@ -304,6 +431,7 @@ async fn send_email_handler(
         "legal_notice" => generate_legal_notice_email(&req.data),
         "fully_managed_capacity_alert" => generate_fully_managed_capacity_alert_email(&req.data),
         "organization_invite" => generate_organization_invite_email(&req.data),
+        "webauthn_reset" => generate_webauthn_reset_email(&req.data),
         _ => {
             return Ok(Json(SendEmailResponse {
                 success: false,
@@ -349,12 +477,12 @@ async fn send_email_handler(
         .from(
             format!("{} <{}>", state.from_name, state.from_email)
                 .parse()
-                .map_err(|e| anyhow::anyhow!("Invalid from address: {}", e))?,
+                .with_context(Ctx::invalid_from_address())?,
         )
         .to(req
             .to
             .parse()
-            .map_err(|e| anyhow::anyhow!("Invalid recipient address: {}", e))?)
+            .with_context(Ctx::invalid_recipient(&req.to))?)
         .subject(subject)
         .multipart(
             lettre::message::MultiPart::alternative()
@@ -369,16 +497,17 @@ async fn send_email_handler(
                         .body(html_body),
                 ),
         )
-        .map_err(|e| anyhow::anyhow!("Failed to build email: {}", e))?;
+        .with_context(Ctx::build_message())?;
 
-    let smtp_transport = state
-        .smtp_transport
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("SMTP transport not configured"))?;
+    let Some(ref smtp_transport) = state.smtp_transport else {
+        return Err(SendEmailError::SmtpNotConfigured {
+            location: std::panic::Location::caller(),
+        });
+    };
 
     let result: SmtpResponse = smtp_transport
         .send(&email)
-        .map_err(|e| anyhow::anyhow!("Failed to send email: {}", e))?;
+        .with_context(Ctx::send_failed(&req.to))?;
 
     info!("Email sent successfully to {}: {:?}", req.to, result.code());
 
@@ -1079,8 +1208,36 @@ fn generate_suspension_notice_email(data: &serde_json::Value) -> (String, String
     (subject, html_body, text_body)
 }
 
+fn generate_webauthn_reset_email(data: &serde_json::Value) -> (String, String, String) {
+    let reset_url_raw = data["reset_url"]
+        .as_str()
+        .unwrap_or("https://dashboard.caution.co");
+    let expires_at_raw = data["expires_at"].as_str().unwrap_or("soon");
+
+    let reset_url = html_escape(reset_url_raw);
+    let expires_at = html_escape(expires_at_raw);
+    let subject = "Your authentication methods have been reset".to_string();
+
+    let html_body = format!(
+        include_str!("../templates/webauthn_reset.html"),
+        reset_url = reset_url,
+        expires_at = expires_at,
+        footer = html_email_footer()
+    );
+
+    let text_body = format!(
+        include_str!("../templates/webauthn_reset.txt"),
+        reset_url = reset_url_raw,
+        expires_at = expires_at_raw
+    );
+
+    (subject, html_body, text_body)
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> Result<(), MainError> {
+    use MainErrorCtx as Ctx;
+
     tracing_subscriber::fmt()
         .with_target(false)
         .compact()
@@ -1107,11 +1264,10 @@ async fn main() -> anyhow::Result<()> {
     let from_email = if test_mode {
         std::env::var("FROM_EMAIL").unwrap_or_else(|_| "noreply@localhost".to_string())
     } else {
-        let value = std::env::var("FROM_EMAIL")
-            .map_err(|_| anyhow::anyhow!("FROM_EMAIL must be set when EMAIL_TEST_MODE=false"))?;
+        let value = std::env::var("FROM_EMAIL").with_context(Ctx::missing_from_email())?;
         value
             .parse::<lettre::Address>()
-            .map_err(|e| anyhow::anyhow!("FROM_EMAIL must be a valid email address: {}", e))?;
+            .with_context(Ctx::invalid_from_email())?;
         value
     };
     let base_url =
@@ -1133,12 +1289,14 @@ async fn main() -> anyhow::Result<()> {
 
         let creds = Credentials::new(smtp_username, smtp_password);
         let transport = if smtp_port == 465 {
-            SmtpTransport::relay(&smtp_host)?
+            SmtpTransport::relay(&smtp_host)
+                .with_context(Ctx::smtp_relay(&smtp_host))?
                 .port(smtp_port)
                 .credentials(creds)
                 .build()
         } else {
-            SmtpTransport::starttls_relay(&smtp_host)?
+            SmtpTransport::starttls_relay(&smtp_host)
+                .with_context(Ctx::smtp_relay(&smtp_host))?
                 .port(smtp_port)
                 .credentials(creds)
                 .build()
@@ -1172,17 +1330,21 @@ async fn main() -> anyhow::Result<()> {
 
     let bind_addr =
         std::env::var("EMAIL_BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:8082".to_string());
-    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+    let listener = tokio::net::TcpListener::bind(&bind_addr)
+        .await
+        .with_context(Ctx::bind(&bind_addr))?;
 
     info!("Email service listening on {}", bind_addr);
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
-        .await?;
+        .await
+        .with_context(Ctx::serve())?;
 
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
 async fn shutdown_signal() {
     let ctrl_c = tokio::signal::ctrl_c();
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())

@@ -128,14 +128,14 @@ fn normalize_inventory(snapshot: &mut InventorySnapshot) {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum FetchInventoryError {
-    #[error("failed to discover enabled AWS regions [{location:?}]")]
+    #[error("failed to discover enabled AWS regions [{location}]")]
     DiscoverRegions {
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("timed out discovering enabled AWS regions [{location:?}]")]
+    #[error("timed out discovering enabled AWS regions [{location}]")]
     Timeout {
         #[location]
         location: Location,
@@ -238,7 +238,7 @@ async fn list_volumes(client: &Client, region: &str) -> Result<Vec<AwsVolume>, L
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum ListVolumesError {
-    #[error("failed to describe EBS volumes in {region} [{location:?}]")]
+    #[error("failed to describe EBS volumes in {region} [{location}]")]
     Request {
         #[context(borrow = str)]
         region: String,
@@ -247,7 +247,7 @@ pub(crate) enum ListVolumesError {
         #[source]
         source: BoxError,
     },
-    #[error("timed out describing EBS volumes in {region} [{location:?}]")]
+    #[error("timed out describing EBS volumes in {region} [{location}]")]
     Timeout {
         #[context(borrow = str)]
         region: String,
@@ -284,7 +284,7 @@ async fn list_addresses(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum ListAddressesError {
-    #[error("failed to describe public IPv4 addresses in {region} [{location:?}]")]
+    #[error("failed to describe public IPv4 addresses in {region} [{location}]")]
     Request {
         #[context(borrow = str)]
         region: String,
@@ -293,7 +293,7 @@ pub(crate) enum ListAddressesError {
         #[source]
         source: BoxError,
     },
-    #[error("timed out describing public IPv4 addresses in {region} [{location:?}]")]
+    #[error("timed out describing public IPv4 addresses in {region} [{location}]")]
     Timeout {
         #[context(borrow = str)]
         region: String,

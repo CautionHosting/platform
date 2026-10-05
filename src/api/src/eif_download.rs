@@ -4,6 +4,7 @@ use axum::{
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::SystemTime};
 use tokio::{fs, io::AsyncWriteExt, sync::Semaphore};
 use tower::Service;
@@ -14,94 +15,162 @@ use crate::{AppState, AuthContext, cloud_credentials, deployment};
 
 const SUBDIR: &str = "eif-cache";
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum EnsureCachedError {
-    #[error("failed to acquire download lock")]
-    AcquirePermit,
+    #[error("failed to acquire download lock [{location}]")]
+    AcquirePermit {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
-    #[error("failed to download EIF from S3")]
-    S3Download(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("failed to download EIF from S3 [{location}]")]
+    S3Download {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
-    #[error("failed to create cache directory")]
-    CreateCacheDir(#[source] std::io::Error),
+    #[error("failed to create cache directory [{location}]")]
+    CreateCacheDir {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
-    #[error("failed to create temp file")]
-    CreateTempFile(#[source] std::io::Error),
+    #[error("failed to create temp file [{location}]")]
+    CreateTempFile {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
-    #[error("failed to read EIF data from S3 stream")]
-    ReadStream(#[source] Box<dyn std::error::Error + Send + Sync>),
+    #[error("failed to read EIF data from S3 stream [{location}]")]
+    ReadStream {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
-    #[error("failed to write EIF data to temp file")]
-    WriteFile(#[source] std::io::Error),
+    #[error("failed to write EIF data to temp file [{location}]")]
+    WriteFile {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
-    #[error("failed to flush temp file")]
-    FlushFile(#[source] std::io::Error),
+    #[error("failed to flush temp file [{location}]")]
+    FlushFile {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
-    #[error("failed to rename temp file to final cache path")]
-    RenameFile(#[source] std::io::Error),
+    #[error("failed to rename temp file to final cache path [{location}]")]
+    RenameFile {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
-    #[error("failed to evict LRU cache entries")]
-    EvictLru(#[from] EvictLruError),
+    #[error("failed to evict LRU cache entries [{location}]")]
+    EvictLru {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum EvictLruError {
-    #[error("failed to remove cached EIF file `{0}`")]
-    RemoveFile(PathBuf, #[source] std::io::Error),
+    #[error("failed to remove cached EIF file '{path}' [{location}]")]
+    RemoveFile {
+        path: PathBuf,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum DownloadEifError {
-    #[error("organization not found for user")]
-    OrgNotFound,
+    #[error("insufficient permissions [{location}]")]
+    Forbidden { location: Location },
 
-    #[error("insufficient permissions")]
-    Forbidden,
+    #[error("database error [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
-    #[error("internal server error")]
-    InternalServerError,
+    #[error("no completed builds found for this resource [{location}]")]
+    BuildNotFound { location: Location },
 
-    #[error("database error")]
-    Database(#[from] sqlx::Error),
+    #[error("credential error [{location}]")]
+    CredentialError {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
-    #[error("no completed builds found for this resource")]
-    BuildNotFound,
+    #[error("encryption not configured [{location}]")]
+    EncryptionNotConfigured { location: Location },
 
-    #[error("credential error")]
-    CredentialError,
+    #[error("failed to decrypt managed on-prem credential [{location}]")]
+    ManagedCredentialDecrypt {
+        #[location]
+        location: Location,
+        #[source]
+        #[context(option)]
+        source: Option<BoxError>,
+    },
 
-    #[error("encryption not configured")]
-    EncryptionNotConfigured,
-
-    #[error("failed to decrypt managed on-prem credential")]
-    ManagedCredentialDecrypt,
-
-    #[error("failed to prepare cached EIF for serving")]
-    CachedEifNotAvailable(#[from] EnsureCachedError),
+    #[error("failed to prepare cached EIF for serving [{location}]")]
+    CachedEifNotAvailable {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
 impl IntoResponse for DownloadEifError {
     fn into_response(self) -> Response<Body> {
         let (status, body) = match &self {
-            DownloadEifError::OrgNotFound => (StatusCode::NOT_FOUND, "organization not found"),
-            DownloadEifError::Forbidden => (StatusCode::FORBIDDEN, "insufficient permissions"),
-            DownloadEifError::InternalServerError => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
+            DownloadEifError::Forbidden { .. } => {
+                (StatusCode::FORBIDDEN, "insufficient permissions")
             }
-            DownloadEifError::Database(_) => (StatusCode::INTERNAL_SERVER_ERROR, "database error"),
-            DownloadEifError::BuildNotFound => (
+            DownloadEifError::Database { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "database error")
+            }
+            DownloadEifError::BuildNotFound { .. } => (
                 StatusCode::NOT_FOUND,
                 "no completed builds found for this resource",
             ),
-            DownloadEifError::CredentialError => (StatusCode::BAD_REQUEST, "credential error"),
-            DownloadEifError::EncryptionNotConfigured => {
+            DownloadEifError::CredentialError { .. } => {
+                (StatusCode::BAD_REQUEST, "credential error")
+            }
+            DownloadEifError::EncryptionNotConfigured { .. } => {
                 (StatusCode::SERVICE_UNAVAILABLE, "encryption not configured")
             }
-            DownloadEifError::ManagedCredentialDecrypt => (
+            DownloadEifError::ManagedCredentialDecrypt { .. } => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "failed to decrypt managed on-prem credential",
             ),
-            DownloadEifError::CachedEifNotAvailable(_) => (
+            DownloadEifError::CachedEifNotAvailable { .. } => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "failed to prepare cached EIF",
             ),
@@ -134,12 +203,15 @@ impl EifDownloadCache {
         self.data_dir.join(SUBDIR).join(sanitized)
     }
 
+    #[tracing::instrument(skip_all, err)]
     pub(crate) async fn ensure_cached(
         &self,
         s3_client: &aws_sdk_s3::Client,
         bucket: &str,
         s3_key: &str,
     ) -> Result<PathBuf, EnsureCachedError> {
+        use EnsureCachedErrorCtx as Ctx;
+
         let cache_path = self.cache_path(s3_key);
 
         if cache_path.exists() {
@@ -156,7 +228,7 @@ impl EifDownloadCache {
         let permit = semaphore
             .acquire()
             .await
-            .map_err(|_| EnsureCachedError::AcquirePermit)?;
+            .with_context(Ctx::acquire_permit())?;
 
         if cache_path.exists() {
             return Ok(cache_path);
@@ -170,13 +242,13 @@ impl EifDownloadCache {
             .key(s3_key)
             .send()
             .await
-            .map_err(|e| EnsureCachedError::S3Download(Box::new(e)))?;
+            .with_context(Ctx::s3_download())?;
 
         let mut stream = response.body;
         let temp_dir = self.data_dir.join(SUBDIR);
         fs::create_dir_all(&temp_dir)
             .await
-            .map_err(EnsureCachedError::CreateCacheDir)?;
+            .with_context(Ctx::create_cache_dir())?;
 
         let temp_path = temp_dir.join(format!(
             ".{}.tmp",
@@ -184,31 +256,30 @@ impl EifDownloadCache {
         ));
         let mut file = fs::File::create(&temp_path)
             .await
-            .map_err(EnsureCachedError::CreateTempFile)?;
+            .with_context(Ctx::create_temp_file())?;
 
-        while let Some(chunk) = stream
-            .try_next()
-            .await
-            .map_err(|e| EnsureCachedError::ReadStream(Box::new(e)))?
-        {
+        while let Some(chunk) = stream.try_next().await.with_context(Ctx::read_stream())? {
             file.write_all(&chunk)
                 .await
-                .map_err(EnsureCachedError::WriteFile)?;
+                .with_context(Ctx::write_file())?;
         }
-        file.flush().await.map_err(EnsureCachedError::FlushFile)?;
+        file.flush().await.with_context(Ctx::flush_file())?;
         drop(permit);
 
         fs::rename(&temp_path, &cache_path)
             .await
-            .map_err(EnsureCachedError::RenameFile)?;
+            .with_context(Ctx::rename_file())?;
 
-        self.evict_lru().await?;
+        self.evict_lru().await.with_context(Ctx::evict_lru())?;
 
         tracing::info!("Cached EIF to {}", cache_path.display());
         Ok(cache_path)
     }
 
+    #[tracing::instrument(skip_all, err)]
     async fn evict_lru(&self) -> Result<(), EvictLruError> {
+        use EvictLruErrorCtx as Ctx;
+
         let cache_dir = self.data_dir.join(SUBDIR);
         let Ok(mut entries) = fs::read_dir(&cache_dir).await else {
             return Ok(());
@@ -243,10 +314,9 @@ impl EifDownloadCache {
             if let Ok(meta) = fs::metadata(&path).await {
                 total_size -= meta.len();
             }
-            if let Err(e) = fs::remove_file(&path).await
-                && e.kind() != std::io::ErrorKind::NotFound
-            {
-                return Err(EvictLruError::RemoveFile(path, e));
+            match fs::remove_file(&path).await {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                result => result.with_context(Ctx::remove_file(path))?,
             }
         }
 
@@ -263,29 +333,27 @@ struct BuildDownloadRow {
     resource_name: Option<String>,
 }
 
+#[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
 pub(crate) async fn download_eif(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(resource_id): Path<Uuid>,
     req: axum::extract::Request,
 ) -> Result<Response<Body>, DownloadEifError> {
+    use DownloadEifErrorCtx as Ctx;
+
     let org_id = crate::get_user_primary_org(&state.db, auth.user_id)
         .await
-        .map_err(|status| match status {
-            StatusCode::NOT_FOUND => DownloadEifError::OrgNotFound,
-            StatusCode::FORBIDDEN => DownloadEifError::Forbidden,
-            _ => DownloadEifError::InternalServerError,
-        })?;
+        .with_context(Ctx::database())?;
 
     let role = crate::check_org_access(&state.db, auth.user_id, org_id)
         .await
-        .map_err(|status| match status {
-            StatusCode::FORBIDDEN => DownloadEifError::Forbidden,
-            _ => DownloadEifError::InternalServerError,
-        })?;
+        .with_context(Ctx::database())?;
 
     if !crate::can_manage_org(&role) && !crate::is_owner(&role) {
-        return Err(DownloadEifError::Forbidden);
+        return Err(DownloadEifError::Forbidden {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let build: Option<BuildDownloadRow> =
@@ -300,7 +368,8 @@ pub(crate) async fn download_eif(
         .bind(resource_id)
         .bind(org_id)
         .fetch_optional(&state.db)
-        .await?
+        .await
+        .with_context(Ctx::database())?
         .map(|(s3_key, sha256, size, name)| BuildDownloadRow {
             eif_s3_key: s3_key,
             eif_sha256: sha256,
@@ -308,7 +377,9 @@ pub(crate) async fn download_eif(
             resource_name: name,
         });
 
-    let build = build.ok_or(DownloadEifError::BuildNotFound)?;
+    let build = build.ok_or_else(|| DownloadEifError::BuildNotFound {
+        location: std::panic::Location::caller(),
+    })?;
 
     let app_name = build
         .resource_name
@@ -316,46 +387,52 @@ pub(crate) async fn download_eif(
 
     let credential = cloud_credentials::get_credential_by_resource(&state.db, org_id, resource_id)
         .await
-        .map_err(|_| DownloadEifError::CredentialError)?;
+        .with_context(Ctx::credential_error())?;
 
-    let (s3_client, bucket) = if let Some(cred) = credential.as_ref().filter(|c| c.managed_on_prem)
-    {
-        let encryptor = state
-            .encryptor
-            .as_ref()
-            .ok_or(DownloadEifError::EncryptionNotConfigured)?;
+    let (s3_client, bucket) =
+        if let Some(cred) = credential.as_ref().filter(|c| c.managed_on_prem) {
+            let encryptor = state.encryptor.as_ref().ok_or_else(|| {
+                DownloadEifError::EncryptionNotConfigured {
+                    location: std::panic::Location::caller(),
+                }
+            })?;
 
-        let managed_cred =
-            cloud_credentials::get_managed_onprem_credential(&state.db, encryptor, org_id, cred.id)
-                .await
-                .map_err(|_| DownloadEifError::ManagedCredentialDecrypt)?
-                .ok_or(DownloadEifError::ManagedCredentialDecrypt)?;
+            let managed_cred = cloud_credentials::get_managed_onprem_credential(
+                &state.db, encryptor, org_id, cred.id,
+            )
+            .await
+            .with_context(Ctx::managed_credential_decrypt())?
+            .ok_or_else(|| DownloadEifError::ManagedCredentialDecrypt {
+                location: std::panic::Location::caller(),
+                source: None,
+            })?;
 
-        let aws_creds = deployment::AwsCredentials {
-            access_key_id: managed_cred.aws_access_key_id,
-            secret_access_key: managed_cred.aws_secret_access_key,
-            region: managed_cred.aws_region,
+            let aws_creds = deployment::AwsCredentials {
+                access_key_id: managed_cred.aws_access_key_id,
+                secret_access_key: managed_cred.aws_secret_access_key,
+                region: managed_cred.aws_region,
+            };
+
+            let client = crate::s3_client_for_credentials(&aws_creds).await;
+            let bucket = managed_cred.eif_bucket;
+            (client, bucket)
+        } else {
+            let aws_creds = deployment::AwsCredentials {
+                access_key_id: std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default(),
+                secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY").unwrap_or_default(),
+                region: std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()),
+            };
+
+            let client = crate::s3_client_for_credentials(&aws_creds).await;
+            let bucket = state.builder_config.eif_s3_bucket.clone();
+            (client, bucket)
         };
-
-        let client = crate::s3_client_for_credentials(&aws_creds).await;
-        let bucket = managed_cred.eif_bucket;
-        (client, bucket)
-    } else {
-        let aws_creds = deployment::AwsCredentials {
-            access_key_id: std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default(),
-            secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY").unwrap_or_default(),
-            region: std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()),
-        };
-
-        let client = crate::s3_client_for_credentials(&aws_creds).await;
-        let bucket = state.builder_config.eif_s3_bucket.clone();
-        (client, bucket)
-    };
 
     let cache_path = state
         .eif_download_cache
         .ensure_cached(&s3_client, &bucket, &build.eif_s3_key)
-        .await?;
+        .await
+        .with_context(Ctx::cached_eif_not_available())?;
 
     let mut serve_file = ServeFile::new(&cache_path);
 

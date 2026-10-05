@@ -101,7 +101,7 @@ impl FromStr for ResourceKind {
 }
 
 #[derive(Debug, Eq, PartialEq, thiserror::Error)]
-#[error("unknown resource kind `{value}`; expected user, organization, or app [{location:?}]")]
+#[error("unknown resource kind `{value}`; expected user, organization, or app [{location}]")]
 pub struct ParseResourceKindError {
     value: String,
     location: Location,
@@ -184,7 +184,7 @@ impl Relation {
 
 #[derive(Debug, Eq, PartialEq, thiserror::Error)]
 #[error(
-    "unknown relation `{value}` for {kind}; expected {expected} [{location:?}]",
+    "unknown relation `{value}` for {kind}; expected {expected} [{location}]",
     expected = expected_relations(*kind)
 )]
 pub struct ParseRelationError {

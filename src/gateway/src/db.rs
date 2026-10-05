@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -10,6 +10,39 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::types::DbSession;
+
+// ---------------------------------------------------------------------------
+// Shared error type for all database operations in this module
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum DbErrorKind {
+    QueryFailed,
+    InvalidInput,
+    UsernameTaken,
+    AlphaCodeUnavailable,
+    UserNotFound,
+    CredentialNotFound,
+    InvitationInvalid,
+    PgpKeyDuplicate,
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+#[context(derive(Debug))]
+#[error("database error ({kind:?}): {operation} [{location}]")]
+pub(crate) struct DbError {
+    pub(crate) kind: DbErrorKind,
+    #[context(borrow = str)]
+    operation: String,
+    #[location]
+    location: Location,
+    #[source]
+    source: Option<BoxError>,
+}
+
+// ---------------------------------------------------------------------------
+// Data types
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct RegistrationUser {
@@ -52,6 +85,10 @@ pub struct OrganizationInvitation {
     pub expires_at: OffsetDateTime,
 }
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 const LEGACY_DEFAULT_ORG_PREFIX: &str = "Organization for user ";
 
 fn public_organization_name(name: &str) -> String {
@@ -64,33 +101,20 @@ fn public_organization_name(name: &str) -> String {
     trimmed.to_string()
 }
 
-/// Creates a user and records legal consent events in a single transaction.
-/// If either the user creation or legal event recording fails, the entire
-/// transaction rolls back — no account exists without consent records.
-/// Sentinel error message signalling a unique-constraint violation on
-/// `users.username` (Postgres error code 23505). We can't return a typed
-/// error here without restructuring this fn's `Result<Uuid>` signature (it's
-/// wrapped in a transaction and shares error handling with the legal-event
-/// inserts below), so callers that need to distinguish "username taken" from
-/// other failures should match on this exact anyhow message via
-/// `is_username_taken_error`.
-const USERNAME_TAKEN_ERROR: &str = "USERNAME_TAKEN";
-const ALPHA_CODE_UNAVAILABLE_ERROR: &str = "ALPHA_CODE_UNAVAILABLE";
-
-/// Returns true if `err` (as produced by `create_user`) indicates the
-/// username was already taken, so callers can map it to a 409 response.
-pub fn is_username_taken_error(err: &anyhow::Error) -> bool {
-    // Walk the full cause chain: callers such as `create_user` wrap the
-    // sentinel with `.context(...)`, and anyhow's `Display` only renders the
-    // outermost context, so a top-level `to_string()` would miss it.
-    err.chain()
-        .any(|cause| cause.to_string().contains(USERNAME_TAKEN_ERROR))
+fn generate_user_identifier() -> String {
+    let random_bytes: [u8; 16] = rand::thread_rng().gen();
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random_bytes);
+    format!("u_{}", encoded)
 }
 
-pub fn is_alpha_code_unavailable_error(err: &anyhow::Error) -> bool {
-    err.chain()
-        .any(|cause| cause.to_string().contains(ALPHA_CODE_UNAVAILABLE_ERROR))
+pub fn generate_session_id() -> String {
+    let random_bytes: [u8; 32] = rand::thread_rng().gen();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random_bytes)
 }
+
+// ---------------------------------------------------------------------------
+// User / credential operations
+// ---------------------------------------------------------------------------
 
 /// Attempts the one-time username claim for a placeholder account. The
 /// `UPDATE` only matches rows still marked as a placeholder, so a second
@@ -98,11 +122,10 @@ pub fn is_alpha_code_unavailable_error(err: &anyhow::Error) -> bool {
 /// overwriting an already-chosen username.
 ///
 /// Returns `Ok(true)` if the claim succeeded, `Ok(false)` if the user had
-/// already claimed a username (no row matched `username_is_placeholder =
-/// true`). A unique-constraint violation on `users.username` is surfaced as
-/// the same `USERNAME_TAKEN_ERROR` sentinel used by `create_user`, so
-/// callers should check `is_username_taken_error` on the returned error.
-pub async fn claim_username(pool: &PgPool, user_id: Uuid, username: &str) -> Result<bool> {
+/// already claimed a username (no row matched `username_is_placeholder = true`).
+/// A unique-constraint violation on `users.username` is surfaced as
+/// `DbErrorKind::UsernameTaken`.
+pub async fn claim_username(pool: &PgPool, user_id: Uuid, username: &str) -> Result<bool, DbError> {
     let result = sqlx::query(
         "UPDATE users
          SET username = $1, username_is_placeholder = false
@@ -118,37 +141,56 @@ pub async fn claim_username(pool: &PgPool, user_id: Uuid, username: &str) -> Res
                 && db_err.constraint().is_some_and(|c| c.contains("username"))
             {
                 tracing::warn!("Username already taken on claim: {}", username);
-                return anyhow::anyhow!(USERNAME_TAKEN_ERROR);
+                return DbError {
+                    kind: DbErrorKind::UsernameTaken,
+                    operation: "claim_username".into(),
+                    location: std::panic::Location::caller(),
+                    source: Some(Box::new(e)),
+                };
             }
         }
         tracing::error!("Database error claiming username: {:?}", e);
-        anyhow::anyhow!("Failed to claim username: {}", e)
+        DbError {
+            kind: DbErrorKind::QueryFailed,
+            operation: "claim_username".into(),
+            location: std::panic::Location::caller(),
+            source: Some(Box::new(e)),
+        }
     })?;
 
     Ok(result.rows_affected() > 0)
 }
 
 /// Returns `(username, username_is_placeholder)` for the given user.
-pub async fn get_username_status(pool: &PgPool, user_id: Uuid) -> Result<(String, bool)> {
-    let row: (String, bool) = sqlx::query_as(
-        "SELECT username, username_is_placeholder FROM users WHERE id = $1",
-    )
-    .bind(user_id)
-    .fetch_one(pool)
-    .await
-    .context("Failed to fetch username status")?;
+#[tracing::instrument(skip_all, err)]
+pub async fn get_username_status(pool: &PgPool, user_id: Uuid) -> Result<(String, bool), DbError> {
+    let row: (String, bool) =
+        sqlx::query_as("SELECT username, username_is_placeholder FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await
+            .with_context(DbErrorCtx::new(
+                DbErrorKind::QueryFailed,
+                "get_username_status",
+            ))?;
 
     Ok(row)
 }
 
+/// Creates a user and records legal consent events in a single transaction.
+/// If either the user creation or legal event recording fails, the entire
+/// transaction rolls back — no account exists without consent records.
 pub async fn create_user(
     pool: &PgPool,
     fido2_user_handle: &[u8],
     alpha_code_id: Uuid,
     username: &str,
     legal: &SignupLegalContext,
-) -> Result<Uuid> {
-    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
+) -> Result<Uuid, DbError> {
+    let mut tx = pool.begin().await.with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "create_user: begin",
+    ))?;
 
     let redemption = sqlx::query(
         "UPDATE beta_codes
@@ -160,10 +202,18 @@ pub async fn create_user(
     .bind(alpha_code_id)
     .execute(&mut *tx)
     .await
-    .context("Failed to redeem alpha code")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "create_user: redeem alpha code",
+    ))?;
 
     if redemption.rows_affected() != 1 {
-        return Err(anyhow::anyhow!(ALPHA_CODE_UNAVAILABLE_ERROR));
+        return Err(DbError {
+            kind: DbErrorKind::AlphaCodeUnavailable,
+            operation: "create_user".into(),
+            location: std::panic::Location::caller(),
+            source: None,
+        });
     }
 
     let user_id = insert_user_with_legal_events(
@@ -178,12 +228,12 @@ pub async fn create_user(
         },
         legal,
     )
-    .await
-    .context("Failed to insert alpha user")?;
+    .await?;
 
-    tx.commit()
-        .await
-        .context("Failed to commit user creation transaction")?;
+    tx.commit().await.with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "create_user: commit",
+    ))?;
 
     Ok(user_id)
 }
@@ -192,7 +242,7 @@ async fn insert_user_with_legal_events(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     input: CreateUserInput<'_>,
     legal: &SignupLegalContext,
-) -> Result<Uuid> {
+) -> Result<Uuid, DbError> {
     let username = input
         .username
         .map(|s| s.to_string())
@@ -236,7 +286,12 @@ async fn insert_user_with_legal_events(
                 && db_err.constraint().is_some_and(|c| c.contains("username"))
             {
                 tracing::warn!("Username already taken: {}", username);
-                return anyhow::anyhow!(USERNAME_TAKEN_ERROR);
+                return DbError {
+                    kind: DbErrorKind::UsernameTaken,
+                    operation: "insert_user_with_legal_events".into(),
+                    location: std::panic::Location::caller(),
+                    source: Some(Box::new(e)),
+                };
             }
         }
         tracing::error!("Database error creating user: {:?}", e);
@@ -245,7 +300,12 @@ async fn insert_user_with_legal_events(
             "fido2_user_handle (hex): {}",
             hex::encode(input.fido2_user_handle)
         );
-        anyhow::anyhow!("Failed to create user: {}", e)
+        DbError {
+            kind: DbErrorKind::QueryFailed,
+            operation: "insert_user_with_legal_events".into(),
+            location: std::panic::Location::caller(),
+            source: Some(Box::new(e)),
+        }
     })?;
 
     // Record acceptance/acknowledgment for every currently active document
@@ -260,7 +320,10 @@ async fn insert_user_with_legal_events(
     )
     .fetch_all(&mut **tx)
     .await
-    .context("Failed to query active legal documents")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "insert_user_with_legal_events: query active documents",
+    ))?;
 
     for (doc_type, legal_document_id, version, requires_blocking) in active_documents {
         let event_type = if requires_blocking {
@@ -268,7 +331,6 @@ async fn insert_user_with_legal_events(
         } else {
             "acknowledged"
         };
-
 
         sqlx::query(
             "INSERT INTO user_legal_events (
@@ -286,7 +348,10 @@ async fn insert_user_with_legal_events(
         .bind(&legal.user_agent)
         .execute(&mut **tx)
         .await
-        .context(format!("Failed to record {} legal event", doc_type))?;
+        .with_context(DbErrorCtx::new(
+            DbErrorKind::QueryFailed,
+            "insert_user_with_legal_events: record legal event",
+        ))?;
     }
 
     Ok(user_id)
@@ -300,7 +365,7 @@ pub fn hash_invitation_token(token: &str) -> Option<String> {
 pub async fn get_valid_invitation(
     pool: &PgPool,
     token_hash: &str,
-) -> Result<Option<OrganizationInvitation>> {
+) -> Result<Option<OrganizationInvitation>, DbError> {
     let mut invitation = sqlx::query_as::<_, OrganizationInvitation>(
         "SELECT oi.id,
                 oi.organization_id,
@@ -319,7 +384,10 @@ pub async fn get_valid_invitation(
     .bind(token_hash)
     .fetch_optional(pool)
     .await
-    .context("Failed to load organization invitation")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "get_valid_invitation",
+    ))?;
 
     if let Some(invitation) = invitation.as_mut() {
         invitation.organization_name = public_organization_name(&invitation.organization_name);
@@ -335,8 +403,11 @@ pub async fn accept_invitation_and_create_user(
     fido2_user_handle: &[u8],
     username: &str,
     legal: &SignupLegalContext,
-) -> Result<Uuid> {
-    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
+) -> Result<Uuid, DbError> {
+    let mut tx = pool.begin().await.with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "accept_invitation_and_create_user: begin",
+    ))?;
 
     let invitation: OrganizationInvitation = sqlx::query_as(
         "SELECT oi.id,
@@ -359,8 +430,16 @@ pub async fn accept_invitation_and_create_user(
     .bind(token_hash)
     .fetch_optional(&mut *tx)
     .await
-    .context("Failed to lock organization invitation")?
-    .ok_or_else(|| anyhow::anyhow!("Invitation is invalid or already used"))?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "accept_invitation_and_create_user: lock invitation",
+    ))?
+    .ok_or_else(|| DbError {
+        kind: DbErrorKind::InvitationInvalid,
+        operation: "accept_invitation_and_create_user".into(),
+        location: std::panic::Location::caller(),
+        source: None,
+    })?;
 
     let user_id = insert_user_with_legal_events(
         &mut tx,
@@ -374,8 +453,7 @@ pub async fn accept_invitation_and_create_user(
         },
         legal,
     )
-    .await
-    .context("Failed to create invited user")?;
+    .await?;
 
     sqlx::query(
         "INSERT INTO organization_members (organization_id, user_id, role, invited_by)
@@ -387,7 +465,10 @@ pub async fn accept_invitation_and_create_user(
     .bind(invitation.invited_by)
     .execute(&mut *tx)
     .await
-    .context("Failed to add invited user to organization")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "accept_invitation_and_create_user: add member",
+    ))?;
 
     sqlx::query(
         "UPDATE organization_invitations
@@ -398,16 +479,20 @@ pub async fn accept_invitation_and_create_user(
     .bind(invitation_id)
     .execute(&mut *tx)
     .await
-    .context("Failed to mark invitation accepted")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "accept_invitation_and_create_user: mark accepted",
+    ))?;
 
-    tx.commit()
-        .await
-        .context("Failed to commit invitation acceptance")?;
+    tx.commit().await.with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "accept_invitation_and_create_user: commit",
+    ))?;
 
     Ok(user_id)
 }
 
-pub async fn validate_alpha_code(pool: &PgPool, code: &str) -> Result<Option<Uuid>> {
+pub async fn validate_alpha_code(pool: &PgPool, code: &str) -> Result<Option<Uuid>, DbError> {
     let code_id: Option<Uuid> = sqlx::query_scalar(
         "SELECT id FROM beta_codes
          WHERE code = $1
@@ -417,43 +502,39 @@ pub async fn validate_alpha_code(pool: &PgPool, code: &str) -> Result<Option<Uui
     .bind(code)
     .fetch_optional(pool)
     .await
-    .context("Failed to validate alpha code")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "validate_alpha_code",
+    ))?;
 
     Ok(code_id)
 }
 
-
-pub async fn get_user_id_by_fido2_handle(pool: &PgPool, fido2_user_handle: &[u8]) -> Result<Uuid> {
-    let user_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM users WHERE fido2_user_handle = $1")
-            .bind(fido2_user_handle)
-            .fetch_optional(pool)
-            .await
-            .context("Failed to get user ID")?;
-
-    user_id.ok_or_else(|| anyhow::anyhow!("User not found for handle"))
-}
-
-pub async fn get_registration_user(pool: &PgPool, user_id: Uuid) -> Result<RegistrationUser> {
+pub async fn get_registration_user(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<RegistrationUser, DbError> {
     let user: Option<RegistrationUser> =
         sqlx::query_as("SELECT username, fido2_user_handle FROM users WHERE id = $1")
             .bind(user_id)
             .fetch_optional(pool)
             .await
-            .context("Failed to get registration user")?;
+            .with_context(DbErrorCtx::new(
+                DbErrorKind::QueryFailed,
+                "get_registration_user",
+            ))?;
 
-    user.ok_or_else(|| anyhow::anyhow!("User not found"))
-}
-
-fn generate_user_identifier() -> String {
-    let random_bytes: [u8; 16] = rand::thread_rng().gen();
-    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random_bytes);
-    format!("u_{}", encoded)
+    user.ok_or_else(|| DbError {
+        kind: DbErrorKind::UserNotFound,
+        operation: "get_registration_user".into(),
+        location: std::panic::Location::caller(),
+        source: None,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn save_fido2_credential(
-    pool: &PgPool,
+pub async fn save_fido2_credential<'e, E>(
+    executor: E,
     credential_id: &[u8],
     user_id: Uuid,
     public_key: &[u8],
@@ -464,7 +545,10 @@ pub async fn save_fido2_credential(
     transport: Option<serde_json::Value>,
     flags: Option<serde_json::Value>,
     resident: Option<bool>,
-) -> Result<()> {
+) -> Result<(), DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     sqlx::query(
         "INSERT INTO fido2_credentials (
             credential_id,
@@ -491,84 +575,102 @@ pub async fn save_fido2_credential(
     .bind(transport)
     .bind(flags)
     .bind(resident)
-    .execute(pool)
+    .execute(executor)
     .await
-    .context("Failed to save credential")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "save_fido2_credential",
+    ))?;
 
     Ok(())
 }
 
-pub async fn credential_exists(pool: &PgPool, credential_id: &[u8]) -> Result<bool> {
+pub async fn credential_exists<'e, E>(executor: E, credential_id: &[u8]) -> Result<bool, DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM fido2_credentials WHERE credential_id = $1)",
     )
     .bind(credential_id)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await
-    .context("Failed to check credential existence")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "credential_exists",
+    ))?;
 
     Ok(exists)
 }
 
-pub async fn get_all_credential_public_keys(pool: &PgPool) -> Result<Vec<Vec<u8>>> {
+#[tracing::instrument(skip_all, err)]
+pub async fn get_all_credential_public_keys(pool: &PgPool) -> Result<Vec<Vec<u8>>, DbError> {
     let keys: Vec<Vec<u8>> = sqlx::query_scalar("SELECT public_key FROM fido2_credentials")
         .fetch_all(pool)
         .await
-        .context("Failed to fetch credential public keys")?;
+        .with_context(DbErrorCtx::new(
+            DbErrorKind::QueryFailed,
+            "get_all_credential_public_keys",
+        ))?;
 
     Ok(keys)
 }
 
-pub async fn get_credential_public_key(pool: &PgPool, credential_id: &[u8]) -> Result<Vec<u8>> {
+#[tracing::instrument(skip_all, err)]
+pub async fn get_credential_public_key(
+    pool: &PgPool,
+    credential_id: &[u8],
+) -> Result<Vec<u8>, DbError> {
     let public_key: Option<Vec<u8>> =
         sqlx::query_scalar("SELECT public_key FROM fido2_credentials WHERE credential_id = $1")
             .bind(credential_id)
             .fetch_optional(pool)
             .await
-            .context("Failed to get credential")?;
+            .with_context(DbErrorCtx::new(
+                DbErrorKind::QueryFailed,
+                "get_credential_public_key",
+            ))?;
 
-    public_key.ok_or_else(|| anyhow::anyhow!("Credential not found"))
+    public_key.ok_or_else(|| DbError {
+        kind: DbErrorKind::CredentialNotFound,
+        operation: "get_credential_public_key".into(),
+        location: std::panic::Location::caller(),
+        source: None,
+    })
 }
 
-pub async fn get_user_id_by_credential(pool: &PgPool, credential_id: &[u8]) -> Result<Uuid> {
+#[tracing::instrument(skip_all, err)]
+pub async fn get_user_id_by_credential(
+    pool: &PgPool,
+    credential_id: &[u8],
+) -> Result<Uuid, DbError> {
     let user_id: Option<Uuid> =
         sqlx::query_scalar("SELECT user_id FROM fido2_credentials WHERE credential_id = $1")
             .bind(credential_id)
             .fetch_optional(pool)
             .await
-            .context("Failed to get user ID")?;
+            .with_context(DbErrorCtx::new(
+                DbErrorKind::QueryFailed,
+                "get_user_id_by_credential",
+            ))?;
 
-    user_id.ok_or_else(|| anyhow::anyhow!("Credential not found"))
+    user_id.ok_or_else(|| DbError {
+        kind: DbErrorKind::CredentialNotFound,
+        operation: "get_user_id_by_credential".into(),
+        location: std::panic::Location::caller(),
+        source: None,
+    })
 }
 
-pub async fn get_all_credential_ids(pool: &PgPool) -> Result<Vec<Vec<u8>>> {
+pub async fn get_all_credential_ids(pool: &PgPool) -> Result<Vec<Vec<u8>>, DbError> {
     let rows: Vec<(Vec<u8>,)> =
         sqlx::query_as("SELECT credential_id FROM fido2_credentials ORDER BY created_at DESC")
             .fetch_all(pool)
             .await
-            .context("Failed to query credentials")?;
-
-    Ok(rows.into_iter().map(|r| r.0).collect())
-}
-
-pub async fn get_all_passkeys(pool: &PgPool) -> Result<Vec<Vec<u8>>> {
-    let rows: Vec<(Vec<u8>,)> =
-        sqlx::query_as("SELECT public_key FROM fido2_credentials ORDER BY created_at DESC")
-            .fetch_all(pool)
-            .await
-            .context("Failed to query passkeys")?;
-
-    Ok(rows.into_iter().map(|r| r.0).collect())
-}
-
-pub async fn get_credential_ids_by_user_id(pool: &PgPool, user_id: Uuid) -> Result<Vec<Vec<u8>>> {
-    let rows: Vec<(Vec<u8>,)> = sqlx::query_as(
-        "SELECT credential_id FROM fido2_credentials WHERE user_id = $1 ORDER BY created_at DESC",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-    .context("Failed to query credentials")?;
+            .with_context(DbErrorCtx::new(
+                DbErrorKind::QueryFailed,
+                "get_all_credential_ids",
+            ))?;
 
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
@@ -577,29 +679,39 @@ pub async fn get_credential_ids_by_user_id(pool: &PgPool, user_id: Uuid) -> Resu
 /// an error when not found — callers must NOT translate a `None` here into a
 /// distinct HTTP response for unauthenticated login flows, or they'll create a
 /// username-enumeration oracle (see `begin_login_handler`).
-pub async fn get_user_id_by_username(pool: &PgPool, username: &str) -> Result<Option<Uuid>> {
+pub async fn get_user_id_by_username(
+    pool: &PgPool,
+    username: &str,
+) -> Result<Option<Uuid>, DbError> {
     let user_id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
         .bind(username)
         .fetch_optional(pool)
         .await
-        .context("Failed to get user ID by username")?;
+        .with_context(DbErrorCtx::new(
+            DbErrorKind::QueryFailed,
+            "get_user_id_by_username",
+        ))?;
 
     Ok(user_id)
 }
 
 /// Fetch the serialized `SecurityKey` public keys for every credential
 /// belonging to a user, for building a username-scoped `allowCredentials` list.
+#[tracing::instrument(skip_all, err)]
 pub async fn get_credential_public_keys_by_user_id(
     pool: &PgPool,
     user_id: Uuid,
-) -> Result<Vec<Vec<u8>>> {
+) -> Result<Vec<Vec<u8>>, DbError> {
     let rows: Vec<(Vec<u8>,)> = sqlx::query_as(
         "SELECT public_key FROM fido2_credentials WHERE user_id = $1 ORDER BY created_at DESC",
     )
     .bind(user_id)
     .fetch_all(pool)
     .await
-    .context("Failed to query credential public keys by user")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "get_credential_public_keys_by_user_id",
+    ))?;
 
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
@@ -608,7 +720,10 @@ pub async fn get_credential_public_keys_by_user_id(
 /// successfully used in a discoverable (username-less) login assertion. Only
 /// touches rows where residency is still unknown (`NULL`) — never overwrites
 /// an explicit `false` recorded from a registration-time `credProps` reading.
-pub async fn mark_credential_resident_if_unknown(pool: &PgPool, credential_id: &[u8]) -> Result<()> {
+pub async fn mark_credential_resident_if_unknown(
+    pool: &PgPool,
+    credential_id: &[u8],
+) -> Result<(), DbError> {
     sqlx::query(
         "UPDATE fido2_credentials SET resident = true, updated_at = NOW()
          WHERE credential_id = $1 AND resident IS NULL",
@@ -616,7 +731,10 @@ pub async fn mark_credential_resident_if_unknown(pool: &PgPool, credential_id: &
     .bind(credential_id)
     .execute(pool)
     .await
-    .context("Failed to backfill credential resident flag")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "mark_credential_resident_if_unknown",
+    ))?;
 
     Ok(())
 }
@@ -624,7 +742,7 @@ pub async fn mark_credential_resident_if_unknown(pool: &PgPool, credential_id: &
 pub async fn list_user_credentials(
     pool: &PgPool,
     user_id: Uuid,
-) -> Result<Vec<UserCredentialRecord>> {
+) -> Result<Vec<UserCredentialRecord>, DbError> {
     let rows: Vec<UserCredentialRecord> = sqlx::query_as(
         r#"
         SELECT
@@ -644,7 +762,10 @@ pub async fn list_user_credentials(
     .bind(user_id)
     .fetch_all(pool)
     .await
-    .context("Failed to list user credentials")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "list_user_credentials",
+    ))?;
 
     Ok(rows)
 }
@@ -653,7 +774,7 @@ pub async fn get_user_credential_by_credential_id(
     pool: &PgPool,
     user_id: Uuid,
     credential_id: &[u8],
-) -> Result<Option<UserCredentialRecord>> {
+) -> Result<Option<UserCredentialRecord>, DbError> {
     let row: Option<UserCredentialRecord> = sqlx::query_as(
         r#"
         SELECT
@@ -673,7 +794,10 @@ pub async fn get_user_credential_by_credential_id(
     .bind(credential_id)
     .fetch_optional(pool)
     .await
-    .context("Failed to fetch user credential")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "get_user_credential_by_credential_id",
+    ))?;
 
     Ok(row)
 }
@@ -682,28 +806,18 @@ pub async fn delete_user_credential(
     pool: &PgPool,
     user_id: Uuid,
     credential_row_id: Uuid,
-) -> Result<u64> {
+) -> Result<u64, DbError> {
     let result = sqlx::query("DELETE FROM fido2_credentials WHERE id = $1 AND user_id = $2")
         .bind(credential_row_id)
         .bind(user_id)
         .execute(pool)
         .await
-        .context("Failed to delete credential")?;
+        .with_context(DbErrorCtx::new(
+            DbErrorKind::QueryFailed,
+            "delete_user_credential",
+        ))?;
 
     Ok(result.rows_affected())
-}
-
-pub async fn update_sign_count(pool: &PgPool, credential_id: &[u8], sign_count: u32) -> Result<()> {
-    sqlx::query(
-        "UPDATE fido2_credentials SET sign_count = $1, updated_at = NOW() WHERE credential_id = $2",
-    )
-    .bind(sign_count as i64)
-    .bind(credential_id)
-    .execute(pool)
-    .await
-    .context("Failed to update sign count")?;
-
-    Ok(())
 }
 
 pub async fn update_fido2_credential(
@@ -711,7 +825,7 @@ pub async fn update_fido2_credential(
     credential_id: &[u8],
     public_key: &[u8],
     sign_count: u32,
-) -> Result<()> {
+) -> Result<(), DbError> {
     sqlx::query(
         "UPDATE fido2_credentials 
          SET public_key = $1, sign_count = $2, updated_at = NOW() 
@@ -722,17 +836,23 @@ pub async fn update_fido2_credential(
     .bind(credential_id)
     .execute(pool)
     .await
-    .context("Failed to update credential")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "update_fido2_credential",
+    ))?;
 
     Ok(())
 }
 
-pub async fn create_auth_session(
-    pool: &PgPool,
+pub async fn create_auth_session<'e, E>(
+    executor: E,
     session_id: &str,
     credential_id: &[u8],
     expires_at: OffsetDateTime,
-) -> Result<()> {
+) -> Result<(), DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     sqlx::query(
         "INSERT INTO auth_sessions (session_id, credential_id, created_at, expires_at, last_used_at)
          VALUES ($1, $2, NOW(), $3, NOW())"
@@ -740,14 +860,21 @@ pub async fn create_auth_session(
     .bind(session_id)
     .bind(credential_id)
     .bind(expires_at)
-    .execute(pool)
+    .execute(executor)
     .await
-    .context("Failed to create session")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "create_auth_session",
+    ))?;
 
     Ok(())
 }
 
-pub async fn validate_auth_session(pool: &PgPool, session_id: &str) -> Result<Option<Vec<u8>>> {
+#[tracing::instrument(skip_all, err)]
+pub async fn validate_auth_session(
+    pool: &PgPool,
+    session_id: &str,
+) -> Result<Option<Vec<u8>>, DbError> {
     let session: Option<DbSession> = sqlx::query_as(
         "SELECT session_id, credential_id, expires_at, created_at, last_used_at
          FROM auth_sessions
@@ -756,7 +883,10 @@ pub async fn validate_auth_session(pool: &PgPool, session_id: &str) -> Result<Op
     .bind(session_id)
     .fetch_optional(pool)
     .await
-    .context("Failed to validate session")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "validate_auth_session",
+    ))?;
 
     let Some(session) = session else {
         return Ok(None);
@@ -778,12 +908,15 @@ pub async fn validate_auth_session(pool: &PgPool, session_id: &str) -> Result<Op
     Ok(Some(session.credential_id))
 }
 
-pub async fn delete_auth_session(pool: &PgPool, session_id: &str) -> Result<()> {
+pub async fn delete_auth_session(pool: &PgPool, session_id: &str) -> Result<(), DbError> {
     sqlx::query("DELETE FROM auth_sessions WHERE session_id = $1")
         .bind(session_id)
         .execute(pool)
         .await
-        .context("Failed to delete session")?;
+        .with_context(DbErrorCtx::new(
+            DbErrorKind::QueryFailed,
+            "delete_auth_session",
+        ))?;
 
     Ok(())
 }
@@ -817,9 +950,17 @@ pub async fn run_cleanups(pool: &PgPool) {
     }
 }
 
-pub fn generate_session_id() -> String {
-    let random_bytes: [u8; 32] = rand::thread_rng().gen();
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random_bytes)
+// ---------------------------------------------------------------------------
+// SSH key operations
+// ---------------------------------------------------------------------------
+
+/// Result of [`add_ssh_key`]: the new row's ID plus the fingerprint that was
+/// computed (and stored) for it — returned so callers don't have to recompute
+/// it from the public key just to echo it back.
+#[derive(Debug, Clone)]
+pub struct AddedSshKey {
+    pub id: Uuid,
+    pub fingerprint: String,
 }
 
 pub async fn add_ssh_key(
@@ -828,8 +969,9 @@ pub async fn add_ssh_key(
     public_key: &str,
     key_type: &str,
     name: Option<&str>,
-) -> Result<Uuid> {
-    let fingerprint = generate_ssh_fingerprint(public_key)?;
+) -> Result<AddedSshKey, DbError> {
+    let fingerprint = generate_ssh_fingerprint(public_key)
+        .with_context(DbErrorCtx::new(DbErrorKind::InvalidInput, "add_ssh_key"))?;
 
     let key_id: Uuid = sqlx::query_scalar(
         "INSERT INTO ssh_keys (user_id, public_key, fingerprint, key_type, name)
@@ -843,25 +985,15 @@ pub async fn add_ssh_key(
     .bind(name)
     .fetch_one(pool)
     .await
-    .context("Failed to insert SSH key")?;
+    .with_context(DbErrorCtx::new(DbErrorKind::QueryFailed, "add_ssh_key"))?;
 
-    Ok(key_id)
+    Ok(AddedSshKey {
+        id: key_id,
+        fingerprint,
+    })
 }
 
-pub async fn get_user_by_ssh_key(pool: &PgPool, public_key: &str) -> Result<Option<Uuid>> {
-    let fingerprint = generate_ssh_fingerprint(public_key)?;
-
-    let user_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT user_id FROM ssh_keys WHERE fingerprint = $1")
-            .bind(&fingerprint)
-            .fetch_optional(pool)
-            .await
-            .context("Failed to get user by SSH key")?;
-
-    Ok(user_id)
-}
-
-pub async fn list_ssh_keys(pool: &PgPool, user_id: Uuid) -> Result<Vec<SshKeyInfo>> {
+pub async fn list_ssh_keys(pool: &PgPool, user_id: Uuid) -> Result<Vec<SshKeyInfo>, DbError> {
     let keys: Vec<SshKeyInfo> = sqlx::query_as(
         "SELECT id, fingerprint, key_type, name, public_key, created_at, last_used_at
          FROM ssh_keys
@@ -871,28 +1003,35 @@ pub async fn list_ssh_keys(pool: &PgPool, user_id: Uuid) -> Result<Vec<SshKeyInf
     .bind(user_id)
     .fetch_all(pool)
     .await
-    .context("Failed to list SSH keys")?;
+    .with_context(DbErrorCtx::new(DbErrorKind::QueryFailed, "list_ssh_keys"))?;
 
     Ok(keys)
 }
 
-pub async fn delete_ssh_key(pool: &PgPool, user_id: Uuid, fingerprint: &str) -> Result<bool> {
+pub async fn delete_ssh_key(
+    pool: &PgPool,
+    user_id: Uuid,
+    fingerprint: &str,
+) -> Result<bool, DbError> {
     let result = sqlx::query("DELETE FROM ssh_keys WHERE user_id = $1 AND fingerprint = $2")
         .bind(user_id)
         .bind(fingerprint)
         .execute(pool)
         .await
-        .context("Failed to delete SSH key")?;
+        .with_context(DbErrorCtx::new(DbErrorKind::QueryFailed, "delete_ssh_key"))?;
 
     Ok(result.rows_affected() > 0)
 }
 
-pub async fn update_ssh_key_last_used(pool: &PgPool, fingerprint: &str) -> Result<()> {
+pub async fn update_ssh_key_last_used(pool: &PgPool, fingerprint: &str) -> Result<(), DbError> {
     sqlx::query("UPDATE ssh_keys SET last_used_at = NOW() WHERE fingerprint = $1")
         .bind(fingerprint)
         .execute(pool)
         .await
-        .context("Failed to update SSH key last_used_at")?;
+        .with_context(DbErrorCtx::new(
+            DbErrorKind::QueryFailed,
+            "update_ssh_key_last_used",
+        ))?;
 
     Ok(())
 }
@@ -900,25 +1039,28 @@ pub async fn update_ssh_key_last_used(pool: &PgPool, fingerprint: &str) -> Resul
 pub async fn get_ssh_public_key_by_fingerprint(
     pool: &PgPool,
     fingerprint: &str,
-) -> Result<Option<String>> {
+) -> Result<Option<String>, DbError> {
     let public_key: Option<String> =
         sqlx::query_scalar("SELECT public_key FROM ssh_keys WHERE fingerprint = $1 LIMIT 1")
             .bind(fingerprint)
             .fetch_optional(pool)
             .await
-            .context("Failed to get SSH public key by fingerprint")?;
+            .with_context(DbErrorCtx::new(
+                DbErrorKind::QueryFailed,
+                "get_ssh_public_key_by_fingerprint",
+            ))?;
 
     Ok(public_key)
 }
 
 /// Check if an SSH key fingerprint exists for any user
-pub async fn ssh_key_exists(pool: &PgPool, fingerprint: &str) -> Result<bool> {
+pub async fn ssh_key_exists(pool: &PgPool, fingerprint: &str) -> Result<bool, DbError> {
     let exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM ssh_keys WHERE fingerprint = $1)")
             .bind(fingerprint)
             .fetch_one(pool)
             .await
-            .context("Failed to check SSH key existence")?;
+            .with_context(DbErrorCtx::new(DbErrorKind::QueryFailed, "ssh_key_exists"))?;
 
     Ok(exists)
 }
@@ -931,8 +1073,13 @@ pub async fn get_user_for_app_by_ssh_key(
     pool: &PgPool,
     fingerprint: &str,
     app_id: &str,
-) -> Result<Option<(Uuid, Uuid)>> {
-    let app_uuid = Uuid::parse_str(app_id).context("Invalid app ID format")?;
+) -> Result<Option<(Uuid, Uuid)>, DbError> {
+    let app_uuid = Uuid::parse_str(app_id).map_err(|e| DbError {
+        kind: DbErrorKind::InvalidInput,
+        operation: "get_user_for_app_by_ssh_key: parse app_id".into(),
+        location: std::panic::Location::caller(),
+        source: Some(Box::new(e)),
+    })?;
 
     let result: Option<(Uuid, Uuid)> = sqlx::query_as(
         "SELECT om.user_id, om.organization_id
@@ -947,12 +1094,27 @@ pub async fn get_user_for_app_by_ssh_key(
     .bind(app_uuid)
     .fetch_optional(pool)
     .await
-    .context("Failed to get user for app by SSH key")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "get_user_for_app_by_ssh_key",
+    ))?;
 
     Ok(result)
 }
 
-pub fn generate_ssh_fingerprint(public_key: &str) -> Result<String> {
+/// Error for [`generate_ssh_fingerprint`] — a pure key-decoding operation with
+/// no database access. Callers that do hit the DB convert it into a
+/// `DbErrorKind::InvalidInput` at their own boundary.
+#[derive(Debug, thiserror::Error)]
+#[error("could not decode SSH public key data [{location}]")]
+pub struct SshFingerprintError {
+    #[source]
+    pub(crate) source: base64::DecodeError,
+    location: dterror::Location,
+}
+
+#[track_caller]
+pub fn generate_ssh_fingerprint(public_key: &str) -> Result<String, SshFingerprintError> {
     let parts: Vec<&str> = public_key.split_whitespace().collect();
     let key_data = if parts.len() >= 2 {
         parts[1]
@@ -964,7 +1126,10 @@ pub fn generate_ssh_fingerprint(public_key: &str) -> Result<String> {
     // This matches OpenSSH's fingerprint format: SHA256:<base64_of_sha256_of_decoded_key>
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(key_data)
-        .map_err(|_| anyhow::anyhow!("Invalid SSH key: base64 decode failed"))?;
+        .map_err(|source| SshFingerprintError {
+            source,
+            location: std::panic::Location::caller(),
+        })?;
 
     let mut hasher = Sha256::new();
     hasher.update(&decoded);
@@ -983,6 +1148,10 @@ pub struct SshKeyInfo {
     pub last_used_at: Option<time::OffsetDateTime>,
 }
 
+// ---------------------------------------------------------------------------
+// Signed request audit (already typed, not anyhow — kept as-is)
+// ---------------------------------------------------------------------------
+
 pub struct NewSignedRequestAudit<'a> {
     pub user_id: Uuid,
     pub credential_id: &'a [u8],
@@ -999,25 +1168,29 @@ pub struct NewSignedRequestAudit<'a> {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("Unable to record verified signed request {challenge_id} for user {user_id}")]
+#[error("Unable to record verified signed request {challenge_id} for user {user_id} [{location}]")]
 pub struct RecordSignedRequestAuditError {
     user_id: Uuid,
     challenge_id: Uuid,
+    location: dterror::Location,
 
     #[source]
     source: sqlx::Error,
 }
 
 impl RecordSignedRequestAuditError {
+    #[track_caller]
     fn new(user_id: Uuid, challenge_id: Uuid, source: sqlx::Error) -> Self {
         Self {
             user_id,
             challenge_id,
+            location: std::panic::Location::caller(),
             source,
         }
     }
 }
 
+#[tracing::instrument(skip_all, err)]
 pub async fn record_signed_request_audit(
     pool: &PgPool,
     audit: &NewSignedRequestAudit<'_>,
@@ -1056,37 +1229,43 @@ pub enum CompleteSignedRequestAuditErrorKind {
 
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "Unable to complete signed request audit {audit_id} with HTTP status {response_status}: {kind:?}"
+    "Unable to complete signed request audit {audit_id} with HTTP status {response_status}: {kind:?} [{location}]"
 )]
 pub struct CompleteSignedRequestAuditError {
     kind: CompleteSignedRequestAuditErrorKind,
     audit_id: Uuid,
     response_status: u16,
+    location: dterror::Location,
 
     #[source]
     source: Option<sqlx::Error>,
 }
 
 impl CompleteSignedRequestAuditError {
+    #[track_caller]
     fn database(audit_id: Uuid, response_status: u16, source: sqlx::Error) -> Self {
         Self {
             kind: CompleteSignedRequestAuditErrorKind::Database,
             audit_id,
             response_status,
+            location: std::panic::Location::caller(),
             source: Some(source),
         }
     }
 
+    #[track_caller]
     fn audit_not_pending(audit_id: Uuid, response_status: u16) -> Self {
         Self {
             kind: CompleteSignedRequestAuditErrorKind::AuditNotPending,
             audit_id,
             response_status,
+            location: std::panic::Location::caller(),
             source: None,
         }
     }
 }
 
+#[tracing::instrument(skip_all, err)]
 pub async fn complete_signed_request_audit(
     pool: &PgPool,
     audit_id: Uuid,
@@ -1115,6 +1294,10 @@ pub async fn complete_signed_request_audit(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// PGP key operations
+// ---------------------------------------------------------------------------
+
 pub async fn add_pgp_key(
     pool: &PgPool,
     user_id: Uuid,
@@ -1122,7 +1305,7 @@ pub async fn add_pgp_key(
     fingerprint: &str,
     name: Option<&str>,
     signed_request_id: Option<Uuid>,
-) -> Result<Uuid, sqlx::Error> {
+) -> Result<Uuid, DbError> {
     sqlx::query_scalar(
         "INSERT INTO pgp_keys (
             user_id, public_key, fingerprint, name, added_by_signed_request_id
@@ -1136,9 +1319,36 @@ pub async fn add_pgp_key(
     .bind(signed_request_id)
     .fetch_one(pool)
     .await
+    .map_err(|e| {
+        if let sqlx::Error::Database(ref db_err) = e {
+            if db_err.is_unique_violation()
+                && matches!(
+                    db_err.constraint(),
+                    Some(
+                        "pgp_keys_user_fingerprint_unique"
+                            | "pgp_keys_active_user_fingerprint_unique"
+                    )
+                )
+            {
+                return DbError {
+                    kind: DbErrorKind::PgpKeyDuplicate,
+                    operation: "add_pgp_key".into(),
+                    location: std::panic::Location::caller(),
+                    source: Some(Box::new(e)),
+                };
+            }
+        }
+        tracing::error!("Database error adding PGP key: {:?}", e);
+        DbError {
+            kind: DbErrorKind::QueryFailed,
+            operation: "add_pgp_key".into(),
+            location: std::panic::Location::caller(),
+            source: Some(Box::new(e)),
+        }
+    })
 }
 
-pub async fn list_pgp_keys(pool: &PgPool, user_id: Uuid) -> Result<Vec<PgpKeyInfo>, sqlx::Error> {
+pub async fn list_pgp_keys(pool: &PgPool, user_id: Uuid) -> Result<Vec<PgpKeyInfo>, DbError> {
     sqlx::query_as(
         "SELECT id, fingerprint, name, created_at
          FROM pgp_keys
@@ -1148,6 +1358,7 @@ pub async fn list_pgp_keys(pool: &PgPool, user_id: Uuid) -> Result<Vec<PgpKeyInf
     .bind(user_id)
     .fetch_all(pool)
     .await
+    .with_context(DbErrorCtx::new(DbErrorKind::QueryFailed, "list_pgp_keys"))
 }
 
 #[derive(Debug, Clone, sqlx::FromRow, serde::Serialize)]
@@ -1159,20 +1370,23 @@ pub struct PgpKeyInfo {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("Unable to remove PGP public key {key_id} for user {user_id}")]
+#[error("Unable to remove PGP public key {key_id} for user {user_id} [{location}]")]
 pub struct RemovePgpKeyError {
     user_id: Uuid,
     key_id: Uuid,
+    location: dterror::Location,
 
     #[source]
     source: sqlx::Error,
 }
 
 impl RemovePgpKeyError {
+    #[track_caller]
     fn new(user_id: Uuid, key_id: Uuid, source: sqlx::Error) -> Self {
         Self {
             user_id,
             key_id,
+            location: std::panic::Location::caller(),
             source,
         }
     }
@@ -1198,7 +1412,9 @@ pub async fn remove_pgp_key(
     .map_err(|source| RemovePgpKeyError::new(user_id, key_id, source))
 }
 
-// QR Login token functions
+// ---------------------------------------------------------------------------
+// QR login token operations
+// ---------------------------------------------------------------------------
 
 pub async fn create_qr_login_token(
     pool: &PgPool,
@@ -1207,7 +1423,7 @@ pub async fn create_qr_login_token(
     ip_address: Option<&str>,
     expires_at: OffsetDateTime,
     username: &str,
-) -> Result<()> {
+) -> Result<(), DbError> {
     sqlx::query(
         "INSERT INTO qr_login_tokens (token, requestee_token, status, ip_address, expires_at, username)
          VALUES ($1, $2, 'pending', $3, $4, $5)",
@@ -1219,7 +1435,10 @@ pub async fn create_qr_login_token(
     .bind(username)
     .execute(pool)
     .await
-    .context("Failed to create QR login token")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "create_qr_login_token",
+    ))?;
 
     Ok(())
 }
@@ -1227,7 +1446,7 @@ pub async fn create_qr_login_token(
 pub async fn get_qr_login_token(
     pool: &PgPool,
     token: &str,
-) -> Result<Option<crate::types::DbQrLoginToken>> {
+) -> Result<Option<crate::types::DbQrLoginToken>, DbError> {
     let row: Option<crate::types::DbQrLoginToken> = sqlx::query_as(
         "SELECT token, requestee_token, status, ip_address, browser_ip_address, auth_challenge_key, session_id, expires_at, created_at, username
          FROM qr_login_tokens
@@ -1236,7 +1455,10 @@ pub async fn get_qr_login_token(
     .bind(token)
     .fetch_optional(pool)
     .await
-    .context("Failed to get QR login token")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "get_qr_login_token",
+    ))?;
 
     Ok(row)
 }
@@ -1244,7 +1466,7 @@ pub async fn get_qr_login_token(
 pub async fn get_qr_login_token_by_requestee_token(
     pool: &PgPool,
     requestee_token: &str,
-) -> Result<Option<crate::types::DbQrLoginToken>> {
+) -> Result<Option<crate::types::DbQrLoginToken>, DbError> {
     let row: Option<crate::types::DbQrLoginToken> = sqlx::query_as(
         "SELECT token, requestee_token, status, ip_address, browser_ip_address, auth_challenge_key, session_id, expires_at, created_at, username
          FROM qr_login_tokens
@@ -1253,7 +1475,10 @@ pub async fn get_qr_login_token_by_requestee_token(
     .bind(requestee_token)
     .fetch_optional(pool)
     .await
-    .context("Failed to get QR login token by requestee token")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "get_qr_login_token_by_requestee_token",
+    ))?;
 
     Ok(row)
 }
@@ -1263,7 +1488,7 @@ pub async fn claim_qr_login_token(
     requestee_token: &str,
     auth_challenge_key: &str,
     browser_ip: Option<&str>,
-) -> Result<bool> {
+) -> Result<bool, DbError> {
     let result = sqlx::query(
         "UPDATE qr_login_tokens
          SET status = 'authenticated', auth_challenge_key = $2, browser_ip_address = $3
@@ -1274,7 +1499,10 @@ pub async fn claim_qr_login_token(
     .bind(browser_ip)
     .execute(pool)
     .await
-    .context("Failed to claim QR login token")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "claim_qr_login_token",
+    ))?;
 
     Ok(result.rows_affected() == 1)
 }
@@ -1283,7 +1511,7 @@ pub async fn complete_qr_login_token(
     pool: &PgPool,
     requestee_token: &str,
     session_id: &str,
-) -> Result<bool> {
+) -> Result<bool, DbError> {
     let result = sqlx::query(
         "UPDATE qr_login_tokens
          SET status = 'completed', session_id = $2
@@ -1293,7 +1521,10 @@ pub async fn complete_qr_login_token(
     .bind(session_id)
     .execute(pool)
     .await
-    .context("Failed to complete QR login token")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "complete_qr_login_token",
+    ))?;
 
     Ok(result.rows_affected() == 1)
 }
@@ -1301,7 +1532,7 @@ pub async fn complete_qr_login_token(
 pub async fn consume_qr_login_session_id(
     pool: &PgPool,
     token: &str,
-) -> Result<Option<String>> {
+) -> Result<Option<String>, DbError> {
     // Postgres `RETURNING` yields the post-update value, which would be NULL
     // here. Capture the old session id in a CTE (locked FOR UPDATE so concurrent
     // pollers can't both consume it) and return that instead.
@@ -1320,13 +1551,19 @@ pub async fn consume_qr_login_session_id(
     .bind(token)
     .fetch_optional(pool)
     .await
-    .context("Failed to consume QR login session id")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "consume_qr_login_session_id",
+    ))?;
 
     Ok(row.map(|(sid,)| sid))
 }
 
-// QR Sign token functions
+// ---------------------------------------------------------------------------
+// QR sign token operations
+// ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_qr_sign_token(
     pool: &PgPool,
     token: &str,
@@ -1338,7 +1575,7 @@ pub async fn create_qr_sign_token(
     body_hash: &str,
     ip_address: Option<&str>,
     expires_at: time::OffsetDateTime,
-) -> Result<()> {
+) -> Result<(), DbError> {
     sqlx::query(
         "INSERT INTO qr_sign_tokens (token, status, challenge_id, challenge_json, method, path, body, body_hash, ip_address, expires_at)
          VALUES ($1, 'pending', $2, $3, $4, $5, $6, $7, $8, $9)"
@@ -1354,7 +1591,10 @@ pub async fn create_qr_sign_token(
     .bind(expires_at)
     .execute(pool)
     .await
-    .context("Failed to create QR sign token")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "create_qr_sign_token",
+    ))?;
 
     Ok(())
 }
@@ -1362,7 +1602,7 @@ pub async fn create_qr_sign_token(
 pub async fn get_qr_sign_token(
     pool: &PgPool,
     token: &str,
-) -> Result<Option<crate::types::DbQrSignToken>> {
+) -> Result<Option<crate::types::DbQrSignToken>, DbError> {
     let row: Option<crate::types::DbQrSignToken> = sqlx::query_as(
         "SELECT token, status, challenge_id, challenge_json, method, path, body, body_hash, fido2_response, ip_address, browser_ip_address, expires_at, created_at
          FROM qr_sign_tokens
@@ -1371,7 +1611,10 @@ pub async fn get_qr_sign_token(
     .bind(token)
     .fetch_optional(pool)
     .await
-    .context("Failed to get QR sign token")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "get_qr_sign_token",
+    ))?;
 
     Ok(row)
 }
@@ -1380,7 +1623,7 @@ pub async fn claim_qr_sign_token(
     pool: &PgPool,
     token: &str,
     browser_ip: Option<&str>,
-) -> Result<bool> {
+) -> Result<bool, DbError> {
     let result = sqlx::query(
         "UPDATE qr_sign_tokens
          SET status = 'authenticated', browser_ip_address = $2
@@ -1390,7 +1633,10 @@ pub async fn claim_qr_sign_token(
     .bind(browser_ip)
     .execute(pool)
     .await
-    .context("Failed to claim QR sign token")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "claim_qr_sign_token",
+    ))?;
 
     Ok(result.rows_affected() == 1)
 }
@@ -1399,7 +1645,7 @@ pub async fn complete_qr_sign_token(
     pool: &PgPool,
     token: &str,
     fido2_response: &str,
-) -> Result<bool> {
+) -> Result<bool, DbError> {
     let result = sqlx::query(
         "UPDATE qr_sign_tokens
          SET status = 'completed', fido2_response = $2
@@ -1409,15 +1655,22 @@ pub async fn complete_qr_sign_token(
     .bind(fido2_response)
     .execute(pool)
     .await
-    .context("Failed to complete QR sign token")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "complete_qr_sign_token",
+    ))?;
 
     Ok(result.rows_affected() == 1)
 }
 
+// ---------------------------------------------------------------------------
+// Auth session operations
+// ---------------------------------------------------------------------------
+
 pub async fn get_auth_session(
     pool: &PgPool,
     session_id: &str,
-) -> Result<Option<crate::types::DbSession>> {
+) -> Result<Option<crate::types::DbSession>, DbError> {
     let session = sqlx::query_as(
         "SELECT session_id, credential_id, expires_at, created_at, last_used_at
          FROM auth_sessions WHERE session_id = $1",
@@ -1425,36 +1678,56 @@ pub async fn get_auth_session(
     .bind(session_id)
     .fetch_optional(pool)
     .await
-    .context("Failed to get auth session")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "get_auth_session",
+    ))?;
 
     Ok(session)
 }
 
+// ---------------------------------------------------------------------------
+// E2E testing (feature-gated)
+// ---------------------------------------------------------------------------
+
 #[cfg(feature = "e2e-testing-unsafe")]
-pub async fn create_e2e_user(pool: &PgPool) -> Result<(Uuid, Vec<u8>)> {
+pub async fn create_e2e_user(pool: &PgPool) -> Result<(Uuid, Vec<u8>), DbError> {
     let username = generate_user_identifier();
     let user_handle: [u8; 16] = rand::thread_rng().gen();
     let credential_id: [u8; 16] = rand::thread_rng().gen();
     let credential_id_vec = credential_id.to_vec();
 
-    // Mark e2e users as non-placeholder so the username-claim gate
-    // (`username_claim_gate_middleware`) doesn't 403 every e2e session on
-    // protected/`/api` routes. Real registrations already set this false;
-    // only the placeholder gate test flips a user back to placeholder on
-    // purpose.
+    // Seed the e2e user in the SAME placeholder state as a real signup:
+    // `username_is_placeholder = true` and the auto-generated `u_<base64>`
+    // identifier as its username. This is what lets the WebAuthn login e2e
+    // exercise the username-claim flow end to end — the account starts gated
+    // (`username_claim_gate_middleware` 403s protected routes with
+    // `username_required`), and the test then claims a real username via
+    // `POST /user/username` to lift the gate. A non-placeholder seed would
+    // make the gate never fire (the gate test sees 200, not 403) and make the
+    // one-time claim return 409 already-claimed instead of 200.
     let user_id: Uuid = sqlx::query_scalar(
         "INSERT INTO users (fido2_user_handle, username, email, beta_code_id, username_is_placeholder)
-         VALUES ($1, $2, NULL, NULL, false)
+         VALUES ($1, $2, NULL, NULL, true)
          RETURNING id",
     )
     .bind(&user_handle[..])
     .bind(&username)
     .fetch_one(pool)
     .await
-    .context("Failed to create e2e user")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "create_e2e_user",
+    ))?;
 
-    // Insert a dummy credential row so session validation joins work.
-    const E2E_CREDENTIAL_PUBLIC_KEY: &[u8] = br#"{"cred":{"cred_id":"7ySFchbdsv8y8B5oR-1cxOlY5Trjo1auESH25Co0nTI","cred":{"type_":"ES256","key":{"EC_EC2":{"curve":"SECP256R1","x":"SveqzIeBhZDl0phwAvHY0rAIEdeTphQu4ReAuCzq8bs","y":"6mm9arrmm2MqgpwkdTvN0-X-cduiZd4zAQdvDuEDO7M"}}},"counter":0,"transports":null,"user_verified":false,"backup_eligible":false,"backup_state":false,"registration_policy":"preferred","extensions":{"cred_protect":"Ignored","hmac_create_secret":"NotRequested","appid":"NotRequested","cred_props":"Ignored"},"attestation":{"data":"Self_","metadata":"None"},"attestation_format":"packed"}}"#;
+    // Insert a dummy credential row so session validation joins work. Store a
+    // structurally VALID `SecurityKey` JSON (captured from a genuine dev
+    // registration; the key material is unrelated and non-secret) rather than
+    // a placeholder string: the username-scoped login path
+    // (`scoped_or_decoy_challenge`) deserializes each stored public_key into a
+    // real `SecurityKey` to build the challenge, so an invalid blob would make
+    // a known-username begin 500 instead of returning that user's credential.
+    const E2E_CREDENTIAL_PUBLIC_KEY: &[u8] = br#"{"cred":{"cred_id":"7ySFchbdsv8y8B5oR-1cxOlY5Trjo1auESH25Co0nTI","cred":{"type_":"ES256","key":{"EC_EC2":{"curve":"SECP256R1","x":"VTSRkyIs9sASIgLB2vWSu6xFyAvGf9lQ6GSHgiAmJlQ","y":"UFAsQBox-mvdfu4qaZYEwPKA0bmHWELgEfIUol8H0eQ"}}},"counter":0,"transports":null,"user_verified":true,"backup_eligible":true,"backup_state":true,"registration_policy":"preferred","extensions":{"cred_protect":"Ignored","hmac_create_secret":"NotRequested","appid":"NotRequested","cred_props":"Ignored"},"attestation":{"data":"None","metadata":"None"},"attestation_format":"none"}}"#;
     sqlx::query(
         "INSERT INTO fido2_credentials (
             credential_id, user_id, public_key, name, attestation_type,
@@ -1466,10 +1739,17 @@ pub async fn create_e2e_user(pool: &PgPool) -> Result<(Uuid, Vec<u8>)> {
     .bind(E2E_CREDENTIAL_PUBLIC_KEY)
     .execute(pool)
     .await
-    .context("Failed to create e2e credential")?;
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "create_e2e_user: credential",
+    ))?;
 
     Ok((user_id, credential_id_vec))
 }
+
+// ---------------------------------------------------------------------------
+// PIN / reset token operations
+// ---------------------------------------------------------------------------
 
 /// Check if any of the user's organizations require PIN for authentication.
 /// Returns true if ANY org the user belongs to has require_pin = true.
@@ -1492,13 +1772,52 @@ pub async fn user_requires_pin(pool: &PgPool, user_id: Uuid) -> Result<bool, sql
     Ok(requires_pin.unwrap_or(false))
 }
 
+/// Atomically consume a reset token by marking it used, but only if it hasn't
+/// expired. Returns the number of rows affected (0 means expired or already used).
+pub async fn consume_reset_token(
+    executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    token_hash: &str,
+) -> Result<u64, DbError> {
+    let result = sqlx::query(
+        "UPDATE webauthn_reset_tokens SET used_at = NOW() WHERE token_hash = $1 AND used_at IS NULL AND expires_at > NOW()",
+    )
+    .bind(token_hash)
+    .execute(executor)
+    .await
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "consume_reset_token",
+    ))?;
+
+    Ok(result.rows_affected())
+}
+
+/// Look up a valid (unexpired, unused) reset token by its raw bytes.
+/// Hashes the token with SHA-256 before querying, matching the stored `token_hash` column.
+/// Returns the associated user_id if the token is still redeemable.
+pub async fn get_valid_reset_token(pool: &PgPool, token: &[u8]) -> Result<Option<Uuid>, DbError> {
+    let token_hash = hex::encode(Sha256::digest(token));
+    let row: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT user_id FROM webauthn_reset_tokens WHERE token_hash = $1 AND used_at IS NULL AND expires_at > NOW()",
+    )
+    .bind(&token_hash)
+    .fetch_optional(pool)
+    .await
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "get_valid_reset_token",
+    ))?;
+
+    Ok(row.map(|(uid,)| uid))
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
-    use super::{
-        generate_ssh_fingerprint, hash_invitation_token, is_username_taken_error,
-        USERNAME_TAKEN_ERROR,
-    };
-    use anyhow::Context as _;
+    use super::*;
 
     // Golden vector cross-checked with `ssh-keygen -lf`:
     //   ssh-keygen -t ed25519 ...  ->  SHA256:vO7cKxkbEOoI4Qix7nsJMasdWsJHDFVfgXsKQrA0DhM
@@ -1508,24 +1827,6 @@ mod tests {
         AAAAC3NzaC1lZDI1NTE5AAAAIMBnPZP2DQ1v1MC9AQKLsNo0M649c6MVmz9O+P9UiBrT \
         test@example.com";
     const EXPECTED_FINGERPRINT: &str = "vO7cKxkbEOoI4Qix7nsJMasdWsJHDFVfgXsKQrA0DhM";
-
-    #[test]
-    fn username_taken_error_detected_through_context_wrapping() {
-        // Bare sentinel (as returned by claim_username).
-        let bare = anyhow::anyhow!(USERNAME_TAKEN_ERROR);
-        assert!(is_username_taken_error(&bare));
-
-        // Sentinel wrapped in .context(), as create_user does. anyhow's Display
-        // only shows the outermost context, so detection must walk the chain.
-        let wrapped = Result::<(), _>::Err(anyhow::anyhow!(USERNAME_TAKEN_ERROR))
-            .context("Failed to insert alpha user")
-            .unwrap_err();
-        assert!(is_username_taken_error(&wrapped));
-
-        // An unrelated error must not be misclassified.
-        let other = anyhow::anyhow!("some other database failure");
-        assert!(!is_username_taken_error(&other));
-    }
 
     #[test]
     fn fingerprint_matches_openssh_for_known_key() {
@@ -1545,7 +1846,7 @@ mod tests {
         // Bare blob (no type prefix) hashes identically too.
         assert_eq!(
             generate_ssh_fingerprint(blob).unwrap(),
-            EXPECTED_FINGERPRINT,
+            EXPECTED_FINGERPRINT
         );
     }
 

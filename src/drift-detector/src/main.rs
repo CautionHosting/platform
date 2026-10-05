@@ -32,21 +32,26 @@
 //!   when both are unset, the default credential chain is used
 //! - `RUST_LOG` (optional): tracing filter, defaults to `info`
 
+// The instrumented async entry points wrap sqlx's compile-time query
+// type-checking in deeply nested generated futures; the default recursion limit
+// is too low to compute those layouts.
+#![recursion_limit = "256"]
+
 use drift_detector::aws::{AwsCredentials, AwsError, Ec2Inspector, Ec2Instance};
 use drift_detector::db::{
-    ComputeResource, DbError, ProviderAccount, get_active_organization_ids, get_compute_resources,
+    ComputeResource, ProviderAccount, get_active_organization_ids, get_compute_resources,
     get_org_users, get_provider_accounts,
 };
 use drift_detector::drift::{
-    DriftReport, DriftSeverity, OrganizationDriftReport, ParseDriftSeverityError, ScannedInstance,
+    DriftReport, DriftSeverity, OrganizationDriftReport, ScannedInstance,
     detect_orphaned_resources, detect_resource_drift, detect_unattributed_orphaned_resources,
     format_drift_report, format_org_users,
 };
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use std::collections::HashMap;
 use std::env;
-use thiserror::Error;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;
@@ -72,17 +77,25 @@ async fn main() {
 /// Fatal failures (environment, database connection, organization resolution)
 /// are returned as errors; per-organization failures are logged and counted so
 /// the remaining organizations can still be scanned.
+#[tracing::instrument(skip_all, err)]
 async fn run() -> Result<(), RunError> {
-    let (database_url, aws_access_key_id, aws_secret_access_key) = load_environment()?;
-    let pool = connect_database(&database_url).await?;
+    use RunErrorCtx as Ctx;
+
+    let (database_url, aws_access_key_id, aws_secret_access_key) =
+        load_environment().with_context(Ctx::environment())?;
+    let pool = connect_database(&database_url)
+        .await
+        .with_context(Ctx::database())?;
 
     let org_id_arg: Option<Uuid> = env::args().nth(1).and_then(|s| s.parse().ok());
     let min_severity: DriftSeverity = match env::args().nth(2) {
-        Some(raw) => raw.parse()?,
+        Some(raw) => raw.parse().with_context(Ctx::invalid_severity())?,
         None => DriftSeverity::Info,
     };
 
-    let org_ids = resolve_org_ids(&pool, org_id_arg).await?;
+    let org_ids = resolve_org_ids(&pool, org_id_arg)
+        .await
+        .with_context(Ctx::resolve_orgs())?;
 
     let mut any_critical = false;
     let mut failed_scans = 0;
@@ -172,81 +185,121 @@ async fn run() -> Result<(), RunError> {
 }
 
 /// Fatal errors that abort the whole scan.
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error, CtxError)]
 enum RunError {
     /// Failed to load environment configuration.
-    #[error("failed to load environment configuration")]
-    Environment(#[from] EnvironmentError),
+    #[error("failed to load environment configuration [{location}]")]
+    Environment {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
     /// Failed to connect to the database.
-    #[error("failed to connect to the database")]
-    Database(#[from] DatabaseConnectError),
+    #[error("failed to connect to the database [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
     /// Failed to resolve the organizations to scan.
-    #[error("failed to resolve the organizations to scan")]
-    ResolveOrgs(#[from] ResolveOrgsError),
+    #[error("failed to resolve the organizations to scan [{location}]")]
+    ResolveOrgs {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
     /// The minimum severity argument could not be parsed.
-    #[error("failed to parse minimum drift severity")]
-    InvalidSeverity(#[from] ParseDriftSeverityError),
+    #[error("failed to parse minimum drift severity [{location}]")]
+    InvalidSeverity {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
 /// Errors loading the CLI environment.
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error, CtxError)]
 enum EnvironmentError {
     /// `DATABASE_URL` is not set or not valid unicode.
-    #[error("DATABASE_URL environment variable must be set")]
-    MissingDatabaseUrl(#[source] env::VarError),
+    #[error("DATABASE_URL environment variable must be set [{location}]")]
+    MissingDatabaseUrl {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
 /// Errors connecting to `PostgreSQL`.
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error, CtxError)]
 enum DatabaseConnectError {
     /// The connection attempt failed.
-    #[error("failed to connect to PostgreSQL database")]
-    Connect(#[source] sqlx::Error),
+    #[error("failed to connect to PostgreSQL database [{location}]")]
+    Connect {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
 /// Errors resolving which organizations to scan.
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error, CtxError)]
 enum ResolveOrgsError {
     /// The database contains no active organizations.
-    #[error("no active organizations found in database")]
-    NoActiveOrganizations,
+    #[error("no active organizations found in database [{location}]")]
+    NoActiveOrganizations { location: Location },
 
     /// Listing active organizations failed.
-    #[error("failed to list active organizations")]
-    List(#[from] DbError),
+    #[error("failed to list active organizations [{location}]")]
+    List {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
 /// Errors that prevent scanning a single organization (the scan is skipped).
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error, CtxError)]
 enum OrgScanError {
     /// Failed to load the organization's provider accounts.
-    #[error("failed to load provider accounts for organization {org_id}")]
+    #[error("failed to load provider accounts for organization {org_id} [{location}]")]
     LoadProviderAccounts {
         /// The organization being scanned.
         org_id: Uuid,
+        #[location]
+        location: Location,
         /// The underlying database error.
         #[source]
-        source: DbError,
+        source: BoxError,
     },
 
     /// Failed to load the organization's compute resources.
-    #[error("failed to load compute resources for organization {org_id}")]
+    #[error("failed to load compute resources for organization {org_id} [{location}]")]
     LoadComputeResources {
         /// The organization being scanned.
         org_id: Uuid,
+        #[location]
+        location: Location,
         /// The underlying database error.
         #[source]
-        source: DbError,
+        source: BoxError,
     },
 
     /// None of the organization's provider accounts could be queried.
-    #[error("no provider account could be queried for organization {org_id}")]
+    #[error("no provider account could be queried for organization {org_id} [{location}]")]
     NoAccountsQueried {
         /// The organization being scanned.
         org_id: Uuid,
+        location: Location,
     },
 }
 
@@ -261,8 +314,11 @@ fn init_tracing() {
 }
 
 /// Load configuration from environment variables.
+#[tracing::instrument(skip_all, err)]
 fn load_environment() -> Result<(String, String, String), EnvironmentError> {
-    let database_url = env::var("DATABASE_URL").map_err(EnvironmentError::MissingDatabaseUrl)?;
+    use EnvironmentErrorCtx as Ctx;
+
+    let database_url = env::var("DATABASE_URL").with_context(Ctx::missing_database_url())?;
 
     let aws_access_key_id = env::var("AWS_ACCESS_KEY_ID").unwrap_or_default();
     let aws_secret_access_key = env::var("AWS_SECRET_ACCESS_KEY").unwrap_or_default();
@@ -271,31 +327,41 @@ fn load_environment() -> Result<(String, String, String), EnvironmentError> {
 }
 
 /// Connect to `PostgreSQL`.
+#[tracing::instrument(skip_all, err)]
 async fn connect_database(database_url: &str) -> Result<PgPool, DatabaseConnectError> {
+    use DatabaseConnectErrorCtx as Ctx;
+
     tracing::info!("Connecting to database...");
     PgPoolOptions::new()
         .max_connections(5)
         .connect(database_url)
         .await
-        .map_err(DatabaseConnectError::Connect)
+        .with_context(Ctx::connect())
 }
 
 /// Resolve the organizations to scan, either from the CLI argument or by querying
 /// all active organizations.
+#[tracing::instrument(skip_all, err)]
 async fn resolve_org_ids(
     pool: &PgPool,
     org_id_arg: Option<Uuid>,
 ) -> Result<Vec<Uuid>, ResolveOrgsError> {
+    use ResolveOrgsErrorCtx as Ctx;
+
     if let Some(id) = org_id_arg {
         tracing::info!(org_id = %id, "Scanning single organization");
         return Ok(vec![id]);
     }
 
     tracing::info!("No org_id provided, scanning all active organizations");
-    let org_ids = get_active_organization_ids(pool).await?;
+    let org_ids = get_active_organization_ids(pool)
+        .await
+        .with_context(Ctx::list())?;
 
     if org_ids.is_empty() {
-        return Err(ResolveOrgsError::NoActiveOrganizations);
+        return Err(ResolveOrgsError::NoActiveOrganizations {
+            location: std::panic::Location::caller(),
+        });
     }
 
     tracing::info!(
@@ -324,6 +390,7 @@ struct OrgScan {
 /// be completed (for example when none of the organization's accounts could be
 /// queried). AWS is scanned even when the database tracks no resources for the
 /// organization, so orphaned instances are still reported.
+#[tracing::instrument(skip_all, err)]
 async fn detect_organization_drift(
     pool: &PgPool,
     org_id: Uuid,
@@ -332,11 +399,13 @@ async fn detect_organization_drift(
     aws_access_key_id: &str,
     aws_secret_access_key: &str,
 ) -> Result<Option<OrgScan>, OrgScanError> {
+    use OrgScanErrorCtx as Ctx;
+
     tracing::info!(%org_id, "Loading expected state");
 
     let provider_accounts = get_provider_accounts(pool, org_id)
         .await
-        .map_err(|source| OrgScanError::LoadProviderAccounts { org_id, source })?;
+        .with_context(Ctx::load_provider_accounts(org_id))?;
 
     let users = match get_org_users(pool, org_id).await {
         Ok(users) => users,
@@ -358,7 +427,7 @@ async fn detect_organization_drift(
 
     let expected_resources = get_compute_resources(pool, org_id)
         .await
-        .map_err(|source| OrgScanError::LoadComputeResources { org_id, source })?;
+        .with_context(Ctx::load_compute_resources(org_id))?;
 
     if expected_resources.is_empty() {
         tracing::info!(
@@ -382,7 +451,10 @@ async fn detect_organization_drift(
     .await;
 
     if result.accounts_failed == provider_accounts.len() {
-        return Err(OrgScanError::NoAccountsQueried { org_id });
+        return Err(OrgScanError::NoAccountsQueried {
+            org_id,
+            location: std::panic::Location::caller(),
+        });
     }
 
     Ok(Some(OrgScan {
@@ -609,27 +681,37 @@ mod tests {
 
     #[test]
     fn test_environment_error_display() {
-        let err = EnvironmentError::MissingDatabaseUrl(env::VarError::NotPresent);
-        assert_eq!(
-            err.to_string(),
-            "DATABASE_URL environment variable must be set"
+        let err = EnvironmentError::MissingDatabaseUrl {
+            location: std::panic::Location::caller(),
+            source: env::VarError::NotPresent.into(),
+        };
+        assert!(
+            err.to_string()
+                .starts_with("DATABASE_URL environment variable must be set")
         );
     }
 
     #[test]
     fn test_resolve_orgs_error_display() {
-        let err = ResolveOrgsError::NoActiveOrganizations;
-        assert_eq!(err.to_string(), "no active organizations found in database");
+        let err = ResolveOrgsError::NoActiveOrganizations {
+            location: std::panic::Location::caller(),
+        };
+        assert!(
+            err.to_string()
+                .starts_with("no active organizations found in database")
+        );
     }
 
     #[test]
     fn test_org_scan_error_display_no_accounts_queried() {
         let err = OrgScanError::NoAccountsQueried {
             org_id: Uuid::nil(),
+            location: std::panic::Location::caller(),
         };
-        assert_eq!(
-            err.to_string(),
-            "no provider account could be queried for organization 00000000-0000-0000-0000-000000000000"
+        assert!(
+            err.to_string().starts_with(
+                "no provider account could be queried for organization 00000000-0000-0000-0000-000000000000"
+            )
         );
     }
 }

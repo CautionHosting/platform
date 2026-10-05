@@ -202,6 +202,15 @@ fi
 log "  User ID: $USER_ID"
 log "  Session: $SESSION_ID"
 
+# e2e-login seeds a placeholder account; every protected route below is gated by
+# username_claim_gate_middleware until a real username is claimed. Claim one now.
+CLAIMED_USERNAME="billing-$(date +%s)$RANDOM"
+CLAIM_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GATEWAY_URL/user/username" \
+    -H "X-Session-ID: $SESSION_ID" -H 'Content-Type: application/json' \
+    -d "{\"username\":\"$CLAIMED_USERNAME\"}")
+[ "$CLAIM_CODE" = "200" ] || step_fail "Failed to claim username (HTTP $CLAIM_CODE) — protected routes stay gated"
+log "  Claimed username: $CLAIMED_USERNAME"
+
 # Get the user's organization (may not exist or endpoint may differ)
 ORG_ID=""
 ORG_RESPONSE=$(curl -s "$GATEWAY_URL/organizations" \
@@ -229,8 +238,8 @@ if [ -z "$ORG_ID" ] || [ "$ORG_ID" = "null" ]; then
     " 2>/dev/null | head -1 | tr -d ' \n' || true)
     if [ -n "$ORG_ID" ] && [ "$ORG_ID" != "null" ]; then
         docker exec "${TEST_DB_HOST:-postgres-test}" psql -U postgres -d caution_test -c "
-        INSERT INTO organization_members (organization_id, role)
-        VALUES ('$ORG_ID', 'owner');
+        INSERT INTO organization_members (organization_id, user_id, role)
+        VALUES ('$ORG_ID', '$USER_ID', 'owner');
         " >/dev/null 2>&1 || true
         log "  Created org $ORG_ID and added user as owner"
     else

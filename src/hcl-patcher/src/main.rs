@@ -3,14 +3,18 @@ mod patcher;
 mod xpath;
 
 use clap::Parser;
+use dterror::ResultExt;
 use std::fs;
 use std::process;
 
-use crate::error::PatcherError;
+use crate::error::{PatcherError, PatcherErrorCtx};
 use crate::patcher::patch_hcl_value;
 
 #[derive(Parser)]
-#[command(name = "hcl-patcher", about = "Patch values in HCL files using XPath-like selectors")]
+#[command(
+    name = "hcl-patcher",
+    about = "Patch values in HCL files using XPath-like selectors"
+)]
 struct Args {
     /// Path to the HCL file
     file: String,
@@ -30,13 +34,16 @@ struct Args {
     output: Option<String>,
 }
 
+#[tracing::instrument(skip_all, err)]
 fn run(args: Args) -> Result<(), PatcherError> {
-    let hcl_input = fs::read_to_string(&args.file)?;
+    use PatcherErrorCtx as Ctx;
+
+    let hcl_input = fs::read_to_string(&args.file).with_context(Ctx::io())?;
     let patched = patch_hcl_value(&hcl_input, &args.selector, &args.value, &args.type_)?;
 
     match &args.output {
-        Some(path) => fs::write(path, &patched)?,
-        None => fs::write(&args.file, &patched)?,
+        Some(path) => fs::write(path, &patched).with_context(Ctx::io())?,
+        None => fs::write(&args.file, &patched).with_context(Ctx::io())?,
     }
 
     Ok(())
@@ -46,7 +53,7 @@ fn main() {
     let args = Args::parse();
 
     if let Err(e) = run(args) {
-        eprintln!("error: {e}");
+        eprintln!("error: {}", e.client_message());
         process::exit(e.exit_code());
     }
 }

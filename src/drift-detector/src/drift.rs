@@ -118,9 +118,19 @@ impl std::fmt::Display for DriftSeverity {
 }
 
 /// Error returned when a drift severity string cannot be parsed.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("invalid drift severity `{0}` (expected `info`, `warning`, or `critical`)")]
-pub struct ParseDriftSeverityError(String);
+///
+/// Source-less leaf error: there is no underlying error to carry, so this stays
+/// plain `thiserror` (no `dterror::CtxError`) and carries only a location field.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "invalid drift severity `{value}` (expected `info`, `warning`, or `critical`) [{location}]"
+)]
+pub struct ParseDriftSeverityError {
+    /// The value that could not be parsed as a severity.
+    pub value: String,
+    /// The source location where the parse failed.
+    pub location: dterror::Location,
+}
 
 impl std::str::FromStr for DriftSeverity {
     type Err = ParseDriftSeverityError;
@@ -130,7 +140,10 @@ impl std::str::FromStr for DriftSeverity {
             "info" | "informational" => Ok(Self::Info),
             "warning" | "warn" => Ok(Self::Warning),
             "critical" => Ok(Self::Critical),
-            other => Err(ParseDriftSeverityError(other.to_string())),
+            other => Err(ParseDriftSeverityError {
+                value: other.to_string(),
+                location: std::panic::Location::caller(),
+            }),
         }
     }
 }
@@ -1608,16 +1621,25 @@ mod tests {
 
     #[test]
     fn test_drift_severity_from_str() {
-        assert_eq!("info".parse::<DriftSeverity>(), Ok(DriftSeverity::Info));
-        assert_eq!("INFO".parse::<DriftSeverity>(), Ok(DriftSeverity::Info));
         assert_eq!(
-            "warning".parse::<DriftSeverity>(),
-            Ok(DriftSeverity::Warning)
+            "info".parse::<DriftSeverity>().ok(),
+            Some(DriftSeverity::Info)
         );
-        assert_eq!("warn".parse::<DriftSeverity>(), Ok(DriftSeverity::Warning));
         assert_eq!(
-            "critical".parse::<DriftSeverity>(),
-            Ok(DriftSeverity::Critical)
+            "INFO".parse::<DriftSeverity>().ok(),
+            Some(DriftSeverity::Info)
+        );
+        assert_eq!(
+            "warning".parse::<DriftSeverity>().ok(),
+            Some(DriftSeverity::Warning)
+        );
+        assert_eq!(
+            "warn".parse::<DriftSeverity>().ok(),
+            Some(DriftSeverity::Warning)
+        );
+        assert_eq!(
+            "critical".parse::<DriftSeverity>().ok(),
+            Some(DriftSeverity::Critical)
         );
         assert!("bogus".parse::<DriftSeverity>().is_err());
     }

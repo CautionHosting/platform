@@ -45,7 +45,7 @@ enum PromptForPinError {
 
 fn prompt_for_pin() -> Result<Option<String>, PromptForPinError> {
     use PromptForPinErrorCtx as Ctx;
-    let pin = prompt::password("Enter your security key PIN (or press Enter if no PIN is set): ")
+    let pin = prompt::password("Enter your WebAuthn PIN (or press Enter if no PIN is set): ")
         .with_context(Ctx::read_pin())?;
 
     if pin.trim().is_empty() {

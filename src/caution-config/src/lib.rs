@@ -1,3 +1,4 @@
+use dterror::ResultExt;
 use hcl::expr::Expression;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -150,7 +151,7 @@ impl E2eEncryption {
 
 impl E2eEncryption {
     pub fn effective_mode(&self) -> Option<E2eMode> {
-        self.mode.or_else(|| match self.enabled {
+        self.mode.or(match self.enabled {
             Some(true) => Some(E2eMode::Steve),
             _ => None,
         })
@@ -250,6 +251,7 @@ impl UnitConfig {
     /// `env::vault(...)` (and any other function-call) entries are skipped here:
     /// they are resolved inside the enclave by locksmith-oneshot, not exported
     /// from the build host.
+    #[tracing::instrument(skip_all, err)]
     pub fn run_command_string(&self) -> Result<String, FromStrError> {
         let mut out = String::new();
 
@@ -257,16 +259,18 @@ impl UnitConfig {
             for (key, expr) in env {
                 let value = match expr {
                     Expression::String(s) => s,
-                    // Function-call values (only env::vault(...) survives
-                    // validation) are injected at runtime by locksmith, not
-                    // exported here.
                     _ => continue,
                 };
                 if !is_valid_env_key(key) {
-                    return Err(FromStrError::InvalidEnvKey(key.clone()));
+                    return Err(FromStrError::InvalidEnvKey {
+                        key: key.clone(),
+                        location: std::panic::Location::caller(),
+                    });
                 }
                 let quoted =
-                    shlex::try_quote(value).map_err(|_| FromStrError::UnquotableCommand)?;
+                    shlex::try_quote(value).map_err(|_| FromStrError::UnquotableCommand {
+                        location: std::panic::Location::caller(),
+                    })?;
                 out.push_str("export ");
                 out.push_str(key);
                 out.push('=');
@@ -291,16 +295,22 @@ impl UnitConfig {
             if !is_valid_env_key(name) {
                 break;
             }
-            let quoted = shlex::try_quote(value).map_err(|_| FromStrError::UnquotableCommand)?;
+            let quoted = shlex::try_quote(value).map_err(|_| FromStrError::UnquotableCommand {
+                location: std::panic::Location::caller(),
+            })?;
             parts.push(format!("{name}={quoted}"));
             argv.next();
         }
 
         let rest: Vec<&str> = argv.collect();
         if rest.is_empty() {
-            return Err(FromStrError::NoCommand);
+            return Err(FromStrError::NoCommand {
+                location: std::panic::Location::caller(),
+            });
         }
-        let joined = shlex::try_join(rest).map_err(|_| FromStrError::UnquotableCommand)?;
+        let joined = shlex::try_join(rest).map_err(|_| FromStrError::UnquotableCommand {
+            location: std::panic::Location::caller(),
+        })?;
         parts.push(joined);
         out.push_str(&parts.join(" "));
 
@@ -345,77 +355,237 @@ pub struct ConfigurationFile {
     pub enclave: Option<BTreeMap<String, EnclaveConfig>>,
 }
 
+/// Leaf error for domain validation.
 #[derive(Debug, thiserror::Error)]
-pub enum FromProcfileError {
-    #[error(
-        "Port {0} is reserved for internal enclave services. Ports 49500-49600 are reserved; choose a different application port."
-    )]
-    ReservedPort(u16),
+pub enum DomainValidationError {
+    #[error("domain must be between 1 and 253 characters")]
+    InvalidLength { location: dterror::Location },
 
-    #[error("http_port {0} must also be listed in ports")]
-    HttpPortNotInPorts(u16),
+    #[error("domain must be a fully-qualified hostname")]
+    MissingDot { location: dterror::Location },
 
-    #[error("managed_on_prem requires 'platform' to be specified")]
-    ManagedOnPremMissingPlatform,
+    #[error("domain must not start or end with '.'")]
+    LeadingOrTrailingDot { location: dterror::Location },
 
-    #[error("Unsupported platform '{0}'. Currently only 'aws' is supported.")]
-    ManagedOnPremUnsupportedPlatform(String),
+    #[error("domain must not contain empty labels")]
+    EmptyLabel { location: dterror::Location },
 
-    #[error("managed_on_prem with platform 'aws' requires 'aws_region'")]
-    ManagedOnPremMissingRegion,
+    #[error("domain labels must be 63 characters or fewer")]
+    LabelTooLong { location: dterror::Location },
 
-    #[error("invalid domain: {0}")]
-    InvalidDomain(String),
+    #[error("domain labels must not start or end with '-'")]
+    LabelHyphen { location: dterror::Location },
 
-    #[error("invalid provider config: {0}")]
-    InvalidProvider(String),
+    #[error("domain contains invalid characters")]
+    InvalidChars { location: dterror::Location },
 }
 
+/// Leaf error for SSH key validation.
 #[derive(Debug, thiserror::Error)]
+pub enum SshKeyValidationError {
+    #[error("ssh key exceeds the maximum length of {max} characters")]
+    TooLong {
+        max: usize,
+        location: dterror::Location,
+    },
+
+    #[error("ssh key is missing a key type field")]
+    MissingType { location: dterror::Location },
+
+    #[error("ssh key is missing a base64 body field")]
+    MissingBody { location: dterror::Location },
+
+    #[error("unrecognized ssh key type '{key_type}'")]
+    UnrecognizedType {
+        key_type: String,
+        location: dterror::Location,
+    },
+
+    #[error("ssh key type contains characters that are not safe to embed")]
+    UnsafeTypeChars { location: dterror::Location },
+
+    #[error("ssh key body contains characters that are not safe to embed")]
+    UnsafeBodyChars { location: dterror::Location },
+}
+
+/// Leaf error for AWS resource id validation.
+#[derive(Debug, thiserror::Error)]
+pub enum AwsIdValidationError {
+    #[error("expected an AWS {prefix}-… id, got {value:?}")]
+    WrongPrefix {
+        prefix: String,
+        value: String,
+        location: dterror::Location,
+    },
+
+    #[error("malformed AWS {prefix} id: {value:?}")]
+    MalformedId {
+        prefix: String,
+        value: String,
+        location: dterror::Location,
+    },
+}
+
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+pub enum FromProcfileError {
+    #[error(
+        "Port {port} is reserved for internal enclave services. Ports 49500-49600 are reserved; choose a different application port. [{location}]"
+    )]
+    ReservedPort {
+        port: u16,
+        location: dterror::Location,
+    },
+
+    #[error("http_port {port} must also be listed in ports [{location}]")]
+    HttpPortNotInPorts {
+        port: u16,
+        location: dterror::Location,
+    },
+
+    #[error("managed_on_prem requires 'platform' to be specified [{location}]")]
+    ManagedOnPremMissingPlatform { location: dterror::Location },
+
+    #[error("Unsupported platform '{platform}'. Currently only 'aws' is supported. [{location}]")]
+    ManagedOnPremUnsupportedPlatform {
+        platform: String,
+        location: dterror::Location,
+    },
+
+    #[error("managed_on_prem with platform 'aws' requires 'aws_region' [{location}]")]
+    ManagedOnPremMissingRegion { location: dterror::Location },
+
+    #[error("invalid domain [{location}]")]
+    InvalidDomain {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("invalid ssh key [{location}]")]
+    InvalidSshKey {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("invalid provider config [{location}]")]
+    InvalidProvider {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+}
+
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
 pub enum FromStrError {
-    #[error("Ports 49500-49600 are reserved; choose a different application port.")]
-    ReservedPort,
+    #[error("Ports 49500-49600 are reserved; choose a different application port. [{location}]")]
+    ReservedPort {
+        #[location]
+        location: dterror::Location,
+    },
 
-    #[error("Multiple enclaves defined; only one enclave is supported")]
-    MultipleEnclaves,
+    #[error("Multiple enclaves defined; only one enclave is supported [{location}]")]
+    MultipleEnclaves {
+        #[location]
+        location: dterror::Location,
+    },
 
-    #[error("Multiple units defined; only one unit is supported")]
-    MultipleUnits,
+    #[error("Multiple units defined; only one unit is supported [{location}]")]
+    MultipleUnits {
+        #[location]
+        location: dterror::Location,
+    },
 
-    #[error("http_port {0} must also be present in ingress rules")]
-    HttpPortNotInPorts(u16),
+    #[error("http_port {port} must also be present in ingress rules [{location}]")]
+    HttpPortNotInPorts {
+        port: u16,
+        #[location]
+        location: dterror::Location,
+    },
 
     #[error(
-        "key_exchange is only supported when e2e_encryption resolves to mode = \"steve\""
+        "key_exchange is only supported when e2e_encryption resolves to mode = \"steve\" [{location}]"
     )]
-    KeyExchangeRequiresSteve,
+    KeyExchangeRequiresSteve {
+        #[location]
+        location: dterror::Location,
+    },
 
     #[error(
-        "Invalid env expression for key '{0}'; only string literals and env::vault(...) are allowed"
+        "Invalid env expression for key '{key}'; only string literals and env::vault(...) are allowed [{location}]"
     )]
-    InvalidEnvExpression(String),
+    InvalidEnvExpression {
+        key: String,
+        #[location]
+        location: dterror::Location,
+    },
 
-    #[error("Invalid env key '{0}'; keys must match [A-Za-z_][A-Za-z0-9_]* to be safely exported")]
-    InvalidEnvKey(String),
+    #[error(
+        "Invalid env key '{key}'; keys must match [A-Za-z_][A-Za-z0-9_]* to be safely exported [{location}]"
+    )]
+    InvalidEnvKey {
+        key: String,
+        #[location]
+        location: dterror::Location,
+    },
 
-    #[error("Command contains characters that cannot be shell-quoted (e.g. NUL byte)")]
-    UnquotableCommand,
+    #[error("Command contains characters that cannot be shell-quoted (e.g. NUL byte) [{location}]")]
+    UnquotableCommand {
+        #[location]
+        location: dterror::Location,
+    },
 
-    #[error("Unit has no executable command (only inline env assignments found)")]
-    NoCommand,
+    #[error("Unit has no executable command (only inline env assignments found) [{location}]")]
+    NoCommand {
+        #[location]
+        location: dterror::Location,
+    },
 
-    #[error("Failed to parse HCL")]
-    HclParse(#[from] hcl::Error),
+    #[error("Failed to parse HCL [{location}]")]
+    HclParse {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
 
-    #[error("invalid domain: {0}")]
-    InvalidDomain(String),
+    #[error("invalid domain [{location}]")]
+    InvalidDomain {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
 
-    #[error("invalid provider config: {0}")]
-    InvalidProvider(String),
+    #[error("invalid ssh key [{location}]")]
+    InvalidSshKey {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
+    #[error("invalid provider config [{location}]")]
+    InvalidProvider {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
 }
 
 const RESERVED_INTERNAL_PORT_START: u16 = 49_500;
 const RESERVED_INTERNAL_PORT_END: u16 = 49_600;
+
+/// Upper bound on a single authorized-keys line. Well below the EC2 user-data
+/// budget that the rendered bootstrap script must fit within, and far above any
+/// real key, so it only bounds pathological input before we parse it.
+const MAX_SSH_KEY_LEN: usize = 8192;
 
 fn is_reserved(port: u16) -> bool {
     (RESERVED_INTERNAL_PORT_START..=RESERVED_INTERNAL_PORT_END).contains(&port)
@@ -426,34 +596,124 @@ fn is_reserved(port: u16) -> bool {
 /// The value flows into generated infrastructure (Terraform variables, the
 /// instance bootstrap script, and the Caddy config), so it must be a plain DNS
 /// name with no characters that could carry meaning in those contexts.
-fn validate_domain(domain: Option<&str>) -> Result<(), String> {
+#[tracing::instrument(skip_all, err)]
+fn validate_domain(domain: Option<&str>) -> Result<(), DomainValidationError> {
     let Some(domain) = domain else {
         return Ok(());
     };
     if domain.is_empty() || domain.len() > 253 {
-        return Err("domain must be between 1 and 253 characters".to_string());
+        return Err(DomainValidationError::InvalidLength {
+            location: std::panic::Location::caller(),
+        });
     }
     if !domain.contains('.') {
-        return Err("domain must be a fully-qualified hostname".to_string());
+        return Err(DomainValidationError::MissingDot {
+            location: std::panic::Location::caller(),
+        });
     }
     if domain.starts_with('.') || domain.ends_with('.') {
-        return Err("domain must not start or end with '.'".to_string());
+        return Err(DomainValidationError::LeadingOrTrailingDot {
+            location: std::panic::Location::caller(),
+        });
     }
     for label in domain.split('.') {
         if label.is_empty() {
-            return Err("domain must not contain empty labels".to_string());
+            return Err(DomainValidationError::EmptyLabel {
+                location: std::panic::Location::caller(),
+            });
         }
         if label.len() > 63 {
-            return Err("domain labels must be 63 characters or fewer".to_string());
+            return Err(DomainValidationError::LabelTooLong {
+                location: std::panic::Location::caller(),
+            });
         }
         if label.starts_with('-') || label.ends_with('-') {
-            return Err("domain labels must not start or end with '-'".to_string());
+            return Err(DomainValidationError::LabelHyphen {
+                location: std::panic::Location::caller(),
+            });
         }
         if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-            return Err("domain contains invalid characters".to_string());
+            return Err(DomainValidationError::InvalidChars {
+                location: std::panic::Location::caller(),
+            });
         }
     }
     Ok(())
+}
+
+/// Returns `true` for characters that are safe to embed in the instance bootstrap
+/// script. The set covers everything a real authorized-keys line uses (key type,
+/// base64 body, and a typical comment) while excluding every character that would
+/// carry shell or HCL meaning (`$`, `%`, `{`, `}`, quotes, backticks, `\`, `;`,
+/// `&`, `|`, parentheses, angle brackets, newlines, etc.).
+fn is_safe_ssh_key_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '-' | '.' | '_' | ':' | '@')
+}
+
+/// Validate and sanitize an OpenSSH authorized-keys line for safe embedding.
+///
+/// A key is `<type> <body>[ <comment>…]`. The *key material* (the type and body
+/// fields) must be free of characters that carry meaning in the bootstrap script;
+/// if either field looks wrong (unrecognized type, or an unsafe character in the
+/// type/body) the whole entry is rejected.
+///
+/// The trailing comment is not key material and is **not** preserved faithfully:
+/// any character outside [`is_safe_ssh_key_char`]'s allowlist (including any
+/// non-ASCII byte) marks the comment unsafe, and an unsafe comment is dropped in
+/// full rather than failing the config. Only the `<type> <body>` material is
+/// guaranteed to survive; a comment survives only when it is entirely safe.
+///
+/// Returns the line to store: the original when every field is safe, or
+/// `<type> <body>` with the offending comment removed.
+#[tracing::instrument(skip_all, err)]
+fn sanitize_ssh_key(key: &str) -> Result<String, SshKeyValidationError> {
+    if key.len() > MAX_SSH_KEY_LEN {
+        return Err(SshKeyValidationError::TooLong {
+            max: MAX_SSH_KEY_LEN,
+            location: std::panic::Location::caller(),
+        });
+    }
+
+    let mut fields = key.split_whitespace();
+    let key_type = fields
+        .next()
+        .ok_or_else(|| SshKeyValidationError::MissingType {
+            location: std::panic::Location::caller(),
+        })?;
+    let body = fields
+        .next()
+        .ok_or_else(|| SshKeyValidationError::MissingBody {
+            location: std::panic::Location::caller(),
+        })?;
+
+    if !(key_type.starts_with("ssh-")
+        || key_type.starts_with("ecdsa-")
+        || key_type.starts_with("sk-"))
+    {
+        return Err(SshKeyValidationError::UnrecognizedType {
+            key_type: key_type.to_string(),
+            location: std::panic::Location::caller(),
+        });
+    }
+    if !key_type.chars().all(is_safe_ssh_key_char) {
+        return Err(SshKeyValidationError::UnsafeTypeChars {
+            location: std::panic::Location::caller(),
+        });
+    }
+    if !body.chars().all(is_safe_ssh_key_char) {
+        return Err(SshKeyValidationError::UnsafeBodyChars {
+            location: std::panic::Location::caller(),
+        });
+    }
+
+    // The remainder is an optional comment. Keep it only when every character is
+    // safe; otherwise drop it rather than rejecting the whole configuration.
+    let comment_is_safe = fields.all(|field| field.chars().all(is_safe_ssh_key_char));
+    if comment_is_safe {
+        Ok(key.to_string())
+    } else {
+        Ok(format!("{key_type} {body}"))
+    }
 }
 
 /// Validate that `value` is a well-formed AWS resource id of the form
@@ -463,23 +723,33 @@ fn validate_domain(domain: Option<&str>) -> Result<(), String> {
 /// generated Terraform, so they must contain no characters that could carry
 /// meaning there. Real AWS ids always match this shape, so the check is strict
 /// without rejecting any legitimate value.
-fn validate_aws_id(prefix: &str, value: &str) -> Result<(), String> {
+#[tracing::instrument(skip_all, err)]
+fn validate_aws_id(prefix: &str, value: &str) -> Result<(), AwsIdValidationError> {
     let id = value
         .strip_prefix(prefix)
         .and_then(|rest| rest.strip_prefix('-'))
-        .ok_or_else(|| format!("expected an AWS {prefix}-… id, got {value:?}"))?;
+        .ok_or_else(|| AwsIdValidationError::WrongPrefix {
+            prefix: prefix.to_string(),
+            value: value.to_string(),
+            location: std::panic::Location::caller(),
+        })?;
     if !matches!(id.len(), 8 | 17)
         || !id
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     {
-        return Err(format!("malformed AWS {prefix} id: {value:?}"));
+        return Err(AwsIdValidationError::MalformedId {
+            prefix: prefix.to_string(),
+            value: value.to_string(),
+            location: std::panic::Location::caller(),
+        });
     }
     Ok(())
 }
 
 /// Validate every AWS resource identifier carried by a `provider { }` block.
-fn validate_provider(provider: &Provider) -> Result<(), String> {
+#[tracing::instrument(skip_all, err)]
+fn validate_provider(provider: &Provider) -> Result<(), AwsIdValidationError> {
     let Provider::Aws(aws) = provider;
     if let Some(ref vpc_id) = aws.vpc_id {
         validate_aws_id("vpc", vpc_id)?;
@@ -494,7 +764,10 @@ fn validate_provider(provider: &Provider) -> Result<(), String> {
 }
 
 impl ConfigurationFile {
+    #[tracing::instrument(skip_all, err)]
     pub fn from_procfile(content: &str) -> Result<Self, FromProcfileError> {
+        use FromProcfileErrorCtx as Ctx;
+
         let mut containerfile = None;
         let mut app_sources: Vec<String> = Vec::new();
         let mut cache: Option<bool> = None;
@@ -564,12 +837,10 @@ impl ConfigurationFile {
                     "ssh_keys" | "ssh_key" => {
                         if !value.is_empty() {
                             let unquoted = value.trim_matches('"').trim_matches('\'').trim();
-                            if !unquoted.is_empty()
-                                && (unquoted.starts_with("ssh-")
-                                    || unquoted.starts_with("ecdsa-")
-                                    || unquoted.starts_with("sk-"))
-                            {
-                                ssh_keys.push(unquoted.to_string());
+                            if !unquoted.is_empty() {
+                                let sanitized = sanitize_ssh_key(unquoted)
+                                    .with_context(Ctx::invalid_ssh_key())?;
+                                ssh_keys.push(sanitized);
                             }
                         }
                     }
@@ -582,7 +853,10 @@ impl ConfigurationFile {
                             match trimmed.parse::<u16>() {
                                 Ok(port) if port > 0 => {
                                     if is_reserved(port) {
-                                        return Err(FromProcfileError::ReservedPort(port));
+                                        return Err(FromProcfileError::ReservedPort {
+                                            port,
+                                            location: std::panic::Location::caller(),
+                                        });
                                     }
                                     ports.push(port);
                                 }
@@ -630,21 +904,21 @@ impl ConfigurationFile {
                             aws_subnet_id = Some(value);
                         }
                     }
-                    "aws_security_group_id" => {
-                        if !value.is_empty() {
-                            aws_security_group_id = Some(value);
-                        }
+                    "aws_security_group_id" if !value.is_empty() => {
+                        aws_security_group_id = Some(value);
                     }
                     _ => {}
                 }
             }
         }
 
-
-        if let Some(hp) = http_port {
-            if !ports.contains(&hp) {
-                return Err(FromProcfileError::HttpPortNotInPorts(hp));
-            }
+        if let Some(hp) = http_port
+            && !ports.contains(&hp)
+        {
+            return Err(FromProcfileError::HttpPortNotInPorts {
+                port: hp,
+                location: std::panic::Location::caller(),
+            });
         }
 
         let explicit_http_port = http_port;
@@ -703,7 +977,12 @@ impl ConfigurationFile {
             allow_plaintext_fallback: None,
         });
 
-        validate_domain(domain.as_deref()).map_err(FromProcfileError::InvalidDomain)?;
+        if let Err(source) = validate_domain(domain.as_deref()) {
+            return Err(FromProcfileError::InvalidDomain {
+                location: std::panic::Location::caller(),
+                source: Box::new(source),
+            });
+        }
 
         let http = if has_explicit_http_port {
             let port = http_port.unwrap_or(80);
@@ -775,10 +1054,15 @@ impl ConfigurationFile {
         };
 
         let provider = if managed_on_prem {
-            let platform = platform.ok_or(FromProcfileError::ManagedOnPremMissingPlatform)?;
+            let platform = platform.ok_or(FromProcfileError::ManagedOnPremMissingPlatform {
+                location: std::panic::Location::caller(),
+            })?;
             match platform.as_str() {
                 "aws" => {
-                    let region = aws_region.ok_or(FromProcfileError::ManagedOnPremMissingRegion)?;
+                    let region =
+                        aws_region.ok_or(FromProcfileError::ManagedOnPremMissingRegion {
+                            location: std::panic::Location::caller(),
+                        })?;
                     Some(Provider::Aws(AwsProviderConfig {
                         region,
                         vpc_id: aws_vpc_id,
@@ -787,17 +1071,23 @@ impl ConfigurationFile {
                     }))
                 }
                 other => {
-                    return Err(FromProcfileError::ManagedOnPremUnsupportedPlatform(
-                        other.to_string(),
-                    ));
+                    return Err(FromProcfileError::ManagedOnPremUnsupportedPlatform {
+                        platform: other.to_string(),
+                        location: std::panic::Location::caller(),
+                    });
                 }
             }
         } else {
             None
         };
 
-        if let Some(ref p) = provider {
-            validate_provider(p).map_err(FromProcfileError::InvalidProvider)?;
+        if let Some(ref p) = provider
+            && let Err(source) = validate_provider(p)
+        {
+            return Err(FromProcfileError::InvalidProvider {
+                location: std::panic::Location::caller(),
+                source: Box::new(source),
+            });
         }
 
         let caution = provider.map(|p| CautionConfig {
@@ -810,11 +1100,23 @@ impl ConfigurationFile {
         Ok(ConfigurationFile { caution, enclave })
     }
 
+    #[allow(
+        clippy::should_implement_trait,
+        reason = "has more business logic than FromStr"
+    )]
+    #[tracing::instrument(skip_all, err)]
     pub fn from_str(s: &str) -> Result<Self, FromStrError> {
-        let config: ConfigurationFile = hcl::from_str(s)?;
+        use FromStrErrorCtx as Ctx;
 
-        if let Some(provider) = config.caution.as_ref().and_then(|c| c.provider.as_ref()) {
-            validate_provider(provider).map_err(FromStrError::InvalidProvider)?;
+        let mut config: ConfigurationFile = hcl::from_str(s).with_context(Ctx::hcl_parse())?;
+
+        if let Some(provider) = config.caution.as_ref().and_then(|c| c.provider.as_ref())
+            && let Err(source) = validate_provider(provider)
+        {
+            return Err(FromStrError::InvalidProvider {
+                location: std::panic::Location::caller(),
+                source: Box::new(source),
+            });
         }
 
         if let Some((_, enclave)) = &config.enclave.iter().flatten().next()
@@ -829,10 +1131,14 @@ impl ConfigurationFile {
                     }) if start_port <= RESERVED_INTERNAL_PORT_END
                         && end_port >= RESERVED_INTERNAL_PORT_START =>
                     {
-                        return Err(FromStrError::ReservedPort);
+                        return Err(FromStrError::ReservedPort {
+                            location: std::panic::Location::caller(),
+                        });
                     }
                     Some(PortSpec::Exact { port }) if is_reserved(port) => {
-                        return Err(FromStrError::ReservedPort);
+                        return Err(FromStrError::ReservedPort {
+                            location: std::panic::Location::caller(),
+                        });
                     }
                     _ => (),
                 }
@@ -841,24 +1147,33 @@ impl ConfigurationFile {
 
         if let Some(ref enclaves) = config.enclave {
             if enclaves.len() > 1 {
-                return Err(FromStrError::MultipleEnclaves);
+                return Err(FromStrError::MultipleEnclaves {
+                    location: std::panic::Location::caller(),
+                });
             }
 
             if let Some((_name, enclave)) = enclaves.iter().next() {
                 if let Some(ref network) = enclave.network
                     && let Some(ref http) = network.http
                 {
-                    validate_domain(http.domain.as_deref()).map_err(FromStrError::InvalidDomain)?;
+                    if let Err(source) = validate_domain(http.domain.as_deref()) {
+                        return Err(FromStrError::InvalidDomain {
+                            location: std::panic::Location::caller(),
+                            source: Box::new(source),
+                        });
+                    }
 
                     if let Some(e2e) = http.e2e_encryption.as_ref()
                         && e2e.key_exchange.is_some()
                         && e2e.effective_mode() != Some(E2eMode::Steve)
                     {
-                        return Err(FromStrError::KeyExchangeRequiresSteve);
+                        return Err(FromStrError::KeyExchangeRequiresSteve {
+                            location: std::panic::Location::caller(),
+                        });
                     }
 
                     let port_covered = network.ingress.iter().any(|rule| match &rule.port_spec {
-                        Some(PortSpec::Exact { port }) => *port == http.port,
+                        Some(PortSpec::Exact { port }) => port == &http.port,
                         Some(PortSpec::FromTo {
                             start_port,
                             end_port,
@@ -866,13 +1181,18 @@ impl ConfigurationFile {
                         None => false,
                     });
                     if !port_covered {
-                        return Err(FromStrError::HttpPortNotInPorts(http.port));
+                        return Err(FromStrError::HttpPortNotInPorts {
+                            port: http.port,
+                            location: std::panic::Location::caller(),
+                        });
                     }
                 }
 
                 if let Some(ref units) = enclave.unit {
                     if units.len() > 1 {
-                        return Err(FromStrError::MultipleUnits);
+                        return Err(FromStrError::MultipleUnits {
+                            location: std::panic::Location::caller(),
+                        });
                     }
 
                     for (unit_name, unit) in units {
@@ -881,19 +1201,29 @@ impl ConfigurationFile {
                                 let allowed = matches!(expr, Expression::String(_))
                                     || is_vault_funccall(expr);
                                 if !allowed {
-                                    return Err(FromStrError::InvalidEnvExpression(format!(
-                                        "{}.{}",
-                                        unit_name, key
-                                    )));
+                                    return Err(FromStrError::InvalidEnvExpression {
+                                        key: format!("{}.{}", unit_name, key),
+                                        location: std::panic::Location::caller(),
+                                    });
                                 }
                                 if matches!(expr, Expression::String(_)) && !is_valid_env_key(key) {
-                                    return Err(FromStrError::InvalidEnvKey(format!(
-                                        "{}.{}",
-                                        unit_name, key
-                                    )));
+                                    return Err(FromStrError::InvalidEnvKey {
+                                        key: format!("{}.{}", unit_name, key),
+                                        location: std::panic::Location::caller(),
+                                    });
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+
+        if let Some(enclaves) = config.enclave.as_mut() {
+            for enclave in enclaves.values_mut() {
+                if let Some(debug) = enclave.debug.as_mut() {
+                    for key in debug.ssh_keys.iter_mut() {
+                        *key = sanitize_ssh_key(key).with_context(Ctx::invalid_ssh_key())?;
                     }
                 }
             }
@@ -1170,7 +1500,7 @@ enclave "worker" {
 }
 "#;
         let err = ConfigurationFile::from_str(hcl).unwrap_err();
-        assert!(matches!(err, FromStrError::MultipleEnclaves));
+        assert!(matches!(err, FromStrError::MultipleEnclaves { .. }));
     }
 
     #[test]
@@ -1190,7 +1520,7 @@ enclave "main" {
 }
 "#;
         let err = ConfigurationFile::from_str(hcl).unwrap_err();
-        assert!(matches!(err, FromStrError::MultipleUnits));
+        assert!(matches!(err, FromStrError::MultipleUnits { .. }));
     }
 
     #[test]
@@ -1215,7 +1545,10 @@ enclave "main" {
 }
 "#;
         let err = ConfigurationFile::from_str(hcl).unwrap_err();
-        assert!(matches!(err, FromStrError::HttpPortNotInPorts(9090)));
+        assert!(matches!(
+            err,
+            FromStrError::HttpPortNotInPorts { port: 9090, .. }
+        ));
     }
 
     #[test]
@@ -1235,7 +1568,7 @@ enclave "main" {
 }
 "#;
         let err = ConfigurationFile::from_str(hcl).unwrap_err();
-        assert!(matches!(err, FromStrError::InvalidEnvExpression(_)));
+        assert!(matches!(err, FromStrError::InvalidEnvExpression { .. }));
     }
 
     #[test]
@@ -1402,7 +1735,7 @@ enclave "main" {
 }
 "#;
         let err = ConfigurationFile::from_str(hcl).unwrap_err();
-        assert!(matches!(err, FromStrError::InvalidEnvExpression(_)));
+        assert!(matches!(err, FromStrError::InvalidEnvExpression { .. }));
     }
 
     #[test]
@@ -1585,7 +1918,7 @@ cache: false
             assert!(
                 matches!(
                     ConfigurationFile::from_procfile(&procfile),
-                    Err(FromProcfileError::InvalidDomain(_))
+                    Err(FromProcfileError::InvalidDomain { .. })
                 ),
                 "expected {bad:?} to be rejected"
             );
@@ -1613,8 +1946,84 @@ enclave "main" {
 "#;
         assert!(matches!(
             ConfigurationFile::from_str(hcl),
-            Err(FromStrError::InvalidDomain(_))
+            Err(FromStrError::InvalidDomain { .. })
         ));
+    }
+
+    #[test]
+    fn test_from_procfile_preserves_safe_ssh_key() {
+        // A fully safe key (type, base64 body, and comment) is stored unchanged.
+        let procfile =
+            "run: /app\nports: 8080\ndebug: true\nssh_keys: ssh-ed25519 AAAAC3Nza ryan@left\n";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let enclave = config.enclave.unwrap();
+        let debug = enclave.get("default").unwrap().debug.as_ref().unwrap();
+        assert_eq!(debug.ssh_keys, vec!["ssh-ed25519 AAAAC3Nza ryan@left"]);
+    }
+
+    #[test]
+    fn test_from_procfile_strips_unsafe_ssh_key_comment() {
+        // An injection payload in the comment is stripped; the key material survives.
+        let procfile =
+            "run: /app\nports: 8080\ndebug: true\nssh_keys: ssh-rsa AAAAB3Nza ; rm -rf /\n";
+        let config = ConfigurationFile::from_procfile(procfile).unwrap();
+        let enclave = config.enclave.unwrap();
+        let debug = enclave.get("default").unwrap().debug.as_ref().unwrap();
+        assert_eq!(debug.ssh_keys, vec!["ssh-rsa AAAAB3Nza"]);
+    }
+
+    #[test]
+    fn test_from_procfile_rejects_unsafe_ssh_key_body() {
+        // Unsafe characters in the body (key material) reject the whole config.
+        let procfile = "run: /app\nports: 8080\ndebug: true\nssh_keys: ssh-rsa AAAA$(evil)\n";
+        assert!(matches!(
+            ConfigurationFile::from_procfile(procfile),
+            Err(FromProcfileError::InvalidSshKey { .. })
+        ));
+    }
+
+    #[test]
+    fn test_from_procfile_rejects_bad_ssh_key_type_or_missing_body() {
+        for bad in ["foobar AAAA", "ssh-rsa"] {
+            let procfile = format!("run: /app\nports: 8080\ndebug: true\nssh_keys: {bad}\n");
+            assert!(
+                matches!(
+                    ConfigurationFile::from_procfile(&procfile),
+                    Err(FromProcfileError::InvalidSshKey { .. })
+                ),
+                "expected {bad:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_from_str_sanitizes_ssh_keys() {
+        let hcl = r#"
+enclave "main" {
+  debug {
+    enabled = true
+    ssh_keys = [
+      "ssh-ed25519 AAAAC3Nza ryan@left",
+      "ssh-rsa AAAAB3Nza $(evil) here",
+    ]
+  }
+  unit "default" {
+    command = "/app"
+  }
+}
+"#;
+        let config = ConfigurationFile::from_str(hcl).unwrap();
+        let enclave = config.enclave.unwrap();
+        let debug = enclave.get("main").unwrap().debug.as_ref().unwrap();
+        assert_eq!(
+            debug.ssh_keys,
+            vec![
+                "ssh-ed25519 AAAAC3Nza ryan@left".to_string(),
+                // The `$(evil)` token is unsafe, so the comment is dropped while
+                // the key material is preserved.
+                "ssh-rsa AAAAB3Nza".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -1659,7 +2068,7 @@ enclave "main" {
         let result = ConfigurationFile::from_procfile(procfile);
         assert!(matches!(
             result,
-            Err(FromProcfileError::ReservedPort(49500))
+            Err(FromProcfileError::ReservedPort { port: 49500, .. })
         ));
     }
 
@@ -2047,7 +2456,7 @@ caution {
             assert!(
                 matches!(
                     ConfigurationFile::from_str(&hcl),
-                    Err(FromStrError::InvalidProvider(_))
+                    Err(FromStrError::InvalidProvider { .. })
                 ),
                 "expected {field}={value:?} to be rejected"
             );
@@ -2065,7 +2474,7 @@ aws_vpc_id: vpc-$(id).example
 ";
         assert!(matches!(
             ConfigurationFile::from_procfile(procfile),
-            Err(FromProcfileError::InvalidProvider(_))
+            Err(FromProcfileError::InvalidProvider { .. })
         ));
     }
 
@@ -2148,7 +2557,7 @@ enclave "default" {
 }
 "#;
         let err = ConfigurationFile::from_str(hcl).unwrap_err();
-        let FromStrError::HclParse(source) = err else {
+        let FromStrError::HclParse { source, .. } = err else {
             panic!("unexpected error: {err}");
         };
         assert!(
@@ -2174,7 +2583,10 @@ enclave "default" {
         let procfile = "run: /app\nports: 8080\nhttp_port: 9000\ndomain: x.example.com\n";
         let err = ConfigurationFile::from_procfile(procfile).unwrap_err();
         assert!(
-            matches!(err, FromProcfileError::HttpPortNotInPorts(9000)),
+            matches!(
+                err,
+                FromProcfileError::HttpPortNotInPorts { port: 9000, .. }
+            ),
             "unexpected error: {err}"
         );
     }
@@ -2189,7 +2601,7 @@ aws_region: us-east-1
         let err = ConfigurationFile::from_procfile(procfile).unwrap_err();
         assert!(matches!(
             err,
-            FromProcfileError::ManagedOnPremMissingPlatform
+            FromProcfileError::ManagedOnPremMissingPlatform { .. }
         ));
     }
 
@@ -2204,7 +2616,7 @@ aws_region: us-east-1
         let err = ConfigurationFile::from_procfile(procfile).unwrap_err();
         assert!(matches!(
             err,
-            FromProcfileError::ManagedOnPremUnsupportedPlatform(_)
+            FromProcfileError::ManagedOnPremUnsupportedPlatform { .. }
         ));
     }
 
@@ -2216,7 +2628,10 @@ managed_on_prem: true
 platform: aws
 ";
         let err = ConfigurationFile::from_procfile(procfile).unwrap_err();
-        assert!(matches!(err, FromProcfileError::ManagedOnPremMissingRegion));
+        assert!(matches!(
+            err,
+            FromProcfileError::ManagedOnPremMissingRegion { .. }
+        ));
     }
 
     fn default_unit(hcl: &str) -> UnitConfig {
@@ -2392,7 +2807,7 @@ enclave "main" {
             env: None,
         };
         let err = unit.run_command_string().unwrap_err();
-        assert!(matches!(err, FromStrError::UnquotableCommand));
+        assert!(matches!(err, FromStrError::UnquotableCommand { .. }));
     }
 
     #[test]
@@ -2431,7 +2846,7 @@ enclave "main" {
             )])),
         };
         let err = unit.run_command_string().unwrap_err();
-        assert!(matches!(err, FromStrError::InvalidEnvKey(_)));
+        assert!(matches!(err, FromStrError::InvalidEnvKey { .. }));
     }
 
     #[test]
@@ -2443,7 +2858,7 @@ enclave "main" {
             env: None,
         };
         let err = unit.run_command_string().unwrap_err();
-        assert!(matches!(err, FromStrError::NoCommand));
+        assert!(matches!(err, FromStrError::NoCommand { .. }));
     }
 
     #[test]
@@ -2466,7 +2881,7 @@ enclave "main" {
 }
 "#;
         let err = ConfigurationFile::from_str(hcl).unwrap_err();
-        assert!(matches!(err, FromStrError::InvalidEnvKey(_)));
+        assert!(matches!(err, FromStrError::InvalidEnvKey { .. }));
     }
 
     #[test]
@@ -2548,7 +2963,7 @@ caution {
 }
 "#;
         let err = ConfigurationFile::from_str(hcl).unwrap_err();
-        assert!(matches!(err, FromStrError::HclParse(_)));
+        assert!(matches!(err, FromStrError::HclParse { .. }));
     }
 
     #[test]
@@ -2573,11 +2988,14 @@ caution {
         let tls = hcl::from_str::<E2eEncryption>(r#"mode = "tls""#).unwrap();
         assert_eq!(tls.effective_mode(), Some(E2eMode::Tls));
 
-        let http = hcl::from_str::<HttpConfig>(r#"
+        let http = hcl::from_str::<HttpConfig>(
+            r#"
             domain = "app.example.com"
             port = 8080
             upstream_protocol = "h2c"
-        "#).unwrap();
+        "#,
+        )
+        .unwrap();
         assert_eq!(http.upstream_protocol, Some(HttpUpstreamProtocol::H2c));
 
         let legacy_enabled = hcl::from_str::<E2eEncryption>(r#"enabled = true"#).unwrap();
@@ -2662,7 +3080,7 @@ enclave "main" {{
             assert!(
                 matches!(
                     parse_config_with_e2e(body),
-                    Err(FromStrError::KeyExchangeRequiresSteve)
+                    Err(FromStrError::KeyExchangeRequiresSteve { .. })
                 ),
                 "expected key_exchange rejection: {body}"
             );
@@ -2673,7 +3091,7 @@ enclave "main" {{
     fn legacy_caddy_mode_is_rejected() {
         assert!(matches!(
             parse_config_with_e2e(r#"mode = "caddy""#),
-            Err(FromStrError::HclParse(_))
+            Err(FromStrError::HclParse { .. })
         ));
     }
 
@@ -2682,16 +3100,14 @@ enclave "main" {{
         let default = hcl::from_str::<E2eEncryption>("enabled = true").unwrap();
         assert!(!default.allow_plaintext_fallback());
 
-        let enabled = hcl::from_str::<E2eEncryption>(
-            "enabled = true\nallow_plaintext_fallback = true",
-        )
-        .unwrap();
+        let enabled =
+            hcl::from_str::<E2eEncryption>("enabled = true\nallow_plaintext_fallback = true")
+                .unwrap();
         assert!(enabled.allow_plaintext_fallback());
 
-        let disabled = hcl::from_str::<E2eEncryption>(
-            "enabled = true\nallow_plaintext_fallback = false",
-        )
-        .unwrap();
+        let disabled =
+            hcl::from_str::<E2eEncryption>("enabled = true\nallow_plaintext_fallback = false")
+                .unwrap();
         assert!(!disabled.allow_plaintext_fallback());
     }
 
@@ -2737,7 +3153,7 @@ enclave "test" {
 }
 "#;
         let err = ConfigurationFile::from_str(hcl).unwrap_err();
-        assert!(matches!(err, FromStrError::HclParse(_)));
+        assert!(matches!(err, FromStrError::HclParse { .. }));
     }
 
     #[test]
@@ -2763,7 +3179,7 @@ enclave "test" {
 }
 "#;
         let err = ConfigurationFile::from_str(hcl).unwrap_err();
-        assert!(matches!(err, FromStrError::HclParse(_)));
+        assert!(matches!(err, FromStrError::HclParse { .. }));
     }
 
     #[test]
@@ -2903,5 +3319,41 @@ enclave "test" {
         assert!(net.ingress.is_empty());
         assert!(net.egress.is_empty());
         assert!(net.http.is_some());
+    }
+
+    #[test]
+    fn validate_domain_rejects_too_long() {
+        let long = "a".repeat(254);
+        let err = validate_domain(Some(&long)).unwrap_err();
+        assert!(matches!(err, DomainValidationError::InvalidLength { .. }));
+    }
+
+    #[test]
+    fn sanitize_ssh_key_rejects_too_long() {
+        let long = format!("ssh-ed25519 {}", "A".repeat(MAX_SSH_KEY_LEN));
+        let err = sanitize_ssh_key(&long).unwrap_err();
+        assert!(
+            matches!(err, SshKeyValidationError::TooLong { max, .. } if max == MAX_SSH_KEY_LEN)
+        );
+    }
+
+    #[test]
+    fn validate_aws_id_rejects_wrong_prefix() {
+        let err = validate_aws_id("vpc", "sg-0a1b2c3d").unwrap_err();
+        assert!(matches!(err, AwsIdValidationError::WrongPrefix { prefix, .. } if prefix == "vpc"));
+    }
+
+    #[test]
+    fn validate_provider_rejects_malformed_subnet() {
+        let provider = Provider::Aws(AwsProviderConfig {
+            region: "us-east-1".into(),
+            vpc_id: None,
+            subnet_ids: Some(vec!["subnet-zzzz".into()]),
+            security_group_id: None,
+        });
+        let err = validate_provider(&provider).unwrap_err();
+        assert!(
+            matches!(err, AwsIdValidationError::MalformedId { prefix, .. } if prefix == "subnet")
+        );
     }
 }

@@ -1,25 +1,18 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{Context, Result};
 use axum::{
-    body::Body,
-    extract::{Path as RoutePath, Request, State},
-    http::StatusCode,
     middleware,
-    response::{IntoResponse, Redirect, Response},
     routing::{delete, get, post},
     Router,
 };
-use russh::keys::{Algorithm, PrivateKey};
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use russh::keys::ssh_key::LineEnding;
+use russh::keys::{Algorithm, PrivateKey};
 use sqlx::postgres::PgPoolOptions;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tower::Service;
-use tower_http::services::ServeFile;
 use tower_http::{cors::CorsLayer, limit::RequestBodyLimitLayer, services::ServeDir};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use webauthn_rs::prelude::*;
@@ -31,7 +24,6 @@ mod db;
 mod decoy;
 mod handlers;
 mod pgp;
-mod proxy;
 mod rate_limit;
 mod request_id;
 mod security_headers;
@@ -42,54 +34,186 @@ mod validation;
 use config::Config;
 use types::AppState;
 
-const VERIFY_E2EE_CLIENT_PATH: &str =
-    "/verify-e2ee/client/2ee4760186df3022931aecc9145bd6bee8fc6137";
+#[derive(Debug, thiserror::Error, CtxError)]
+enum MainError {
+    #[error("failed to load configuration [{location}]")]
+    Config {
+        #[location]
+        location: Location,
 
-async fn redirect_verify_e2ee() -> Redirect {
-    Redirect::permanent("/verify-e2ee/")
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to connect to database [{location}]")]
+    DatabaseConnection {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("no valid RP origins configured [{location}]")]
+    NoValidOrigins {
+        #[location]
+        location: Location,
+    },
+
+    #[error("non-localhost RP origin must use HTTPS in production: {origin} [{location}]")]
+    InsecureOrigin {
+        origin: String,
+
+        #[location]
+        location: Location,
+    },
+
+    #[error("failed to create WebAuthn builder [{location}]")]
+    WebauthnBuilder {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to build WebAuthn [{location}]")]
+    WebauthnBuild {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to load SSH host key [{location}]")]
+    HostKey {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to build HTTP client [{location}]")]
+    HttpClient {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to bind to address {addr} [{location}]")]
+    BindAddress {
+        #[context(borrow = str)]
+        addr: String,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("server error [{location}]")]
+    Server {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
 }
 
-async fn serve_verify_e2ee_target(
-    RoutePath(scope): RoutePath<String>,
-    State(frontend_index): State<PathBuf>,
-    request: Request,
-) -> Response {
-    if scope.len() != 64
-        || !scope
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-        || request.uri().path() != format!("{VERIFY_E2EE_CLIENT_PATH}/targets/{scope}/")
-    {
-        return StatusCode::NOT_FOUND.into_response();
-    }
+#[derive(Debug, thiserror::Error, CtxError)]
+enum LoadHostKeyError {
+    #[error("failed to read SSH host key from {path} [{location}]")]
+    ReadKeyFile {
+        #[context(borrow = str)]
+        path: String,
 
-    ServeFile::new(frontend_index)
-        .call(request)
-        .await
-        .expect("ServeFile is infallible")
-        .map(Body::new)
-}
+        #[location]
+        location: Location,
 
-fn build_frontend_routes(frontend_dir: &Path) -> Router {
-    let frontend_index = frontend_dir.join("index.html");
-    let target_route = format!("{VERIFY_E2EE_CLIENT_PATH}/targets/{{scope}}/");
+        #[source]
+        source: BoxError,
+    },
 
-    Router::new()
-        .route_service("/login", ServeFile::new(frontend_index.clone()))
-        .route_service("/onboarding", ServeFile::new(frontend_index.clone()))
-        .route_service("/invite", ServeFile::new(frontend_index.clone()))
-        .route_service("/dashboard", ServeFile::new(frontend_index.clone()))
-        .route_service("/qr-login", ServeFile::new(frontend_index.clone()))
-        .route_service("/qr-sign", ServeFile::new(frontend_index.clone()))
-        .route_service("/verify", ServeFile::new(frontend_index.clone()))
-        .route("/verify-e2ee", get(redirect_verify_e2ee))
-        .route_service("/verify-e2ee/", ServeFile::new(frontend_index.clone()))
-        .route(&target_route, get(serve_verify_e2ee_target))
-        .with_state(frontend_index)
+    #[error("failed to decode SSH host key [{location}]")]
+    DecodeKey {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to generate Ed25519 key [{location}]")]
+    GenerateKey {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to create directory {parent} [{location}]")]
+    CreateDirectory {
+        #[context(borrow = std::path::Path)]
+        parent: std::path::PathBuf,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to encode SSH host key [{location}]")]
+    EncodeKey {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to write SSH host key to {path} [{location}]")]
+    WriteKeyFile {
+        #[context(borrow = str)]
+        path: String,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to set permissions on SSH host key [{location}]")]
+    SetPermissions {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to read SSH host key metadata [{location}]")]
+    ReadMetadata {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), MainError> {
+    use MainErrorCtx as Ctx;
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -108,7 +232,7 @@ async fn main() -> Result<()> {
         tracing::warn!("e2e-testing-unsafe feature is enabled — /auth/e2e-login endpoint is active. Do NOT use in production.");
     }
 
-    let config = Config::from_env().context("Failed to load configuration")?;
+    let config = Config::from_env().with_context(Ctx::config())?;
 
     let max_db_connections: u32 = std::env::var("DB_MAX_CONNECTIONS")
         .ok()
@@ -119,7 +243,7 @@ async fn main() -> Result<()> {
         .max_connections(max_db_connections)
         .connect(&config.database_url)
         .await
-        .context("Failed to connect to database")?;
+        .with_context(Ctx::database_connection())?;
 
     tracing::info!("Database connected");
 
@@ -130,7 +254,9 @@ async fn main() -> Result<()> {
         .collect();
 
     if origins.is_empty() {
-        anyhow::bail!("No valid RP origins configured");
+        return Err(MainError::NoValidOrigins {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let is_production = std::env::var("ENVIRONMENT")
@@ -139,17 +265,17 @@ async fn main() -> Result<()> {
     if is_production {
         for origin in &origins {
             if origin.scheme() == "http" && origin.host_str() != Some("localhost") {
-                anyhow::bail!(
-                    "Non-localhost RP origin must use HTTPS in production: {}",
-                    origin
-                );
+                return Err(MainError::InsecureOrigin {
+                    origin: origin.to_string(),
+                    location: std::panic::Location::caller(),
+                });
             }
         }
     }
 
     let rp_id = &config.rp_id;
     let mut builder =
-        WebauthnBuilder::new(rp_id, &origins[0]).context("Failed to create WebAuthn builder")?;
+        WebauthnBuilder::new(rp_id, &origins[0]).with_context(Ctx::webauthn_builder())?;
 
     for origin in origins.iter().skip(1) {
         builder = builder.append_allowed_origin(origin);
@@ -158,7 +284,7 @@ async fn main() -> Result<()> {
     let webauthn = builder
         .rp_name(&config.rp_display_name)
         .build()
-        .context("Failed to build WebAuthn")?;
+        .with_context(Ctx::webauthn_build())?;
 
     // Fail fast if the login-begin decoy timing-equalization fixtures ever
     // stop deserializing (e.g. a future webauthn-rs upgrade changing
@@ -171,8 +297,8 @@ async fn main() -> Result<()> {
     tracing::info!("  RP Display Name: {}", config.rp_display_name);
     tracing::info!("  RP Origins: {:?}", config.rp_origins);
 
-    let host_key = load_or_generate_host_key(&config.ssh_host_key_path)
-        .context("Failed to load SSH host key")?;
+    let host_key =
+        load_or_generate_host_key(&config.ssh_host_key_path).with_context(Ctx::host_key())?;
 
     // Kill-switch for legacy credential-broadcast login (see AppState::login_allow_broadcast
     // doc comment). Read once at startup — toggling requires an env var change + restart.
@@ -211,6 +337,11 @@ async fn main() -> Result<()> {
         rate_limit::USERNAME_BEGIN_WINDOW_SECS,
     );
 
+    let http_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .with_context(Ctx::http_client())?;
+
     let state = AppState {
         db: pool.clone(),
         webauthn,
@@ -222,9 +353,7 @@ async fn main() -> Result<()> {
         // across redirects. A backend 3xx (attacker-influenced or not) would
         // otherwise leak the internal secret/body to the redirect target.
         // Backend 3xx responses are relayed to the caller instead.
-        http_client: reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?,
+        http_client,
         reg_states: Arc::new(RwLock::new(HashMap::new())),
         passkey_reg_states: Arc::new(RwLock::new(HashMap::new())),
         auth_states: Arc::new(RwLock::new(HashMap::new())),
@@ -274,6 +403,12 @@ async fn main() -> Result<()> {
             "X-Fido2-Response".parse().unwrap(),
         ]);
 
+    // The `e2e-testing-unsafe` build appends a route below, so the binding must
+    // stay `mut`; without that feature the compiler cannot see any use of it.
+    #[allow(
+        unused_mut,
+        reason = "auth_routes is appended to based on build configuration"
+    )]
     let mut auth_routes = Router::new()
         .route(
             "/auth/register/begin",
@@ -327,6 +462,18 @@ async fn main() -> Result<()> {
         .route(
             "/auth/qr-sign/authenticate/finish",
             post(handlers::qr_sign_authenticate_finish_handler),
+        )
+        // CSRF posture: these routes have no session cookie or CSRF token by
+        // design. The WebAuthn registration ceremony itself enforces origin
+        // binding (rpId must match page origin) and user verification, so a
+        // cross-site attacker cannot forge a ceremony even if they can POST here.
+        .route(
+            "/auth/reset/begin",
+            post(handlers::reset_webauthn::begin_reset_register_handler),
+        )
+        .route(
+            "/auth/reset/finish",
+            post(handlers::reset_webauthn::finish_reset_register_handler),
         );
 
     #[cfg(feature = "e2e-testing-unsafe")]
@@ -365,10 +512,7 @@ async fn main() -> Result<()> {
             "/ssh-keys/{fingerprint}",
             delete(handlers::delete_ssh_key_handler),
         )
-        .route(
-            "/user/username",
-            get(handlers::get_username_status_handler),
-        )
+        .route("/user/username", get(handlers::get_username_status_handler))
         .route("/user/username", post(handlers::claim_username_handler))
         .route("/pgp-keys", post(handlers::add_pgp_key_handler))
         .route("/pgp-keys", get(handlers::list_pgp_keys_handler))
@@ -393,15 +537,15 @@ async fn main() -> Result<()> {
         .layer(cors.clone());
 
     let public_api_proxy = Router::new()
-        .route("/onboarding/verify", get(proxy::proxy_handler))
-        .route("/config/stripe-key", get(proxy::proxy_handler))
-        .route("/legal/active-documents", get(proxy::proxy_handler))
+        .route("/onboarding/verify", get(handlers::proxy_handler))
+        .route("/config/stripe-key", get(handlers::proxy_handler))
+        .route("/legal/active-documents", get(handlers::proxy_handler))
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .with_state(state.clone())
         .layer(cors.clone());
 
     let api_proxy = Router::new()
-        .fallback(proxy::proxy_handler)
+        .fallback(handlers::proxy_handler)
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware::username_claim_gate_middleware,
@@ -422,11 +566,12 @@ async fn main() -> Result<()> {
         std::env::var("FRONTEND_DIR").unwrap_or_else(|_| "/app/frontend".to_string());
 
     let frontend_service = ServeDir::new(&frontend_dir).append_index_html_on_directories(true);
-    let frontend_routes = build_frontend_routes(Path::new(&frontend_dir));
+    let frontend_routes =
+        handlers::frontend::build_frontend_routes(std::path::Path::new(&frontend_dir));
 
     // Webhook proxy to metering service (no auth required — Paddle verifies via signature)
     let webhook_proxy = Router::new()
-        .route("/webhooks/paddle", post(proxy::metering_proxy_handler))
+        .route("/webhooks/paddle", post(handlers::metering_proxy_handler))
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .with_state(state.clone())
         .layer(cors.clone());
@@ -434,7 +579,10 @@ async fn main() -> Result<()> {
     // Public, unauthenticated, root-level (must NOT be nested under /api): the
     // platform's current enclave build inputs, proxied to the API's same path.
     let well_known_proxy = Router::new()
-        .route("/.well-known/caution/build-inputs", get(proxy::proxy_handler))
+        .route(
+            "/.well-known/caution/build-inputs",
+            get(handlers::proxy_handler),
+        )
         .with_state(state.clone())
         .layer(cors.clone());
 
@@ -540,7 +688,7 @@ async fn main() -> Result<()> {
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
-        .context("Failed to bind to address")?;
+        .with_context(Ctx::bind_address(&addr))?;
 
     tracing::info!("Gateway listening on {}", addr);
     tracing::info!("SSH server listening on port {}", config.ssh_port);
@@ -551,7 +699,7 @@ async fn main() -> Result<()> {
     )
     .with_graceful_shutdown(shutdown_signal())
     .await
-    .context("Server error")?;
+    .with_context(Ctx::server())?;
 
     Ok(())
 }
@@ -566,18 +714,17 @@ async fn shutdown_signal() {
     }
 }
 
-fn load_or_generate_host_key(path: &str) -> Result<PrivateKey> {
+fn load_or_generate_host_key(path: &str) -> Result<PrivateKey, LoadHostKeyError> {
     use std::fs;
     use std::path::Path;
+    use LoadHostKeyErrorCtx as Ctx;
 
     let key_path = Path::new(path);
 
     if key_path.exists() {
-        let key_str = fs::read_to_string(key_path)
-            .with_context(|| format!("Failed to read SSH host key from {}", path))?;
+        let key_str = fs::read_to_string(key_path).with_context(Ctx::read_key_file(path))?;
 
-        let key = russh::keys::decode_secret_key(&key_str, None)
-            .context("Failed to decode SSH host key")?;
+        let key = russh::keys::decode_secret_key(&key_str, None).with_context(Ctx::decode_key())?;
 
         tracing::debug!("Loaded SSH host key");
         Ok(key)
@@ -585,24 +732,25 @@ fn load_or_generate_host_key(path: &str) -> Result<PrivateKey> {
         tracing::info!("Generating new SSH host key");
 
         let key = PrivateKey::random(&mut rand010::rng(), Algorithm::Ed25519)
-            .context("Failed to generate Ed25519 key")?;
+            .with_context(Ctx::generate_key())?;
 
         if let Some(parent) = key_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create directory {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(Ctx::create_directory(parent))?;
         }
 
-        let key_pem = key.to_openssh(LineEnding::LF)
-            .context("Failed to encode SSH host key")?;
-        fs::write(key_path, key_pem.as_bytes())
-            .with_context(|| format!("Failed to write SSH host key to {}", path))?;
+        let key_pem = key
+            .to_openssh(LineEnding::LF)
+            .with_context(Ctx::encode_key())?;
+        fs::write(key_path, key_pem.as_bytes()).with_context(Ctx::write_key_file(path))?;
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(key_path)?.permissions();
+            let mut perms = fs::metadata(key_path)
+                .with_context(Ctx::read_metadata())?
+                .permissions();
             perms.set_mode(0o600);
-            fs::set_permissions(key_path, perms)?;
+            fs::set_permissions(key_path, perms).with_context(Ctx::set_permissions())?;
         }
 
         tracing::info!("SSH host key generated");
@@ -612,41 +760,8 @@ fn load_or_generate_host_key(path: &str) -> Result<PrivateKey> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_frontend_routes, load_or_generate_host_key, VERIFY_E2EE_CLIENT_PATH};
-    use axum::{
-        body::Body,
-        http::{header, Request, StatusCode},
-        middleware,
-    };
+    use super::load_or_generate_host_key;
     use russh::keys::{Algorithm, HashAlg};
-    use tower::Service;
-    use tower_http::services::ServeDir;
-
-    async fn get(app: &mut axum::Router, path: &str) -> axum::response::Response {
-        app.call(Request::builder().uri(path).body(Body::empty()).unwrap())
-            .await
-            .unwrap()
-    }
-
-    fn test_frontend() -> (tempfile::TempDir, axum::Router) {
-        let dir = tempfile::tempdir().unwrap();
-        let client_dir = dir
-            .path()
-            .join(VERIFY_E2EE_CLIENT_PATH.trim_start_matches('/'));
-        std::fs::create_dir_all(client_dir.join("xwing")).unwrap();
-        std::fs::write(dir.path().join("index.html"), "<main>verifier</main>").unwrap();
-        std::fs::write(client_dir.join("register.js"), "export {};").unwrap();
-        std::fs::write(client_dir.join("enclave-sw.js"), "self.onfetch = null;").unwrap();
-        std::fs::write(client_dir.join("xwing/steve_xwing_wasm_bg.wasm"), b"\0asm").unwrap();
-
-        let app = build_frontend_routes(dir.path())
-            .fallback_service(ServeDir::new(dir.path()).append_index_html_on_directories(true))
-            .layer(middleware::from_fn(
-                super::security_headers::security_headers_middleware,
-            ));
-
-        (dir, app)
-    }
 
     #[test]
     fn generates_ed25519_host_key_and_persists_it() {
@@ -677,63 +792,5 @@ mod tests {
             loaded.fingerprint(HashAlg::Sha256),
             "loaded key should match the generated key"
         );
-    }
-
-    #[tokio::test]
-    async fn verify_e2ee_routes_are_public_and_canonical() {
-        let (_dir, mut app) = test_frontend();
-
-        let redirect = get(&mut app, "/verify-e2ee").await;
-        assert_eq!(redirect.status(), StatusCode::PERMANENT_REDIRECT);
-        assert_eq!(redirect.headers()[header::LOCATION], "/verify-e2ee/");
-
-        let index = get(&mut app, "/verify-e2ee/").await;
-        assert_eq!(index.status(), StatusCode::OK);
-        assert_eq!(index.headers()[header::CONTENT_TYPE], "text/html");
-    }
-
-    #[tokio::test]
-    async fn verify_e2ee_only_serves_deterministic_target_pages() {
-        let (_dir, mut app) = test_frontend();
-        let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        let target = format!(
-            "{VERIFY_E2EE_CLIENT_PATH}/targets/{hash}/?origin=https%3A%2F%2Fexample.com&suite=X25519"
-        );
-
-        let response = get(&mut app, &target).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers()[header::CONTENT_TYPE], "text/html");
-
-        for invalid in [
-            "/verify-e2ee/client/2ee4760186df3022931aecc9145bd6bee8fc6137/targets/not-a-sha256/",
-            "/verify-e2ee/client/2ee4760186df3022931aecc9145bd6bee8fc6137/targets/ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789/",
-            "/verify-e2ee/client/2ee4760186df3022931aecc9145bd6bee8fc6137/targets/%610123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde/",
-            "/verify-e2ee/client/wrong/targets/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/",
-            "/verify-e2ee/client/2ee4760186df3022931aecc9145bd6bee8fc6137/targets/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        ] {
-            let response = get(&mut app, invalid).await;
-            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{invalid}");
-        }
-    }
-
-    #[tokio::test]
-    async fn verify_e2ee_artifacts_have_safe_content_types() {
-        let (_dir, mut app) = test_frontend();
-
-        for (relative_path, content_type) in [
-            ("register.js", "text/javascript"),
-            ("enclave-sw.js", "text/javascript"),
-            ("xwing/steve_xwing_wasm_bg.wasm", "application/wasm"),
-        ] {
-            let path = format!("{VERIFY_E2EE_CLIENT_PATH}/{relative_path}");
-            let response = get(&mut app, &path).await;
-            assert_eq!(response.status(), StatusCode::OK, "{path}");
-            assert_eq!(response.headers()[header::CONTENT_TYPE], content_type);
-            assert_eq!(response.headers()["x-content-type-options"], "nosniff");
-            assert!(response.headers()["content-security-policy"]
-                .to_str()
-                .unwrap()
-                .contains("worker-src 'self'"));
-        }
     }
 }

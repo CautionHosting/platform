@@ -1,69 +1,136 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use anyhow::{bail, Result};
 use regex::Regex;
 use std::sync::OnceLock;
 
-const APP_NAME_MIN_LEN: usize = 3;
-const APP_NAME_MAX_LEN: usize = 63;
-const APP_NAME_PATTERN: &str = r"^[a-zA-Z0-9]([a-zA-Z0-9_-]*[a-zA-Z0-9])?$";
 const PASSKEY_NAME_MAX_LEN: usize = 80;
 const USERNAME_MIN_LEN: usize = 3;
 const USERNAME_MAX_LEN: usize = 32;
 const USERNAME_PATTERN: &str = r"^[a-zA-Z0-9]([a-zA-Z0-9_-]*[a-zA-Z0-9])?$";
 
-static APP_NAME_REGEX: OnceLock<Regex> = OnceLock::new();
 static USERNAME_REGEX: OnceLock<Regex> = OnceLock::new();
 
-fn get_app_name_regex() -> &'static Regex {
-    APP_NAME_REGEX.get_or_init(|| Regex::new(APP_NAME_PATTERN).unwrap())
+/// Error type returned by all validation functions in this module.
+///
+/// Location is Debug-only: this type's `Display` is internal; callers box it as
+/// a `#[source]` and serve fixed, generic client bodies.
+#[derive(Debug, thiserror::Error)]
+pub enum ValidationError {
+    #[error("Invalid app ID format, expected UUID [{location}]")]
+    InvalidAppId {
+        #[source]
+        source: dterror::BoxError,
+        location: dterror::Location,
+    },
+
+    #[error("Username must be at least {min} characters")]
+    UsernameTooShort {
+        min: usize,
+        location: dterror::Location,
+    },
+
+    #[error("Username must be at most {max} characters")]
+    UsernameTooLong {
+        max: usize,
+        location: dterror::Location,
+    },
+
+    #[error(
+        "Username must contain only letters, numbers, hyphens, and underscores, \
+         and must start/end with alphanumeric"
+    )]
+    UsernameInvalidChars { location: dterror::Location },
+
+    #[error("SSH public key is too short (minimum {min} characters)")]
+    SshKeyTooShort {
+        min: usize,
+        location: dterror::Location,
+    },
+
+    #[error("SSH public key is too long (maximum {max} characters)")]
+    SshKeyTooLong {
+        max: usize,
+        location: dterror::Location,
+    },
+
+    #[error("SSH public key must have format: <key-type> <base64-data> [comment]")]
+    SshKeyMissingData { location: dterror::Location },
+
+    #[error("Unsupported SSH key type '{key_type}'. Allowed types: {}", allowed.join(", "))]
+    SshKeyUnsupportedType {
+        key_type: String,
+        allowed: Vec<String>,
+        location: dterror::Location,
+    },
+
+    #[error("SSH public key data is not valid base64")]
+    SshKeyInvalidBase64 { location: dterror::Location },
+
+    #[error("SSH public key decoded to empty data")]
+    SshKeyEmptyDecoded { location: dterror::Location },
+
+    #[error("SSH key data is too short for key type '{key_type}'")]
+    SshKeyDataTooShort {
+        key_type: String,
+        location: dterror::Location,
+    },
+
+    #[error("Passkey name cannot be empty")]
+    PasskeyNameEmpty { location: dterror::Location },
+
+    #[error("Passkey name must be at most {max} characters")]
+    PasskeyNameTooLong {
+        max: usize,
+        location: dterror::Location,
+    },
+
+    #[error("Passkey name cannot contain control characters")]
+    PasskeyNameControlChars { location: dterror::Location },
 }
 
 fn get_username_regex() -> &'static Regex {
     USERNAME_REGEX.get_or_init(|| Regex::new(USERNAME_PATTERN).unwrap())
 }
 
-pub fn validate_app_id(id: &str) -> Result<()> {
-    uuid::Uuid::parse_str(id)
-        .map_err(|_| anyhow::anyhow!("Invalid app ID format, expected UUID"))?;
-    Ok(())
-}
-
-pub fn validate_app_name(name: &str) -> Result<()> {
-    if name.len() < APP_NAME_MIN_LEN {
-        bail!("App name must be at least {} characters", APP_NAME_MIN_LEN);
-    }
-    if name.len() > APP_NAME_MAX_LEN {
-        bail!("App name must be at most {} characters", APP_NAME_MAX_LEN);
-    }
-
-    if !get_app_name_regex().is_match(name) {
-        bail!("App name must contain only letters, numbers, hyphens, and underscores, and must start/end with alphanumeric");
-    }
-
+#[track_caller]
+pub fn validate_app_id(id: &str) -> Result<(), ValidationError> {
+    uuid::Uuid::parse_str(id).map_err(|source| ValidationError::InvalidAppId {
+        source: Box::new(source),
+        location: std::panic::Location::caller(),
+    })?;
     Ok(())
 }
 
 /// Validates a chosen username. Validation is case-insensitive (the pattern
 /// allows both cases); the caller is responsible for normalizing to lowercase
 /// before storage.
-pub fn validate_username(name: &str) -> Result<()> {
+#[track_caller]
+pub fn validate_username(name: &str) -> Result<(), ValidationError> {
     if name.len() < USERNAME_MIN_LEN {
-        bail!("Username must be at least {} characters", USERNAME_MIN_LEN);
+        return Err(ValidationError::UsernameTooShort {
+            min: USERNAME_MIN_LEN,
+            location: std::panic::Location::caller(),
+        });
     }
     if name.len() > USERNAME_MAX_LEN {
-        bail!("Username must be at most {} characters", USERNAME_MAX_LEN);
+        return Err(ValidationError::UsernameTooLong {
+            max: USERNAME_MAX_LEN,
+            location: std::panic::Location::caller(),
+        });
     }
 
     if !get_username_regex().is_match(name) {
-        bail!("Username must contain only letters, numbers, hyphens, and underscores, and must start/end with alphanumeric");
+        return Err(ValidationError::UsernameInvalidChars {
+            location: std::panic::Location::caller(),
+        });
     }
 
     Ok(())
 }
 
-pub fn validate_ssh_public_key(public_key: &str) -> Result<()> {
+#[track_caller]
+pub fn validate_ssh_public_key(public_key: &str) -> Result<(), ValidationError> {
     const SSH_KEY_MIN_LEN: usize = 50;
     const SSH_KEY_MAX_LEN: usize = 2000;
     const ALLOWED_SSH_KEY_TYPES: &[&str] = &[
@@ -77,36 +144,43 @@ pub fn validate_ssh_public_key(public_key: &str) -> Result<()> {
     let key = public_key.trim();
 
     if key.len() < SSH_KEY_MIN_LEN {
-        bail!(
-            "SSH public key is too short (minimum {} characters)",
-            SSH_KEY_MIN_LEN
-        );
+        return Err(ValidationError::SshKeyTooShort {
+            min: SSH_KEY_MIN_LEN,
+            location: std::panic::Location::caller(),
+        });
     }
     if key.len() > SSH_KEY_MAX_LEN {
-        bail!(
-            "SSH public key is too long (maximum {} characters)",
-            SSH_KEY_MAX_LEN
-        );
+        return Err(ValidationError::SshKeyTooLong {
+            max: SSH_KEY_MAX_LEN,
+            location: std::panic::Location::caller(),
+        });
     }
 
     let parts: Vec<&str> = key.split_whitespace().collect();
     if parts.len() < 2 {
-        bail!("SSH public key must have format: <key-type> <base64-data> [comment]");
+        return Err(ValidationError::SshKeyMissingData {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let key_type = parts[0];
     let key_data = parts[1];
 
     if !ALLOWED_SSH_KEY_TYPES.contains(&key_type) {
-        bail!(
-            "Unsupported SSH key type '{}'. Allowed types: {}",
-            key_type,
-            ALLOWED_SSH_KEY_TYPES.join(", ")
-        );
+        return Err(ValidationError::SshKeyUnsupportedType {
+            key_type: key_type.to_string(),
+            allowed: ALLOWED_SSH_KEY_TYPES
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            location: std::panic::Location::caller(),
+        });
     }
 
     if !is_valid_base64(key_data) {
-        bail!("SSH public key data is not valid base64");
+        return Err(ValidationError::SshKeyInvalidBase64 {
+            location: std::panic::Location::caller(),
+        });
     }
 
     let min_data_len = match key_type {
@@ -119,37 +193,51 @@ pub fn validate_ssh_public_key(public_key: &str) -> Result<()> {
     };
 
     if key_data.len() < min_data_len {
-        bail!("SSH key data is too short for key type '{}'", key_type);
+        return Err(ValidationError::SshKeyDataTooShort {
+            key_type: key_type.to_string(),
+            location: std::panic::Location::caller(),
+        });
     }
 
     match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, key_data) {
         Ok(decoded) => {
             if decoded.is_empty() {
-                bail!("SSH public key decoded to empty data");
+                return Err(ValidationError::SshKeyEmptyDecoded {
+                    location: std::panic::Location::caller(),
+                });
             }
         }
-        Err(_) => bail!("SSH public key data is not valid base64"),
+        Err(_) => {
+            return Err(ValidationError::SshKeyInvalidBase64 {
+                location: std::panic::Location::caller(),
+            });
+        }
     }
 
     Ok(())
 }
 
-pub fn validate_passkey_name(name: &str) -> Result<()> {
+#[track_caller]
+pub fn validate_passkey_name(name: &str) -> Result<(), ValidationError> {
     let trimmed = name.trim();
 
     if trimmed.is_empty() {
-        bail!("Passkey name cannot be empty");
+        return Err(ValidationError::PasskeyNameEmpty {
+            location: std::panic::Location::caller(),
+        });
     }
 
     if trimmed.len() > PASSKEY_NAME_MAX_LEN {
-        bail!(
-            "Passkey name must be at most {} characters",
-            PASSKEY_NAME_MAX_LEN
-        );
+        return Err(ValidationError::PasskeyNameTooLong {
+            max: PASSKEY_NAME_MAX_LEN,
+            location: std::panic::Location::caller(),
+        });
     }
 
     if trimmed.chars().any(|c| c.is_control()) {
-        bail!("Passkey name cannot contain control characters");
+        return Err(ValidationError::PasskeyNameControlChars {
+            location: std::panic::Location::caller(),
+        });
     }
 
     Ok(())
@@ -164,60 +252,6 @@ fn is_valid_base64(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_app_name_valid() {
-        assert!(validate_app_name("my-app").is_ok());
-        assert!(validate_app_name("web-frontend").is_ok());
-        assert!(validate_app_name("api-v2").is_ok());
-        assert!(validate_app_name("test123").is_ok());
-        assert!(validate_app_name("a1b").is_ok());
-        assert!(validate_app_name("My-App").is_ok());
-        assert!(validate_app_name("app--name").is_ok());
-        assert!(validate_app_name("app_name").is_ok());
-    }
-
-    #[test]
-    fn test_app_name_invalid() {
-        assert!(validate_app_name("ab").is_err());
-        assert!(validate_app_name("-app").is_err());
-        assert!(validate_app_name("app-").is_err());
-        assert!(validate_app_name("_app").is_err());
-        assert!(validate_app_name("app_").is_err());
-        assert!(validate_app_name("app.name").is_err());
-        assert!(validate_app_name("app name").is_err());
-    }
-
-    #[test]
-    fn test_app_name_boundary_lengths() {
-        // Exactly min length (3)
-        assert!(validate_app_name("abc").is_ok());
-        // Exactly max length (63)
-        assert!(validate_app_name(&"a".repeat(63)).is_ok());
-        // One over max
-        assert!(validate_app_name(&"a".repeat(64)).is_err());
-        // One under min
-        assert!(validate_app_name("ab").is_err());
-        // Single char
-        assert!(validate_app_name("a").is_err());
-        // Empty
-        assert!(validate_app_name("").is_err());
-    }
-
-    #[test]
-    fn test_app_name_special_characters() {
-        assert!(validate_app_name("app.name").is_err());
-        assert!(validate_app_name("app name").is_err());
-        assert!(validate_app_name("app@name").is_err());
-        assert!(validate_app_name("app/name").is_err());
-        assert!(validate_app_name("app\nname").is_err());
-    }
-
-    #[test]
-    fn test_app_name_numeric_only() {
-        assert!(validate_app_name("123").is_ok());
-        assert!(validate_app_name("1-2-3").is_ok());
-    }
 
     #[test]
     fn test_validate_app_id() {

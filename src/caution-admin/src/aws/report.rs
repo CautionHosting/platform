@@ -117,7 +117,7 @@ pub async fn load_findings_report(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum LoadFindingsReportError {
-    #[error("failed to load Platform state for AWS findings [{location:?}]")]
+    #[error("failed to load Platform state for AWS findings [{location}]")]
     Database {
         #[location]
         location: Location,

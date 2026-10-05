@@ -3,16 +3,42 @@
 
 //! Derived organization balance helpers backed by the ledger views.
 
+use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use sqlx::{Executor, PgPool, Postgres};
 use uuid::Uuid;
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum GetLedgerBalanceError {
+    #[error("could not query ledger balance [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum CreditLedgerOnceError {
+    #[error("could not credit ledger [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 pub async fn get_ledger_balance_cents<'e, E>(
     executor: E,
     organization_id: Uuid,
-) -> anyhow::Result<i64>
+) -> Result<i64, GetLedgerBalanceError>
 where
     E: Executor<'e, Database = Postgres>,
 {
+    use GetLedgerBalanceErrorCtx as Ctx;
+
     let balance = sqlx::query_scalar(
         r#"
         SELECT COALESCE(clb.credit_cents, 0) - COALESCE(dlb.debit_cents, 0)
@@ -23,7 +49,8 @@ where
     )
     .bind(organization_id)
     .fetch_one(executor)
-    .await?;
+    .await
+    .with_context(Ctx::database())?;
 
     Ok(balance)
 }
@@ -42,6 +69,7 @@ pub enum CreditOutcome {
 /// idempotency. A redundant webhook/callback delivery is a no-op
 /// ([`CreditOutcome::AlreadyCredited`]); a fresh grant returns the new balance
 /// in the same transaction that inserted the row.
+#[tracing::instrument(skip_all, err)]
 pub async fn credit_ledger_once(
     pool: &PgPool,
     org_id: Uuid,
@@ -50,8 +78,10 @@ pub async fn credit_ledger_once(
     entry_type: &str,
     description: &str,
     paddle_transaction_id: &str,
-) -> anyhow::Result<CreditOutcome> {
-    let mut tx = pool.begin().await?;
+) -> Result<CreditOutcome, CreditLedgerOnceError> {
+    use CreditLedgerOnceErrorCtx as Ctx;
+
+    let mut tx = pool.begin().await.with_context(Ctx::database())?;
 
     let inserted = sqlx::query(
         "INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description, paddle_transaction_id)
@@ -65,16 +95,19 @@ pub async fn credit_ledger_once(
     .bind(description)
     .bind(paddle_transaction_id)
     .execute(&mut *tx)
-    .await?
+    .await
+    .with_context(Ctx::database())?
     .rows_affected();
 
     if inserted == 0 {
-        tx.rollback().await?;
+        tx.rollback().await.with_context(Ctx::database())?;
         return Ok(CreditOutcome::AlreadyCredited);
     }
 
-    let new_balance = get_ledger_balance_cents(&mut *tx, org_id).await?;
-    tx.commit().await?;
+    let new_balance = get_ledger_balance_cents(&mut *tx, org_id)
+        .await
+        .with_context(Ctx::database())?;
+    tx.commit().await.with_context(Ctx::database())?;
 
     Ok(CreditOutcome::Credited { new_balance })
 }

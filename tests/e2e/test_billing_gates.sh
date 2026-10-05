@@ -7,7 +7,7 @@
 #
 # Tests billing enforcement gates:
 #   1. Wait for services
-#   2. Create test user
+#   2. Create test user via e2e-login and claim a username (lifts the gate)
 #   3. Deploy with zero credits — rejected (402)
 #   4. Deploy with $20 credits — rejected (402, below $25 minimum)
 #   5. Deploy with $25 credits — passes billing gate
@@ -177,9 +177,13 @@ if [ -z "$ORG_ID" ] || [ "$ORG_ID" = "null" ]; then
   INSERT INTO organizations (name) VALUES ('e2e-gates-org')
   RETURNING id;
   " 2>/dev/null | head -1 | tr -d ' \n' || true)
+  # Link the user to the org. deploy_logic requires the authenticated user to be
+  # a member of req.org_id (the org carried in the deploy request); without this
+  # row it returns NotOrgMember (403) before ever reaching the balance check, so
+  # the gate would deny regardless of the seeded credit amount.
   docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -c "
-  INSERT INTO organization_members (organization_id, role)
-  VALUES ('$ORG_ID', 'owner');
+  INSERT INTO organization_members (organization_id, user_id, role)
+  VALUES ('$ORG_ID', '$USER_ID', 'owner');
   " >/dev/null 2>&1 || true
 fi
 
@@ -204,7 +208,10 @@ RESOURCE_TYPE_ID=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test 
 SELECT id FROM resource_types WHERE type_code = 'ec2-instance' LIMIT 1;
 " 2>/dev/null | head -1 | tr -d ' \n')
 
-# Create the test app resource that deploy requests will reference
+# Create the test app resource that deploy requests will reference. No git repo is
+# seeded on purpose: this test checks the billing/resource *gate decision*, not real
+# deploys. With no repo, get_commit_sha fails (400) after the billing gate passes —
+# that non-402 result is exactly what steps 5/7 assert to mean "the gate let it through".
 APP_ID=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -A -c "
 INSERT INTO compute_resources (organization_id, provider_account_id, resource_type_id,
   provider_resource_id, resource_name, state, created_by)
@@ -215,6 +222,20 @@ RETURNING id;
 
 log "  Provider account: $PROVIDER_ACCOUNT_ID"
 log "  Test app: $APP_ID"
+
+# Claim a real username. e2e-login seeds the user in the placeholder state, and
+# every protected /api route (including /api/deploy below) runs through
+# username_claim_gate_middleware, which 403s `username_required` until a real
+# username is claimed. Without this, deploy requests never reach the billing
+# gate and every assertion below sees "username not claimed" instead.
+CLAIMED_USERNAME="gate-test-$(date +%s)$RANDOM"
+CLAIM_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GATEWAY_URL/user/username" \
+  -H "X-Session-ID: $SESSION_ID" -H 'Content-Type: application/json' \
+  -d "{\"username\":\"$CLAIMED_USERNAME\"}")
+if [ "$CLAIM_CODE" != "200" ]; then
+  step_fail "Failed to claim username (HTTP $CLAIM_CODE) — protected routes stay gated"
+fi
+log "  Claimed username: $CLAIMED_USERNAME"
 
 step_pass "E2E login (user: ${USER_ID:0:8}..., org: ${ORG_ID:0:8}...)"
 
@@ -254,8 +275,8 @@ log "Testing deploy with \$25 credits..."
 set_balance 2500
 RESULT=$(attempt_deploy)
 
-# Should NOT be 402 — it passes the billing gate. May fail for other reasons
-# (no actual repo/resource) which is fine; we're testing the gate, not the deploy.
+# Should NOT be 402 — it passes the billing gate. Deploy then fails on the missing
+# repo (get_commit_sha -> 400), which is fine; we're testing the gate, not the deploy.
 if [ "$RESULT" != "402" ]; then
   log "  Balance 2500c: passed billing gate (result: $RESULT)"
   step_pass "\$25 credits: billing gate passed (result: $RESULT)"

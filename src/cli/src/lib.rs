@@ -311,10 +311,7 @@ async fn check_gateway_connectivity(
 ) -> Result<(), CheckGatewayConnectivityError> {
     use CheckGatewayConnectivityErrorCtx as Ctx;
 
-    output::verbose(
-        verbose,
-        format!("Testing connectivity to gateway: {}", url),
-    );
+    output::verbose(verbose, format!("Testing connectivity to gateway: {}", url));
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
@@ -2055,14 +2052,16 @@ impl ApiClient {
         let config_dir = base_config.join("caution-cli");
 
         // Migrate from the old api-cli directory name if present
-        if legacy_dir.exists() && !config_dir.exists()
-            && let Err(e) = fs::rename(&legacy_dir, &config_dir) {
-                output::warning(format!(
-                    "Warning: could not migrate config from {} to {}: {e}. You may need to log in again.",
-                    legacy_dir.display(),
-                    config_dir.display()
-                ));
-            }
+        if legacy_dir.exists()
+            && !config_dir.exists()
+            && let Err(e) = fs::rename(&legacy_dir, &config_dir)
+        {
+            output::warning(format!(
+                "Warning: could not migrate config from {} to {}: {e}. You may need to log in again.",
+                legacy_dir.display(),
+                config_dir.display()
+            ));
+        }
 
         output::verbose(verbose, format!("Config directory: {:?}", config_dir));
 
@@ -2197,15 +2196,17 @@ impl ApiClient {
     fn format_api_error(&self, status: reqwest::StatusCode, body: &str) -> String {
         if status == reqwest::StatusCode::FORBIDDEN
             && let Ok(payload) = serde_json::from_str::<LegalAcceptanceRequiredError>(body)
-                && payload.code == "legal_acceptance_required" {
-                    let mut message = self.legal_acceptance_message(&payload.document_type);
-                    if let Some(server_message) = payload.message
-                        && !server_message.trim().is_empty() {
-                            message.push_str("\n\n");
-                            message.push_str(server_message.trim());
-                        }
-                    return message;
-                }
+            && payload.code == "legal_acceptance_required"
+        {
+            let mut message = self.legal_acceptance_message(&payload.document_type);
+            if let Some(server_message) = payload.message
+                && !server_message.trim().is_empty()
+            {
+                message.push_str("\n\n");
+                message.push_str(server_message.trim());
+            }
+            return message;
+        }
 
         if body.trim().is_empty() {
             format!("HTTP {}", status)
@@ -2484,19 +2485,22 @@ impl ApiClient {
                     return Some(Self::expand_identity_path(value));
                 }
             } else if let Some(value) = arg.strip_prefix("-i")
-                && !value.is_empty() {
-                    return Some(Self::expand_identity_path(value));
-                }
+                && !value.is_empty()
+            {
+                return Some(Self::expand_identity_path(value));
+            }
 
             if arg == "-o" {
                 if let Some(value) = iter.next()
-                    && let Some(identity) = Self::identity_from_ssh_option(value) {
-                        return Some(identity);
-                    }
-            } else if let Some(value) = arg.strip_prefix("-o")
-                && let Some(identity) = Self::identity_from_ssh_option(value) {
+                    && let Some(identity) = Self::identity_from_ssh_option(value)
+                {
                     return Some(identity);
                 }
+            } else if let Some(value) = arg.strip_prefix("-o")
+                && let Some(identity) = Self::identity_from_ssh_option(value)
+            {
+                return Some(identity);
+            }
         }
         None
     }
@@ -2512,9 +2516,10 @@ impl ApiClient {
 
     fn expand_identity_path(path: &str) -> PathBuf {
         if let Some(rest) = path.strip_prefix("~/")
-            && let Some(home) = dirs::home_dir() {
-                return home.join(rest);
-            }
+            && let Some(home) = dirs::home_dir()
+        {
+            return home.join(rest);
+        }
         PathBuf::from(path)
     }
 
@@ -2539,20 +2544,23 @@ impl ApiClient {
 
         if let Ok(command) = std::env::var("GIT_SSH_COMMAND")
             && let Some(path) = Self::identity_from_ssh_command(&command)
-                && path.exists() {
-                    return Some(path);
-                }
+            && path.exists()
+        {
+            return Some(path);
+        }
 
         if let Ok(output) = Command::new("git")
             .args(["config", "--get", "core.sshCommand"])
             .output()
-            && output.status.success() {
-                let command = String::from_utf8_lossy(&output.stdout);
-                if let Some(path) = Self::identity_from_ssh_command(command.trim())
-                    && path.exists() {
-                        return Some(path);
-                    }
+            && output.status.success()
+        {
+            let command = String::from_utf8_lossy(&output.stdout);
+            if let Some(path) = Self::identity_from_ssh_command(command.trim())
+                && path.exists()
+            {
+                return Some(path);
             }
+        }
 
         if self.read_caution_git_remote().is_some() {
             for name in ["id_ed25519", "id_ecdsa", "id_rsa"] {
@@ -3412,27 +3420,24 @@ fn resolve_procfile_build_command(
         }
     }
 
-    let containerfile =
-        if !has_explicit_build_command(build_command.as_deref()) {
-            match containerfile.as_deref() {
-                Some(containerfile) => {
-                    let containerfile =
-                        validate_explicit_containerfile_path(containerfile).with_context(
-                            Ctx::invalid_containerfile(),
-                        )?;
-                    if !work_dir.join(&containerfile).is_file() {
-                        return Err(ResolveProcfileBuildCommandError::MissingContainerfile {
-                            path: containerfile,
-                            location: std::panic::Location::caller(),
-                        });
-                    }
-                    Some(containerfile)
+    let containerfile = if !has_explicit_build_command(build_command.as_deref()) {
+        match containerfile.as_deref() {
+            Some(containerfile) => {
+                let containerfile = validate_explicit_containerfile_path(containerfile)
+                    .with_context(Ctx::invalid_containerfile())?;
+                if !work_dir.join(&containerfile).is_file() {
+                    return Err(ResolveProcfileBuildCommandError::MissingContainerfile {
+                        path: containerfile,
+                        location: std::panic::Location::caller(),
+                    });
                 }
-                None => None,
+                Some(containerfile)
             }
-        } else {
-            None
-        };
+            None => None,
+        }
+    } else {
+        None
+    };
 
     Ok(resolve_build_command_in_dir(
         build_command.as_deref(),

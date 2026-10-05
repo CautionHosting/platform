@@ -107,7 +107,7 @@ struct AppCountRow {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("failed to browse {filter} apps while {operation} [{location:?}]")]
+#[error("failed to browse {filter} apps while {operation} [{location}]")]
 pub(crate) struct BrowseAppsError {
     filter: AppFilter,
     operation: &'static str,

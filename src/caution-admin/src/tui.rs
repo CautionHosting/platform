@@ -35,11 +35,18 @@ pub use render::render;
 const TUI_PAGE_SIZE: u32 = 50;
 static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-pub async fn run(database: Database, platform_sha: Option<String>) -> Result<(), RunTuiError> {
+pub async fn run(
+    database: Database,
+    platform_sha: Option<String>,
+    enable_write: bool,
+) -> Result<(), RunTuiError> {
     use RunTuiErrorCtx as Ctx;
 
     let mut session = TerminalSession::new().with_context(Ctx::new(RunTuiStage::Initialize))?;
     let mut state = AppState::new();
+    if enable_write {
+        state.enable_write = true;
+    }
     let mut aws_load = None;
 
     while !state.should_quit {
@@ -101,7 +108,7 @@ impl fmt::Display for RunTuiStage {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("terminal explorer failed while {stage} [{location:?}]")]
+#[error("terminal explorer failed while {stage} [{location}]")]
 pub struct RunTuiError {
     stage: RunTuiStage,
     #[location]
@@ -135,6 +142,27 @@ async fn handle_key(
             apps::cycle_filter(database, state).await;
             None
         }
+        KeyOutcome::ConfirmAction => {
+            execute_confirmed_action(state).await;
+            None
+        }
+    }
+}
+
+async fn execute_confirmed_action(state: &mut AppState) {
+    let Some(confirmation) = state.pending_confirmation.take() else {
+        return;
+    };
+    match confirmation.action {
+        crate::state::ActionKind::ResetWebauthn => {
+            match crate::actions::reset_webauthn(confirmation.user_id).await {
+                Ok(()) => state.set_status(format!(
+                    "WebAuthn credentials reset for {}",
+                    confirmation.username
+                )),
+                Err(error) => state.set_error(error_message(&error)),
+            }
+        }
     }
 }
 
@@ -167,6 +195,7 @@ enum KeyOutcome {
     Page(PageDirection),
     Sort,
     Filter,
+    ConfirmAction,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -181,6 +210,15 @@ enum PageDirection {
 fn classify_key(state: &mut AppState, key: KeyEvent) -> KeyOutcome {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         state.should_quit = true;
+        return KeyOutcome::Handled;
+    }
+
+    if state.pending_confirmation.is_some() {
+        match key.code {
+            KeyCode::Enter => return KeyOutcome::ConfirmAction,
+            KeyCode::Esc => state.pending_confirmation = None,
+            _ => {}
+        }
         return KeyOutcome::Handled;
     }
 
@@ -327,6 +365,18 @@ async fn open_selected(database: &Database, state: &mut AppState) -> Option<AwsL
                 Ok(page) => state.open_related(source, relation.relation, page),
                 Err(error) => state.set_error(error_message(&error)),
             }
+        }
+        Some(Row::Action(action)) => {
+            let Screen::Resource(ref resource) = state.current.screen else {
+                state.set_error("action unavailable from this screen");
+                return None;
+            };
+            state.pending_confirmation = crate::state::PendingConfirmation {
+                action,
+                user_id: resource.id,
+                username: resource.label.clone(),
+            }
+            .into();
         }
         None => state.set_status("nothing to open"),
     }
@@ -554,7 +604,7 @@ impl fmt::Display for NewTerminalSessionStage {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("terminal initialization failed while {stage} [{location:?}]")]
+#[error("terminal initialization failed while {stage} [{location}]")]
 struct NewTerminalSessionError {
     stage: NewTerminalSessionStage,
     #[location]
@@ -571,7 +621,7 @@ fn leave_alternate_screen(output: &mut impl io::Write) -> Result<(), LeaveAltern
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum LeaveAlternateScreenError {
-    #[error("failed to leave the alternate terminal screen [{location:?}]")]
+    #[error("failed to leave the alternate terminal screen [{location}]")]
     Execute {
         #[location]
         location: Location,

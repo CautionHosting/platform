@@ -203,6 +203,16 @@ fi
 
 db_query "UPDATE users SET email = 'legal-e2e@example.com', email_verified_at = NOW(), payment_method_added_at = NOW() WHERE id = '$USER_ID';" >/dev/null
 
+# e2e-login seeds a placeholder account; every protected /api route below is
+# gated by username_claim_gate_middleware until a real username is claimed.
+# Claim one now so the legal/status requests reach their handlers.
+CLAIMED_USERNAME="legal-$(date +%s)$RANDOM"
+CLAIM_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GATEWAY_URL/user/username" \
+    -H "X-Session-ID: $SESSION_ID" -H 'Content-Type: application/json' \
+    -d "{\"username\":\"$CLAIMED_USERNAME\"}")
+[ "$CLAIM_CODE" = "200" ] || step_fail "Failed to claim username (HTTP $CLAIM_CODE) — protected routes stay gated"
+log "Claimed username: $CLAIMED_USERNAME"
+
 STATUS_RESPONSE=$(curl -sf "$GATEWAY_URL/api/user/status" -H "X-Session-ID: $SESSION_ID")
 HAS_LEGAL=$(echo "$STATUS_RESPONSE" | jq 'has("legal")')
 TOS_ACTIVE=$(echo "$STATUS_RESPONSE" | jq -r '.legal.terms_of_service.active_version')
