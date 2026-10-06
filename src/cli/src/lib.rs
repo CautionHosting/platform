@@ -28,6 +28,7 @@ mod auth;
 mod byoc;
 mod cache;
 mod credentials;
+mod env_notice;
 mod pgp_keys;
 mod secrets;
 mod ssh_keys;
@@ -342,7 +343,7 @@ async fn check_gateway_connectivity(
 
 #[derive(Parser)]
 #[command(name = "caution")]
-#[command(version = "0.1.0")]
+#[command(version = env_notice::BUILD_ID)]
 #[command(about = "Caution.co CLI for deploying and verifying reproducible enclaves")]
 struct Cli {
     #[command(subcommand)]
@@ -405,6 +406,11 @@ enum Commands {
     },
     #[command(about = "Logout and clear local session")]
     Logout,
+    #[command(
+        about = "Show build and run environment findings",
+        visible_alias = "env"
+    )]
+    Environment,
     #[command(about = "Show account information")]
     Account {
         #[command(subcommand)]
@@ -1329,14 +1335,25 @@ struct ApiClient {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum ApiClientNewError {
-    #[error("could not find config directory [{location:?}]")]
+    #[error("failed to resolve config directory [{location:?}]")]
     ConfigDir {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum ConfigDirError {
+    #[error("could not find config directory [{location:?}]")]
+    NotFound {
         #[location]
         location: Location,
     },
 
     #[error("failed to create config directory [{location:?}]")]
-    CreateConfigDir {
+    Create {
         #[location]
         location: Location,
         #[source]
@@ -2034,6 +2051,33 @@ pub(crate) enum ResolveLocalBuildCommandFromDirError {
     },
 }
 
+/// Resolve `<config>/caution-cli`, migrating the legacy `api-cli` directory
+/// and creating it if needed.
+pub(crate) fn config_dir() -> Result<PathBuf, ConfigDirError> {
+    use ConfigDirErrorCtx as Ctx;
+
+    let base_config = dirs::config_dir().ok_or_else(|| ConfigDirError::NotFound {
+        location: std::panic::Location::caller(),
+    })?;
+    let legacy_dir = base_config.join("api-cli");
+    let config_dir = base_config.join("caution-cli");
+
+    // Migrate from the old api-cli directory name if present
+    if legacy_dir.exists()
+        && !config_dir.exists()
+        && let Err(e) = fs::rename(&legacy_dir, &config_dir)
+    {
+        output::warning(format!(
+            "Warning: could not migrate config from {} to {}: {e}. You may need to log in again.",
+            legacy_dir.display(),
+            config_dir.display()
+        ));
+    }
+
+    fs::create_dir_all(&config_dir).with_context(Ctx::create())?;
+    Ok(config_dir)
+}
+
 impl ApiClient {
     fn new(
         base_url: &str,
@@ -2045,27 +2089,8 @@ impl ApiClient {
 
         output::verbose(verbose, "Initializing API client...");
 
-        let base_config = dirs::config_dir().ok_or_else(|| ApiClientNewError::ConfigDir {
-            location: std::panic::Location::caller(),
-        })?;
-        let legacy_dir = base_config.join("api-cli");
-        let config_dir = base_config.join("caution-cli");
-
-        // Migrate from the old api-cli directory name if present
-        if legacy_dir.exists()
-            && !config_dir.exists()
-            && let Err(e) = fs::rename(&legacy_dir, &config_dir)
-        {
-            output::warning(format!(
-                "Warning: could not migrate config from {} to {}: {e}. You may need to log in again.",
-                legacy_dir.display(),
-                config_dir.display()
-            ));
-        }
-
+        let config_dir = config_dir().with_context(Ctx::config_dir())?;
         output::verbose(verbose, format!("Config directory: {:?}", config_dir));
-
-        fs::create_dir_all(&config_dir).with_context(Ctx::create_config_dir())?;
         let config_path = config_dir.join("config.json");
 
         // Local deployment info in the current git repo (optional - may not have a valid cwd)
@@ -3522,11 +3547,20 @@ pub async fn run() -> Result<(), RunError> {
 
     let cli = Cli::parse();
 
-    output::verbose(cli.verbose, "API CLI v0.1.0");
+    output::verbose(cli.verbose, format!("API CLI v{}", env_notice::BUILD_ID));
     output::verbose(cli.verbose, format!("Gateway URL: {}", cli.url));
     output::verbose(cli.verbose, format!("Command: {:?}", cli.command));
 
     validate_global_qr(&cli.command, cli.qr)?;
+
+    // Local diagnostic: needs no API client, so it stays reachable when the
+    // config directory is unavailable.
+    if matches!(cli.command, Commands::Environment) {
+        env_notice::print_report(cli.verbose);
+        return Ok(());
+    }
+
+    env_notice::gate(cli.verbose);
 
     if let Err(e) = check_dependencies(cli.verbose) {
         output::error(format!("Dependency check failed: {}", e));
@@ -3580,6 +3614,8 @@ pub async fn run() -> Result<(), RunError> {
                     .with_context(Ctx::command_dispatch())?;
             }
         }
+        // Handled before API client initialization
+        Commands::Environment => {}
         Commands::Logout => {
             auth::logout(&client)
                 .await
@@ -3944,6 +3980,14 @@ mod tests {
             resolve_reproduction_e2e_mode(Some(&tls), true),
             Some(E2eMode::Tls)
         );
+    }
+
+    #[test]
+    fn environment_parses_with_alias() {
+        for name in ["environment", "env"] {
+            let cli = Cli::try_parse_from(["caution", name]).unwrap();
+            assert!(matches!(cli.command, Commands::Environment));
+        }
     }
 
     #[test]

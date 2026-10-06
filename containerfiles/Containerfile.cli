@@ -41,6 +41,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     find /usr/local/cargo/registry -name '.cargo-ok' -delete 2>/dev/null || true && \
     cargo fetch --locked --target $TARGET_ARCH
 
+# Keys the CLI's one-time environment acknowledgement (.git is not in the context)
+ARG CAUTION_CLI_GIT_SHA=
+ENV CAUTION_CLI_GIT_SHA=${CAUTION_CLI_GIT_SHA}
+
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,id=cli-target,target=/build/target \

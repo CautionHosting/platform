@@ -2699,6 +2699,7 @@ pub(crate) async fn verify(
             if let Some(backup) = backup {
                 output::status(format!("Previous state: {}", backup.display()));
             }
+            crate::env_notice::verify_reminder();
 
             Ok(())
         }

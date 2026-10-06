@@ -162,6 +162,7 @@ build-cli:
 		--progress=plain \
 		--provenance=false \
 		--build-arg SOURCE_DATE_EPOCH=1 \
+		--build-arg CAUTION_CLI_GIT_SHA=$(GIT_REF) \
 		$(NO_CACHE) \
 		-t caution-cli \
 		-f ./containerfiles/Containerfile.cli \
@@ -334,6 +335,7 @@ build-cli-host:
 	mkdir -p $(CLI_OUT_DIR); \
 	OPENSSL_NO_VENDOR=1 \
 	CARGO_NET_GIT_FETCH_WITH_CLI=true \
+	CAUTION_CLI_GIT_SHA=$(GIT_REF) \
 	cargo build --release --locked -p cli; \
 	install -m 0755 target/release/caution$(CLI_HOST_EXE_SUFFIX) $(CLI_OUT_DIR)/$(CLI_HOST_BINARY)
 	@echo "Host-toolchain CLI binary available at $(CLI_OUT_DIR)/$(CLI_HOST_BINARY)"
