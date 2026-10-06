@@ -17,11 +17,11 @@
 //! 2. **`SentryLayer`** (a Tower layer) wraps each request. At request start
 //!    it generates a request ID and stores it in a `tokio::task_local`. After
 //!    the handler resolves, it drains that request's breadcrumbs from the map,
-//!    creates a fresh per-request Sentry `Hub`, injects the breadcrumbs into
-//!    the Hub's scope, and captures any attached error against that specific
-//!    Hub. Because the Hub is held by reference (not resolved from a
-//!    thread-local), this is correct regardless of which OS thread the task
-//!    was rescheduled onto.
+//!    creates a fresh per-request Sentry `Hub` (with an empty scope, reusing
+//!    only the global client), injects the breadcrumbs into that Hub's scope,
+//!    and captures any attached error against it. Because the Hub is a new
+//!    instance rather than the thread-local one, state never leaks across
+//!    concurrent requests regardless of OS-thread scheduling.
 //!
 //! ## Setup
 //!
@@ -54,7 +54,7 @@ use std::task::{Context, Poll};
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use sentry::{Breadcrumb, Hub};
+use sentry::{Breadcrumb, Hub, Scope};
 use tower::{Layer, Service};
 use tracing_subscriber::layer::{Context as SubContext, Layer as SubLayer};
 
@@ -308,6 +308,39 @@ pub fn attach(
 }
 
 // ---------------------------------------------------------------------------
+// Spawned-task helpers (for long-running work that outlives the response)
+// ---------------------------------------------------------------------------
+
+/// Drains and removes all breadcrumbs accumulated for `request_id` from the
+/// shared map. Returns an empty vec if none exist.
+///
+/// Use this in a spawned task's error path to collect breadcrumbs before
+/// reporting to Sentry via [`capture_error_with_breadcrumbs`].
+#[tracing::instrument(skip_all)]
+pub fn drain_breadcrumbs(request_id: &uuid::Uuid) -> Vec<Breadcrumb> {
+    let mut map = BREADCRUMBS.lock().unwrap_or_else(|e| e.into_inner());
+    map.remove(request_id).unwrap_or_default()
+}
+
+/// Captures an error to Sentry with the given breadcrumbs attached, using a
+/// fresh isolated Hub (empty scope, global client).
+///
+/// This is the entry point for reporting errors from spawned tasks that
+/// outlive the HTTP response (e.g. deploy workers).
+#[tracing::instrument(skip_all)]
+pub fn capture_error_with_breadcrumbs(
+    error: &(impl std::error::Error + Send + Sync),
+    breadcrumbs: Vec<Breadcrumb>,
+) {
+    let client = Hub::main().client();
+    let hub = Arc::new(Hub::new(client, Arc::new(Scope::default())));
+    for crumb in breadcrumbs {
+        hub.add_breadcrumb(crumb);
+    }
+    hub.capture_error(error);
+}
+
+// ---------------------------------------------------------------------------
 // SentryLayer (Tower layer)
 // ---------------------------------------------------------------------------
 
@@ -386,11 +419,13 @@ where
                         "Reporting error to Sentry"
                     );
 
-                    // Create a per-request Hub so breadcrumbs are isolated
-                    // from other concurrent requests. We hold the Hub by
-                    // reference (Arc), so this is correct regardless of which
-                    // OS thread we're on.
-                    let hub = Arc::new(Hub::current());
+                    // Create a fresh per-request Hub so breadcrumbs are fully
+                    // isolated from other concurrent requests. We reuse the
+                    // main hub's client (which carries release, environment,
+                    // DSN) but start with an empty scope so no state leaks
+                    // across requests or users.
+                    let client = Hub::main().client();
+                    let hub = Arc::new(Hub::new(client, Arc::new(Scope::default())));
                     for crumb in breadcrumbs {
                         hub.add_breadcrumb(crumb);
                     }

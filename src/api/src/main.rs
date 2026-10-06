@@ -3096,19 +3096,35 @@ async fn deploy_handler(
     Extension(auth): Extension<AuthContext>,
     validated_types::Validated(req): validated_types::Validated<DeployRequest>,
 ) -> Response {
+    use sentry_middleware::{capture_error_with_breadcrumbs, drain_breadcrumbs, REQUEST_ID};
+
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
     let deploy_attempt_id = Uuid::new_v4();
+
+    // Capture the request ID and any breadcrumbs accumulated so far (pre-spawn
+    // phase: auth, validation, handler setup). We remove them from the shared
+    // map so SentryService's later drain is a no-op.
+    let request_id = REQUEST_ID.get();
+    let pre_spawn_breadcrumbs = drain_breadcrumbs(&request_id);
 
     // Spawn the deploy logic in a separate task
     let db_for_recovery = state.db.clone();
     let app_id_for_recovery = req.app_id;
     let org_id_for_recovery = req.org_id;
     tokio::spawn(async move {
-        let result = deploy_logic(state, auth, req, deploy_attempt_id, tx.clone()).await;
+        // Set REQUEST_ID so tracing events during the deploy phase are
+        // collected into the BREADCRUMBS map by RequestBreadcrumbLayer.
+        let result = REQUEST_ID
+            .scope(request_id, async {
+                deploy_logic(state, auth, req, deploy_attempt_id, tx.clone()).await
+            })
+            .await;
 
-        // Send final result as JSON
         match result {
             Ok(response) => {
+                // Clean up post-spawn breadcrumbs (no error to report).
+                drain_breadcrumbs(&request_id);
+
                 let json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
                 let _ = tx.send(Ok(bytes::Bytes::from(format!("{}\n", json)))).await;
             }
@@ -3130,6 +3146,13 @@ async fn deploy_handler(
                 {
                     tracing::error!("Failed to reset resource state after deploy error: {}", e);
                 }
+
+                // Collect all breadcrumbs (pre-spawn + post-spawn) and report
+                // the failure to Sentry with an isolated hub.
+                let post_spawn = drain_breadcrumbs(&request_id);
+                let mut all_breadcrumbs = pre_spawn_breadcrumbs;
+                all_breadcrumbs.extend(post_spawn);
+                capture_error_with_breadcrumbs(&error, all_breadcrumbs);
 
                 let (status, msg) = error.client_response();
                 let _ = tx.send(Ok(milestone_error(msg))).await;
