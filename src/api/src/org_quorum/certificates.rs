@@ -94,8 +94,8 @@ fn verify_proof(
                 "invalid certificate-service PCR policy",
             ))?;
         // Only Bootproof parses/verifies the untrusted COSE evidence. No data is
-        // consumed until AWS chain, signature, nonce absence and PCR checks pass.
-        if let Ok(document) = nitro.verify_at_attestation_time(None) {
+        // consumed until AWS chain, signature, nonce absence, PCR and bundle-hash checks pass.
+        if let Ok(document) = nitro.verify_at_attestation_time(&hash, None) {
             let at = verify_payload(document, &hash)?;
             if valid_at(set, at) {
                 return Ok(at);

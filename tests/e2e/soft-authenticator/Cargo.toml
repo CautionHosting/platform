@@ -37,12 +37,12 @@ anyhow = "1"
 base64 = "0.22"
 sha2 = "0.10"
 sequoia-openpgp = "1"
-public-certificate-models = { git = "https://codeberg.org/caution/locksmith.git", rev = "accc9d36c3c47fc1ea2802f46266f508a19f02d0" }
+public-certificate-models = { git = "https://codeberg.org/caution/locksmith.git", rev = "890a46a72c4aee6c6faccddd496c16653e98a765" }
 serde_cbor = "0.11"
 hex = "0.4"
 uuid = { version = "1", features = ["v4"] }
-public-cert-service = { git = "https://codeberg.org/caution/locksmith.git", rev = "accc9d36c3c47fc1ea2802f46266f508a19f02d0", features = ["unsafe-e2e"], optional = true }
-locksmith = { git = "https://codeberg.org/caution/locksmith.git", rev = "accc9d36c3c47fc1ea2802f46266f508a19f02d0", features = ["unsafe-e2e"], optional = true }
+public-cert-service = { git = "https://codeberg.org/caution/locksmith.git", rev = "890a46a72c4aee6c6faccddd496c16653e98a765", features = ["unsafe-e2e"], optional = true }
+locksmith = { git = "https://codeberg.org/caution/locksmith.git", rev = "890a46a72c4aee6c6faccddd496c16653e98a765", features = ["unsafe-e2e"], optional = true }
 keyforkd = { version = "0.1.5", registry = "distrust", default-features = false, optional = true }
 keyforkd-client = { version = "0.2.2", registry = "distrust", default-features = false, features = ["ed25519"], optional = true }
 keyfork-derive-openpgp = { version = "0.2.1", registry = "distrust", default-features = false, optional = true }

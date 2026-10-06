@@ -2,13 +2,15 @@
 
 For existing unversioned PGP bundles, follow [Legacy V0 import and recovery](legacy-v0.md).
 
-Source status, 28 September 2026: Platform selects Locksmith
-`accc9d36c3c47fc1ea2802f46266f508a19f02d0` for API/CLI dependencies,
-the mock helper and the default enclave runtime. This revision adds a 60-second
-future-skew allowance for external-PGP share signatures and bounded rejection
-logging. The pins are aligned; this is source configuration, not a deployment
-record. Bootproof SDK consumers remain at
-`821b5c63e80f082f6d67ba3695c11416933489ec`; the builder's default Bootproof daemon
+Source status, 6 October 2026: Platform selects Locksmith
+`890a46a72c4aee6c6faccddd496c16653e98a765` for API/CLI dependencies,
+the mock helper and the default enclave runtime. This revision enforces the
+expected bundle hash inside Bootproof's historical verifier and retains the
+60-second future-skew allowance and bounded rejection logging for external-PGP
+share signatures. The pins are aligned; this is source configuration, not a
+deployment record. Platform and Locksmith Bootproof SDK consumers use
+`2590edb0f23cae6589bc73cc8324673023ac1deb`, requiring the expected artifact hash
+when verifying a historical proof; the builder's default Bootproof daemon
 is `b03721957e3850931f5b53627e7c3d1c302a06fe`.
 
 Current V1 creation, proof verification, PGP/passkey/mixed recovery, native and
@@ -114,7 +116,7 @@ token and is part of that trust boundary.
 Rebuild/redeploy API, gateway, CLI and application images at the aligned revisions;
 review any `LOCKSMITH_COMMIT` override. Existing environment files take precedence
 over the builder default and are not updated when `env.example` changes. Update
-the override to `accc9d36c3c47fc1ea2802f46266f508a19f02d0`, or remove it to use the
+the override to `890a46a72c4aee6c6faccddd496c16653e98a765`, or remove it to use the
 default, before rebuilding. The old `2db332a` daemon only loads raw V0 bundles and
 cannot load current V1 or ImportedV0 artifacts. Configure:
 

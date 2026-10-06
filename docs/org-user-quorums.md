@@ -346,10 +346,12 @@ completed remotely; investigate before submitting another creation request.
 ## Dependency and validation boundary
 
 The shared models and loader are pinned to the Locksmith revision recorded in
-`Cargo.toml` and `Cargo.lock`. All Bootproof SDK consumers use the historical
-verification revision `821b5c63e80f082f6d67ba3695c11416933489ec`, including the existing
-ES384 encoding fix. No old-remote patch or local path dependency is required.
-The default Locksmith daemon revision is also `accc9d36c3c47fc1ea2802f46266f508a19f02d0`,
+`Cargo.toml` and `Cargo.lock`. Platform and Locksmith Bootproof SDK consumers use the historical
+verification revision `2590edb0f23cae6589bc73cc8324673023ac1deb`, including the existing
+ES384 encoding fix. The certificate verifier passes the locally computed bundle
+hash to Bootproof, which checks `user_data` before returning the authenticated
+payload. No old-remote patch or local path dependency is required.
+The default Locksmith daemon revision is also `890a46a72c4aee6c6faccddd496c16653e98a765`,
 matching the API/CLI loader. `LOCKSMITH_COMMIT` still overrides this default.
 The standalone mock E2E helper uses the same revision. This revision includes
 holder-identity checks during shard submission, certified release indices, and

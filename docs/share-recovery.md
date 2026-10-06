@@ -36,7 +36,7 @@ file SHA-256 is `82e74d053976b47edba6e4f11b143c3184bc422c67b3a16c3599bee924e0403
 This is not fresh real-Nitro, physical-device or deployment evidence.
 
 Shared Rust dependencies and the default enclave runtime select Locksmith
-`accc9d36c3c47fc1ea2802f46266f508a19f02d0`, including explicit ImportedV0 recovery,
+`890a46a72c4aee6c6faccddd496c16653e98a765`, including explicit ImportedV0 recovery,
 expired nonparticipant handling, durable legacy fixtures, the V1 key-service
 profile, certified release indices, ECDH identity checks and smartcard PIN fixes.
 It also allows up to 60 seconds of future skew for external-PGP share signatures

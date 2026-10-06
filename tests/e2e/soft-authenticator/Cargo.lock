@@ -468,7 +468,7 @@ dependencies = [
 [[package]]
 name = "bootproof"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/bootproof.git?rev=821b5c63e80f082f6d67ba3695c11416933489ec#821b5c63e80f082f6d67ba3695c11416933489ec"
+source = "git+https://codeberg.org/caution/bootproof.git?rev=2590edb0f23cae6589bc73cc8324673023ac1deb#2590edb0f23cae6589bc73cc8324673023ac1deb"
 dependencies = [
  "aws-nitro-enclaves-nsm-api",
  "serde_bytes",
@@ -479,7 +479,7 @@ dependencies = [
 [[package]]
 name = "bootproof-sdk"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/bootproof.git?rev=821b5c63e80f082f6d67ba3695c11416933489ec#821b5c63e80f082f6d67ba3695c11416933489ec"
+source = "git+https://codeberg.org/caution/bootproof.git?rev=2590edb0f23cae6589bc73cc8324673023ac1deb#2590edb0f23cae6589bc73cc8324673023ac1deb"
 dependencies = [
  "coset",
  "ring",
@@ -2059,7 +2059,7 @@ dependencies = [
 [[package]]
 name = "keymaker-models"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=accc9d36c3c47fc1ea2802f46266f508a19f02d0#accc9d36c3c47fc1ea2802f46266f508a19f02d0"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=890a46a72c4aee6c6faccddd496c16653e98a765#890a46a72c4aee6c6faccddd496c16653e98a765"
 dependencies = [
  "serde",
  "serde_cbor",
@@ -2173,7 +2173,7 @@ dependencies = [
 [[package]]
 name = "locksmith"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=accc9d36c3c47fc1ea2802f46266f508a19f02d0#accc9d36c3c47fc1ea2802f46266f508a19f02d0"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=890a46a72c4aee6c6faccddd496c16653e98a765#890a46a72c4aee6c6faccddd496c16653e98a765"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2973,7 +2973,7 @@ dependencies = [
 [[package]]
 name = "public-cert-service"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=accc9d36c3c47fc1ea2802f46266f508a19f02d0#accc9d36c3c47fc1ea2802f46266f508a19f02d0"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=890a46a72c4aee6c6faccddd496c16653e98a765#890a46a72c4aee6c6faccddd496c16653e98a765"
 dependencies = [
  "anyhow",
  "axum",
@@ -3004,7 +3004,7 @@ dependencies = [
 [[package]]
 name = "public-certificate-models"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=accc9d36c3c47fc1ea2802f46266f508a19f02d0#accc9d36c3c47fc1ea2802f46266f508a19f02d0"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=890a46a72c4aee6c6faccddd496c16653e98a765#890a46a72c4aee6c6faccddd496c16653e98a765"
 dependencies = [
  "serde",
 ]
