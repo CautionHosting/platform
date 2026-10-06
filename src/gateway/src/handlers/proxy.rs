@@ -22,6 +22,48 @@ pub struct BuildTargetUrlError {
     location: dterror::Location,
 }
 
+/// A proxied request that never completed a round-trip with the backend.
+///
+/// These are the gateway's own 502s: the backend was unreachable or its
+/// response could not be read, so the backend never produced (or we could not
+/// observe) a response of its own. The gateway is therefore the only service
+/// that can report them to Sentry — attaching this to the 502 response lets
+/// [`sentry_middleware::SentryLayer`] capture it exactly once, without
+/// double-reporting when the backend did handle the request and reported its
+/// own error.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum BackendUnreachable {
+    #[error("failed to construct backend URL [{location}]")]
+    BuildUrl {
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+    #[error("backend request failed [{location}]")]
+    Send {
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+    #[error("failed to read backend response [{location}]")]
+    ReadResponse {
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+}
+
+/// Build the gateway's 502 response and attach [`BackendUnreachable`] so the
+/// Sentry layer reports it. The client-visible body is fixed and identical to
+/// the previous plain `(StatusCode::BAD_GATEWAY, msg)` response.
+fn backend_unavailable_response(error: BackendUnreachable, message: &'static str) -> Response {
+    sentry_middleware::attach(
+        (StatusCode::BAD_GATEWAY, message).into_response(),
+        error,
+    )
+}
+
 #[tracing::instrument(skip_all)]
 fn build_api_target_url(
     api_service_url: &str,
@@ -131,14 +173,26 @@ pub async fn metering_proxy_handler(
 
     let proxy_response = proxy_req.send().await.map_err(|e| {
         tracing::error!("Metering proxy request failed: {:?}", e);
-        (StatusCode::BAD_GATEWAY, "Metering service unavailable").into_response()
+        backend_unavailable_response(
+            BackendUnreachable::Send {
+                location: std::panic::Location::caller(),
+                source: Box::new(e),
+            },
+            "Metering service unavailable",
+        )
     })?;
 
     let status = proxy_response.status();
     let resp_headers = proxy_response.headers().clone();
     let resp_body = proxy_response.bytes().await.map_err(|e| {
         tracing::error!("Failed to read metering response: {:?}", e);
-        (StatusCode::BAD_GATEWAY, "Failed to read metering response").into_response()
+        backend_unavailable_response(
+            BackendUnreachable::ReadResponse {
+                location: std::panic::Location::caller(),
+                source: Box::new(e),
+            },
+            "Failed to read metering response",
+        )
     })?;
 
     let mut response = Response::builder().status(status);
@@ -165,7 +219,13 @@ pub async fn proxy_handler(
     let target_url = build_api_target_url(&state.api_service_url, path, req.uri().query())
         .map_err(|e| {
             tracing::error!(raw_path = %path, error = ?e, "Failed to construct backend URL");
-            (StatusCode::BAD_GATEWAY, "Backend service unavailable").into_response()
+            backend_unavailable_response(
+                BackendUnreachable::BuildUrl {
+                    location: std::panic::Location::caller(),
+                    source: Box::new(e),
+                },
+                "Backend service unavailable",
+            )
         })?;
 
     let session_id_header = req.headers().get("X-Session-ID").cloned();
@@ -237,7 +297,13 @@ pub async fn proxy_handler(
 
     let proxy_response = proxy_req.send().await.map_err(|e| {
         tracing::error!("Proxy request failed: {:?}", e);
-        (StatusCode::BAD_GATEWAY, "Backend service unavailable").into_response()
+        backend_unavailable_response(
+            BackendUnreachable::Send {
+                location: std::panic::Location::caller(),
+                source: Box::new(e),
+            },
+            "Backend service unavailable",
+        )
     })?;
 
     let status = proxy_response.status();
@@ -245,7 +311,13 @@ pub async fn proxy_handler(
 
     let body_bytes = proxy_response.bytes().await.map_err(|e| {
         tracing::error!("Failed to read proxy response body: {:?}", e);
-        (StatusCode::BAD_GATEWAY, "Failed to read backend response").into_response()
+        backend_unavailable_response(
+            BackendUnreachable::ReadResponse {
+                location: std::panic::Location::caller(),
+                source: Box::new(e),
+            },
+            "Failed to read backend response",
+        )
     })?;
 
     let mut response = Response::builder().status(status);
