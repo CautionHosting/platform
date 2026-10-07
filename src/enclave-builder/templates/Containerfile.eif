@@ -35,7 +35,9 @@ ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C link-arg=-Wl,
 ENV TARGET_ARCH="x86_64-unknown-linux-musl"
 
 WORKDIR /build-steve
-RUN git clone https://codeberg.org/caution/steve.git . && \
+# A failed clone leaves the directory empty, so the GitHub mirror can retry in place.
+RUN (git clone https://codeberg.org/caution/steve.git . || \
+     git clone https://github.com/CautionHosting/steve.git .) && \
     git checkout {{STEVE_COMMIT}}
 
 RUN cargo fetch --locked --target $TARGET_ARCH
@@ -66,10 +68,19 @@ ENV NETTLE_STATIC=1
 ENV LIBPCSCLITE_STATIC=1
 
 WORKDIR /build-locksmith
-RUN git clone https://codeberg.org/caution/locksmith.git . && \
+# A failed clone leaves the directory empty, so the GitHub mirror can retry in place.
+RUN (git clone https://codeberg.org/caution/locksmith.git . || \
+     git clone https://github.com/CautionHosting/locksmith.git .) && \
     git checkout {{LOCKSMITH_COMMIT}}
 
-RUN cargo fetch --locked --target $TARGET_ARCH
+# Cargo.lock pins bootproof from Codeberg; on failure, fetch the same rev from
+# the GitHub mirror. insteadOf only rewrites transport, so Cargo.lock is unchanged.
+RUN cargo fetch --locked --target $TARGET_ARCH || \
+    CARGO_NET_GIT_FETCH_WITH_CLI=true \
+    GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0=url.https://github.com/CautionHosting/.insteadOf \
+    GIT_CONFIG_VALUE_0=https://codeberg.org/caution/ \
+    cargo fetch --locked --target $TARGET_ARCH
 
 RUN cargo build --release --locked --target ${TARGET_ARCH} -p locksmith \
       && install -D -m 0755 /build-locksmith/target/${TARGET_ARCH}/release/locksmithd /binaries/locksmithd \
@@ -88,7 +99,9 @@ ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C link-arg=-Wl,
 ENV TARGET_ARCH="x86_64-unknown-linux-musl"
 
 WORKDIR /build-bootproof
-RUN git clone https://codeberg.org/caution/bootproof.git . && \
+# A failed clone leaves the directory empty, so the GitHub mirror can retry in place.
+RUN (git clone https://codeberg.org/caution/bootproof.git . || \
+     git clone https://github.com/CautionHosting/bootproof.git .) && \
     git checkout {{BOOTPROOF_COMMIT}}
 
 RUN cargo fetch --locked --target $TARGET_ARCH

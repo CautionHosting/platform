@@ -3,8 +3,17 @@
 
 const ENCLAVE_SOURCE_BASE: &str = "https://codeberg.org/caution/enclaveos/archive";
 pub const FRAMEWORK_SOURCE: &str = "https://codeberg.org/caution/platform/archive/main.tar.gz";
-const PLATFORM_CODEBERG_ARCHIVE_PREFIX: &str = "https://codeberg.org/caution/platform/archive/";
-const PLATFORM_GITHUB_ARCHIVE_PREFIX: &str = "https://github.com/CautionHosting/platform/archive/";
+/// Canonical Codeberg archive prefixes and their GitHub mirrors.
+const ARCHIVE_MIRRORS: [(&str, &str); 2] = [
+    (
+        "https://codeberg.org/caution/platform/archive/",
+        "https://github.com/CautionHosting/platform/archive/",
+    ),
+    (
+        "https://codeberg.org/caution/enclaveos/archive/",
+        "https://github.com/CautionHosting/enclaveos/archive/",
+    ),
+];
 
 pub fn enclave_source_url(commit: &str) -> String {
     format!("{}/{}.tar.gz", ENCLAVE_SOURCE_BASE, commit)
@@ -22,8 +31,10 @@ pub fn pin_archive_url_to_commit(url: &str, commit: &str) -> String {
 pub fn archive_url_candidates(url: &str) -> Vec<String> {
     let mut candidates = vec![url.to_string()];
 
-    if let Some(archive_name) = url.strip_prefix(PLATFORM_CODEBERG_ARCHIVE_PREFIX) {
-        candidates.push([PLATFORM_GITHUB_ARCHIVE_PREFIX, archive_name].concat());
+    for (canonical, mirror) in ARCHIVE_MIRRORS {
+        if let Some(archive_name) = url.strip_prefix(canonical) {
+            candidates.push([mirror, archive_name].concat());
+        }
     }
 
     candidates
@@ -1197,13 +1208,26 @@ mod tests {
     }
 
     #[test]
-    fn test_archive_url_candidates_adds_platform_mirror() {
-        for archive_name in ["main.tar.gz", "abc123.tar.gz"] {
-            let codeberg = [PLATFORM_CODEBERG_ARCHIVE_PREFIX, archive_name].concat();
-            let github = [PLATFORM_GITHUB_ARCHIVE_PREFIX, archive_name].concat();
+    fn test_archive_url_candidates_adds_configured_mirrors() {
+        for (codeberg_prefix, github_prefix) in ARCHIVE_MIRRORS {
+            for archive_name in ["main.tar.gz", "abc123.tar.gz"] {
+                let codeberg = [codeberg_prefix, archive_name].concat();
+                let github = [github_prefix, archive_name].concat();
 
-            assert_eq!(archive_url_candidates(&codeberg), vec![codeberg, github]);
+                assert_eq!(archive_url_candidates(&codeberg), vec![codeberg, github]);
+            }
         }
+    }
+
+    #[test]
+    fn test_archive_url_candidates_mirrors_enclave_source() {
+        assert_eq!(
+            archive_url_candidates(&enclave_source_url("abc123")),
+            vec![
+                "https://codeberg.org/caution/enclaveos/archive/abc123.tar.gz".to_string(),
+                "https://github.com/CautionHosting/enclaveos/archive/abc123.tar.gz".to_string(),
+            ]
+        );
     }
 
     #[test]

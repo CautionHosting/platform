@@ -472,48 +472,8 @@ pub enum GetOrCloneEnclaveSourceError {
         source: dterror::BoxError,
     },
 
-    #[error("failed to build archive HTTP client [{location}]")]
-    BuildHttpClient {
-        #[location]
-        location: dterror::Location,
-        #[source]
-        source: dterror::BoxError,
-    },
-
     #[error("failed to download enclave source archive [{location}]")]
     DownloadArchive {
-        #[location]
-        location: dterror::Location,
-        #[source]
-        source: dterror::BoxError,
-    },
-
-    #[error("failed to read archive entries [{location}]")]
-    ReadEntries {
-        #[location]
-        location: dterror::Location,
-        #[source]
-        source: dterror::BoxError,
-    },
-
-    #[error("failed to read archive entry [{location}]")]
-    ReadEntry {
-        #[location]
-        location: dterror::Location,
-        #[source]
-        source: dterror::BoxError,
-    },
-
-    #[error("failed to extract entry [{location}]")]
-    ExtractEntry {
-        #[location]
-        location: dterror::Location,
-        #[source]
-        source: dterror::BoxError,
-    },
-
-    #[error("failed to find top-level directory in extracted enclave source [{location}]")]
-    FindTopLevelDir {
         #[location]
         location: dterror::Location,
         #[source]
@@ -583,50 +543,14 @@ pub async fn get_or_clone_enclave_source(
             None
         };
 
-        let download_dir = work_dir.join("enclave-source");
-
-        // Remove existing directory if it exists
-        if download_dir.exists() {
-            tracing::info!(
-                "Removing existing source directory: {}",
-                download_dir.display()
-            );
-            fs::remove_dir_all(&download_dir)
-                .await
-                .with_context(Ctx::remove_dir(&download_dir))?;
-        }
-
-        fs::create_dir_all(&download_dir)
-            .await
-            .with_context(Ctx::create_dir(&download_dir))?;
-
-        tracing::info!("Downloading archive...");
-        let client = archive_http_client().with_context(Ctx::build_http_client())?;
-        let archive_bytes = download_archive_bytes(
-            &client,
-            enclave_source,
+        let candidates = crate::archive_url_candidates(enclave_source);
+        let enclave_source_dir = download_first_archive(
+            &candidates,
+            &work_dir.join("enclave-source"),
             "enclave source archive",
-            &ARCHIVE_RETRY_DELAYS,
         )
         .await
         .with_context(Ctx::download_archive())?;
-
-        tracing::info!("Downloaded {} bytes, extracting...", archive_bytes.len());
-
-        // Extract tar.gz archive
-        let decoder = GzDecoder::new(&archive_bytes[..]);
-        let mut archive = Archive::new(decoder);
-
-        for entry in archive.entries().with_context(Ctx::read_entries())? {
-            let mut entry = entry.with_context(Ctx::read_entry())?;
-            entry
-                .unpack_in(&download_dir)
-                .with_context(Ctx::extract_entry())?;
-        }
-
-        let enclave_source_dir = find_top_level_dir(&download_dir)
-            .await
-            .with_context(Ctx::find_top_level_dir())?;
         tracing::info!(
             "Enclave source extracted to: {}",
             enclave_source_dir.display()
@@ -731,20 +655,30 @@ pub async fn get_or_clone_enclave_source(
 pub async fn get_or_clone_framework_source(
     framework_source_url: &str,
     work_dir: &Path,
-) -> Result<PathBuf, GetOrCloneFrameworkSourceFromUrlsError> {
+) -> Result<PathBuf, DownloadFirstArchiveError> {
     let candidates = crate::archive_url_candidates(framework_source_url);
-    get_or_clone_framework_source_from_urls(&candidates, work_dir).await
+    download_first_archive(
+        &candidates,
+        &work_dir.join("framework-source"),
+        "framework source archive",
+    )
+    .await
 }
 
-/// Error type for [`get_or_clone_framework_source_from_urls`].
+/// Error type for [`download_first_archive`].
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error, dterror::CtxError)]
-pub enum GetOrCloneFrameworkSourceFromUrlsError {
-    #[error("no framework source archive URLs provided [{location}]")]
-    EmptyUrls { location: dterror::Location },
+pub enum DownloadFirstArchiveError {
+    #[error("no {description} URLs provided [{location}]")]
+    EmptyUrls {
+        description: String,
+        location: dterror::Location,
+    },
 
-    #[error("failed to build archive HTTP client for framework source [{location}]")]
+    #[error("failed to build archive HTTP client for {description} [{location}]")]
     BuildClient {
+        #[context(borrow = str)]
+        description: String,
         #[location]
         location: dterror::Location,
         #[source]
@@ -771,108 +705,92 @@ pub enum GetOrCloneFrameworkSourceFromUrlsError {
         source: dterror::BoxError,
     },
 
-    #[error("all framework source archive URLs failed:\n  {failures} [{location}]")]
+    #[error("all {description} URLs failed:\n  {failures} [{location}]")]
     AllFailed {
+        description: String,
         failures: String,
         location: dterror::Location,
     },
 }
 
+/// Download and extract the first archive candidate that succeeds.
+///
+/// Each candidate gets its own transient retries; a failed download or
+/// extraction moves on to the next candidate. Returns the extracted top-level
+/// directory inside `download_dir`.
 #[tracing::instrument(skip_all, err)]
-pub(crate) async fn get_or_clone_framework_source_from_urls(
-    framework_source_urls: &[String],
-    work_dir: &Path,
-) -> Result<PathBuf, GetOrCloneFrameworkSourceFromUrlsError> {
-    use GetOrCloneFrameworkSourceFromUrlsErrorCtx as Ctx;
+pub(crate) async fn download_first_archive(
+    urls: &[String],
+    download_dir: &Path,
+    description: &str,
+) -> Result<PathBuf, DownloadFirstArchiveError> {
+    use DownloadFirstArchiveErrorCtx as Ctx;
 
-    if framework_source_urls.is_empty() {
-        return Err(GetOrCloneFrameworkSourceFromUrlsError::EmptyUrls {
+    if urls.is_empty() {
+        return Err(DownloadFirstArchiveError::EmptyUrls {
+            description: description.to_string(),
             location: std::panic::Location::caller(),
         });
     }
 
-    let download_dir = work_dir.join("framework-source");
     let retry_delays = &ARCHIVE_RETRY_DELAYS;
     let mut failures = Vec::new();
-    let client = archive_http_client().with_context(Ctx::build_client())?;
+    let client = archive_http_client().with_context(Ctx::build_client(description))?;
 
-    for framework_source_url in framework_source_urls {
+    for url in urls {
         if download_dir.exists() {
             tracing::info!(
-                "Removing existing framework source directory: {}",
+                "Removing existing {} directory: {}",
+                description,
                 download_dir.display()
             );
-            fs::remove_dir_all(&download_dir)
+            fs::remove_dir_all(download_dir)
                 .await
-                .with_context(Ctx::remove_dir(&download_dir))?;
+                .with_context(Ctx::remove_dir(download_dir))?;
         }
 
-        fs::create_dir_all(&download_dir)
+        fs::create_dir_all(download_dir)
             .await
-            .with_context(Ctx::create_dir(&download_dir))?;
+            .with_context(Ctx::create_dir(download_dir))?;
 
-        tracing::info!(
-            "Downloading framework source archive from: {}",
-            framework_source_url
-        );
-        match download_archive_bytes(
-            &client,
-            framework_source_url,
-            "framework source archive",
-            retry_delays,
-        )
-        .await
-        {
+        tracing::info!("Downloading {} from: {}", description, url);
+        match download_archive_bytes(&client, url, description, retry_delays).await {
             Ok(archive_bytes) => {
                 tracing::info!("Downloaded {} bytes, extracting...", archive_bytes.len());
-                match extract_framework_archive(&archive_bytes, &download_dir).await {
-                    Ok(framework_source_dir) => {
-                        tracing::info!(
-                            "Framework source archive selected: {}",
-                            framework_source_url
-                        );
-                        tracing::info!(
-                            "Framework source extracted to: {}",
-                            framework_source_dir.display()
-                        );
-                        return Ok(framework_source_dir);
+                match extract_archive(&archive_bytes, download_dir).await {
+                    Ok(source_dir) => {
+                        tracing::info!("{} selected: {}", description, url);
+                        tracing::info!("{} extracted to: {}", description, source_dir.display());
+                        return Ok(source_dir);
                     }
                     Err(error) => {
                         let details = error_chain(&error);
-                        tracing::warn!(
-                            "Framework source archive failed from {}: {}",
-                            framework_source_url,
-                            details
-                        );
-                        failures
-                            .push([framework_source_url.as_str(), ": ", details.as_str()].concat());
+                        tracing::warn!("{} failed from {}: {}", description, url, details);
+                        failures.push([url.as_str(), ": ", details.as_str()].concat());
                     }
                 }
             }
             Err(error) => {
                 let details = error_chain(&error);
-                tracing::warn!(
-                    "Framework source archive failed from {}: {}",
-                    framework_source_url,
-                    details
-                );
-                failures.push([framework_source_url.as_str(), ": ", details.as_str()].concat());
+                tracing::warn!("{} failed from {}: {}", description, url, details);
+                failures.push([url.as_str(), ": ", details.as_str()].concat());
             }
         }
     }
 
     let failures = failures.join("\n  ");
-    Err(GetOrCloneFrameworkSourceFromUrlsError::AllFailed {
+    Err(DownloadFirstArchiveError::AllFailed {
+        description: description.to_string(),
         failures,
         location: std::panic::Location::caller(),
     })
 }
 
-/// Error type for [`extract_framework_archive`].
+/// Error type for [`extract_archive`].
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error, dterror::CtxError)]
-pub(crate) enum ExtractFrameworkArchiveError {
-    #[error("failed to read framework archive entries [{location}]")]
+pub(crate) enum ExtractArchiveError {
+    #[error("failed to read archive entries [{location}]")]
     ReadEntries {
         #[location]
         location: dterror::Location,
@@ -880,7 +798,7 @@ pub(crate) enum ExtractFrameworkArchiveError {
         source: dterror::BoxError,
     },
 
-    #[error("failed to read framework archive entry [{location}]")]
+    #[error("failed to read archive entry [{location}]")]
     ReadEntry {
         #[location]
         location: dterror::Location,
@@ -896,7 +814,7 @@ pub(crate) enum ExtractFrameworkArchiveError {
         source: dterror::BoxError,
     },
 
-    #[error("failed to find top-level directory in extracted framework source [{location}]")]
+    #[error("failed to find top-level directory in extracted archive [{location}]")]
     FindTopLevelDir {
         #[location]
         location: dterror::Location,
@@ -906,11 +824,11 @@ pub(crate) enum ExtractFrameworkArchiveError {
 }
 
 #[tracing::instrument(skip_all, err)]
-pub(crate) async fn extract_framework_archive(
+pub(crate) async fn extract_archive(
     archive_bytes: &[u8],
     download_dir: &Path,
-) -> Result<PathBuf, ExtractFrameworkArchiveError> {
-    use ExtractFrameworkArchiveErrorCtx as Ctx;
+) -> Result<PathBuf, ExtractArchiveError> {
+    use ExtractArchiveErrorCtx as Ctx;
 
     let decoder = GzDecoder::new(archive_bytes);
     let mut archive = Archive::new(decoder);
@@ -922,10 +840,9 @@ pub(crate) async fn extract_framework_archive(
             .with_context(Ctx::extract_entry())?;
     }
 
-    let framework_source_dir = find_top_level_dir(download_dir)
+    find_top_level_dir(download_dir)
         .await
-        .with_context(Ctx::find_top_level_dir())?;
-    Ok(framework_source_dir)
+        .with_context(Ctx::find_top_level_dir())
 }
 
 /// Error type for [`find_top_level_dir`].
@@ -1002,8 +919,8 @@ async fn find_top_level_dir(dir: &Path) -> Result<PathBuf, FindTopLevelDirError>
 #[cfg(test)]
 mod tests {
     use super::{
-        download_archive_bytes, error_chain, get_or_clone_framework_source_from_urls,
-        is_retryable_archive_status,
+        download_archive_bytes, download_first_archive, error_chain, is_retryable_archive_status,
+        DownloadFirstArchiveError,
     };
     use flate2::write::GzEncoder;
     use flate2::Compression;
@@ -1059,6 +976,18 @@ mod tests {
             .unwrap();
         archive.finish().unwrap();
         archive.into_inner().unwrap().finish().unwrap()
+    }
+
+    async fn framework_from_urls(
+        urls: &[String],
+        work_dir: &std::path::Path,
+    ) -> Result<std::path::PathBuf, DownloadFirstArchiveError> {
+        download_first_archive(
+            urls,
+            &work_dir.join("framework-source"),
+            "framework source archive",
+        )
+        .await
     }
 
     fn test_client() -> reqwest::Client {
@@ -1138,7 +1067,7 @@ mod tests {
         let fallback = "http://127.0.0.1:1/archive.tar.gz".to_string();
         let work_dir = tempfile::tempdir().unwrap();
 
-        let source = get_or_clone_framework_source_from_urls(&[primary, fallback], work_dir.path())
+        let source = framework_from_urls(&[primary, fallback], work_dir.path())
             .await
             .unwrap();
 
@@ -1154,7 +1083,7 @@ mod tests {
             serve_statuses(vec![StatusCode::OK], valid_framework_archive()).await;
         let work_dir = tempfile::tempdir().unwrap();
 
-        let source = get_or_clone_framework_source_from_urls(&[primary, fallback], work_dir.path())
+        let source = framework_from_urls(&[primary, fallback], work_dir.path())
             .await
             .unwrap();
 
@@ -1173,7 +1102,7 @@ mod tests {
         let fallback = "http://127.0.0.1:1/archive.tar.gz".to_string();
         let work_dir = tempfile::tempdir().unwrap();
 
-        let source = get_or_clone_framework_source_from_urls(&[primary, fallback], work_dir.path())
+        let source = framework_from_urls(&[primary, fallback], work_dir.path())
             .await
             .unwrap();
 
@@ -1189,7 +1118,7 @@ mod tests {
             serve_statuses(vec![StatusCode::OK], valid_framework_archive()).await;
         let work_dir = tempfile::tempdir().unwrap();
 
-        let source = get_or_clone_framework_source_from_urls(&[primary, fallback], work_dir.path())
+        let source = framework_from_urls(&[primary, fallback], work_dir.path())
             .await
             .unwrap();
 
@@ -1206,12 +1135,9 @@ mod tests {
             serve_statuses(vec![StatusCode::BAD_GATEWAY; 3], Vec::new()).await;
         let work_dir = tempfile::tempdir().unwrap();
 
-        let error = get_or_clone_framework_source_from_urls(
-            &[primary.clone(), fallback.clone()],
-            work_dir.path(),
-        )
-        .await
-        .unwrap_err();
+        let error = framework_from_urls(&[primary.clone(), fallback.clone()], work_dir.path())
+            .await
+            .unwrap_err();
         let message = error.to_string();
 
         assert!(message.contains(&primary));

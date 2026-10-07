@@ -63,14 +63,6 @@ pub(crate) fn classify_archive_preflight(
     }
 }
 
-pub(crate) fn archive_preflight_urls(url: &str, use_platform_mirror: bool) -> Vec<String> {
-    if use_platform_mirror {
-        enclave_builder::archive_url_candidates(url)
-    } else {
-        vec![url.to_string()]
-    }
-}
-
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum AppendAttestationResponseChunkError {
     #[error("Attestation response exceeds 1 MiB limit [{location:?}]")]
@@ -1487,10 +1479,10 @@ async fn build_and_get_pcrs(
     // user-filesystem extraction (minutes in). Only meaningful when
     // reproducing from a manifest.
     if external_manifest.is_some() {
-        preflight_archive_url(client, "Enclave source", &enclave_source, false)
+        preflight_archive_url(client, "Enclave source", &enclave_source)
             .await
             .with_context(Ctx::preflight_archive())?;
-        preflight_archive_url(client, "Framework source", &framework_source, true)
+        preflight_archive_url(client, "Framework source", &framework_source)
             .await
             .with_context(Ctx::preflight_archive())?;
     }
@@ -3496,7 +3488,6 @@ async fn preflight_archive_url(
     client: &ApiClient,
     label: &str,
     url: &str,
-    use_platform_mirror: bool,
 ) -> Result<(), PreflightArchiveUrlError> {
     use PreflightArchiveUrlErrorCtx as Ctx;
 
@@ -3504,7 +3495,7 @@ async fn preflight_archive_url(
         return Ok(());
     }
 
-    let candidates = archive_preflight_urls(url, use_platform_mirror);
+    let candidates = enclave_builder::archive_url_candidates(url);
     preflight_archive_urls(client, label, &candidates)
         .await
         .with_context(Ctx::preflight())

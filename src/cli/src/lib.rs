@@ -3882,7 +3882,7 @@ mod tests {
     use super::verify::{
         ARCHIVE_PREFLIGHT_ATTEMPTS, ArchivePreflightStatus, MAX_ATTESTATION_RESPONSE_BYTES,
         TlsConnection, TlsExpectation, TrustedHashes, TrustedTls,
-        append_attestation_response_chunk, archive_preflight_urls, attestation_inspection_json,
+        append_attestation_response_chunk, attestation_inspection_json,
         attestation_user_data, classify_app_source_refs, classify_archive_preflight,
         configured_enclave, display_user_data, dns_answer_is_absent, dns_contains_deployment_ip,
         git_command, measured_build_cache_key, persist_trusted_hashes,
@@ -5034,20 +5034,6 @@ enclave "default" {
                 expected
             );
         }
-    }
-
-    #[test]
-    fn archive_preflight_mirrors_framework_but_not_enclave_source() {
-        let url = "https://codeberg.org/caution/platform/archive/abc123.tar.gz";
-
-        assert_eq!(archive_preflight_urls(url, false), vec![url.to_string()]);
-        assert_eq!(
-            archive_preflight_urls(url, true),
-            vec![
-                url.to_string(),
-                "https://github.com/CautionHosting/platform/archive/abc123.tar.gz".to_string(),
-            ]
-        );
     }
 
     #[tokio::test]

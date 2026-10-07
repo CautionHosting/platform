@@ -348,7 +348,8 @@ Local source is the default. If the deployment manifest has no app commit, the
 CLI uses the current checkout at `HEAD`.
 
 Source-archive preflights use five-second HEAD requests. The Platform framework
-archive is checked on Codeberg first, then on the configured GitHub mirror; each
+and EnclaveOS archives are checked on Codeberg first, then on the configured
+GitHub mirror; each
 candidate is retried once for transient failures, while missing archives advance
 to the next candidate immediately. The canonical Codeberg URL remains in the
 measured manifest. If every candidate remains unavailable, verification stops
