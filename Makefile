@@ -116,6 +116,16 @@ build-drift-detector:
 	@docker build --platform linux/amd64 -t caution-drift-detector -f ./containerfiles/Containerfile.drift-detector .
 	@echo "Drift-detector image built: caution-drift-detector"
 
+.PHONY: build-tap-framer verify-tap-framer
+
+build-tap-framer:
+	@docker buildx build --platform linux/amd64 --no-cache \
+		-f containerfiles/Containerfile.tap-framer --target tap-framer-export \
+		--output type=local,dest=dist/tap-framer .
+
+verify-tap-framer:
+	@python3 tests/test_tap_framer_release.py
+
 build-frontend-dist:
 	@echo "Building Frontend static assets..."
 	@rm -rf $(OUT_DIR)/frontend
@@ -806,6 +816,9 @@ prepare-byoc-provisioner:
 
 test-unit:
 	cargo test --workspace
+	@if [ "$$(uname -s)" = Linux ]; then \
+		cargo test --locked --manifest-path src/tap-framer/Cargo.toml; \
+	fi
 
 test-live-caddy-nitro:
 	@test -n "$(CADDY_E2E_URL)" || { echo "CADDY_E2E_URL is required"; exit 1; }

@@ -243,6 +243,14 @@ pub enum StageEifComponentsError {
         source: dterror::BoxError,
     },
 
+    #[error("could not stage TAP tunnel helper [{location}]")]
+    StageTapFramer {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
     #[error("could not render Containerfile.eif template [{location}]")]
     RenderContainerfile {
         #[location]
@@ -436,12 +444,17 @@ pub async fn stage_eif_components(
         e2e,
         e2e_mode == "tls",
         locksmith,
+        egress,
         &bootproof_commit,
         &steve_commit,
         &locksmith_commit,
     )
     .await
     .with_context(Ctx::render_containerfile())?;
+
+    crate::tap_framer::stage_sources(&templates_dir, &stage_dir, &containerfile_content)
+        .await
+        .with_context(Ctx::stage_tap_framer())?;
 
     let run_sh_path = stage_dir.join("run.sh");
     fs::write(&run_sh_path, &run_sh_content)
@@ -737,6 +750,15 @@ async fn render_run_sh_template(
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error, dterror::CtxError)]
 pub enum RenderContainerfileTemplateError {
+    #[error("could not read selected TAP framer recipe '{path}' [{location}]")]
+    ReadTapFramerRecipe {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
     #[error("could not read Containerfile.eif template '{path}' [{location}]")]
     ReadTemplate {
         #[context(borrow = Path)]
@@ -748,12 +770,14 @@ pub enum RenderContainerfileTemplateError {
     },
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all, err)]
 async fn render_containerfile_template(
     template_path: &Path,
     e2e: bool,
     caddy: bool,
     locksmith: bool,
+    egress: bool,
     bootproof_commit: &str,
     steve_commit: &str,
     locksmith_commit: &str,
@@ -774,7 +798,18 @@ async fn render_containerfile_template(
     if locksmith {
         enabled_blocks.push("LOCKSMITH");
     }
-    let processed = process_template_blocks(&template, &enabled_blocks);
+    if egress {
+        enabled_blocks.push("EGRESS");
+    }
+    let mut processed = process_template_blocks(&template, &enabled_blocks);
+    if processed.contains("{{TAP_FRAMER_CONTAINERFILE}}") {
+        let recipe_path =
+            template_path.with_file_name("../../../containerfiles/Containerfile.tap-framer");
+        let recipe = fs::read_to_string(&recipe_path)
+            .await
+            .with_context(Ctx::read_tap_framer_recipe(&recipe_path))?;
+        processed = processed.replace("{{TAP_FRAMER_CONTAINERFILE}}", &recipe);
+    }
 
     Ok(processed
         .replace("{{BOOTPROOF_COMMIT}}", bootproof_commit)
@@ -869,6 +904,14 @@ pub enum BuildEifFromFilesystemsError {
         built_eif: PathBuf,
         build_log: PathBuf,
         location: dterror::Location,
+    },
+
+    #[error("could not export paired TAP tunnel helper [{location}]")]
+    ExportTapFramer {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
     },
 
     #[error("failed to copy EIF from {from} to {to} [{location}]")]
@@ -1109,6 +1152,12 @@ pub async fn build_eif_from_filesystems(
     fs::copy(&built_eif, &output_path)
         .await
         .with_context(Ctx::copy_eif(&built_eif, &output_path))?;
+
+    if egress {
+        crate::tap_framer::export_binary(work_dir, &output_path)
+            .await
+            .with_context(Ctx::export_tap_framer())?;
+    }
 
     let built_pcrs = output_dir_absolute.join("enclave.pcrs");
     let pcrs_path = output_path.with_extension("pcrs");
@@ -2234,6 +2283,234 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_stage_tap_framer_egress_selection() {
+        for egress in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let templates = dir.path().join("selected/src/enclave-builder/templates");
+            let user_dir = dir.path().join("user.tar");
+            case_colliding_tar(&user_dir);
+            let enclave_dir = dir.path().join("enclave");
+            for path in [&templates, &enclave_dir] {
+                std::fs::create_dir_all(path).unwrap();
+            }
+            std::fs::write(
+                templates.join("Containerfile.eif"),
+                include_str!("../templates/Containerfile.eif"),
+            )
+            .unwrap();
+            std::fs::write(
+                templates.join("run.sh.template"),
+                include_str!("../templates/run.sh.template"),
+            )
+            .unwrap();
+            let sources = ["Cargo.toml", "Cargo.lock", "src/main.rs", "src/vsock.rs"];
+            if egress {
+                let recipe = templates.join("../../../containerfiles/Containerfile.tap-framer");
+                std::fs::create_dir_all(recipe.parent().unwrap()).unwrap();
+                std::fs::write(
+                    recipe,
+                    format!(
+                        "{}\n# selected recipe\n",
+                        include_str!("../../../containerfiles/Containerfile.tap-framer")
+                    ),
+                )
+                .unwrap();
+                for name in sources {
+                    for (root, contents) in [
+                        (templates.join("../../tap-framer"), "selected-framework"),
+                        (templates.join("tap-framer"), "wrong-layout"),
+                    ] {
+                        let source = root.join(name);
+                        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+                        std::fs::write(source, format!("{contents}:{name}")).unwrap();
+                    }
+                }
+            }
+            let stage = stage_eif_components(
+                &user_dir,
+                &enclave_dir,
+                dir.path(),
+                Some("/app/server".to_string()),
+                Some(test_manifest()),
+                &[8080],
+                None,
+                false,
+                "steve",
+                DEFAULT_KEY_EXCHANGE,
+                false,
+                None,
+                "http",
+                false,
+                None,
+                egress,
+                Some(&templates),
+            )
+            .await
+            .unwrap();
+            let recipe = std::fs::read_to_string(stage.join("Containerfile.eif")).unwrap();
+            let run_sh = std::fs::read_to_string(stage.join("run.sh")).unwrap();
+            let mut stage_names = std::collections::HashSet::new();
+            for line in recipe.lines() {
+                if let Some((_, name)) = line
+                    .strip_prefix("FROM ")
+                    .and_then(|line| line.split_once(" AS "))
+                {
+                    assert!(
+                        stage_names.insert(name),
+                        "duplicate Containerfile stage: {name}"
+                    );
+                }
+            }
+            assert_eq!(run_sh.contains("tap-framer"), egress);
+            assert!(!recipe.contains("# {EGRESS"));
+            if egress {
+                for instruction in [
+                    "FROM rust AS tap-framer-builder",
+                    "COPY src/tap-framer/src/ /build-tap-framer/src/",
+                    "# selected recipe",
+                    "COPY --from=tap-framer-builder /binaries/tap-framer /build/binaries/tap-framer",
+                    "RUN install -m 0755 /build/binaries/tap-framer /build/initramfs/bin/tap-framer",
+                    "COPY --from=tap-framer-builder /binaries/tap-framer /tap-framer",
+                ] {
+                    assert!(recipe.contains(instruction), "missing {instruction}");
+                }
+                for name in sources {
+                    assert_eq!(
+                        std::fs::read_to_string(stage.join("src/tap-framer").join(name)).unwrap(),
+                        format!("selected-framework:{name}")
+                    );
+                }
+            } else {
+                assert!(!recipe.contains("tap-framer"));
+                assert!(!stage.join("components/tap-framer").exists());
+            }
+            assert!(!stage.join("tap-framer").exists());
+            assert!(!recipe.contains("{{TAP_FRAMER_CONTAINERFILE}}"));
+            assert_eq!(
+                recipe.matches("FROM rust AS tap-framer-builder").count(),
+                usize::from(egress)
+            );
+            assert_eq!(stage.join("src/tap-framer").exists(), egress);
+            let archive = dir.path().join("context.tar");
+            write_context_tar(&stage, &archive).unwrap();
+            let names = tar_entry_names(&archive);
+            assert!(names.contains(&"Containerfile.eif".to_string()));
+            for name in sources {
+                assert_eq!(names.contains(&format!("src/tap-framer/{name}")), egress);
+            }
+            std::fs::write(stage.join("output/tap-framer"), b"built helper").unwrap();
+            let eif = dir.path().join("enclave.eif");
+            std::fs::write(eif.with_extension("tap-framer"), b"stale export").unwrap();
+            crate::tap_framer::export_binary(dir.path(), &eif)
+                .await
+                .unwrap();
+            if egress {
+                assert_eq!(
+                    std::fs::read(eif.with_extension("tap-framer")).unwrap(),
+                    b"built helper"
+                );
+            } else {
+                assert!(!eif.with_extension("tap-framer").exists());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_render_selected_tap_framer_recipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let selected = dir.path().join("selected");
+        let templates = selected.join("src/enclave-builder/templates");
+        std::fs::create_dir_all(&templates).unwrap();
+        std::fs::create_dir_all(selected.join("containerfiles")).unwrap();
+        let template = templates.join("Containerfile.eif");
+        std::fs::write(
+            &template,
+            "# {EGRESS\n{{TAP_FRAMER_CONTAINERFILE}}\n# }EGRESS\n",
+        )
+        .unwrap();
+        let recipe = "FROM scratch AS tap-framer-export\nCOPY src/tap-framer/ /selected-source/\n";
+        std::fs::write(
+            selected.join("containerfiles/Containerfile.tap-framer"),
+            recipe,
+        )
+        .unwrap();
+        let rendered = render_containerfile_template(
+            &template,
+            false,
+            false,
+            false,
+            true,
+            "bootproof",
+            "steve",
+            "locksmith",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rendered.trim_end(), recipe.trim_end());
+        std::fs::remove_file(selected.join("containerfiles/Containerfile.tap-framer")).unwrap();
+        let disabled = render_containerfile_template(
+            &template,
+            false,
+            false,
+            false,
+            false,
+            "bootproof",
+            "steve",
+            "locksmith",
+        )
+        .await
+        .unwrap();
+        assert!(disabled.trim().is_empty());
+        assert!(
+            render_containerfile_template(
+                &template,
+                false,
+                false,
+                false,
+                true,
+                "bootproof",
+                "steve",
+                "locksmith",
+            )
+            .await
+            .is_err(),
+            "missing selected recipe must not fall back to this checkout"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_render_containerfile_historical_tap_framer_unconditional() {
+        for source in ["tap-framer/", "components/tap-framer/"] {
+            let dir = tempfile::tempdir().unwrap();
+            let template = dir.path().join("Containerfile.eif");
+            let historical = format!(
+                "FROM pallet-rust AS tap-framer-builder\nCOPY {source} /build-tap-framer/\n\
+                 FROM busybox AS eif-builder\n\
+                 COPY --from=tap-framer-builder /binaries/tap-framer /build/binaries/tap-framer\n\
+                 RUN install -m 0755 /build/binaries/tap-framer /build/initramfs/bin/tap-framer\n\
+                 FROM scratch AS output\n\
+                 COPY --from=tap-framer-builder /binaries/tap-framer /tap-framer\n"
+            );
+            std::fs::write(&template, &historical).unwrap();
+            for egress in [false, true] {
+                let rendered = render_containerfile_template(
+                    &template,
+                    false,
+                    false,
+                    false,
+                    egress,
+                    "bootproof-commit",
+                    "steve-commit",
+                    "locksmith-commit",
+                )
+                .await
+                .unwrap();
+                assert_eq!(rendered, historical);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn test_render_containerfile_caddy_runtime_smoke() {
         let template =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/Containerfile.eif");
@@ -2242,6 +2519,7 @@ mod tests {
             false,
             true,
             false,
+            true,
             "bootproof-commit",
             "steve-commit",
             "locksmith-commit",
@@ -2839,7 +3117,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(rendered.contains("VSOCK-CONNECT:3:3"));
+        assert!(rendered.contains("/bin/tap-framer --connect 3 3 eth0"));
+        assert!(!rendered.contains("TUN,tun-type=tap"));
         assert!(rendered.contains("nameserver 10.0.100.1"));
     }
 
@@ -2863,7 +3142,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(!rendered.contains("VSOCK-CONNECT:3:3"));
+        assert!(!rendered.contains("tap-framer"));
         assert!(!rendered.contains("udhcpc"));
         assert!(rendered.contains("nameserver 127.0.0.1"));
         assert!(rendered.contains(

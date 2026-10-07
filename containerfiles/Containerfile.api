@@ -104,7 +104,11 @@ COPY --from=builder /usr/local/bin/remote-build-helper /usr/local/bin/remote-bui
 COPY --from=builder /usr/local/bin/hcl-patcher /usr/local/bin/hcl-patcher
 
 COPY terraform /app/terraform
-COPY src/enclave-builder/templates /app/templates
+COPY src/enclave-builder/templates /app/src/enclave-builder/templates
+COPY containerfiles/Containerfile.tap-framer /app/containerfiles/Containerfile.tap-framer
+COPY src/tap-framer/Cargo.toml src/tap-framer/Cargo.lock /app/src/tap-framer/
+COPY src/tap-framer/src /app/src/tap-framer/src
+ENV CAUTION_TEMPLATES_DIR=/app/src/enclave-builder/templates
 
 WORKDIR /app
 

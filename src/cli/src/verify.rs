@@ -1236,8 +1236,12 @@ pub(crate) enum BuildAndGetPcrsError {
         source: BoxError,
     },
 
-    #[error("failed to build enclave locally [{location:?}]")]
+    #[error(
+        "failed to reproduce enclave using framework '{framework_source}'. For missing TAP-framer sources or incompatible template staging, install a CLI containing platform PR #464 and retry the same verification with --no-cache. Keep the manifest's framework pin; do not bypass PCR verification [{location}]"
+    )]
     BuildEnclave {
+        #[context(borrow = str)]
+        framework_source: String,
         #[location]
         location: Location,
 
@@ -1786,7 +1790,7 @@ async fn build_and_get_pcrs(
             )
             .await
     }
-    .with_context(Ctx::build_enclave())?;
+    .with_context(Ctx::build_enclave(&framework_source))?;
     loader.finish();
 
     if let Some(work_dir) = deployment.eif.path.parent() {
@@ -4201,6 +4205,36 @@ async fn download_and_extract_app_source_with_git_fallback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reproduction_failure_preserves_cause_and_gives_tap_framer_compatibility_guidance() {
+        let framework = "https://example.com/platform/archive/selected-commit.tar.gz";
+        let error = Err::<(), _>(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "components/tap-framer/src/main.rs",
+        ))
+        .with_context(BuildAndGetPcrsErrorCtx::build_enclave(framework))
+        .unwrap_err();
+        let BuildAndGetPcrsError::BuildEnclave {
+            framework_source,
+            source,
+            ..
+        } = &error
+        else {
+            panic!("expected reproduction build failure");
+        };
+        assert_eq!(framework_source, framework);
+        assert_eq!(
+            source.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        let message = error.to_string();
+        assert!(message.contains(framework));
+        assert!(message.contains("PR #464"));
+        assert!(message.contains("--no-cache"));
+        assert!(message.contains("Keep the manifest's framework pin"));
+        assert!(message.contains("do not bypass PCR verification"));
+    }
 
     #[test]
     fn parse_git_rev_parse_output_returns_value_on_success() {

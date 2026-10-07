@@ -81,6 +81,7 @@ pub mod compile;
 pub mod docker;
 pub mod extract;
 pub mod manifest;
+pub mod tap_framer;
 pub mod pcrs;
 
 use dterror::ResultExt;

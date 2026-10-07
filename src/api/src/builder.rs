@@ -1650,6 +1650,11 @@ if [ -f "$PCRS_PATH" ]; then
     PCRS_JSON="{{"$PCRS_JSON"}}"
 fi
 
+# Publish the paired host tunnel executable before the EIF becomes deployable.
+if [ "$EGRESS" = "true" ]; then
+    aws s3 cp /build/output/enclave.tap-framer "s3://$S3_BUCKET/$EIF_S3_KEY.tap-framer"
+fi
+
 # Upload EIF to S3
 echo "Uploading EIF to S3..."
 aws s3 cp "$EIF_PATH" "s3://$S3_BUCKET/$EIF_S3_KEY"
@@ -3469,6 +3474,10 @@ mod tests {
         .unwrap();
         assert!(script.contains("EGRESS=\"true\""));
         assert!(script.contains("CAUTION_EGRESS=\"$EGRESS\""));
+        let helper_upload = script.find("aws s3 cp /build/output/enclave.tap-framer").unwrap();
+        let eif_upload = script.find("aws s3 cp \"$EIF_PATH\"").unwrap();
+        assert!(helper_upload < eif_upload);
+        assert!(script.contains("s3://$S3_BUCKET/$EIF_S3_KEY.tap-framer"));
     }
 
     #[test]

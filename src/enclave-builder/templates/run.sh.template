@@ -52,7 +52,7 @@ echo "Network loopback configured"
 
 # {EGRESS
 echo "Setting up vsock network tunnel to parent..."
-/bin/socat TUN,tun-type=tap,iff-no-pi,iff-up,tun-name=eth0 VSOCK-CONNECT:3:3 &
+/bin/tap-framer --connect 3 3 eth0 &
 SOCAT_PID=$!
 echo "VSock tunnel started (PID: $SOCAT_PID)"
 

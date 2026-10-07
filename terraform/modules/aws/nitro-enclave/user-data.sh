@@ -54,6 +54,12 @@ aws s3 cp "${eif_s3_path}" /opt/nitro/enclave.eif
 
 %{ if egress == "true" ~}
 echo "Setting up vsock network proxy for enclave..."
+# TAP_FRAMER_INSTALL_BEGIN
+aws s3 cp "${eif_s3_path}.tap-framer" /opt/nitro/tap-framer.download
+printf '%s  %s\n' '${tap_framer_sha256}' /opt/nitro/tap-framer.download | sha256sum -c -
+install -m 0755 /opt/nitro/tap-framer.download /usr/local/bin/tap-framer
+rm /opt/nitro/tap-framer.download
+# TAP_FRAMER_INSTALL_END
 cat > /usr/local/bin/vsock-network-proxy.sh <<'PROXY_SCRIPT'
 #!/bin/bash
 set -e
@@ -70,7 +76,7 @@ ip tuntap add mode tap name enclave0
 ip addr add 10.0.100.1/24 dev enclave0
 ip link set enclave0 up
 
-socat TUN,tun-type=tap,iff-no-pi,tun-name=enclave0 VSOCK-LISTEN:3,fork,reuseaddr &
+/usr/local/bin/tap-framer --listen 3 enclave0 &
 SOCAT_PID=$!
 echo "VSock bridge started (PID: $SOCAT_PID)"
 
