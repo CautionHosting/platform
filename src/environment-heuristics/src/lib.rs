@@ -6,8 +6,10 @@ use std::io::{BufRead, BufReader};
 // compromises don't themselves affect the build output.
 
 fn get_os_name() -> Option<String> {
+    // Systems without /etc/os-release (e.g. macOS) are still named so findings
+    // say what they found rather than "unknown".
     let Ok(file) = std::fs::File::open("/etc/os-release") else {
-        return None;
+        return Some(std::env::consts::OS.to_string());
     };
     let reader = BufReader::new(file);
 
@@ -39,8 +41,8 @@ impl std::fmt::Display for Heuristic {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Heuristic::PackageManager(pkgman) => write!(f, "Found package manager: {pkgman}"),
-            Heuristic::UnknownOs(Some(os)) => write!(f, "Untrusted build OS: {os}"),
-            Heuristic::UnknownOs(None) => write!(f, "Unknown build OS"),
+            Heuristic::UnknownOs(Some(os)) => write!(f, "Untrusted OS: {os}"),
+            Heuristic::UnknownOs(None) => write!(f, "Unknown OS"),
             Heuristic::LD_PRELOAD(value) => {
                 write!(f, "Unsafe variable LD_PRELOAD is set {value:?}")
             }

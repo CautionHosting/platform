@@ -117,6 +117,13 @@ pub fn confirm(label: &str) -> Result<bool, PromptError> {
     Ok(input.trim() == "y" || input.trim() == "Y")
 }
 
+/// Wait for the user to press Enter. Returns an error on EOF.
+pub fn acknowledge(label: &str) -> Result<(), PromptError> {
+    write_prompt(label)?;
+    read_line()?;
+    Ok(())
+}
+
 /// Read a password-like value without echo.
 ///
 /// Writes the prompt label to stderr, then reads from stdin with echo suppressed.
