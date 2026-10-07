@@ -589,6 +589,22 @@ pub async fn begin_login_handler(
     .into_response())
 }
 
+/// Only a missing row is an authentication outcome; query failures stay server errors.
+#[track_caller]
+fn credential_lookup_error(error: db::DbError) -> LoginError {
+    if error.kind == db::DbErrorKind::CredentialNotFound {
+        LoginError::CredentialNotFound {
+            location: std::panic::Location::caller(),
+            source: Box::new(error),
+        }
+    } else {
+        LoginError::DbGetUserIdByCredential {
+            location: std::panic::Location::caller(),
+            source: Box::new(error),
+        }
+    }
+}
+
 #[tracing::instrument(skip_all, err)]
 pub async fn finish_login_handler(
     State(state): State<AppState>,
@@ -637,12 +653,7 @@ pub async fn finish_login_handler(
             let user_id = match db::get_user_id_by_credential(&state.db, &credential_id_bytes).await
             {
                 Ok(user_id) => user_id,
-                Err(e) => {
-                    return Err(LoginError::CredentialNotFound {
-                        source: Box::new(e),
-                        location: std::panic::Location::caller(),
-                    });
-                }
+                Err(e) => return Err(credential_lookup_error(e)),
             };
 
             let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
@@ -678,12 +689,7 @@ pub async fn finish_login_handler(
             let user_id = match db::get_user_id_by_credential(&state.db, &credential_id_bytes).await
             {
                 Ok(user_id) => user_id,
-                Err(e) => {
-                    return Err(LoginError::CredentialNotFound {
-                        source: Box::new(e),
-                        location: std::panic::Location::caller(),
-                    });
-                }
+                Err(e) => return Err(credential_lookup_error(e)),
             };
 
             let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
@@ -910,6 +916,18 @@ fn build_logout_cookies(secure: bool) -> (String, String) {
 mod tests {
     use super::*;
     use webauthn_rs_proto::Mediation;
+
+    #[test]
+    fn only_a_missing_credential_is_an_authentication_failure() {
+        let lookup = |kind| {
+            Err::<(), _>(std::io::Error::other("lookup"))
+                .with_context(db::DbErrorCtx::new(kind, "get_user_id_by_credential"))
+                .unwrap_err()
+        };
+        let status = |kind| credential_lookup_error(lookup(kind)).into_response().status();
+        assert_eq!(status(db::DbErrorKind::CredentialNotFound), StatusCode::UNAUTHORIZED);
+        assert_eq!(status(db::DbErrorKind::QueryFailed), StatusCode::INTERNAL_SERVER_ERROR);
+    }
 
     // --- normalize_login_username -------------------------------------
     //

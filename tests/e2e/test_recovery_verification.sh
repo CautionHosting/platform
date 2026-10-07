@@ -17,6 +17,8 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 cd "$ROOT"
 cargo build --locked -p gateway
+# Puppeteer lives in browser-authenticator; install it as test_webauthn_browser.sh does.
+( cd tests/e2e/browser-authenticator && if [ ! -d node_modules ]; then npm ci || npm install; fi )
 CONTAINER=$(docker run -d -p 127.0.0.1::5432 -e POSTGRES_DB=caution_quorum_test -e POSTGRES_PASSWORD=postgres \
     -v "$ROOT/src/api/migrations:/migrations:ro" -v "$ROOT/utils/makefile-run-migrations.sh:/migrate.sh:ro" postgres:16-alpine)
 for _ in $(seq 1 60); do docker exec "$CONTAINER" pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1 && break; sleep 1; done

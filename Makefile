@@ -738,6 +738,7 @@ run-api-test: network
 		caution-api
 	@echo "API service started in test mode"
 
+# E2E tests reach the gateway on localhost, whatever relying party the host .env configures.
 run-gateway-test: network
 	@docker rm -f gateway 2>/dev/null || true
 	@mkdir -p $(CAUTION_DATA_DIR)/git-repos "$(KEYMAKER_POLICY_DIR)"
@@ -749,6 +750,8 @@ run-gateway-test: network
 		--env-file $(HOME)/.config/caution/.env \
 		-e DATABASE_URL=$(TEST_DATABASE_URL) \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
+		-e RP_ID=localhost \
+		-e RP_ORIGINS=http://localhost:8000 \
 		$(GATEWAY_EXTRA_ENV) \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
 		-v "$(KEYMAKER_POLICY_DIR):/run/config:ro" \
