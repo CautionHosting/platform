@@ -2125,11 +2125,26 @@ mod tests {
             stream.read(&mut bytes).await.unwrap();
             // Close after the client's attestation request, before any share is sent.
         });
+        // Locksmith decrypts the share before connecting, so the bundle and key must be real.
+        use keyfork_shard::{Format, openpgp::OpenPGP};
+        let (holder, _) = CertBuilder::new()
+            .set_creation_time(std::time::SystemTime::now() - std::time::Duration::from_secs(120))
+            .add_userid("destination eof holder")
+            .add_signing_subkey()
+            .add_storage_encryption_subkey()
+            .generate()
+            .unwrap();
+        let mut shardfile = Vec::new();
+        OpenPGP.shard_and_encrypt(1, 1, &[7; 32], std::slice::from_ref(&holder), &mut shardfile).unwrap();
         let bundle = GenerateQuorumBundle::V1(v1::GenerateQuorumResponse {
-            bundle_id: [0; 16], label: Default::default(), keyring: vec![],
-            threshold: 1, max: 1, shardfile: String::new(), public_key: String::new(),
+            bundle_id: [0; 16], label: Default::default(),
+            keyring: vec![v1::Key::OpenPGP { cert: String::from_utf8(holder.armored().to_vec().unwrap()).unwrap() }],
+            threshold: 1, max: 1, shardfile: String::from_utf8(shardfile).unwrap(), public_key: String::new(),
         });
-        let error = locksmith::client::send_selected_shard(address, Default::default(), &bundle, None, None).await.unwrap_err();
+        let work = tempdir().unwrap();
+        let private_key = work.path().join("holder.asc");
+        std::fs::write(&private_key, holder.as_tsk().armored().to_vec().unwrap()).unwrap();
+        let error = locksmith::client::send_selected_shard(address, Default::default(), &bundle, Some(private_key), None).await.unwrap_err();
         assert!(super::connection_closed(&error), "{error:?}");
         receiver.await.unwrap();
     }

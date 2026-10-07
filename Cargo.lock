@@ -1832,6 +1832,7 @@ dependencies = [
  "hcl-rs",
  "hex",
  "indicatif",
+ "keyfork-shard",
  "keymaker-models",
  "locksmith",
  "qrcode",

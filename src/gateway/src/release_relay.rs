@@ -83,7 +83,12 @@ fn trusted_measurements() -> Result<Measurements, StatusCode> {
     let path =
         std::env::var("RECRYPTOR_PCR_POLICY_PATH").map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     let text = std::fs::read_to_string(path).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    let policy = locksmith::bundle::KeymakerPcrPolicy::from_json(&text)
+    measurements_from_policy(&text)
+}
+
+// Exactly one non-expiring PCR0/1/2 set; anything else leaves the relay unavailable.
+fn measurements_from_policy(text: &str) -> Result<Measurements, StatusCode> {
+    let policy = locksmith::bundle::KeymakerPcrPolicy::from_json(text)
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     if policy.sets.len() != 1 || policy.sets[0].expires_at_unix_seconds.is_some() {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
@@ -516,5 +521,36 @@ mod verification_tests {
         }
         let wrong = (0..=2).map(|i| (i, "cd".repeat(48))).collect();
         assert!(verified_request(&approval, &wrong, "example.com").is_err());
+    }
+    #[test]
+    fn operator_policy_must_be_one_fixed_production_pcr_set() {
+        let set = |pcrs: &[(u8, &str)], expiry: Option<u64>| {
+            let pcrs: HashMap<_, _> = pcrs.iter().map(|(i, v)| (i.to_string(), v.repeat(48))).collect();
+            match expiry {
+                Some(at) => json!({"pcrs": pcrs, "expires_at_unix_seconds": at}),
+                None => json!({"pcrs": pcrs}),
+            }
+        };
+        let production = set(&[(0, "ab"), (1, "cd"), (2, "ef")], None);
+        let policy = |sets: Vec<Value>| json!({ "sets": sets }).to_string();
+        assert_eq!(
+            measurements_from_policy(&policy(vec![production.clone()])).unwrap(),
+            [(0, "ab".repeat(48)), (1, "cd".repeat(48)), (2, "ef".repeat(48))].into()
+        );
+        for rejected in [
+            policy(vec![]),
+            policy(vec![production.clone(), production.clone()]),
+            policy(vec![set(&[(0, "ab"), (1, "cd"), (2, "ef")], Some(4_102_444_800))]),
+            policy(vec![set(&[(0, "ab"), (1, "cd")], None)]),
+            policy(vec![set(&[(0, "ab"), (1, "cd"), (2, "ef"), (3, "12")], None)]),
+            policy(vec![set(&[(0, "00"), (1, "cd"), (2, "ef")], None)]),
+            "not json".to_owned(),
+        ] {
+            assert_eq!(
+                measurements_from_policy(&rejected),
+                Err(StatusCode::SERVICE_UNAVAILABLE),
+                "{rejected}"
+            );
+        }
     }
 }

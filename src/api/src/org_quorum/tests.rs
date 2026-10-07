@@ -254,10 +254,12 @@ async fn busy_and_timeout_do_not_retry_generation() {
             atomic::{AtomicUsize, Ordering},
         },
     };
-    for (status, delay, expected) in [
-        (429, 0, StatusCode::TOO_MANY_REQUESTS),
-        (503, 0, StatusCode::SERVICE_UNAVAILABLE),
-        (200, 200, StatusCode::GATEWAY_TIMEOUT),
+    // Only the timeout case gets a short client timeout; a shared 75 ms budget made the
+    // status cases time out under parallel test load on slow (emulated amd64) hosts.
+    for (status, delay, timeout, expected) in [
+        (429, 0, 10_000, StatusCode::TOO_MANY_REQUESTS),
+        (503, 0, 10_000, StatusCode::SERVICE_UNAVAILABLE),
+        (200, 1_000, 75, StatusCode::GATEWAY_TIMEOUT),
     ] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = ["http://", &listener.local_addr().unwrap().to_string()].concat();
@@ -278,7 +280,7 @@ async fn busy_and_timeout_do_not_retry_generation() {
             let _ = stream.write_all(response.as_bytes());
         });
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(75))
+            .timeout(Duration::from_millis(timeout))
             .build()
             .unwrap();
         let error = post::<_, serde_json::Value>(&client, &url, &serde_json::json!({}))

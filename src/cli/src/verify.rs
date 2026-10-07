@@ -2062,6 +2062,20 @@ async fn verify_tls_binding(
     Ok(TlsVerification::Verified(tls))
 }
 
+/// A hosted service that declares TLS must prove its certificate binding. Without TLS
+/// mode there is no binding to check: shares rely on attestation-bound encryption.
+fn check_hosted_tls(hosted: bool, tls: &TlsVerification) -> Result<(), VerifyError> {
+    if hosted && matches!(tls, TlsVerification::SkippedNoDns | TlsVerification::PcrOnly) {
+        return Err(VerifyError::HostedService {
+            location: std::panic::Location::caller(),
+            source: Box::new(std::io::Error::other(
+                "expected service TLS binding was not verified",
+            )),
+        });
+    }
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum VerifyError {
     #[error("hosted service verification failed [{location:?}]")]
@@ -2817,19 +2831,7 @@ async fn verify_result(
                 }
             }
 
-            if hosted
-                && matches!(
-                    tls,
-                    TlsVerification::SkippedNoDns | TlsVerification::PcrOnly
-                )
-            {
-                return Err(VerifyError::HostedService {
-                    location: std::panic::Location::caller(),
-                    source: Box::new(std::io::Error::other(
-                        "required service TLS binding was not verified",
-                    )),
-                });
-            }
+            check_hosted_tls(hosted, &tls)?;
             output::success("✓ Attestation verification PASSED");
             Ok(Some(VerifiedImage {
                 pcrs: verified_pcrs,
@@ -4410,5 +4412,21 @@ mod tests {
     #[test]
     fn parse_git_rev_parse_output_returns_none_on_nonzero_exit() {
         assert_eq!(parse_git_rev_parse_output(false, b"deadbeef\n"), None);
+    }
+
+    #[test]
+    fn hosted_service_rejects_expected_tls_binding_that_was_not_verified() {
+        let verified = TlsVerification::Verified(TrustedTls {
+            domain: "service.example".to_owned(),
+            certfp: "ab".repeat(32),
+        });
+        for hosted in [false, true] {
+            assert!(check_hosted_tls(hosted, &verified).is_ok());
+            // No TLS mode means no binding to check, hosted or not.
+            assert!(check_hosted_tls(hosted, &TlsVerification::NotApplicable).is_ok());
+            for skipped in [TlsVerification::SkippedNoDns, TlsVerification::PcrOnly] {
+                assert_eq!(check_hosted_tls(hosted, &skipped).is_err(), hosted);
+            }
+        }
     }
 }

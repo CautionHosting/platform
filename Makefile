@@ -153,6 +153,14 @@ GIT_PUBKEY := $(shell git log -1 --format=%GK)
 GIT_TIMESTAMP := $(shell git log -1 --format=%cd --date=iso)
 GPG ?= gpg
 
+# Homebrew's nettle@3 is keg-only, so nettle-sys can't find nettle/pgp.h without this.
+ifeq ($(CLI_HOST_OS),macos)
+HOMEBREW_NETTLE := $(firstword $(wildcard /opt/homebrew/opt/nettle@3 /usr/local/opt/nettle@3))
+ifneq ($(HOMEBREW_NETTLE),)
+export PKG_CONFIG_PATH := $(HOMEBREW_NETTLE)/lib/pkgconfig$(if $(PKG_CONFIG_PATH),:$(PKG_CONFIG_PATH))
+endif
+endif
+
 ifdef REPRODUCE
 	-include dist/cli/release.env
 	export
