@@ -10,7 +10,7 @@
 use chrono::{DateTime, TimeDelta, Utc};
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -194,6 +194,7 @@ impl BuilderConfig {
 #[derive(Debug, Clone)]
 pub struct BuildResult {
     pub eif_s3_key: String,
+    pub(crate) component_artifacts: Option<crate::component_artifacts::BuildComponentArtifacts>,
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +205,7 @@ pub struct StagedArtifact {
 
 /// Input parameters for a build.
 pub struct BuildRequest {
+    pub component_set: Option<enclave_builder::components::ComponentSet>,
     pub org_id: Uuid,
     pub app_id: Uuid,
     pub app_name: String,
@@ -473,6 +475,13 @@ pub fn require_platform_framework_commit(
 /// Failure modes for [`check_build_cache`].
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum CheckBuildCacheError {
+    #[error("Failed to decode cached component provenance [{location}]")]
+    Decode {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
     #[error("Failed to query resource-scoped eif_builds cache [{location}]")]
     ResourceScopedQuery {
         #[location]
@@ -501,8 +510,8 @@ pub async fn check_build_cache(
     use CheckBuildCacheErrorCtx as Ctx;
 
     let row = if let Some(app_id) = app_id_scope {
-        sqlx::query_as::<_, (String,)>(
-            "SELECT eif_s3_key
+        sqlx::query(
+            "SELECT eif_s3_key, component_artifacts
              FROM eif_builds
              WHERE organization_id = $1 AND app_id = $2 AND cache_key = $3 AND status = 'completed'
              LIMIT 1",
@@ -514,8 +523,8 @@ pub async fn check_build_cache(
         .await
         .with_context(Ctx::resource_scoped_query())?
     } else {
-        sqlx::query_as::<_, (String,)>(
-            "SELECT eif_s3_key
+        sqlx::query(
+            "SELECT eif_s3_key, component_artifacts
              FROM eif_builds
              WHERE organization_id = $1 AND cache_key = $2 AND status = 'completed'
              LIMIT 1",
@@ -527,7 +536,20 @@ pub async fn check_build_cache(
         .with_context(Ctx::query())?
     };
 
-    Ok(row.map(|(eif_s3_key,)| BuildResult { eif_s3_key }))
+    row.map(|row| {
+        Ok(
+            BuildResult {
+                eif_s3_key: row.try_get("eif_s3_key").with_context(Ctx::decode())?,
+                component_artifacts:
+                    row.try_get::<Option<
+                        sqlx::types::Json<crate::component_artifacts::BuildComponentArtifacts>,
+                    >, _>("component_artifacts")
+                        .with_context(Ctx::decode())?
+                        .map(|value| value.0),
+            },
+        )
+    })
+    .transpose()
 }
 
 /// Failure modes for [`upload_source_archive`].
@@ -771,6 +793,13 @@ async fn ensure_managed_onprem_builder_security_group(
 /// Failure modes for [`execute_remote_build`].
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum ExecuteRemoteBuildError {
+    #[error("Failed to capture build component provenance [{location}]")]
+    Components {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
     #[error("Failed to begin build reservation transaction [{location}]")]
     BeginTransaction {
         #[location]
@@ -873,6 +902,12 @@ pub async fn execute_remote_build(
     let build_id = Uuid::new_v4();
     let instance_type = request.builder_instance_type.as_str();
     let eif_s3_key = format!("eifs/{}/{}.eif", request.org_id, cache_key);
+    let component_artifacts = request
+        .component_set
+        .as_ref()
+        .map(|set| crate::component_artifacts::BuildComponentArtifacts::from_set(set, &eif_s3_key))
+        .transpose()
+        .with_context(Ctx::components())?;
     let procfile_hash = format!("{:x}", Sha256::digest(request.procfile_content.as_bytes()));
 
     // 1. Atomically reserve the single active-build slot for this app.
@@ -911,8 +946,8 @@ pub async fn execute_remote_build(
 
     // 2. Insert pending build row and commit, releasing the lock.
     sqlx::query(
-        "INSERT INTO eif_builds (id, organization_id, app_id, user_id, commit_sha, procfile_hash, cache_key, builder_instance_type, status, started_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', NOW())"
+        "INSERT INTO eif_builds (id, organization_id, app_id, user_id, commit_sha, procfile_hash, cache_key, builder_instance_type, component_artifacts, status, started_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', NOW())"
     )
     .bind(build_id)
     .bind(request.org_id)
@@ -922,6 +957,7 @@ pub async fn execute_remote_build(
     .bind(&procfile_hash)
     .bind(cache_key)
     .bind(instance_type)
+    .bind(component_artifacts.as_ref().map(sqlx::types::Json))
     .execute(&mut *db_tx)
     .await
     .with_context(Ctx::insert_build())?;
@@ -1071,6 +1107,7 @@ pub async fn execute_remote_build(
         Ok(status) => {
             let build_result = BuildResult {
                 eif_s3_key: eif_s3_key.clone(),
+                component_artifacts,
             };
 
             if let Err(e) = sqlx::query(
@@ -1380,11 +1417,20 @@ async fn poll_build_status(
 }
 
 /// Failure modes for [`generate_builder_userdata`].
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum GenerateBuilderUserdataError {
     #[error("could not validate containerfile path [{location}]")]
     ValidateContainerfile {
+        #[location]
         location: Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+    #[error("could not validate pinned component set [{location}]")]
+    Components {
+        #[location]
+        location: Location,
+        #[source]
         source: dterror::BoxError,
     },
 }
@@ -1399,6 +1445,20 @@ fn generate_builder_userdata(
     helper_s3_key: &str,
     helper_sha256: &str,
 ) -> Result<String, GenerateBuilderUserdataError> {
+    use GenerateBuilderUserdataErrorCtx as Ctx;
+    if let Some(set) = &request.component_set {
+        crate::component_artifacts::validate_source_pins(
+            set,
+            &request.enclaveos_commit,
+            &enclave_builder::build::resolve_bootproof_commit(),
+            &request.framework_commit,
+            request.e2e.then_some(request.steve_commit.as_str()),
+            request
+                .locksmith
+                .then_some(enclave_builder::build::resolve_locksmith_commit().as_str()),
+        )
+        .with_context(Ctx::components())?;
+    }
     let status_key = format!("builds/{}/status.json", build_id);
     let bucket = &config.eif_s3_bucket;
     let source_s3_key = &request.source_s3_key;
@@ -1472,6 +1532,7 @@ fn generate_builder_userdata(
         request.run_command.clone(),
         None,
     );
+    manifest.component_set = request.component_set.clone();
     manifest.enclaveos_commit = Some(request.enclaveos_commit.clone());
     manifest.bootproof_commit = Some(bootproof_commit);
     if request.e2e {
@@ -1601,12 +1662,24 @@ cat > /build/manifest.json << 'MANIFEST_EOF'
 {manifest_json}
 MANIFEST_EOF
 
+PREBUILT_COMPONENTS=""
+if jq -e '.component_set != null' /build/manifest.json >/dev/null; then
+    PREBUILT_COMPONENTS="/build/prebuilt"
+    mkdir -p "$PREBUILT_COMPONENTS"
+    while IFS=$'\t' read -r name digest size; do
+        aws s3 cp "s3://$S3_BUCKET/components/v1/blobs/sha256/$digest/$name" "$PREBUILT_COMPONENTS/$name"
+        printf '%s  %s\n' "$digest" "$PREBUILT_COMPONENTS/$name" | sha256sum -c -
+        test "$(stat -c%s "$PREBUILT_COMPONENTS/$name")" = "$size"
+    done < <(jq -r --arg e2e "$E2E" --arg locksmith "$LOCKSMITH" --arg egress "$EGRESS" '.component_set.components | to_entries[] | select((.key != "steve" or $e2e == "true") and (.key != "locksmith" or $locksmith == "true") and (.key != "tap-framer" or $egress == "true")) | .value.files | to_entries[] | [.key, .value.sha256, .value.size] | @tsv' /build/manifest.json)
+fi
+
 set_phase "building-enclave"
 
 echo "Building EIF via remote-build-helper..."
 mkdir -p /build/output
 if CAUTION_IMAGE_REF="app-image" \
 CAUTION_MANIFEST_PATH="/build/manifest.json" \
+CAUTION_COMPONENTS_PATH="$PREBUILT_COMPONENTS" \
 CAUTION_WORK_DIR="/build/remote-helper-work" \
 CAUTION_OUTPUT_EIF="/build/output/enclave.eif" \
 CAUTION_OUTPUT_PCRS="/build/output/enclave.pcrs" \
@@ -2095,8 +2168,79 @@ pub async fn reap_unattributed_builders(db: &PgPool, ec2: &Ec2Client) {
 }
 
 #[cfg(test)]
+#[path = "builder_component_tests.rs"]
+mod component_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires disposable COMPONENTS_TEST_DATABASE_URL"]
+    async fn component_cache_query_and_migration_round_trip() {
+        let url = std::env::var("COMPONENTS_TEST_DATABASE_URL").unwrap();
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        sqlx::raw_sql("CREATE TEMP TABLE eif_builds (organization_id UUID, app_id UUID, cache_key TEXT, status TEXT, eif_s3_key TEXT)")
+            .execute(&db).await.unwrap();
+        for _ in 0..2 {
+            sqlx::raw_sql(include_str!("../migrations/054_component_artifacts.sql"))
+                .execute(&db)
+                .await
+                .unwrap();
+        }
+        let org = Uuid::new_v4();
+        let app = Uuid::new_v4();
+        let artifacts: crate::component_artifacts::BuildComponentArtifacts =
+            serde_json::from_value(serde_json::json!({
+                "component_set_sha256": "a".repeat(64),
+                "tap_framer_s3_key": "eifs/test.eif.tap-framer",
+                "tap_framer_sha256": "b".repeat(64),
+            }))
+            .unwrap();
+        sqlx::query("INSERT INTO eif_builds VALUES ($1, $2, 'pinned', 'completed', 'eifs/test.eif', $3), ($1, $2, 'legacy', 'completed', 'eifs/legacy.eif', NULL)")
+            .bind(org).bind(app).bind(sqlx::types::Json(&artifacts)).execute(&db).await.unwrap();
+        for scope in [None, Some(app)] {
+            let result = check_build_cache(&db, org, "pinned", scope)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.component_artifacts, Some(artifacts.clone()));
+            assert_eq!(result.eif_s3_key, "eifs/test.eif");
+            assert!(
+                check_build_cache(&db, org, "legacy", scope)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .component_artifacts
+                    .is_none()
+            );
+        }
+        assert!(
+            check_build_cache(&db, Uuid::new_v4(), "pinned", None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            check_build_cache(&db, org, "pinned", Some(Uuid::new_v4()))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        sqlx::query("UPDATE eif_builds SET component_artifacts = '{}' WHERE cache_key = 'pinned'")
+            .execute(&db)
+            .await
+            .unwrap();
+        assert!(matches!(
+            check_build_cache(&db, org, "pinned", None).await,
+            Err(CheckBuildCacheError::Decode { .. })
+        ));
+        db.close().await;
+    }
 
     #[test]
     fn failed_build_phase_is_not_a_progress_milestone() {
@@ -2872,6 +3016,7 @@ mod tests {
         };
 
         let request = BuildRequest {
+            component_set: None,
             org_id: Uuid::new_v4(),
             app_id: Uuid::new_v4(),
             app_name: "test-app".to_string(),
@@ -3082,6 +3227,7 @@ mod tests {
         };
 
         let request = BuildRequest {
+            component_set: None,
             org_id: Uuid::new_v4(),
             app_id: Uuid::new_v4(),
             app_name: "test-app".to_string(),
@@ -3141,6 +3287,7 @@ mod tests {
         };
 
         let request = BuildRequest {
+            component_set: None,
             org_id: Uuid::new_v4(),
             app_id: Uuid::new_v4(),
             app_name: "test-app".to_string(),
@@ -3198,6 +3345,7 @@ mod tests {
             additional_instance_tags: Vec::new(),
         };
         let request = BuildRequest {
+            component_set: None,
             org_id: Uuid::new_v4(),
             app_id: Uuid::new_v4(),
             app_name: "test-app".to_string(),
@@ -3263,6 +3411,7 @@ mod tests {
         };
 
         let request = BuildRequest {
+            component_set: None,
             org_id: Uuid::new_v4(),
             app_id: Uuid::new_v4(),
             app_name: "test-app".to_string(),
@@ -3325,6 +3474,7 @@ mod tests {
         };
 
         let request = BuildRequest {
+            component_set: None,
             org_id: Uuid::new_v4(),
             app_id: Uuid::new_v4(),
             app_name: "test-app".to_string(),
@@ -3381,8 +3531,9 @@ mod tests {
         );
     }
 
-    fn make_test_build_request_with_egress(egress: bool) -> BuildRequest {
+    pub(super) fn make_test_build_request_with_egress(egress: bool) -> BuildRequest {
         BuildRequest {
+            component_set: None,
             org_id: Uuid::new_v4(),
             app_id: Uuid::new_v4(),
             app_name: "test-app".to_string(),

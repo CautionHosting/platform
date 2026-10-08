@@ -6,7 +6,19 @@ name = "enclave-builder"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+s3-components = ["dep:aws-config", "dep:aws-sdk-s3", "dep:clap"]
+
+[[bin]]
+name = "prepare-components"
+path = "src/bin/prepare-components.rs"
+required-features = ["s3-components"]
+
 [dependencies]
+aws-config = { version = "1.1", features = ["behavior-version-latest"], optional = true }
+aws-sdk-s3 = { version = "1.15", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
 # Error handling
 thiserror = { workspace = true }
 dterror = { workspace = true }

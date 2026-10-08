@@ -6,8 +6,10 @@ Requires=caution-network.service
 After=caution-postgres.service caution-network.service
 
 [Service]
+EnvironmentFile=%h/.config/caution/components.env
+ExecStartPre=/usr/bin/docker run --rm --network caution-network --env-file %h/.config/caution/.env -e PLATFORM_GIT_SHA -e COMPONENT_BUILD_MODE -e COMPONENT_SET_SHA256 -e COMPONENTS_S3_BUCKET -e ENCLAVEOS_COMMIT -e BOOTPROOF_COMMIT -e STEVE_COMMIT -e LOCKSMITH_COMMIT ${API_COMPONENT_IMAGE} --check-components
 ExecStartPre=-/usr/bin/docker rm -f api
-ExecStart=/usr/bin/docker run --name api --network caution-network -e TF_PLUGIN_CACHE_DIR=/var/cache/caution/terraform --env-file %h/.config/caution/.env -v %h/.config/caution/prices.json:/app/prices.json:ro -v %h/.config/caution/config.json:/app/config.json:ro -v caution-data-dir:/var/cache/caution caution-api
+ExecStart=/usr/bin/docker run --name api --network caution-network -e TF_PLUGIN_CACHE_DIR=/var/cache/caution/terraform --env-file %h/.config/caution/.env -v %h/.config/caution/prices.json:/app/prices.json:ro -v %h/.config/caution/config.json:/app/config.json:ro -v caution-data-dir:/var/cache/caution -e PLATFORM_GIT_SHA -e COMPONENT_BUILD_MODE -e COMPONENT_SET_SHA256 -e COMPONENTS_S3_BUCKET -e ENCLAVEOS_COMMIT -e BOOTPROOF_COMMIT -e STEVE_COMMIT -e LOCKSMITH_COMMIT ${API_COMPONENT_IMAGE}
 ExecStop=/usr/bin/docker stop api
 
 [Install]

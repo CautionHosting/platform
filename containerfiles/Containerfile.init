@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: 2026 Caution SEZC
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Caution-Commercial
+
+FROM stagex/pallet-rust@sha256:9c38bf1066dd9ad1b6a6b584974dd798c2bf798985bf82e58024fbe0515592ca AS rust
+
+FROM rust AS enclave-builder
+
+ENV SOURCE_DATE_EPOCH=1
+ENV CARGO_HOME=/usr/local/cargo
+ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
+ENV TARGET_ARCH="x86_64-unknown-linux-musl"
+
+WORKDIR /build-enclave
+
+COPY enclave/ /build-enclave/
+
+RUN cargo fetch --locked --target $TARGET_ARCH
+
+RUN cargo build --release --locked --target ${TARGET_ARCH} -p init \
+      && install -D -m 0755 /build-enclave/target/${TARGET_ARCH}/release/init /binaries/init
+
+FROM scratch AS init-export
+COPY --from=enclave-builder /binaries/init /init

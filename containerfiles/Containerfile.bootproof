@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: 2026 Caution SEZC
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Caution-Commercial
+
+FROM stagex/pallet-rust@sha256:9c38bf1066dd9ad1b6a6b584974dd798c2bf798985bf82e58024fbe0515592ca AS rust
+FROM stagex/core-git@sha256:6b3e0055f6aeaa8465f207a871db2c63a939cd7406113e9d769ff3b37239f3d0 AS git
+FROM stagex/core-ca-certificates@sha256:d135f1189e9b232eb7316626bf7858534c5540b2fc53dced80a4c9a95f26493e AS ca-certificates
+FROM stagex/core-curl@sha256:bc8bab43d96a9167fbb85022ea773644a45ef335e7a9b747f203078973fa988e AS curl
+
+FROM rust AS bootproof-builder
+
+COPY --from=git . /
+COPY --from=ca-certificates . /
+COPY --from=curl . /
+
+ENV SOURCE_DATE_EPOCH=1
+ENV CARGO_HOME=/usr/local/cargo
+ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
+ENV TARGET_ARCH="x86_64-unknown-linux-musl"
+
+ARG BOOTPROOF_COMMIT
+
+WORKDIR /build-bootproof
+# A failed clone leaves the directory empty, so the GitHub mirror can retry in place.
+RUN (git clone https://codeberg.org/caution/bootproof.git . || \
+     git clone https://github.com/CautionHosting/bootproof.git .) && \
+    git checkout "$BOOTPROOF_COMMIT"
+
+RUN cargo fetch --locked --target $TARGET_ARCH
+
+RUN cargo build --release --locked --target ${TARGET_ARCH} -p bootproofd \
+      && install -D -m 0755 /build-bootproof/target/${TARGET_ARCH}/release/bootproofd /binaries/bootproofd
+
+FROM scratch AS bootproof-export
+COPY --from=bootproof-builder /binaries/bootproofd /bootproofd

@@ -353,6 +353,9 @@ pub struct NitroDeploymentRequest {
     /// If set, EIF is already in S3 at this key — skip local upload.
     #[serde(default)]
     pub eif_s3_key: Option<String>,
+    /// Exact deployment-paired host helper digest, retained across redeploy/rollback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tap_framer_sha256: Option<String>,
     pub memory_mb: u32,
     pub cpu_count: u32,
     pub disk_gb: u32,
@@ -658,6 +661,10 @@ async fn scale_down_asg(
 }
 
 #[cfg(test)]
+#[path = "deployment_component_tests.rs"]
+mod component_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -721,6 +728,7 @@ mod tests {
 
     pub(super) fn deployment_request(eif_path: &str, eif_s3_key: Option<&str>) -> NitroDeploymentRequest {
         NitroDeploymentRequest {
+            tap_framer_sha256: None,
             org_id: Uuid::nil(),
             resource_id: Uuid::nil(),
             resource_name: "app".to_string(),
@@ -2846,6 +2854,13 @@ fn platform_internal_ingress(e2e: bool, locksmith: bool) -> Vec<hcl::Block> {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum GenerateMainTfError {
+    #[error("invalid pinned host helper digest [{location}]")]
+    ComponentDigest {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
     #[error("deployment region is required [{location}]")]
     MissingRegion { location: Location },
     #[error("could not compute enclave sizing [{location}]")]
@@ -2878,6 +2893,12 @@ async fn generate_nitro_deployment_main_tf(
     eif_s3_path: &str,
 ) -> std::result::Result<(), GenerateMainTfError> {
     use GenerateMainTfErrorCtx as Ctx;
+    if let Some(digest) = &request.tap_framer_sha256 {
+        dterror::ResultExt::with_context(
+            enclave_builder::components::validate_digest(digest),
+            Ctx::component_digest(),
+        )?;
+    }
 
     let aws_region = request
         .credentials
@@ -3770,7 +3791,9 @@ async fn generate_nitro_deployment_main_tf(
                                 hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
                                     "tap_framer_sha256",
                                 )),
-                                hcl::Expression::String(SOURCE_TAP_FRAMER_SHA256.trim().into()),
+                                hcl::Expression::String(
+                                    request.tap_framer_sha256.clone().unwrap_or_else(|| SOURCE_TAP_FRAMER_SHA256.trim().into()),
+                                ),
                             ),
                             (
                                 hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
@@ -4074,6 +4097,13 @@ fn provider_credential_variable(name: &str, sensitive: bool) -> hcl::Block {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum GenerateOnpremTfError {
+    #[error("invalid pinned host helper digest [{location}]")]
+    ComponentDigest {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
     #[error("missing managed_onprem config [{location}]")]
     MissingConfig { location: Location },
     #[error("could not compute enclave sizing [{location}]")]
@@ -4106,6 +4136,12 @@ async fn generate_managed_onprem_deployment_tf(
     eif_s3_path: &str,
 ) -> std::result::Result<(), GenerateOnpremTfError> {
     use GenerateOnpremTfErrorCtx as Ctx;
+    if let Some(digest) = &request.tap_framer_sha256 {
+        dterror::ResultExt::with_context(
+            enclave_builder::components::validate_digest(digest),
+            Ctx::component_digest(),
+        )?;
+    }
 
     let onprem =
         request
@@ -4485,7 +4521,9 @@ async fn generate_managed_onprem_deployment_tf(
                                     hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
                                         "tap_framer_sha256",
                                     )),
-                                    hcl::Expression::String(SOURCE_TAP_FRAMER_SHA256.trim().into()),
+                                    hcl::Expression::String(
+                                        request.tap_framer_sha256.clone().unwrap_or_else(|| SOURCE_TAP_FRAMER_SHA256.trim().into()),
+                                    ),
                                 ),
                                 (
                                     hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(

@@ -12,6 +12,11 @@ DB_VOLUME := caution-postgres-data
 CAUTION_DATA_DIR ?= $(PWD)/caution-cache
 CONTAINER_DATA_DIR := /var/cache/caution
 
+# Only the API consumes the prepared component selection.
+API_IMAGE ?= caution-api
+API_COMPONENT_ENV := -e PLATFORM_GIT_SHA -e COMPONENT_BUILD_MODE -e COMPONENT_SET_SHA256 -e COMPONENTS_S3_BUCKET -e ENCLAVEOS_COMMIT -e BOOTPROOF_COMMIT -e STEVE_COMMIT -e LOCKSMITH_COMMIT
+TEST_COMPONENT_BUILD_MODE ?= source
+
 define refuse_mixed_service_management
 	@if command -v systemctl >/dev/null 2>&1; then \
 		active_services=""; \
@@ -69,8 +74,8 @@ fetch/opentofu-$(TOFU_VERSION).tar.gz:
 
 build-api: fetch/opentofu-$(TOFU_VERSION).tar.gz
 	@echo "Building API service..."
-	@docker build -t caution-api --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) --build-arg TOFU_VERSION=$(TOFU_VERSION) -f ./containerfiles/Containerfile.api .
-	@echo "API service image built: caution-api"
+	@docker build -t $(API_IMAGE) --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) --build-arg TOFU_VERSION=$(TOFU_VERSION) -f ./containerfiles/Containerfile.api .
+	@echo "API service image built: $(API_IMAGE)"
 
 build-email:
 	@echo "Building Email service..."
@@ -86,12 +91,12 @@ build-gateway-dev:
 
 build-api-dev: fetch/opentofu-$(TOFU_VERSION).tar.gz
 	@echo "Building API service (dev)..."
-	@docker build -t caution-api $(DEV_BUILD_ARGS) --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) --build-arg TOFU_VERSION=$(TOFU_VERSION) -f ./containerfiles/Containerfile.api .
+	@docker build -t $(API_IMAGE) $(DEV_BUILD_ARGS) --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) --build-arg TOFU_VERSION=$(TOFU_VERSION) -f ./containerfiles/Containerfile.api .
 	@echo "API dev service image built: caution-api"
 
 build-api-e2e: fetch/opentofu-$(TOFU_VERSION).tar.gz
 	@echo "Building API service (e2e test mode)..."
-	@docker build -t caution-api $(DEV_BUILD_ARGS) --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) --build-arg TOFU_VERSION=$(TOFU_VERSION) --build-arg EXTRA_FEATURES="e2e-testing-unsafe" -f ./containerfiles/Containerfile.api .
+	@docker build -t $(API_IMAGE) $(DEV_BUILD_ARGS) --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) --build-arg TOFU_VERSION=$(TOFU_VERSION) --build-arg EXTRA_FEATURES="e2e-testing-unsafe" -f ./containerfiles/Containerfile.api .
 	@echo "API e2e image build complete"
 
 build-email-dev:
@@ -487,9 +492,13 @@ migrate: postgres
 	@echo "Migrations complete"
 
 run-api: guard-direct-api network postgres
-	@docker rm -f api 2>/dev/null || true
-	@mkdir -p $(CAUTION_DATA_DIR)/git-repos $(CAUTION_DATA_DIR)/build $(CAUTION_DATA_DIR)/terraform
-	@docker run -d \
+	@set -a; . "$(HOME)/.config/caution/components.env"; set +a; \
+		docker run --rm --network $(NETWORK) --dns 8.8.8.8 --dns 8.8.4.4 \
+		--env-file $(HOME)/.config/caution/.env -e AWS_REGION=us-west-2 $(API_COMPONENT_ENV) \
+		"$$API_COMPONENT_IMAGE" --check-components && \
+		{ docker rm -f api 2>/dev/null || true; } && \
+		mkdir -p $(CAUTION_DATA_DIR)/git-repos $(CAUTION_DATA_DIR)/build $(CAUTION_DATA_DIR)/terraform && \
+		docker run -d \
 		--name api \
 		--network $(NETWORK) \
 		--dns 8.8.8.8 \
@@ -504,7 +513,7 @@ run-api: guard-direct-api network postgres
 		-v $(PWD)/terraform:/app/terraform:ro \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
-		caution-api
+		$(API_COMPONENT_ENV) "$$API_COMPONENT_IMAGE"
 	@echo "API service started (internal port 8080)"
 
 run-gateway: guard-direct-gateway network
@@ -562,9 +571,19 @@ run-drift-detector: network
 # Main targets
 # =============================================================================
 
-up: migrate
-	@echo "Building all images in parallel..."
-	@$(MAKE) build-api build-gateway build-email build-metering
+# Keep service lifecycle in Make/systemd. Only component preparation is new.
+up:
+	@mkdir -p "$(HOME)/.config/caution"
+	+@flock "$(HOME)/.config/caution/components.up.lock" $(MAKE) up-components
+
+.PHONY: up-components prepare-components test-prepare-components
+up-components:
+	@git diff --quiet HEAD -- || { echo "Commit tracked changes before make up"; exit 1; }
+	@$(MAKE) build-api API_IMAGE=caution-api-components
+	@$(MAKE) build-gateway build-email build-metering
+	@$(MAKE) prepare-components API_IMAGE=caution-api-components
+	@$(MAKE) migrate
+	systemctl --user daemon-reload
 	systemctl restart --user caution-email caution-metering caution-api caution-gateway
 	@echo "  All services running"
 	@echo "  Gateway: http://localhost:8000"
@@ -574,6 +593,12 @@ up: migrate
 	@echo "  Postgres: localhost:5432"
 	@echo ""
 	@echo "Database is persistent - safe to run 'make down' without losing data"
+
+prepare-components: network
+	@python3 scripts/prepare-components.py --image "$(API_IMAGE)" --network "$(NETWORK)"
+
+test-prepare-components:
+	@python3 tests/test_prepare_components.py
 
 down:
 	@docker rm -f gateway api email metering 2>/dev/null || true
@@ -708,6 +733,8 @@ run-api-test: network
 		--group-add $$(stat -c '%g' /var/run/docker.sock) \
 		--env-file .env \
 		--env-file $(HOME)/.config/caution/.env \
+		-e COMPONENT_BUILD_MODE=$(TEST_COMPONENT_BUILD_MODE) \
+		$(if $(filter source,$(TEST_COMPONENT_BUILD_MODE)),-e COMPONENT_SET_SHA256= -e COMPONENTS_S3_BUCKET=,) \
 		-e AWS_REGION=us-west-2 \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-e TF_PLUGIN_CACHE_DIR=$(CONTAINER_DATA_DIR)/terraform \
@@ -820,12 +847,22 @@ test-unit:
 		cargo test --locked --manifest-path src/tap-framer/Cargo.toml; \
 	fi
 
+# Real source/prebuilt EIF equality; fixture must live on an isolated build host.
+.PHONY: test-prebuilt-components
+test-prebuilt-components:
+	@test -n "$(COMPONENT_E2E_ROOT)" || { echo "COMPONENT_E2E_ROOT is required (disposable build host only)"; exit 1; }
+	COMPONENT_E2E_ROOT="$(COMPONENT_E2E_ROOT)" cargo test --locked -p enclave-builder --test prebuilt_components -- --ignored --nocapture
+
 test-live-caddy-nitro:
 	@test -n "$(CADDY_E2E_URL)" || { echo "CADDY_E2E_URL is required"; exit 1; }
 	CADDY_E2E_URL="$(CADDY_E2E_URL)" cargo test -p enclave-builder --test caddy_nitro_live -- --ignored --nocapture
 
 test-cli-install:
 	@bash tests/test_cli_install.sh
+
+.PHONY: test-e2e-contracts
+test-e2e-contracts:
+	@python3 tests/e2e/test_acceptance_contracts.py
 
 test-e2e:
 	@$(MAKE) build-cli
@@ -1072,4 +1109,4 @@ test-paddle-sandbox:
 	@echo "Uses PADDLE_API_KEY and PADDLE_API_URL from .env"
 	cargo test --package metering -- sandbox --nocapture
 
-test: test-unit test-cli-install
+test: test-unit test-cli-install test-e2e-contracts test-prepare-components
