@@ -4000,7 +4000,8 @@ async fn deploy_logic(
         });
     }
 
-    let component_selection = component_artifacts::ComponentSelection::parse(
+    let component_selection = component_artifacts::ComponentSelection::parse_with_mode(
+        std::env::var("COMPONENT_BUILD_MODE").ok().as_deref(),
         std::env::var("COMPONENT_SET_SHA256").ok(),
         std::env::var("COMPONENTS_S3_BUCKET").ok(),
         &state.builder_config.eif_s3_bucket,
@@ -4974,9 +4975,31 @@ async fn reconcile_managed_dns(state: Arc<AppState>, managed_dns: managed_dns::M
         .await;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupMode {
+    Serve,
+    CheckComponents,
+}
+
+impl StartupMode {
+    fn parse(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Self, MainError> {
+        let mut arguments = arguments.into_iter();
+        match (arguments.next(), arguments.next()) {
+            (None, None) => Ok(Self::Serve),
+            (Some(argument), None) if argument == "--check-components" => Ok(Self::CheckComponents),
+            _ => Err(MainError::InvalidArguments {
+                location: std::panic::Location::caller(),
+            }),
+        }
+    }
+}
+
 /// Failure modes for the process entry point [`main`].
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum MainError {
+    #[error("invalid arguments; usage: api [--check-components] [{location}]")]
+    InvalidArguments { location: Location },
+
     #[error("could not connect to the database [{location}]")]
     DatabaseConnect {
         #[location]
@@ -5052,6 +5075,7 @@ pub(crate) enum MainError {
 #[tokio::main]
 async fn main() -> Result<(), MainError> {
     use MainErrorCtx as Ctx;
+    let mode = StartupMode::parse(std::env::args_os().skip(1))?;
     tracing_subscriber::fmt::init();
 
     #[cfg(feature = "e2e-testing-unsafe")]
@@ -5072,6 +5096,7 @@ async fn main() -> Result<(), MainError> {
         builder::BuilderConfig::from_env().with_context(Ctx::builder_config_from_env())?;
     let platform_git_sha = std::env::var("PLATFORM_GIT_SHA").ok();
     component_artifacts::validate_startup(
+        std::env::var("COMPONENT_BUILD_MODE").ok().as_deref(),
         std::env::var("COMPONENT_SET_SHA256").ok(),
         std::env::var("COMPONENTS_S3_BUCKET").ok(),
         &builder_config.eif_s3_bucket,
@@ -5086,6 +5111,10 @@ async fn main() -> Result<(), MainError> {
         );
     })
     .with_context(Ctx::component_startup())?;
+    if mode == StartupMode::CheckComponents {
+        println!("Component startup preflight succeeded");
+        return Ok(());
+    }
     info!("Dedicated builder enabled");
 
     if let Err(e) = provisioning::validate_setup() {

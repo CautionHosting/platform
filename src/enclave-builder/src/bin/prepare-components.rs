@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: 2026 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-//! Explicit operator publication; never part of an ordinary per-application build.
+//! Trusted release publication; never part of an ordinary per-application build.
 //!
 //! Retain reviewed release locks outside S3 and pass each via `--accepted-lock`.
 //! The output lock is NOT implicitly trusted; pass it explicitly to reuse it.
-//! Without an accepted mapping, an S3 index is only a first-use candidate, not
-//! independent proof of accepted bytes. Publication never activates a release.
+//! Without an accepted mapping, compile the pinned source recipe locally instead
+//! of trusting an S3 index. Publication never activates a release.
 
 #![recursion_limit = "256"]
 
@@ -39,6 +39,15 @@ const TAP_FILES: [&str; 4] = ["Cargo.toml", "Cargo.lock", "src/main.rs", "src/vs
     about = "Build missing pinned service components and publish an immutable S3 set; does not activate it"
 )]
 struct Arguments {
+    /// Print resolved tool commits and repositories as JSON without publication I/O.
+    #[arg(long, exclusive = true)]
+    print_inputs: bool,
+    #[command(flatten)]
+    publication: Option<PublicationArguments>,
+}
+
+#[derive(Debug, clap::Args)]
+struct PublicationArguments {
     /// Existing destination bucket. No bucket creation, deletion or lifecycle changes.
     #[arg(long)]
     bucket: String,
@@ -121,6 +130,17 @@ async fn main() -> std::process::ExitCode {
 #[tracing::instrument(skip_all, err)]
 async fn prepare(args: Arguments) -> Result<(), PrepareError> {
     use PrepareErrorCtx as Ctx;
+    if args.print_inputs {
+        let mut stdout = std::io::stdout().lock();
+        serde_json::to_writer(&mut stdout, &build::resolve_tool_commits())
+            .with_context(Ctx::operation("write resolved tool inputs"))?;
+        return stdout
+            .flush()
+            .with_context(Ctx::operation("flush resolved tool inputs"));
+    }
+    let args = args
+        .publication
+        .ok_or_else(|| invalid("missing publication arguments"))?;
     let accepted = load_accepted_locks(&args.accepted_lock)?;
     for commit in [
         &args.framework_commit,
@@ -191,7 +211,10 @@ async fn prepare(args: Arguments) -> Result<(), PrepareError> {
         &context.join("enclave"),
         workspace.path(),
     )?;
-    let tap = context.join(recipe::source_subdir(&template, Component::TapFramer).unwrap());
+    let tap = context.join(
+        recipe::source_subdir(&template, Component::TapFramer)
+            .ok_or_else(|| invalid("missing tap source path"))?,
+    );
     for name in TAP_FILES {
         let path = tap.join(name);
         let parent = path.parent().ok_or_else(|| invalid("tap source path"))?;
@@ -237,21 +260,7 @@ async fn prepare(args: Arguments) -> Result<(), PrepareError> {
     for (component, spec) in specs {
         let trusted =
             accepted.get(&build_key(&spec).with_context(Ctx::operation("identify selected spec"))?);
-        let existing = if let Some(trusted) = trusted {
-            store
-                .load_accepted_build(trusted)
-                .await
-                .with_context(Ctx::operation("resolve trusted historical build"))?
-                .then(|| trusted.clone())
-        } else {
-            eprintln!(
-                "{component}: no accepted lock mapping; output is a candidate requiring review"
-            );
-            store
-                .load_build(&spec)
-                .await
-                .with_context(Ctx::operation("resolve candidate existing build"))?
-        };
+        let existing = resolve_reusable_build(&store, &spec, trusted).await?;
         let artifact = match existing {
             Some(artifact) => {
                 eprintln!("{component}: verified reuse (no compilation)");
@@ -286,10 +295,32 @@ async fn prepare(args: Arguments) -> Result<(), PrepareError> {
     write_lock(&args.output_lock, &set, &digest)?;
     println!("{digest}");
     println!(
-        "Activate explicitly after review: export COMPONENTS_S3_BUCKET={} COMPONENT_SET_SHA256={digest}",
+        "Activate verified set: export COMPONENTS_S3_BUCKET={} COMPONENT_SET_SHA256={digest}",
         args.bucket
     );
     Ok(())
+}
+
+#[tracing::instrument(skip_all, err)]
+async fn resolve_reusable_build(
+    store: &S3ComponentStore,
+    spec: &ComponentSpec,
+    trusted: Option<&ComponentArtifact>,
+) -> Result<Option<ComponentArtifact>, PrepareError> {
+    use PrepareErrorCtx as Ctx;
+    if let Some(trusted) = trusted {
+        Ok(store
+            .load_accepted_build(trusted)
+            .await
+            .with_context(Ctx::operation("resolve trusted historical build"))?
+            .then(|| trusted.clone()))
+    } else {
+        eprintln!(
+            "{}: no accepted lock mapping; pinned-source compilation required for qualification",
+            spec.component()
+        );
+        Ok(None)
+    }
 }
 
 #[tracing::instrument(skip_all, err)]
@@ -610,6 +641,166 @@ mod tests {
         .unwrap()
     }
 
+    async fn read_fixture(
+        objects: BTreeMap<String, Vec<u8>>,
+    ) -> (
+        S3ComponentStore,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<Vec<String>>,
+    ) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (finish, mut finished) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut reads = Vec::new();
+            loop {
+                let (mut stream, _) = tokio::select! {
+                    _ = &mut finished => return reads,
+                    connection = listener.accept() => connection.unwrap(),
+                };
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    let mut reader = BufReader::new(&mut stream);
+                    let mut request = String::new();
+                    loop {
+                        assert!(reader.read_line(&mut request).await.unwrap() > 0);
+                        assert!(request.len() < 65536);
+                        if request.ends_with("\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let mut words = request.split_whitespace();
+                    assert_eq!(words.next(), Some("GET"), "selection must never write");
+                    let key = words
+                        .next()
+                        .unwrap()
+                        .split('?')
+                        .next()
+                        .unwrap()
+                        .strip_prefix("/bucket/")
+                        .unwrap();
+                    reads.push(key.to_owned());
+                    let (status, body) = match objects.get(key) {
+                        Some(bytes) => (200, bytes.as_slice()),
+                        None => (404, b"<Error><Code>NoSuchKey</Code></Error>".as_slice()),
+                    };
+                    let header = format!(
+                        "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    stream.write_all(header.as_bytes()).await.unwrap();
+                    stream.write_all(body).await.unwrap();
+                    stream.shutdown().await.unwrap();
+                })
+                .await
+                .unwrap();
+            }
+        });
+        let config = aws_sdk_s3::Config::builder()
+            .behavior_version(aws_config::BehaviorVersion::latest())
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "fixture",
+                "fixture-secret",
+                None,
+                None,
+                "fixture",
+            ))
+            .retry_config(aws_sdk_s3::config::retry::RetryConfig::standard().with_max_attempts(1))
+            .endpoint_url(endpoint)
+            .force_path_style(true)
+            .build();
+        (
+            S3ComponentStore::new(aws_sdk_s3::Client::from_conf(config), "bucket".to_owned()),
+            finish,
+            task,
+        )
+    }
+
+    #[tokio::test]
+    async fn unaccepted_spec_requires_compilation_despite_valid_remote_candidate() {
+        use enclave_builder::components::artifact_key;
+
+        let set = test_set();
+        let candidate = &set.components()[&Component::Init];
+        let index_key = build_key(candidate.spec()).unwrap();
+        let blob_key = artifact_key(candidate.files()["init"].sha256(), "init").unwrap();
+        let (store, finish, task) = read_fixture(BTreeMap::from([
+            (index_key, serde_json::to_vec(candidate).unwrap()),
+            (blob_key, b"binary".to_vec()),
+        ]))
+        .await;
+
+        let reusable = resolve_reusable_build(&store, candidate.spec(), None).await;
+        finish.send(()).unwrap();
+        let reads = task.await.unwrap();
+        assert!(
+            reusable.unwrap().is_none(),
+            "a self-consistent S3 candidate is not locally accepted compiler output"
+        );
+        assert!(
+            reads.is_empty(),
+            "first-use compilation must not consult an untrusted index"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_spec_reuses_only_complete_verified_remote_output() {
+        use enclave_builder::components::artifact_key;
+
+        let set = test_set();
+        let accepted = &set.components()[&Component::Init];
+        let index_key = build_key(accepted.spec()).unwrap();
+        let blob_key = artifact_key(accepted.files()["init"].sha256(), "init").unwrap();
+        for blob_present in [true, false] {
+            let mut objects =
+                BTreeMap::from([(index_key.clone(), serde_json::to_vec(accepted).unwrap())]);
+            if blob_present {
+                objects.insert(blob_key.clone(), b"binary".to_vec());
+            }
+            let (store, finish, task) = read_fixture(objects).await;
+            let reusable = resolve_reusable_build(&store, accepted.spec(), Some(accepted)).await;
+            finish.send(()).unwrap();
+            assert_eq!(task.await.unwrap(), [index_key.clone(), blob_key.clone()]);
+            assert_eq!(reusable.unwrap(), blob_present.then(|| accepted.clone()));
+        }
+    }
+
+    #[test]
+    fn cli_print_inputs_requires_no_publication_arguments() {
+        let parsed = Arguments::try_parse_from(["prepare-components", "--print-inputs"]);
+        assert!(
+            parsed.is_ok(),
+            "resolved inputs must be available without a bucket, source roots, revision or output lock: {parsed:?}"
+        );
+        assert!(parsed.unwrap().publication.is_none());
+    }
+
+    #[test]
+    fn cli_print_inputs_is_exclusive_with_every_publication_option() {
+        for (option, value) in [
+            ("--bucket", "bucket"),
+            ("--framework-source", "/framework"),
+            ("--framework-commit", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            ("--enclave-source", "/enclave"),
+            ("--enclave-commit", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            ("--bootproof-commit", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            ("--steve-commit", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            ("--locksmith-commit", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            ("--output-lock", "/output.json"),
+            ("--accepted-lock", "/accepted.json"),
+            ("--build-log-dir", "/logs"),
+            ("--region", "us-east-1"),
+        ] {
+            let error = Arguments::try_parse_from([
+                "prepare-components", "--print-inputs", option, value,
+            ])
+            .unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict, "{option}");
+        }
+    }
+
     #[test]
     fn accepted_locks_merge_identical_history_and_reject_conflicting_spec_outputs() {
         let directory = tempfile::tempdir().unwrap();
@@ -697,6 +888,7 @@ mod tests {
 
     #[test]
     fn cli_requires_explicit_roots_and_framework_revision() {
+        assert!(Arguments::try_parse_from(["prepare-components"]).is_err());
         assert!(Arguments::try_parse_from(["prepare-components", "--bucket", "bucket"]).is_err());
         let args = Arguments::try_parse_from([
             "prepare-components",
@@ -715,6 +907,8 @@ mod tests {
             "--accepted-lock",
             "/release-b.json",
         ])
+        .unwrap()
+        .publication
         .unwrap();
         assert_eq!(
             args.accepted_lock,

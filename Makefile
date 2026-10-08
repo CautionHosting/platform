@@ -12,6 +12,14 @@ DB_VOLUME := caution-postgres-data
 CAUTION_DATA_DIR ?= $(PWD)/caution-cache
 CONTAINER_DATA_DIR := /var/cache/caution
 
+# Release orchestration supplies unique candidate tags and one captured revision.
+API_IMAGE ?= caution-api
+GATEWAY_IMAGE ?= caution-gateway
+EMAIL_IMAGE ?= caution-email
+METERING_IMAGE ?= caution-metering
+PLATFORM_GIT_SHA ?= $(shell git rev-parse HEAD)
+TEST_COMPONENT_BUILD_MODE ?= source
+
 define refuse_mixed_service_management
 	@if command -v systemctl >/dev/null 2>&1; then \
 		active_services=""; \
@@ -51,8 +59,8 @@ DEV_BUILD_ARGS := --build-arg CARGO_BUILD_FLAGS="" --build-arg CARGO_PROFILE_DIR
 build-gateway:
 	@echo "Building Gateway binary..."
 	@mkdir -p $(OUT_DIR)
-	@docker rmi -f caution-gateway 2>/dev/null || true
-	@docker build -t caution-gateway -f ./containerfiles/Containerfile.gateway .
+	@docker rmi -f $(GATEWAY_IMAGE) 2>/dev/null || true
+	@docker build -t $(GATEWAY_IMAGE) -f ./containerfiles/Containerfile.gateway .
 	@echo "Gateway image build complete"
 
 # NOTE: Tofu is currently broke in stagex.
@@ -69,46 +77,46 @@ fetch/opentofu-$(TOFU_VERSION).tar.gz:
 
 build-api: fetch/opentofu-$(TOFU_VERSION).tar.gz
 	@echo "Building API service..."
-	@docker build -t caution-api --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) --build-arg TOFU_VERSION=$(TOFU_VERSION) -f ./containerfiles/Containerfile.api .
+	@docker build -t $(API_IMAGE) --build-arg PLATFORM_GIT_SHA=$(PLATFORM_GIT_SHA) --build-arg TOFU_VERSION=$(TOFU_VERSION) -f ./containerfiles/Containerfile.api .
 	@echo "API service image built: caution-api"
 
 build-email:
 	@echo "Building Email service..."
-	@docker build -t caution-email -f ./containerfiles/Containerfile.email-service .
+	@docker build -t $(EMAIL_IMAGE) -f ./containerfiles/Containerfile.email-service .
 	@echo "Email service image built: caution-email"
 
 build-gateway-dev:
 	@echo "Building Gateway binary (dev)..."
 	@mkdir -p $(OUT_DIR)
-	@docker rmi -f caution-gateway 2>/dev/null || true
-	@docker build -t caution-gateway $(DEV_BUILD_ARGS) -f ./containerfiles/Containerfile.gateway .
+	@docker rmi -f $(GATEWAY_IMAGE) 2>/dev/null || true
+	@docker build -t $(GATEWAY_IMAGE) $(DEV_BUILD_ARGS) -f ./containerfiles/Containerfile.gateway .
 	@echo "Gateway dev image build complete"
 
 build-api-dev: fetch/opentofu-$(TOFU_VERSION).tar.gz
 	@echo "Building API service (dev)..."
-	@docker build -t caution-api $(DEV_BUILD_ARGS) --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) --build-arg TOFU_VERSION=$(TOFU_VERSION) -f ./containerfiles/Containerfile.api .
+	@docker build -t $(API_IMAGE) $(DEV_BUILD_ARGS) --build-arg PLATFORM_GIT_SHA=$(PLATFORM_GIT_SHA) --build-arg TOFU_VERSION=$(TOFU_VERSION) -f ./containerfiles/Containerfile.api .
 	@echo "API dev service image built: caution-api"
 
 build-api-e2e: fetch/opentofu-$(TOFU_VERSION).tar.gz
 	@echo "Building API service (e2e test mode)..."
-	@docker build -t caution-api $(DEV_BUILD_ARGS) --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) --build-arg TOFU_VERSION=$(TOFU_VERSION) --build-arg EXTRA_FEATURES="e2e-testing-unsafe" -f ./containerfiles/Containerfile.api .
+	@docker build -t $(API_IMAGE) $(DEV_BUILD_ARGS) --build-arg PLATFORM_GIT_SHA=$(PLATFORM_GIT_SHA) --build-arg TOFU_VERSION=$(TOFU_VERSION) --build-arg EXTRA_FEATURES="e2e-testing-unsafe" -f ./containerfiles/Containerfile.api .
 	@echo "API e2e image build complete"
 
 build-email-dev:
 	@echo "Building Email service (dev)..."
-	@docker build -t caution-email $(DEV_BUILD_ARGS) -f ./containerfiles/Containerfile.email-service .
+	@docker build -t $(EMAIL_IMAGE) $(DEV_BUILD_ARGS) -f ./containerfiles/Containerfile.email-service .
 	@echo "Email dev service image built: caution-email"
 
 build-gateway-e2e:
 	@echo "Building Gateway binary (e2e test mode)..."
 	@mkdir -p $(OUT_DIR)
-	@docker rmi -f caution-gateway 2>/dev/null || true
-	@docker build -t caution-gateway $(DEV_BUILD_ARGS) --build-arg EXTRA_FEATURES="e2e-testing-unsafe" -f ./containerfiles/Containerfile.gateway .
+	@docker rmi -f $(GATEWAY_IMAGE) 2>/dev/null || true
+	@docker build -t $(GATEWAY_IMAGE) $(DEV_BUILD_ARGS) --build-arg EXTRA_FEATURES="e2e-testing-unsafe" -f ./containerfiles/Containerfile.gateway .
 	@echo "Gateway e2e image build complete"
 
 build-metering:
 	@echo "Building Metering service..."
-	@docker build -t caution-metering -f ./containerfiles/Containerfile.metering .
+	@docker build -t $(METERING_IMAGE) -f ./containerfiles/Containerfile.metering .
 	@echo "Metering service image built: caution-metering"
 
 build-drift-detector:
@@ -487,62 +495,16 @@ migrate: postgres
 	@echo "Migrations complete"
 
 run-api: guard-direct-api network postgres
-	@docker rm -f api 2>/dev/null || true
-	@mkdir -p $(CAUTION_DATA_DIR)/git-repos $(CAUTION_DATA_DIR)/build $(CAUTION_DATA_DIR)/terraform
-	@docker run -d \
-		--name api \
-		--network $(NETWORK) \
-		--dns 8.8.8.8 \
-		--dns 8.8.4.4 \
-		--group-add $$(stat -c '%g' /var/run/docker.sock) \
-		-e AWS_REGION=us-west-2 \
-		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
-		-e TF_PLUGIN_CACHE_DIR=$(CONTAINER_DATA_DIR)/terraform \
-		--env-file $(HOME)/.config/caution/.env \
-		-v "$(PRICES_FILE):/app/prices.json:ro" \
-		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
-		-v $(PWD)/terraform:/app/terraform:ro \
-		-v /var/run/docker.sock:/var/run/docker.sock \
-		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
-		caution-api
-	@echo "API service started (internal port 8080)"
+	@python3 scripts/launch-service.py api --detach --network "$(NETWORK)" --dns 8.8.8.8 --dns 8.8.4.4 --data-dir "$(CAUTION_DATA_DIR)" --prices-file "$(PRICES_FILE)"
 
 run-gateway: guard-direct-gateway network
-	@docker rm -f gateway 2>/dev/null || true
-	@mkdir -p $(CAUTION_DATA_DIR)/git-repos
-	@docker run -d \
-		--name gateway \
-		--network $(NETWORK) \
-		-p 8000:8080 \
-		-p 2222:2222 \
-		--env-file $(HOME)/.config/caution/.env \
-		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
-		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
-		caution-gateway
-	@echo "Gateway started on port 8000 (HTTP) and 2222 (SSH)"
+	@python3 scripts/launch-service.py gateway --detach --network "$(NETWORK)" --data-dir "$(CAUTION_DATA_DIR)"
 
 run-email: guard-direct-email network
-	@docker rm -f email 2>/dev/null || true
-	@docker run -d \
-		--name email \
-		--network $(NETWORK) \
-		--env-file $(HOME)/.config/caution/.env \
-		-e EMAIL_BIND_ADDR=0.0.0.0:8082 \
-		-p 127.0.0.1:8082:8082 \
-		caution-email
-	@echo "Email service started on http://localhost:8082"
+	@python3 scripts/launch-service.py email --detach --network "$(NETWORK)"
 
 run-metering: guard-direct-metering network postgres
-	@docker rm -f metering 2>/dev/null || true
-	@docker run -d \
-		--name metering \
-		--network $(NETWORK) \
-		--env-file $(HOME)/.config/caution/.env \
-		-v "$(PRICES_FILE):/app/prices.json:ro" \
-		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
-		-e METERING_INTERVAL_SECS=60 \
-		caution-metering
-	@echo "Metering service started (internal port 8083)"
+	@python3 scripts/launch-service.py metering --detach --network "$(NETWORK)" --metering-interval-secs 60 --prices-file "$(PRICES_FILE)"
 
 DRIFT_DETECTOR_ORG_ID ?=
 DRIFT_DETECTOR_MIN_SEVERITY ?= info
@@ -562,18 +524,20 @@ run-drift-detector: network
 # Main targets
 # =============================================================================
 
-up: migrate
-	@echo "Building all images in parallel..."
-	@$(MAKE) build-api build-gateway build-email build-metering
-	systemctl restart --user caution-email caution-metering caution-api caution-gateway
-	@echo "  All services running"
-	@echo "  Gateway: http://localhost:8000"
-	@echo "  SSH: localhost:2222"
-	@echo "  API: internal only (http://api:8080)"
-	@echo "  Metering: internal only (http://metering:8083)"
-	@echo "  Postgres: localhost:5432"
-	@echo ""
-	@echo "Database is persistent - safe to run 'make down' without losing data"
+# Prepare/verify first; migrations and activation happen only after a complete release.
+up:
+	@python3 scripts/platform-release.py up
+
+.PHONY: recover-release test-platform-release
+recover-release:
+	@python3 scripts/platform-release.py recover
+
+test-platform-release:
+	@python3 -m unittest discover -s tests -p 'test_platform_release*.py'
+
+.PHONY: test-containerfile-cache
+test-containerfile-cache:
+	@python3 tests/test_containerfile_cache.py
 
 down:
 	@docker rm -f gateway api email metering 2>/dev/null || true
@@ -708,6 +672,8 @@ run-api-test: network
 		--group-add $$(stat -c '%g' /var/run/docker.sock) \
 		--env-file .env \
 		--env-file $(HOME)/.config/caution/.env \
+		-e COMPONENT_BUILD_MODE=$(TEST_COMPONENT_BUILD_MODE) \
+		$(if $(filter source,$(TEST_COMPONENT_BUILD_MODE)),-e COMPONENT_SET_SHA256= -e COMPONENTS_S3_BUCKET=,) \
 		-e AWS_REGION=us-west-2 \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-e TF_PLUGIN_CACHE_DIR=$(CONTAINER_DATA_DIR)/terraform \
@@ -1082,4 +1048,4 @@ test-paddle-sandbox:
 	@echo "Uses PADDLE_API_KEY and PADDLE_API_URL from .env"
 	cargo test --package metering -- sandbox --nocapture
 
-test: test-unit test-cli-install test-e2e-contracts
+test: test-unit test-cli-install test-e2e-contracts test-platform-release test-containerfile-cache

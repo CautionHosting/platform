@@ -7,12 +7,38 @@ use sha2::{Digest, Sha256};
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SelectionError {
-    #[error("COMPONENTS_S3_BUCKET requires COMPONENT_SET_SHA256 [{location}]")]
+    #[error(
+        "prebuilt component mode requires COMPONENT_SET_SHA256; prepare a release or explicitly set COMPONENT_BUILD_MODE=source and clear COMPONENT_SET_SHA256 and COMPONENTS_S3_BUCKET [{location}]"
+    )]
     MissingDigest { location: dterror::Location },
+    #[error("COMPONENT_BUILD_MODE must be source or prebuilt [{location}]")]
+    InvalidMode { location: dterror::Location },
+    #[error(
+        "COMPONENT_BUILD_MODE=source requires COMPONENT_SET_SHA256 and COMPONENTS_S3_BUCKET to be unset or empty [{location}]"
+    )]
+    SourceSelectionConflict { location: dterror::Location },
     #[error("COMPONENT_SET_SHA256 must be a lowercase SHA-256 digest [{location}]")]
     InvalidDigest { location: dterror::Location },
     #[error("invalid component bucket name [{location}]")]
     InvalidBucket { location: dterror::Location },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComponentBuildMode {
+    Source,
+    Prebuilt,
+}
+
+impl ComponentBuildMode {
+    fn parse(mode: Option<&str>) -> Result<Self, SelectionError> {
+        match mode {
+            None | Some("prebuilt") => Ok(Self::Prebuilt),
+            Some("source") => Ok(Self::Source),
+            Some(_) => Err(SelectionError::InvalidMode {
+                location: std::panic::Location::caller(),
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -22,19 +48,36 @@ pub(crate) struct ComponentSelection {
 }
 
 impl ComponentSelection {
-    pub(crate) fn parse(
+    pub(crate) fn parse_with_mode(
+        mode: Option<&str>,
         digest: Option<String>,
         bucket: Option<String>,
         default_bucket: &str,
     ) -> Result<Option<Self>, SelectionError> {
-        let Some(digest) = digest else {
-            return if bucket.is_some() {
-                Err(SelectionError::MissingDigest {
-                    location: std::panic::Location::caller(),
-                })
-            } else {
+        match ComponentBuildMode::parse(mode)? {
+            ComponentBuildMode::Prebuilt => Self::parse(digest, bucket, default_bucket),
+            ComponentBuildMode::Source => {
+                if digest.is_some_and(|value| !value.is_empty())
+                    || bucket.is_some_and(|value| !value.is_empty())
+                {
+                    return Err(SelectionError::SourceSelectionConflict {
+                        location: std::panic::Location::caller(),
+                    });
+                }
                 Ok(None)
-            };
+            }
+        }
+    }
+
+    fn parse(
+        digest: Option<String>,
+        bucket: Option<String>,
+        default_bucket: &str,
+    ) -> Result<Option<Self>, SelectionError> {
+        let Some(digest) = digest.filter(|value| !value.is_empty()) else {
+            return Err(SelectionError::MissingDigest {
+                location: std::panic::Location::caller(),
+            });
         };
         if enclave_builder::components::validate_digest(&digest).is_err() {
             return Err(SelectionError::InvalidDigest {
@@ -200,6 +243,7 @@ fn validate_startup_pins(
 /// Per-deployment validation remains necessary and is deliberately not replaced.
 #[tracing::instrument(skip_all, err)]
 pub(crate) async fn validate_startup(
+    mode: Option<&str>,
     digest: Option<String>,
     bucket: Option<String>,
     default_bucket: &str,
@@ -207,7 +251,7 @@ pub(crate) async fn validate_startup(
     tools: &enclave_builder::build::ToolCommits,
 ) -> Result<(), StartupComponentsError> {
     use StartupComponentsErrorCtx as Ctx;
-    let Some(selection) = ComponentSelection::parse(digest, bucket, default_bucket)
+    let Some(selection) = ComponentSelection::parse_with_mode(mode, digest, bucket, default_bucket)
         .with_context(Ctx::new("parse selection"))?
     else {
         return Ok(());
@@ -437,15 +481,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_source_mode_needs_neither_platform_pin_nor_storage() {
-        validate_startup(None, None, "", None, &startup_tools())
+    async fn startup_requires_a_release_digest_by_default_before_storage_access() {
+        let error = validate_startup(None, None, None, "", None, &startup_tools())
             .await
-            .unwrap();
+            .expect_err("API startup must not silently fall back to a source build");
+        assert_eq!(error.operation, "parse selection");
+        assert!(matches!(
+            error.source.downcast_ref::<SelectionError>(),
+            Some(SelectionError::MissingDigest { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn startup_rejects_an_empty_release_digest_before_storage_access() {
+        let error = validate_startup(None, Some(String::new()), None, "", None, &startup_tools())
+            .await
+            .expect_err("an empty generated digest must not enable source mode");
+        assert_eq!(error.operation, "parse selection");
+        assert!(matches!(
+            error.source.downcast_ref::<SelectionError>(),
+            Some(SelectionError::MissingDigest { .. })
+        ));
     }
 
     #[tokio::test]
     async fn startup_rejects_partial_selection_before_loading_a_set() {
         let error = validate_startup(
+            None,
             None,
             Some("platform-bucket".to_owned()),
             "platform-bucket",
@@ -823,26 +885,223 @@ mod tests {
     }
 
     #[test]
-    fn selection_preserves_source_builds_and_pins_digest_and_bucket() {
+    fn explicit_source_selection_accepts_only_absent_or_cleared_release_settings() {
+        for digest in [None, Some(String::new())] {
+            for bucket in [None, Some(String::new())] {
+                assert!(
+                    ComponentSelection::parse_with_mode(
+                        Some("source"),
+                        digest.clone(),
+                        bucket,
+                        "invalid default bucket"
+                    )
+                    .expect("explicit source must accept generated empty overrides")
+                    .is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_source_selection_rejects_stale_nonempty_release_settings() {
+        for (digest, bucket) in [
+            (Some("a".repeat(64)), None),
+            (None, Some("component-bucket".to_owned())),
+            (Some("a".repeat(64)), Some("component-bucket".to_owned())),
+            (Some("a".repeat(64)), Some(String::new())),
+            (Some(String::new()), Some("component-bucket".to_owned())),
+            (Some(" ".to_owned()), None),
+            (None, Some(" ".to_owned())),
+        ] {
+            assert!(matches!(
+                ComponentSelection::parse_with_mode(
+                    Some("source"),
+                    digest,
+                    bucket,
+                    "platform-bucket"
+                ),
+                Err(SelectionError::SourceSelectionConflict { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn unknown_build_mode_never_selects_source_or_prebuilt() {
+        for mode in [
+            "",
+            " ",
+            "auto",
+            "SOURCE",
+            "PREBUILT",
+            "source ",
+            "prebuilt\n",
+        ] {
+            for digest in [None, Some("a".repeat(64))] {
+                assert!(
+                    matches!(
+                        ComponentSelection::parse_with_mode(
+                            Some(mode),
+                            digest,
+                            None,
+                            "platform-bucket"
+                        ),
+                        Err(SelectionError::InvalidMode { .. })
+                    ),
+                    "accepted unknown mode {mode:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_prebuilt_requires_an_immutable_complete_selection() {
+        for digest in [
+            None,
+            Some(String::new()),
+            Some(" ".to_owned()),
+            Some("latest".to_owned()),
+        ] {
+            assert!(
+                ComponentSelection::parse_with_mode(
+                    Some("prebuilt"),
+                    digest,
+                    None,
+                    "platform-bucket"
+                )
+                .is_err()
+            );
+        }
+        for bucket in [Some(String::new()), Some("invalid/bucket".to_owned())] {
+            assert!(
+                ComponentSelection::parse_with_mode(
+                    Some("prebuilt"),
+                    Some("a".repeat(64)),
+                    bucket,
+                    "platform-bucket"
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            ComponentSelection::parse_with_mode(Some("prebuilt"), Some("a".repeat(64)), None, "")
+                .is_err()
+        );
+        for bucket in [None, Some("component-bucket".to_owned())] {
+            let selection = ComponentSelection::parse_with_mode(
+                Some("prebuilt"),
+                Some("a".repeat(64)),
+                bucket.clone(),
+                "platform-bucket",
+            )
+            .unwrap()
+            .expect("explicit prebuilt selects a pinned set");
+            assert_eq!(selection.digest(), "a".repeat(64));
+            assert_eq!(
+                selection.bucket(),
+                bucket.as_deref().unwrap_or("platform-bucket")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_explicit_source_accepts_generated_pair_clearing_without_storage_or_pins() {
+        for (digest, bucket) in [(None, None), (Some(String::new()), Some(String::new()))] {
+            validate_startup(Some("source"), digest, bucket, "", None, &startup_tools())
+                .await
+                .expect(
+                    "source mode must bypass component storage and active prebuilt pin validation",
+                );
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_rejects_unknown_mode_before_selection_or_storage() {
+        let error = validate_startup(Some("auto"), None, None, "", None, &startup_tools())
+            .await
+            .expect_err("unknown mode must be rejected without cloud access");
+        assert_eq!(error.operation, "parse selection");
+        assert!(matches!(
+            error.source.downcast_ref::<SelectionError>(),
+            Some(SelectionError::InvalidMode { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn startup_rejects_source_selection_conflicts_before_storage() {
+        let error = validate_startup(
+            Some("source"),
+            None,
+            Some("platform-bucket".to_owned()),
+            "",
+            None,
+            &startup_tools(),
+        )
+        .await
+        .expect_err("source mode must reject stale selection before cloud access");
+        assert_eq!(error.operation, "parse selection");
+        assert!(matches!(
+            error.source.downcast_ref::<SelectionError>(),
+            Some(SelectionError::SourceSelectionConflict { .. })
+        ));
+    }
+
+    #[test]
+    fn selection_requires_a_release_digest_by_default() {
+        for bucket in [
+            None,
+            Some(String::new()),
+            Some("component-bucket".to_owned()),
+        ] {
+            let error = ComponentSelection::parse(None, bucket, "platform-bucket")
+                .expect_err("an absent release digest must not silently select source builds");
+            assert!(matches!(error, SelectionError::MissingDigest { .. }));
+        }
+    }
+
+    #[test]
+    fn selection_treats_an_empty_release_digest_as_missing() {
+        for bucket in [
+            None,
+            Some(String::new()),
+            Some("component-bucket".to_owned()),
+        ] {
+            let error = ComponentSelection::parse(Some(String::new()), bucket, "platform-bucket")
+                .expect_err("an empty release digest must not silently select source builds");
+            assert!(matches!(error, SelectionError::MissingDigest { .. }));
+        }
+    }
+
+    #[test]
+    fn missing_release_digest_explains_explicit_source_fallback() {
+        let error =
+            ComponentSelection::parse(None, Some("component-bucket".to_owned()), "platform-bucket")
+                .unwrap_err();
+        assert!(matches!(error, SelectionError::MissingDigest { .. }));
+        let message = error.to_string();
+        assert!(message.contains("COMPONENT_SET_SHA256"), "{message}");
+        assert!(message.contains("prebuilt"), "{message}");
+        assert!(
+            message.contains("COMPONENT_BUILD_MODE=source"),
+            "missing-digest errors must explain the explicit source fallback: {message}"
+        );
+    }
+
+    #[test]
+    fn selection_pins_digest_and_bucket_by_default() {
         for (digest, bucket, expected_bucket) in [
-            (None, None, None),
-            (Some("a".repeat(64)), None, Some("platform-bucket")),
+            ("a".repeat(64), None, "platform-bucket"),
             (
-                Some("b".repeat(64)),
+                "b".repeat(64),
                 Some("component-bucket".to_owned()),
-                Some("component-bucket"),
+                "component-bucket",
             ),
         ] {
             let selection =
-                ComponentSelection::parse(digest.clone(), bucket, "platform-bucket").unwrap();
-            assert_eq!(
-                selection.as_ref().map(ComponentSelection::digest),
-                digest.as_deref()
-            );
-            assert_eq!(
-                selection.as_ref().map(ComponentSelection::bucket),
-                expected_bucket
-            );
+                ComponentSelection::parse(Some(digest.clone()), bucket, "platform-bucket")
+                    .unwrap()
+                    .expect("a pinned release must select prebuilt components");
+            assert_eq!(selection.digest(), digest);
+            assert_eq!(selection.bucket(), expected_bucket);
         }
     }
 

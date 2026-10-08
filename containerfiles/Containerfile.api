@@ -43,8 +43,8 @@ COPY . .
 ENV RUST_BACKTRACE=1
 ENV TARGET_ARCH="x86_64-unknown-linux-musl"
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     cargo fetch --locked --target $TARGET_ARCH
 
 ARG EXTRA_RUSTFLAGS="-C codegen-units=1"
@@ -54,17 +54,18 @@ ARG EXTRA_FEATURES=""
 ENV RUSTFLAGS="${EXTRA_RUSTFLAGS} -C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
 ENV NETTLE_STATIC=1
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=api-target,target=/build/target \
     --network=none \
     cargo build ${CARGO_BUILD_FLAGS} --frozen \
       -p api --bin api \
-      -p enclave-builder --bin remote-build-helper \
+      -p enclave-builder --bin remote-build-helper --bin prepare-components \
       -p hcl-patcher --bin hcl-patcher \
       --target ${TARGET_ARCH} \
       ${EXTRA_FEATURES:+--features ${EXTRA_FEATURES}} \
       && install -D -m 0755 /build/target/${TARGET_ARCH}/${CARGO_PROFILE_DIR}/api /usr/local/bin/api \
+      && install -D -m 0755 /build/target/${TARGET_ARCH}/${CARGO_PROFILE_DIR}/prepare-components /usr/local/bin/prepare-components \
       && install -D -m 0755 /build/target/${TARGET_ARCH}/${CARGO_PROFILE_DIR}/remote-build-helper /usr/local/bin/remote-build-helper \
       && install -D -m 0755 /build/target/${TARGET_ARCH}/${CARGO_PROFILE_DIR}/hcl-patcher /usr/local/bin/hcl-patcher
 
@@ -100,6 +101,7 @@ COPY --from=linux-nitro /nsm.ko /usr/share/nitro/nsm.ko
 COPY --from=cpio . /
 COPY --from=socat . /
 COPY --from=builder /usr/local/bin/api /usr/local/bin/api
+COPY --from=builder /usr/local/bin/prepare-components /usr/local/bin/prepare-components
 COPY --from=builder /usr/local/bin/remote-build-helper /usr/local/bin/remote-build-helper
 COPY --from=builder /usr/local/bin/hcl-patcher /usr/local/bin/hcl-patcher
 
