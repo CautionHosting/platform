@@ -270,7 +270,7 @@ impl IntoResponse for LoginError {
                 tracing::debug!(?self, "Login finish: decoy/scope rejection");
                 generic_auth_failure_response().into_response()
             }
-            Self::DbGetPublicKeyForCredential { .. } | Self::ParseSecurityKey { .. } => {
+            Self::ParseSecurityKey { .. } => {
                 tracing::warn!(?self, "Login finish: credential lookup/parse failure");
                 generic_auth_failure_response().into_response()
             }
@@ -551,4 +551,25 @@ pub(crate) fn build_auth_cookies(
         .build();
 
     (session_cookie.to_string(), csrf_cookie.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn public_key_lookup_failure_is_internal() {
+        let response = LoginError::DbGetPublicKeyForCredential {
+            user_id: Uuid::nil(),
+            source: Box::new(DomainError("private database diagnostic")),
+            location: std::panic::Location::caller(),
+        }
+        .into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!response.headers().contains_key(header::SET_COOKIE));
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), b"an internal error occurred");
+    }
 }
