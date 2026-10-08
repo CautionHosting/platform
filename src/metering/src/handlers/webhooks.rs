@@ -776,7 +776,7 @@ async fn handle_transaction_completed(
     }
 
     let intent = sqlx::query(
-        "SELECT organization_id, user_id, credit_cents FROM credit_purchase_intents WHERE paddle_transaction_id = $1",
+        "SELECT organization_id, credit_cents FROM credit_purchase_intents WHERE paddle_transaction_id = $1",
     )
     .bind(transaction_id)
     .fetch_optional(&state.pool)
@@ -785,7 +785,6 @@ async fn handle_transaction_completed(
 
     if let Some(intent) = intent {
         let intent_org_id: uuid::Uuid = intent.get("organization_id");
-        let intent_user_id: uuid::Uuid = intent.get("user_id");
         let credit_cents: i64 = intent.get("credit_cents");
 
         if intent_org_id != org_id {
@@ -801,7 +800,6 @@ async fn handle_transaction_completed(
         match credit_ledger_once(
             &state.pool,
             org_id,
-            Some(intent_user_id),
             credit_cents,
             "purchase",
             &format!(
