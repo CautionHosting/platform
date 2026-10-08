@@ -24,6 +24,7 @@ mod builder;
 #[cfg(feature = "e2e-testing-unsafe")]
 mod cleanup;
 mod cloud_credentials;
+mod component_artifacts;
 mod config;
 mod cryptographic_bundles;
 mod deployment;
@@ -2176,7 +2177,7 @@ pub(crate) enum RestorePendingDeployRejectionError {
 
 #[tracing::instrument(skip_all, err)]
 async fn restore_pending_deploy_rejection(
-    state: &Arc<AppState>,
+    db: &sqlx::PgPool,
     org_id: Uuid,
     resource_id: Uuid,
     deploy_attempt_id: Uuid,
@@ -2197,7 +2198,7 @@ async fn restore_pending_deploy_rejection(
         .bind(resource_id)
         .bind(org_id)
         .bind(deploy_attempt_id)
-        .execute(&state.db)
+        .execute(db)
         .await
     } else {
         sqlx::query(
@@ -2210,7 +2211,7 @@ async fn restore_pending_deploy_rejection(
         .bind(resource_id)
         .bind(org_id)
         .bind(deploy_attempt_id)
-        .execute(&state.db)
+        .execute(db)
         .await
     };
 
@@ -2590,6 +2591,13 @@ async fn set_builder_config(
 /// the underlying sources stay chained on the error and never reach the client.
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum DeployLogicError {
+    #[error("could not prepare pinned component artifacts [{location}]")]
+    Components {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
     #[error("invalid platform framework commit [{location}]")]
     FrameworkCommit {
         #[location]
@@ -2908,7 +2916,7 @@ impl DeployLogicError {
     /// Frozen status code and fixed client body for each failure path.
     fn client_response(&self) -> (StatusCode, &'static str) {
         match self {
-            DeployLogicError::FrameworkCommit { .. } => {
+            DeployLogicError::FrameworkCommit { .. } | DeployLogicError::Components { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
             DeployLogicError::OrgMembership { .. } => {
@@ -3992,6 +4000,21 @@ async fn deploy_logic(
         });
     }
 
+    let component_selection = component_artifacts::ComponentSelection::parse(
+        std::env::var("COMPONENT_SET_SHA256").ok(),
+        std::env::var("COMPONENTS_S3_BUCKET").ok(),
+        &state.builder_config.eif_s3_bucket,
+    )
+    .with_context(Ctx::components())?;
+    let selected_components = match component_selection {
+        Some(selection) => Some(
+            component_artifacts::SelectedComponents::load(selection)
+                .await
+                .with_context(Ctx::components())?,
+        ),
+        None => None,
+    };
+
     // Atomically transition to Pending — rejects concurrent deploys via the check above
     if was_destroyed {
         tracing::info!("Reactivating previously destroyed resource {}", resource_id);
@@ -4161,7 +4184,7 @@ async fn deploy_logic(
 
     if provider_requires_linked_byoc(&config_file, managed_onprem_config.is_some()) {
         if let Err(error) = restore_pending_deploy_rejection(
-            &state,
+            &state.db,
             req.org_id,
             resource_id,
             deploy_attempt_id,
@@ -4179,7 +4202,7 @@ async fn deploy_logic(
 
     if !is_managed_onprem && cpu_count > fully_managed_capacity::MAX_FULLY_MANAGED_ENCLAVE_VCPUS {
         if let Err(error) = restore_pending_deploy_rejection(
-            &state,
+            &state.db,
             req.org_id,
             resource_id,
             deploy_attempt_id,
@@ -4199,7 +4222,7 @@ async fn deploy_logic(
         fully_managed_capacity::DeploymentRequirements::for_enclave(cpu_count, memory_mb);
     if deployment_requirements_result.is_err()
         && let Err(error) = restore_pending_deploy_rejection(
-            &state,
+            &state.db,
             req.org_id,
             resource_id,
             deploy_attempt_id,
@@ -4241,9 +4264,22 @@ async fn deploy_logic(
     )
     .await
     .with_context(Ctx::builder_target())?;
-    let builder_eif_s3_key = {
+    let build_result: Result<builder::BuildResult, DeployLogicError> = async {
         let enclaveos_commit = enclave_builder::build::resolve_enclaveos_commit();
         let steve_commit = enclave_builder::build::resolve_steve_commit();
+        if let Some(selected) = &selected_components {
+            component_artifacts::validate_source_pins(
+                selected.set(),
+                &enclaveos_commit,
+                &enclave_builder::build::resolve_bootproof_commit(),
+                &framework_commit,
+                e2e.then_some(steve_commit.as_str()),
+                config_file
+                    .has_vault_env()
+                    .then_some(enclave_builder::build::resolve_locksmith_commit().as_str()),
+            )
+            .with_context(Ctx::components())?;
+        }
         let cache_key = builder::compute_cache_key(
             &commit_sha,
             &enclaveos_commit,
@@ -4259,18 +4295,28 @@ async fn deploy_logic(
                 .unwrap_or(&vec![]),
             &framework_commit,
         );
+        let cache_key = component_artifacts::cache_key_with_components(
+            &cache_key,
+            selected_components
+                .as_ref()
+                .map(|selected| selected.digest()),
+        );
         let s3_client = s3_client_for_credentials(&builder_target.aws_credentials).await;
 
         // Check cache first
         let cached_result = if !no_cache {
-            builder::check_build_cache(
+            let result = builder::check_build_cache(
                 &state.db,
                 req.org_id,
                 &cache_key,
                 builder_target.cache_app_id,
             )
-            .await
-            .with_context(Ctx::cache_lookup())?
+            .await;
+            if matches!(&result, Err(builder::CheckBuildCacheError::Decode { .. })) {
+                result.with_context(Ctx::components())?
+            } else {
+                result.with_context(Ctx::cache_lookup())?
+            }
         } else {
             None
         };
@@ -4292,13 +4338,30 @@ async fn deploy_logic(
         };
 
         if let Some(cached) = cached_result {
+            let expected = selected_components
+                .as_ref()
+                .map(|selected| {
+                    component_artifacts::BuildComponentArtifacts::from_set(
+                        selected.set(),
+                        &cached.eif_s3_key,
+                    )
+                })
+                .transpose()
+                .with_context(Ctx::components())?;
+            if cached.component_artifacts != expected {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "cached EIF component provenance does not match captured selection",
+                ))
+                .with_context(Ctx::components());
+            }
             let _ = tx.send(Ok(milestone("Using cached build..."))).await;
             tracing::info!(
                 "Builder cache HIT: cache_key={}, s3_key={}",
                 cache_key,
                 cached.eif_s3_key
             );
-            cached.eif_s3_key
+            Ok(cached)
         } else {
             let _ = tx
                 .send(Ok(milestone("Provisioning dedicated builder...")))
@@ -4319,6 +4382,20 @@ async fn deploy_logic(
                 });
             }
 
+            if let Some(selected) = &selected_components {
+                selected
+                    .stage_for_builder(
+                        s3_client.clone(),
+                        builder_target.config.eif_s3_bucket.clone(),
+                        &component_artifacts::required_components(
+                            e2e,
+                            config_file.has_vault_env(),
+                            egress,
+                        ),
+                    )
+                    .await
+                    .with_context(Ctx::components())?;
+            }
             let build_id = uuid::Uuid::new_v4();
             let source_artifact = builder::upload_source_archive(
                 &s3_client,
@@ -4340,6 +4417,9 @@ async fn deploy_logic(
             let resolved_size = state.builder_sizes.resolve(size_id);
 
             let build_request = builder::BuildRequest {
+                component_set: selected_components
+                    .as_ref()
+                    .map(|selected| selected.set().clone()),
                 org_id: req.org_id,
                 app_id: resource_id,
                 app_name: app_name.clone(),
@@ -4384,12 +4464,33 @@ async fn deploy_logic(
                 &tx,
                 auth.user_id,
             )
-            .await
-            .with_context(Ctx::builder_failed())?;
-
-            build_result.eif_s3_key
+            .await;
+            if matches!(
+                &build_result,
+                Err(builder::ExecuteRemoteBuildError::Components { .. })
+            ) {
+                build_result.with_context(Ctx::components())
+            } else {
+                build_result.with_context(Ctx::builder_failed())
+            }
         }
-    };
+    }
+    .await;
+    if matches!(&build_result, Err(DeployLogicError::Components { .. }))
+        && let Err(error) = restore_pending_deploy_rejection(
+            &state.db,
+            req.org_id,
+            resource_id,
+            deploy_attempt_id,
+            previous_state,
+            was_destroyed,
+        )
+        .await
+    {
+        tracing::error!(?error, "failed to restore pending deploy rejection");
+    }
+    let build_result = build_result?;
+    let builder_eif_s3_key = build_result.eif_s3_key;
 
     let eif_path = format!(
         "s3://{}/{}",
@@ -4417,6 +4518,8 @@ async fn deploy_logic(
         "eif_path": eif_path,
         "eif_hash": eif_hash,
         "eif_s3_key": builder_eif_s3_key,
+        "component_artifacts": build_result.component_artifacts,
+        "tap_framer_sha256": build_result.component_artifacts.as_ref().map(|artifacts| artifacts.tap_framer_sha256()),
         "eif_size_bytes": eif_size_bytes_db,
         "commit_sha": commit_sha,
         "run_command": run_command,
@@ -4457,7 +4560,7 @@ async fn deploy_logic(
         .await;
         if reservation.is_err()
             && let Err(rejection_error) = restore_pending_deploy_rejection(
-                &state,
+                &state.db,
                 req.org_id,
                 resource_id,
                 deploy_attempt_id,
@@ -4525,6 +4628,10 @@ async fn deploy_logic(
     let _ = tx.send(Ok(milestone(&target))).await;
 
     let nitro_request = deployment::NitroDeploymentRequest {
+        tap_framer_sha256: build_result
+            .component_artifacts
+            .as_ref()
+            .map(|artifacts| artifacts.tap_framer_sha256().to_owned()),
         org_id: req.org_id,
         resource_id,
         resource_name: app_name.clone(),
@@ -4907,6 +5014,16 @@ pub(crate) enum MainError {
         source: BoxError,
     },
 
+    #[error(
+        "component startup preflight failed; prepare compatible set then activate image/pins together [{location}]"
+    )]
+    ComponentStartup {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
     #[error("could not configure managed DNS [{location}]")]
     ManagedDnsConfig {
         #[location]
@@ -4950,6 +5067,26 @@ async fn main() -> Result<(), MainError> {
             "e2e-testing-unsafe feature is enabled — /internal/cleanup/destroy-next-app endpoint is active. Do NOT use in production."
         );
     }
+
+    let builder_config =
+        builder::BuilderConfig::from_env().with_context(Ctx::builder_config_from_env())?;
+    let platform_git_sha = std::env::var("PLATFORM_GIT_SHA").ok();
+    component_artifacts::validate_startup(
+        std::env::var("COMPONENT_SET_SHA256").ok(),
+        std::env::var("COMPONENTS_S3_BUCKET").ok(),
+        &builder_config.eif_s3_bucket,
+        platform_git_sha.as_deref(),
+        &enclave_builder::build::resolve_tool_commits(),
+    )
+    .await
+    .inspect_err(|error| {
+        tracing::error!(
+            ?error,
+            "Component startup preflight failed; prepare compatible set then activate image/pins together"
+        );
+    })
+    .with_context(Ctx::component_startup())?;
+    info!("Dedicated builder enabled");
 
     if let Err(e) = provisioning::validate_setup() {
         tracing::warn!("Provisioning validation failed: {:?}", e);
@@ -5024,10 +5161,6 @@ async fn main() -> Result<(), MainError> {
     let pricing = PricingConfig::load().with_context(Ctx::pricing_load())?;
     let builder_sizes =
         builder::BuilderSizesConfig::load().with_context(Ctx::builder_sizes_load())?;
-
-    let builder_config =
-        builder::BuilderConfig::from_env().with_context(Ctx::builder_config_from_env())?;
-    info!("Dedicated builder enabled");
 
     let eif_cache_size_gb: u64 = std::env::var("EIF_CACHE_SIZE_GB")
         .ok()
@@ -5350,5 +5483,84 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => tracing::info!("Received SIGINT, shutting down"),
         _ = sigterm.recv() => tracing::info!("Received SIGTERM, shutting down"),
+    }
+}
+
+#[cfg(test)]
+mod component_rejection_tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires disposable COMPONENTS_TEST_DATABASE_URL"]
+    async fn component_rejection_restore_preserves_running_and_attempt_ownership() {
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&std::env::var("COMPONENTS_TEST_DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        sqlx::raw_sql("CREATE TEMP TABLE compute_resources (id UUID, organization_id UUID, state TEXT, destroyed_at TIMESTAMPTZ, deploy_attempt_id UUID);
+            CREATE TYPE pg_temp.resource_state AS ENUM ('pending', 'running', 'stopped');
+            ALTER TABLE compute_resources ALTER COLUMN state TYPE pg_temp.resource_state USING state::pg_temp.resource_state;")
+            .execute(&db).await.unwrap();
+        let org = Uuid::new_v4();
+        let id = Uuid::new_v4();
+        let attempt = Uuid::new_v4();
+        sqlx::query("INSERT INTO compute_resources VALUES ($1, $2, 'pending', NULL, $3)")
+            .bind(id)
+            .bind(org)
+            .bind(attempt)
+            .execute(&db)
+            .await
+            .unwrap();
+        for (o, r, a) in [
+            (Uuid::new_v4(), id, attempt),
+            (org, Uuid::new_v4(), attempt),
+            (org, id, Uuid::new_v4()),
+        ] {
+            restore_pending_deploy_rejection(&db, o, r, a, types::ResourceState::Running, false)
+                .await
+                .unwrap();
+            let state: String = sqlx::query_scalar("SELECT state::text FROM compute_resources")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+            assert_eq!(state, "pending");
+        }
+        restore_pending_deploy_rejection(
+            &db,
+            org,
+            id,
+            attempt,
+            types::ResourceState::Running,
+            false,
+        )
+        .await
+        .unwrap();
+        let row: (String, Option<Uuid>, bool) = sqlx::query_as(
+            "SELECT state::text, deploy_attempt_id, destroyed_at IS NULL FROM compute_resources",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(row, ("running".into(), None, true));
+        restore_pending_deploy_rejection(
+            &db,
+            org,
+            id,
+            attempt,
+            types::ResourceState::Stopped,
+            true,
+        )
+        .await
+        .unwrap();
+        let state: String = sqlx::query_scalar("SELECT state::text FROM compute_resources")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            state, "running",
+            "stale rejection must not change a restored resource"
+        );
+        db.close().await;
     }
 }

@@ -315,9 +315,16 @@ resource "aws_iam_policy" "platform_deploy" {
             "s3:prefix" = [
               "builds/*",
               "eifs/*",
+              "components/v1/*",
             ]
           }
         }
+      },
+      {
+        Sid    = "S3ComponentReads"
+        Effect = "Allow"
+        Action = ["s3:GetObject"]
+        Resource = "${aws_s3_bucket.eif_storage.arn}/components/v1/*"
       },
       {
         Sid    = "S3EIFObjects"
@@ -365,6 +372,55 @@ resource "aws_iam_policy" "platform_deploy" {
 resource "aws_iam_user_policy_attachment" "platform" {
   user       = aws_iam_user.platform.name
   policy_arn = aws_iam_policy.platform_deploy.arn
+}
+
+# --- Optional alternate component source for managed deployments ---
+
+variable "components_source_bucket_name" {
+  description = "Optional COMPONENTS_S3_BUCKET override. A bucket different from eif_bucket_name enables platform-only verified relay; builders remain read-only consumers of the EIF bucket. Cross-account source bucket access must also be granted by its owner."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition     = var.components_source_bucket_name == null || can(regex("^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", var.components_source_bucket_name))
+    error_message = "components_source_bucket_name must be null or a literal S3 bucket name, not an ARN, URL, or wildcard."
+  }
+}
+
+resource "aws_iam_user_policy" "platform_component_relay" {
+  count = var.components_source_bucket_name != null && var.components_source_bucket_name != var.eif_bucket_name ? 1 : 0
+  name  = "caution-platform-component-relay"
+  user  = aws_iam_user.platform.name
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "ReadAlternateComponentSource"
+        Effect = "Allow"
+        Action = ["s3:GetObject"]
+        Resource = [
+          "arn:aws:s3:::${var.components_source_bucket_name}/components/v1/blobs/sha256/*",
+          "arn:aws:s3:::${var.components_source_bucket_name}/components/v1/manifests/sha256/*",
+        ]
+      },
+      {
+        Sid    = "CreateRelayedComponents"
+        Effect = "Allow"
+        Action = ["s3:PutObject"]
+        Resource = [
+          "${aws_s3_bucket.eif_storage.arn}/components/v1/blobs/sha256/*",
+          "${aws_s3_bucket.eif_storage.arn}/components/v1/manifests/sha256/*",
+        ]
+        Condition = {
+          StringEquals = {
+            "s3:if-none-match" = "*"
+          }
+        }
+      },
+    ]
+  })
 }
 
 # --- Dedicated Builder: IAM Role + Instance Profile + Security Group ---
@@ -475,9 +531,16 @@ resource "aws_iam_role_policy" "builder_s3" {
             "s3:prefix" = [
               "builds/*",
               "eifs/*",
+              "components/v1/*",
             ]
           }
         }
+      },
+      {
+        Sid    = "BuilderComponentReads"
+        Effect = "Allow"
+        Action = ["s3:GetObject"]
+        Resource = "${aws_s3_bucket.eif_storage.arn}/components/v1/*"
       },
       {
         Sid    = "BuilderS3Objects"

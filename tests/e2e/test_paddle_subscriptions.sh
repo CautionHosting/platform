@@ -14,8 +14,13 @@ DB_NAME="${DB_NAME:-caution_test}"
 
 pass() { printf '[PASS] %s\n' "$1"; }
 fail() { printf '[FAIL] %s\n' "$1" >&2; exit 1; }
-db() { docker exec "$DB_CONTAINER" psql -U postgres -d "$DB_NAME" -Atqc "$1"; }
+db() { docker exec "$DB_CONTAINER" psql -U postgres -d "$DB_NAME" -v ON_ERROR_STOP=1 -Atqc "$1"; }
 new_uuid() { tr -d '\n' </proc/sys/kernel/random/uuid; }
+
+# Keep provider identities and event idempotency keys isolated across reruns.
+RUN_ID=$(new_uuid)
+SUBSCRIPTION_ID="sub_e2e_byoc_$RUN_ID"
+CUSTOMER_ID="ctm_e2e_byoc_$RUN_ID"
 
 wait_for() {
   local name=$1 url=$2
@@ -44,14 +49,15 @@ PY
     -H "Paddle-Signature: ts=$timestamp;h1=$signature" \
     --data-binary "@$payload" \
     "$METERING_URL/webhooks/paddle")
-  jq -e --arg expected "$expected_status" '.status == $expected' <<<"$response" >/dev/null
+  jq -e --arg expected "$expected_status" '.status == $expected' <<<"$response" >/dev/null \
+    || fail "expected webhook status $expected_status, got: $response"
 }
 
 payload() {
   local path=$1 event_id=$2 event_type=$3 occurred_at=$4 status=$5 intent_field=$6 intent_id=$7
   EVENT_ID="$event_id" EVENT_TYPE="$event_type" OCCURRED_AT="$occurred_at" \
   SUBSCRIPTION_STATUS="$status" INTENT_FIELD="$intent_field" INTENT_ID="$intent_id" \
-  ORG_ID="$ORG_ID" python3 - "$path" <<'PY'
+  ORG_ID="$ORG_ID" RUN_ID="$RUN_ID" SUBSCRIPTION_ID="$SUBSCRIPTION_ID" CUSTOMER_ID="$CUSTOMER_ID" python3 - "$path" <<'PY'
 import json, os, pathlib, sys
 custom = {
     "caution_operation": "byoc_subscription",
@@ -62,8 +68,8 @@ field = os.environ["INTENT_FIELD"]
 if field:
     custom[field] = os.environ["INTENT_ID"]
 data = {
-    "id": "sub_e2e_byoc",
-    "customer_id": "ctm_e2e_byoc",
+    "id": os.environ["SUBSCRIPTION_ID"],
+    "customer_id": os.environ["CUSTOMER_ID"],
     "status": os.environ["SUBSCRIPTION_STATUS"],
     "items": [{"price": {"id": "pri_e2e_2"}}],
     "current_billing_period": {
@@ -74,7 +80,7 @@ data = {
     "custom_data": custom,
 }
 body = {
-    "event_id": os.environ["EVENT_ID"],
+    "event_id": os.environ["EVENT_ID"] + "_" + os.environ["RUN_ID"],
     "event_type": os.environ["EVENT_TYPE"],
     "occurred_at": os.environ["OCCURRED_AT"],
     "data": data,
@@ -130,7 +136,7 @@ payload "$TMP_DIR/created.json" 'evt_e2e_created' 'subscription.created' "$CREAT
 send_webhook "$TMP_DIR/created.json"
 
 PROJECTED=$(db "SELECT billing_source || '|' || tier || '|' || max_apps || '|' || status || '|' || catalog_valid
-                FROM subscriptions WHERE paddle_subscription_id = 'sub_e2e_byoc'")
+                FROM subscriptions WHERE paddle_subscription_id = '$SUBSCRIPTION_ID'")
 [[ $PROJECTED == 'paddle|2_enclaves|2|active|true' ]] || fail "unexpected subscription projection: $PROJECTED"
 INTENT_STATUS=$(db "SELECT status FROM subscription_intents WHERE id = '$CHECKOUT_INTENT_ID'")
 [[ $INTENT_STATUS == 'applied' ]] || fail "checkout intent was not applied: $INTENT_STATUS"
@@ -145,11 +151,11 @@ pass 'authenticated subscription API returned the Paddle entitlement'
 STALE_CANCEL_INTENT_ID=$(new_uuid)
 db "INSERT INTO subscription_intents
     (id, organization_id, requested_by_user_id, operation, subscription_id, paddle_subscription_id, status)
-    SELECT '$STALE_CANCEL_INTENT_ID', '$ORG_ID', '$USER_ID', 'cancel', id, 'sub_e2e_byoc', 'provider_pending'
-    FROM subscriptions WHERE paddle_subscription_id = 'sub_e2e_byoc'"
+    SELECT '$STALE_CANCEL_INTENT_ID', '$ORG_ID', '$USER_ID', 'cancel', id, '$SUBSCRIPTION_ID', 'provider_pending'
+    FROM subscriptions WHERE paddle_subscription_id = '$SUBSCRIPTION_ID'"
 payload "$TMP_DIR/stale.json" 'evt_e2e_stale' 'subscription.canceled' '2026-07-13T11:59:59Z' 'canceled' '' ''
 send_webhook "$TMP_DIR/stale.json"
-[[ $(db "SELECT status FROM subscriptions WHERE paddle_subscription_id = 'sub_e2e_byoc'") == 'active' ]] || fail 'older event regressed subscription state'
+[[ $(db "SELECT status FROM subscriptions WHERE paddle_subscription_id = '$SUBSCRIPTION_ID'") == 'active' ]] || fail 'older event regressed subscription state'
 [[ $(db "SELECT status FROM subscription_intents WHERE id = '$STALE_CANCEL_INTENT_ID'") == 'provider_pending' ]] || fail 'older event incorrectly applied cancellation intent'
 pass 'older provider event was ignored without applying workflow side effects'
 
@@ -157,17 +163,17 @@ db "UPDATE subscription_intents SET status = 'canceled' WHERE id = '$STALE_CANCE
 CANCEL_INTENT_ID=$(new_uuid)
 db "INSERT INTO subscription_intents
     (id, organization_id, requested_by_user_id, operation, subscription_id, paddle_subscription_id, status)
-    SELECT '$CANCEL_INTENT_ID', '$ORG_ID', '$USER_ID', 'cancel', id, 'sub_e2e_byoc', 'provider_pending'
-    FROM subscriptions WHERE paddle_subscription_id = 'sub_e2e_byoc'"
+    SELECT '$CANCEL_INTENT_ID', '$ORG_ID', '$USER_ID', 'cancel', id, '$SUBSCRIPTION_ID', 'provider_pending'
+    FROM subscriptions WHERE paddle_subscription_id = '$SUBSCRIPTION_ID'"
 payload "$TMP_DIR/canceled.json" 'evt_e2e_canceled' 'subscription.canceled' "$CREATED_AT" 'canceled' '' ''
 send_webhook "$TMP_DIR/canceled.json"
-[[ $(db "SELECT status FROM subscriptions WHERE paddle_subscription_id = 'sub_e2e_byoc'") == 'canceled' ]] || fail 'equal-time cancellation did not win fail-closed precedence'
+[[ $(db "SELECT status FROM subscriptions WHERE paddle_subscription_id = '$SUBSCRIPTION_ID'") == 'canceled' ]] || fail 'equal-time cancellation did not win fail-closed precedence'
 [[ $(db "SELECT status FROM subscription_intents WHERE id = '$CANCEL_INTENT_ID'") == 'applied' ]] || fail 'cancellation intent was not applied'
 pass 'equal-time cancellation won fail-closed precedence and applied its intent'
 
 send_webhook "$TMP_DIR/canceled.json" 'already_processed'
-EVENT_COUNT=$(db "SELECT COUNT(*) FROM paddle_webhook_events WHERE event_id = 'evt_e2e_canceled'")
-SUBSCRIPTION_COUNT=$(db "SELECT COUNT(*) FROM subscriptions WHERE paddle_subscription_id = 'sub_e2e_byoc'")
+EVENT_COUNT=$(db "SELECT COUNT(*) FROM paddle_webhook_events WHERE event_id = 'evt_e2e_canceled_$RUN_ID'")
+SUBSCRIPTION_COUNT=$(db "SELECT COUNT(*) FROM subscriptions WHERE paddle_subscription_id = '$SUBSCRIPTION_ID'")
 [[ $EVENT_COUNT == 1 && $SUBSCRIPTION_COUNT == 1 ]] || fail 'duplicate webhook was not idempotent'
 pass 'duplicate webhook delivery was idempotent'
 

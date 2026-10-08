@@ -71,6 +71,11 @@ mkdir -p "$LOG_DIR"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 cleanup() {
+    local exit_status=$?
+    if [ "$exit_status" -ne 0 ] && [ "$STEPS_FAILED" -eq 0 ]; then
+        STEPS_FAILED=$((STEPS_FAILED + 1))
+        STEP_RESULTS+=("[FAIL] Step $STEP_NUM: unexpected exit $exit_status (step did not complete)")
+    fi
     echo ""
     echo "=== Cleanup ==="
 
@@ -100,6 +105,7 @@ cleanup() {
     echo "========================================"
     echo ""
     echo "Full log: $LOG_FILE"
+    exit "$exit_status"
 }
 trap cleanup EXIT
 
@@ -1330,12 +1336,18 @@ SELECT COALESCE(SUM(delta_cents), 0) FROM credit_ledger
 WHERE paddle_transaction_id = '$INTENT_TXN';
 " 2>/dev/null | tr -d ' \n')
 
+INTENT_GRANTS=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -A -c "
+SELECT COUNT(*), COUNT(*) FILTER (
+    WHERE organization_id = '$ORG_ID' AND entry_type = 'purchase' AND delta_cents = 2500
+) FROM credit_ledger WHERE paddle_transaction_id = '$INTENT_TXN';
+" 2>/dev/null | tr -d ' \n')
+
 log "  Credited for intent txn: ${INTENT_DELTA}c (paid 100c, custom_data declared 100000000c)"
 
-if [ "$INTENT_DELTA" = "2500" ]; then
-    step_pass "Credit purchase webhook: credited intent amount (\$25.00), ignored custom_data"
+if [ "$INTENT_DELTA" = "2500" ] && [ "$INTENT_GRANTS" = "1|1" ]; then
+    step_pass "Credit purchase webhook: one intent grant (\$25.00) for the expected org, ignored custom_data"
 else
-    step_fail "Credit purchase webhook: credited ${INTENT_DELTA}c, expected 2500 (intent amount)"
+    step_fail "Credit purchase webhook: credited ${INTENT_DELTA}c, grants=$INTENT_GRANTS; expected 2500 and 1|1 (total|matching org/purchase/amount)"
 fi
 
 # ── Step 32: Credit purchase webhook refuses without an intent row ────
@@ -1500,9 +1512,9 @@ INSERT INTO usage_ledger (
     ('$ORG_ID', 'dashboard-cost-sync', 'aws', 'aws_cost_explorer', 13, 'usd', 1, 0,
      NOW(), '{}'),
     ('$ORG_ID', 'dashboard-renamed', 'aws', 'compute', 0, 'hours', 1, 0,
-     NOW(), '{"resource_name":"dashboard-name-a"}'),
+     NOW(), '{\"resource_name\":\"dashboard-name-a\"}'),
     ('$ORG_ID', 'dashboard-renamed', 'aws', 'compute', 0, 'hours', 1, 0,
-     NOW(), '{"resource_name":"dashboard-name-b"}');
+     NOW(), '{\"resource_name\":\"dashboard-name-b\"}');
 " >/dev/null 2>&1
 
 DASHBOARD_USAGE=$(curl -sf "$GATEWAY_URL/api/billing/usage" -H "X-Session-ID: $SESSION_ID")
@@ -1556,10 +1568,14 @@ INSERT INTO usage_ledger (
      date_trunc('month', NOW()) - INTERVAL '1 second', '{}');
 " >/dev/null 2>&1
 
+# The unmetered runner uses configured API pricing, including compute margin;
+# the metered runner uses its latest valid ledger rate (0.4 * 1.25 = 0.5).
+# Read the API's mounted configuration rather than assuming a zero-margin fixture.
+COMPUTE_MARGIN_PERCENT=$(docker cp api:/app/prices.json - | tar -xO | jq -er '.compute_margin_percent | numbers')
 EXPECTED_PROJECTION=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -A -c "
 SELECT 2 + EXTRACT(EPOCH FROM (
     date_trunc('month', NOW()) + INTERVAL '1 month' - date_trunc('month', NOW())
-)) / 3600 * (0.5 + 0.192);
+)) / 3600 * (0.5 + 0.192 * (1 + $COMPUTE_MARGIN_PERCENT / 100.0));
 " 2>/dev/null | head -1 | tr -d ' \n')
 DASHBOARD_USAGE=$(curl -sf "$GATEWAY_URL/api/billing/usage" -H "X-Session-ID: $SESSION_ID")
 if jq -e --argjson expected "$EXPECTED_PROJECTION" '

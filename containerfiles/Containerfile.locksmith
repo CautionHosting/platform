@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: 2026 Caution SEZC
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Caution-Commercial
+
+FROM stagex/pallet-rust@sha256:9c38bf1066dd9ad1b6a6b584974dd798c2bf798985bf82e58024fbe0515592ca AS locksmith-rust
+FROM stagex/core-git@sha256:6b3e0055f6aeaa8465f207a871db2c63a939cd7406113e9d769ff3b37239f3d0 AS locksmith-git
+FROM stagex/core-ca-certificates@sha256:d135f1189e9b232eb7316626bf7858534c5540b2fc53dced80a4c9a95f26493e AS locksmith-ca-certificates
+FROM stagex/core-curl@sha256:bc8bab43d96a9167fbb85022ea773644a45ef335e7a9b747f203078973fa988e AS locksmith-curl
+FROM stagex/core-openssl@sha256:d6487f0cb15f4ee02b420c717cb9abd85d73043c0bb3a2c6ce07688b23c1df07 AS locksmith-openssl
+FROM stagex/user-eudev@sha256:6eab1ad722f60d81886be6452ee47c229ae8aba0036a7e71f47f701f413888ae AS locksmith-eudev
+FROM stagex/user-pcsc-lite@sha256:2e0bb1cbeb9dd97be4e0594bd712dc138ee2710668281d3faa1a18d99a50979d AS locksmith-pcsc-lite
+FROM stagex/user-nettle@sha256:3b883ec8fb6781acff2517e7485d7e8f79f147f8fa2b3b644cb96da495af52e7 AS locksmith-nettle
+FROM stagex/core-gmp@sha256:35f1f6f285efd438e7d985dc0538b7a5ca1a228e69f50d39de2bcafe830b4beb AS locksmith-gmp
+
+FROM locksmith-rust AS locksmith-builder
+
+COPY --from=locksmith-git . /
+COPY --from=locksmith-ca-certificates . /
+COPY --from=locksmith-curl . /
+COPY --from=locksmith-openssl . /
+COPY --from=locksmith-eudev . /
+COPY --from=locksmith-pcsc-lite . /
+COPY --from=locksmith-nettle . /
+COPY --from=locksmith-gmp . /
+
+ENV SOURCE_DATE_EPOCH=1
+ENV CARGO_HOME=/usr/local/cargo
+ENV RUSTFLAGS="-C codegen-units=1 -C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
+ENV TARGET_ARCH="x86_64-unknown-linux-musl"
+ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig
+ENV NETTLE_STATIC=1
+ENV LIBPCSCLITE_STATIC=1
+
+ARG LOCKSMITH_COMMIT
+
+WORKDIR /build-locksmith
+# A failed clone leaves the directory empty, so the GitHub mirror can retry in place.
+RUN (git clone https://codeberg.org/caution/locksmith.git . || \
+     git clone https://github.com/CautionHosting/locksmith.git .) && \
+    git checkout "$LOCKSMITH_COMMIT"
+
+# Cargo.lock pins bootproof from Codeberg; on failure, fetch the same rev from
+# the GitHub mirror. insteadOf only rewrites transport, so Cargo.lock is unchanged.
+RUN cargo fetch --locked --target $TARGET_ARCH || \
+    CARGO_NET_GIT_FETCH_WITH_CLI=true \
+    GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0=url.https://github.com/CautionHosting/.insteadOf \
+    GIT_CONFIG_VALUE_0=https://codeberg.org/caution/ \
+    cargo fetch --locked --target $TARGET_ARCH
+
+RUN cargo build --release --locked --target ${TARGET_ARCH} -p locksmith \
+      && install -D -m 0755 /build-locksmith/target/${TARGET_ARCH}/release/locksmithd /binaries/locksmithd \
+      && install -D -m 0755 /build-locksmith/target/${TARGET_ARCH}/release/locksmith-oneshot /binaries/locksmith-oneshot
+
+FROM scratch AS locksmith-export
+COPY --from=locksmith-builder /binaries/locksmithd /locksmithd
+COPY --from=locksmith-builder /binaries/locksmith-oneshot /locksmith-oneshot

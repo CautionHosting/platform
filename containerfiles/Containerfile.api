@@ -105,6 +105,8 @@ COPY --from=builder /usr/local/bin/hcl-patcher /usr/local/bin/hcl-patcher
 
 COPY terraform /app/terraform
 COPY src/enclave-builder/templates /app/src/enclave-builder/templates
+COPY containerfiles/Containerfile.init containerfiles/Containerfile.bootproof \
+     containerfiles/Containerfile.steve containerfiles/Containerfile.locksmith /app/containerfiles/
 COPY containerfiles/Containerfile.tap-framer /app/containerfiles/Containerfile.tap-framer
 COPY src/tap-framer/Cargo.toml src/tap-framer/Cargo.lock /app/src/tap-framer/
 COPY src/tap-framer/src /app/src/tap-framer/src

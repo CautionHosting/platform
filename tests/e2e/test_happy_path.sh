@@ -320,7 +320,7 @@ if [ -n "$APP_IP" ]; then
     # This fixture has raw ingress only; reach the application on its declared port.
     APP_RESPONDED=false
     for i in $(seq 1 30); do
-        APP_BODY=$(curl -s --connect-timeout 5 "http://$APP_IP:8083/" 2>/dev/null || true)
+        APP_BODY=$(curl -fsS --connect-timeout 5 "http://$APP_IP:8083/" 2>/dev/null || true)
         if [ -n "$APP_BODY" ]; then
             APP_RESPONDED=true
             break
@@ -330,16 +330,16 @@ if [ -n "$APP_IP" ]; then
 
     if $APP_RESPONDED; then
         log "  Response: $(echo "$APP_BODY" | head -1)"
-        if echo "$APP_BODY" | grep -qi "hello"; then
+        if [ "$APP_BODY" = "Hello from Caution.co! Deployment successful!" ]; then
             step_pass "App responds with expected content"
         else
-            step_warn "App responds but content unexpected: $(echo "$APP_BODY" | head -1)"
+            step_fail "App responds but content unexpected: $(echo "$APP_BODY" | head -1)"
         fi
     else
-        step_warn "App did not respond within 150s (may need more time)"
+        step_fail "App did not respond within 150s"
     fi
 else
-    step_warn "Could not determine app IP — skipping curl check"
+    step_fail "Could not determine app IP for the HTTP check"
 fi
 
 # ── Step 9: caution verify ───────────────────────────────────────────
@@ -355,7 +355,7 @@ if [ -z "$APP_IP" ]; then
 fi
 
 if [ -z "$APP_IP" ]; then
-    step_warn "Could not determine app IP — skipping verify"
+    step_fail "Could not determine app IP for verification"
 else
     log "  Verifying attestation at http://$APP_IP/attestation"
 fi
@@ -367,24 +367,10 @@ set -e
 echo "$VERIFY_OUTPUT"
 
 if [ $VERIFY_STATUS -ne 0 ]; then
-    # Check PCR comparison results
-    PCR_MISMATCHES=$(echo "$VERIFY_OUTPUT" | grep -c "MISMATCH" || true)
-    PCR_MATCHES=$(echo "$VERIFY_OUTPUT" | grep -c ": match" || true)
-
-    if echo "$VERIFY_OUTPUT" | grep -q "does not include a manifest"; then
-        step_warn "caution verify (PCRs extracted but no manifest — bootproofd needs manifest support)"
-    elif echo "$VERIFY_OUTPUT" | grep -q "private code"; then
-        step_warn "caution verify (manifest present but local source is unavailable — use --app-source-url)"
-    elif [ "$PCR_MATCHES" -gt 0 ] && [ "$PCR_MISMATCHES" -eq 0 ]; then
-        # All PCRs match but attestation crypto failed (e.g. CA bundle issue)
-        step_warn "caution verify (PCRs match but attestation crypto failed)"
-    elif echo "$VERIFY_OUTPUT" | grep -q "PCR2: match"; then
-        # Application hash (PCR2) matches but kernel hashes differ
-        # (likely stale reproduction cache or enclaveos update)
-        step_warn "caution verify (app PCR2 matches, kernel PCR0/1 differ — stale cache?)"
-    else
-        step_fail "caution verify"
-    fi
+    step_fail "caution verify (exit code $VERIFY_STATUS)"
+elif ! grep -Fq 'Base Nitro attestation and expected PCR0/1/2 verified' <<<"$VERIFY_OUTPUT" \
+    || ! grep -Fq 'Attestation verification PASSED' <<<"$VERIFY_OUTPUT"; then
+    step_fail "caution verify (missing complete verification result)"
 else
     step_pass "caution verify (attestation verified)"
 fi

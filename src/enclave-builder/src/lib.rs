@@ -78,11 +78,13 @@ fn classify_enclave_source(
 
 pub mod build;
 pub mod compile;
+mod component_stage;
+pub mod components;
 pub mod docker;
 pub mod extract;
 pub mod manifest;
-pub mod tap_framer;
 pub mod pcrs;
+pub mod tap_framer;
 
 use dterror::ResultExt;
 use serde::{Deserialize, Serialize};
@@ -109,6 +111,7 @@ pub struct EnclaveBuilder {
     pub work_dir: PathBuf,
     /// Whether to skip Docker cache for EIF builds
     pub no_cache: bool,
+    prebuilt_components: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -401,6 +404,7 @@ impl EnclaveBuilder {
             framework_source: framework_source.into(),
             work_dir,
             no_cache,
+            prebuilt_components: None,
         })
     }
 
@@ -423,11 +427,19 @@ impl EnclaveBuilder {
             framework_source: framework_source.into(),
             work_dir,
             no_cache: false,
+            prebuilt_components: None,
         })
     }
 
     pub fn with_no_cache(mut self, no_cache: bool) -> Self {
         self.no_cache = no_cache;
+        self
+    }
+
+    /// Explicitly consume locally downloaded components matching the manifest.
+    /// Source verification never opts into this mode.
+    pub fn with_prebuilt_components(mut self, directory: PathBuf) -> Self {
+        self.prebuilt_components = Some(directory);
         self
     }
 
@@ -577,6 +589,7 @@ impl EnclaveBuilder {
             e2e_cors_origins,
             egress,
             templates_dir,
+            self.prebuilt_components.as_deref(),
         )
         .await
     }

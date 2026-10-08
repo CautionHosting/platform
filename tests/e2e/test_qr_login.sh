@@ -21,7 +21,7 @@ DB_NAME="${TEST_DB_NAME:-caution_test}"
 STEPS_PASSED=0
 STEPS_FAILED=0
 
-psql_c() { docker exec -i "$DB_HOST" psql -U postgres -d "$DB_NAME" -t -A -c "$1"; }
+psql_c() { docker exec -i "$DB_HOST" psql -X -v ON_ERROR_STOP=1 -U postgres -d "$DB_NAME" -t -A -c "$1"; }
 
 pass() { STEPS_PASSED=$((STEPS_PASSED + 1)); echo "[PASS] $1"; }
 fail() { STEPS_FAILED=$((STEPS_FAILED + 1)); echo "[FAIL] $1" >&2; }
@@ -44,7 +44,9 @@ for _ in $(seq 1 30); do
 done
 
 # ── 1. begin: distinct tokens, requestee in URL ──────────────────────
-BEGIN=$(curl -s -X POST "$GATEWAY_URL/auth/qr-login/begin")
+BEGIN=$(curl -sf -X POST "$GATEWAY_URL/auth/qr-login/begin" \
+    -H 'Content-Type: application/json' -d '{"username":"e2e-qr-user"}') \
+    || { fail "qr-login/begin failed (username is required)"; exit 1; }
 REQUESTER=$(echo "$BEGIN" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
 URL=$(echo "$BEGIN" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')
 REQUESTEE=$(echo "$URL" | sed -n 's/.*token=\([^"&]*\).*/\1/p')
@@ -53,6 +55,7 @@ if [ -n "$REQUESTER" ] && [ -n "$REQUESTEE" ] && [ "$REQUESTER" != "$REQUESTEE" 
     pass "begin issues distinct requester and requestee tokens"
 else
     fail "begin tokens: requester='$REQUESTER' requestee='$REQUESTEE'"
+    exit 1
 fi
 
 # ── 2. authenticate rejects the requester token (split boundary) ─────
@@ -78,8 +81,9 @@ if [ -n "$CRED" ]; then
 else
     EXPECT_EXPIRES=0  # no credentials registered; session fetch returns None
 fi
-psql_c "INSERT INTO qr_login_tokens (token, requestee_token, status, session_id, expires_at)
-        VALUES ('$REQ','$REE','completed','$SID', NOW() + INTERVAL '1 hour');" >/dev/null
+psql_c "INSERT INTO qr_login_tokens (token, requestee_token, status, session_id, expires_at, username)
+        VALUES ('$REQ','$REE','completed','$SID', NOW() + INTERVAL '1 hour', 'e2e-qr-user');" >/dev/null \
+    || { fail "failed to seed completed QR token"; exit 1; }
 
 # ── 3. status: session returned once, then consumed (one-shot) ───────
 POLL1=$(curl -s "$GATEWAY_URL/auth/qr-login/status?token=$REQ")

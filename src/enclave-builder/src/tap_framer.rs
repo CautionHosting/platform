@@ -67,6 +67,7 @@ pub async fn export_binary(work_dir: &Path, output_eif: &Path) -> Result<(), Art
     if !containerfile.contains("COPY src/tap-framer/")
         && !containerfile.contains("COPY components/tap-framer/")
         && !containerfile.contains("COPY tap-framer/")
+        && !containerfile.contains("COPY prebuilt/tap-framer /binaries/tap-framer")
     {
         return match tokio::fs::remove_file(&sidecar).await {
             Ok(()) => Ok(()),

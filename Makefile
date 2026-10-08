@@ -820,12 +820,22 @@ test-unit:
 		cargo test --locked --manifest-path src/tap-framer/Cargo.toml; \
 	fi
 
+# Real source/prebuilt EIF equality; fixture must live on an isolated build host.
+.PHONY: test-prebuilt-components
+test-prebuilt-components:
+	@test -n "$(COMPONENT_E2E_ROOT)" || { echo "COMPONENT_E2E_ROOT is required (disposable build host only)"; exit 1; }
+	COMPONENT_E2E_ROOT="$(COMPONENT_E2E_ROOT)" cargo test --locked -p enclave-builder --test prebuilt_components -- --ignored --nocapture
+
 test-live-caddy-nitro:
 	@test -n "$(CADDY_E2E_URL)" || { echo "CADDY_E2E_URL is required"; exit 1; }
 	CADDY_E2E_URL="$(CADDY_E2E_URL)" cargo test -p enclave-builder --test caddy_nitro_live -- --ignored --nocapture
 
 test-cli-install:
 	@bash tests/test_cli_install.sh
+
+.PHONY: test-e2e-contracts
+test-e2e-contracts:
+	@python3 tests/e2e/test_acceptance_contracts.py
 
 test-e2e:
 	@$(MAKE) build-cli
@@ -1072,4 +1082,4 @@ test-paddle-sandbox:
 	@echo "Uses PADDLE_API_KEY and PADDLE_API_URL from .env"
 	cargo test --package metering -- sandbox --nocapture
 
-test: test-unit test-cli-install
+test: test-unit test-cli-install test-e2e-contracts

@@ -201,7 +201,8 @@ if [ -z "$SESSION_ID" ] || [ "$SESSION_ID" = "null" ]; then
     exit 1
 fi
 
-db_query "UPDATE users SET email = 'legal-e2e@example.com', email_verified_at = NOW(), payment_method_added_at = NOW() WHERE id = '$USER_ID';" >/dev/null
+TEST_EMAIL="legal-e2e-${USER_ID}@example.com"
+db_query "UPDATE users SET email = '$TEST_EMAIL', email_verified_at = NOW(), payment_method_added_at = NOW() WHERE id = '$USER_ID';" >/dev/null
 
 # e2e-login seeds a placeholder account; every protected /api route below is
 # gated by username_claim_gate_middleware until a real username is claimed.
@@ -583,7 +584,8 @@ else
     fi
 
     STEP_NUM=10
-    LEGAL_EMAIL_COUNT10=$(curl -sf "$EMAIL_EXTERNAL_URL/sent?template=legal_notice" 2>/dev/null | jq '.count // 0')
+    # Publishing notifies every eligible user; assert exactly once for this run's recipient.
+    LEGAL_EMAIL_COUNT10=$(curl -sf "$EMAIL_EXTERNAL_URL/sent?template=legal_notice&to=$TEST_EMAIL" 2>/dev/null | jq '.count // 0')
 
     SECOND_NOTIFY10_PENDING="unknown"
     if [[ -n "$DOC10_ID" ]]; then
@@ -597,7 +599,7 @@ else
             -d "{\"dry_run\":true,\"document_ids\":[\"$DOC10_ID\"]}" 2>/dev/null \
             | jq -r '.pending_recipient_count // "unknown"') || SECOND_NOTIFY10_PENDING="unknown"
     fi
-    LEGAL_EMAIL_COUNT10B=$(curl -sf "$EMAIL_EXTERNAL_URL/sent?template=legal_notice" 2>/dev/null | jq '.count // 0')
+    LEGAL_EMAIL_COUNT10B=$(curl -sf "$EMAIL_EXTERNAL_URL/sent?template=legal_notice&to=$TEST_EMAIL" 2>/dev/null | jq '.count // 0')
 
     if [[ "$LEGAL_EMAIL_COUNT10" -eq 1 && "$SECOND_NOTIFY10_PENDING" == "0" && "$LEGAL_EMAIL_COUNT10B" -eq "$LEGAL_EMAIL_COUNT10" ]]; then
         step_pass "publish-legal-doc: notice email sent exactly once and second run dedupes"

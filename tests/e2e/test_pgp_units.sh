@@ -305,15 +305,16 @@ if [ "$READD_ID" = "$KEY_ID" ]; then
     step_fail "Re-add PGP key after soft-delete (expected a new row id, got the original)"
 fi
 
-log "Verifying 2 rows exist for fingerprint $FINGERPRINT (one removed, one active)..."
+# Public fingerprints may appear in other users' fixtures from earlier runs.
+log "Verifying this user has 2 rows for fingerprint $FINGERPRINT (one removed, one active)..."
 ROW_COUNT=$(docker exec postgres-test psql -U postgres -d caution_test -t -A -c "
-SELECT count(*) FROM pgp_keys WHERE fingerprint = '$FINGERPRINT';
+SELECT count(*) FROM pgp_keys WHERE user_id = '$USER_ID' AND fingerprint = '$FINGERPRINT';
 " 2>/dev/null | tr -d ' \n')
 REMOVED_COUNT=$(docker exec postgres-test psql -U postgres -d caution_test -t -A -c "
-SELECT count(*) FROM pgp_keys WHERE fingerprint = '$FINGERPRINT' AND removed_at IS NOT NULL;
+SELECT count(*) FROM pgp_keys WHERE user_id = '$USER_ID' AND fingerprint = '$FINGERPRINT' AND removed_at IS NOT NULL;
 " 2>/dev/null | tr -d ' \n')
 ACTIVE_COUNT=$(docker exec postgres-test psql -U postgres -d caution_test -t -A -c "
-SELECT count(*) FROM pgp_keys WHERE fingerprint = '$FINGERPRINT' AND removed_at IS NULL;
+SELECT count(*) FROM pgp_keys WHERE user_id = '$USER_ID' AND fingerprint = '$FINGERPRINT' AND removed_at IS NULL;
 " 2>/dev/null | tr -d ' \n')
 
 if [ "$ROW_COUNT" != "2" ] || [ "$REMOVED_COUNT" != "1" ] || [ "$ACTIVE_COUNT" != "1" ]; then

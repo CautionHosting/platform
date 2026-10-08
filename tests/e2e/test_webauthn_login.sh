@@ -163,6 +163,11 @@ STEP_NUM=7
 # JSON fixture captured from a genuine dev registration; begin only needs a
 # structurally valid public key, never touches the authenticator itself.
 FIXTURE_PUBLIC_KEY='{"cred":{"cred_id":"KuSaAl0uO3_g-D5b5s5PUrHdgck","cred":{"type_":"ES256","key":{"EC_EC2":{"curve":"SECP256R1","x":"VTSRkyIs9sASIgLB2vWSu6xFyAvGf9lQ6GSHgiAmJlQ","y":"UFAsQBox-mvdfu4qaZYEwPKA0bmHWELgEfIUol8H0eQ"}}},"counter":0,"transports":null,"user_verified":true,"backup_eligible":true,"backup_state":true,"registration_policy":"preferred","extensions":{"cred_protect":"Ignored","hmac_create_secret":"NotRequested","appid":"NotRequested","cred_props":"Ignored"},"attestation":{"data":"None","metadata":"None"},"attestation_format":"none"}}'
+# Reuse this run's unique credential ID when re-inserting after step 13.
+FIXTURE_CRED_ID_HEX=$(psql_q "SELECT encode(credential_id, 'hex') FROM fido2_credentials WHERE user_id = '$USER_ID';")
+[ -n "$FIXTURE_CRED_ID_HEX" ] || step_fail "test user has no credential ID"
+FIXTURE_CRED_ID_B64=$(psql_q "SELECT translate(rtrim(encode(credential_id, 'base64'), '='), '+/', '-_') FROM fido2_credentials WHERE user_id = '$USER_ID';")
+FIXTURE_PUBLIC_KEY=$(echo "$FIXTURE_PUBLIC_KEY" | jq -c --arg id "$FIXTURE_CRED_ID_B64" '.cred.cred_id = $id')
 psql_q "UPDATE fido2_credentials SET public_key = '$FIXTURE_PUBLIC_KEY'::bytea WHERE user_id = '$USER_ID';" >/dev/null
 SCOPED_USERNAME=$(psql_q "SELECT username FROM users WHERE id = '$USER_ID';")
 BODY=$(curl -s -w '\n%{http_code}' -X POST "$GATEWAY_URL/auth/login/begin" \
@@ -397,7 +402,7 @@ psql_q "INSERT INTO fido2_credentials (
             credential_id, user_id, public_key, name, attestation_type,
             sign_count, created_at, updated_at
         ) VALUES (
-            '\\xdeadbeefcafef00d1234567890abcdef'::bytea, '$USER_ID',
+            '\\x$FIXTURE_CRED_ID_HEX'::bytea, '$USER_ID',
             '$FIXTURE_PUBLIC_KEY'::bytea, NULL, 'e2e', 0, NOW(), NOW()
         );" >/dev/null
 REAL_JSON=$(curl -s -X POST "$GATEWAY_URL/auth/login/begin" \
@@ -444,9 +449,9 @@ STEP_NUM=17
 # GET /auth/qr-login/status is what the desktop side polls while waiting for the
 # phone to authenticate. A just-issued token must report "pending" with no
 # session_id yet — the starting state of the cross-device handoff. Independent
-# of credential state (step 13 deleted the user's cred), so a bare begin is fine.
+# of credential state, but begin still requires the desktop-selected username.
 QR_BEGIN=$(curl -s -w '\n%{http_code}' -X POST "$GATEWAY_URL/auth/qr-login/begin" \
-    -H 'Content-Type: application/json' -d '{}')
+    -H 'Content-Type: application/json' -d "{\"username\":\"$SCOPED_USERNAME\"}")
 CODE=$(echo "$QR_BEGIN" | tail -1)
 JSON=$(echo "$QR_BEGIN" | sed '$d')
 [ "$CODE" = 200 ] || step_fail "qr-login/begin (status test) returned HTTP $CODE (want 200)"

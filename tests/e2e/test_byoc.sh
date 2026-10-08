@@ -321,17 +321,18 @@ if ! echo "$INIT_OUTPUT" | grep -Eq "Deployment target: capacity=BYOC, aws_accou
     step_fail "caution init --byoc (exact deployment target not reported)"
 fi
 
-if ! echo "$INIT_OUTPUT" | grep -Eq 'DNS target: [^[:space:]]+\.apps\.caution\.sh'; then
-    echo "$INIT_OUTPUT"
-    step_fail "caution init --byoc (managed DNS target not reported)"
-fi
-
 # Extract resource ID from .caution/deployment.json
 if [ -f ".caution/deployment.json" ]; then
     RESOURCE_ID=$(jq -r '.resource_id' .caution/deployment.json)
 else
     echo "$INIT_OUTPUT"
     step_fail "caution init --byoc (no .caution/deployment.json)"
+fi
+
+# Verify the managed DNS target against the configured environment, not production.
+if ! grep -Fxq "DNS target: $RESOURCE_ID.${CAUTION_APPS_DNS_SUFFIX:-apps.caution.sh}" <<<"$INIT_OUTPUT"; then
+    echo "$INIT_OUTPUT"
+    step_fail "caution init --byoc (managed DNS target does not match resource and suffix)"
 fi
 
 # Verify git remote was set
@@ -413,27 +414,23 @@ step_pass "Deployment (app running with customer-bucket builder path)"
 
 STEP_NUM=8
 log "Running caution verify..."
+APP_IP=$(docker exec "${TEST_DB_HOST:-postgres-test}" psql -U postgres \
+    -d "${TEST_DB_NAME:-caution_test}" -At -v ON_ERROR_STOP=1 \
+    -c "SELECT public_ip FROM compute_resources WHERE id = '$RESOURCE_ID' AND state = 'running' AND destroyed_at IS NULL;")
+if [ -z "$APP_IP" ]; then
+    step_fail "Could not determine running app IP for verification"
+fi
 set +e
-VERIFY_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" verify --no-cache 2>&1)
+VERIFY_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" verify --attestation-url "http://$APP_IP/attestation" --no-cache 2>&1)
 VERIFY_STATUS=$?
 set -e
 echo "$VERIFY_OUTPUT"
 
 if [ $VERIFY_STATUS -ne 0 ]; then
-    # Check PCR comparison results
-    PCR_MISMATCHES=$(echo "$VERIFY_OUTPUT" | grep -c "MISMATCH" || true)
-    PCR_MATCHES=$(echo "$VERIFY_OUTPUT" | grep -c ": match" || true)
-
-    if [ "$PCR_MATCHES" -gt 0 ] && [ "$PCR_MISMATCHES" -eq 0 ]; then
-        # All PCRs match but attestation crypto failed (e.g. CA bundle issue)
-        step_warn "caution verify (PCRs match but attestation crypto failed)"
-    elif echo "$VERIFY_OUTPUT" | grep -q "PCR2: match"; then
-        # Application hash (PCR2) matches but kernel hashes differ
-        # (likely stale reproduction cache or enclaveos update)
-        step_warn "caution verify (app PCR2 matches, kernel PCR0/1 differ — stale cache?)"
-    else
-        step_fail "caution verify"
-    fi
+    step_fail "caution verify (exit code $VERIFY_STATUS)"
+elif ! grep -Fq 'Base Nitro attestation and expected PCR0/1/2 verified' <<<"$VERIFY_OUTPUT" \
+    || ! grep -Fq 'Attestation verification PASSED' <<<"$VERIFY_OUTPUT"; then
+    step_fail "caution verify (missing complete verification result)"
 else
     step_pass "caution verify (attestation verified)"
 fi

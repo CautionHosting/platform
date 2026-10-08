@@ -258,6 +258,13 @@ async fn main() -> Result<(), RemoteBuildError> {
     let builder = EnclaveBuilder::new(enclave_source, enclave_version, framework_source, &work_dir)
         .with_context(Ctx::new_builder())?
         .with_no_cache(no_cache);
+    let builder = match std::env::var("CAUTION_COMPONENTS_PATH")
+        .ok()
+        .filter(|path| !path.is_empty())
+    {
+        Some(path) => builder.with_prebuilt_components(PathBuf::from(path)),
+        None => builder,
+    };
 
     let user_image = UserImage {
         reference: image_ref,

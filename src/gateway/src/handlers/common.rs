@@ -270,7 +270,9 @@ impl IntoResponse for LoginError {
                 tracing::debug!(?self, "Login finish: decoy/scope rejection");
                 generic_auth_failure_response().into_response()
             }
-            Self::DbGetPublicKeyForCredential { .. } | Self::ParseSecurityKey { .. } => {
+            Self::CredentialNotFound { .. }
+            | Self::DbGetPublicKeyForCredential { .. }
+            | Self::ParseSecurityKey { .. } => {
                 tracing::warn!(?self, "Login finish: credential lookup/parse failure");
                 generic_auth_failure_response().into_response()
             }
@@ -551,4 +553,38 @@ pub(crate) fn build_auth_cookies(
         .build();
 
     (session_cookie.to_string(), csrf_cookie.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unknown_credential_matches_other_login_failures() {
+        let errors = [
+            LoginError::CredentialNotFound {
+                source: Box::new(DomainError("credential not found")),
+                location: std::panic::Location::caller(),
+            },
+            LoginError::InvalidSession {
+                session_id: "unknown-session".into(),
+                location: std::panic::Location::caller(),
+            },
+            LoginError::UnexpectedCredentialOwner {
+                expected_user_id: Some(Uuid::nil()),
+                actual_user_id: Uuid::from_u128(1),
+                location: std::panic::Location::caller(),
+            },
+        ];
+        for error in errors {
+            let response = error.into_response();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+            assert!(!response.headers().contains_key(header::SET_COOKIE));
+            let body = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            assert_eq!(body.as_ref(), br#"{"error":"authentication_failed"}"#);
+        }
+    }
 }

@@ -12,7 +12,7 @@
 #   6. Verify /auth/reset/begin rejects an expired token (insert known hash, expired)
 #   7. Verify /auth/reset/begin rejects an already-used token
 #   8. Verify /auth/reset/begin rejects a nonexistent token
-#   9. Verify the public gateway does NOT route /internal/webauthn/reset (404)
+#   9. Verify root /internal/webauthn/reset hits the static fallback (405), without resetting tokens
 #  10. Verify missing secret returns 401
 #  11. Verify nonexistent user returns 404
 #  12. Verify gateway serves /reset SPA route (200, not 404)
@@ -36,7 +36,7 @@ TOTAL_STEPS=12
 log()  { echo "[webauthn-reset] $*"; }
 fail() { STEP_NUM=$((STEP_NUM + 1)); echo "[webauthn-reset] ✗ step $STEP_NUM FAILED: $*" >&2; exit 1; }
 pass() { STEP_NUM=$((STEP_NUM + 1)); log "✓ step $STEP_NUM: $*"; }
-psql_q() { docker exec "$DB_CONTAINER" psql -U postgres -d "$DB_NAME" -tAc "$1"; }
+psql_q() { docker exec "$DB_CONTAINER" psql -X -v ON_ERROR_STOP=1 -U postgres -d "$DB_NAME" -qtAc "$1"; }
 
 # ── Step 1: gateway health ───────────────────────────────────────────
 for i in $(seq 1 30); do
@@ -55,12 +55,14 @@ USER_ID=$(psql_q "INSERT INTO users (username, email, is_active) VALUES ('$USERN
 pass "seeded user id=$USER_ID username=$USERNAME email=$EMAIL"
 
 # ── Step 3: trigger reset via internal endpoint ──────────────────────
-RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
+RESPONSE=$(curl -s -w '\n%{http_code}' \
     -X POST "$API_URL/internal/webauthn/reset" \
     -H "Content-Type: application/json" \
     -H "X-Internal-Service-Secret: $INTERNAL_SECRET" \
     -d "{\"user_id\": \"$USER_ID\"}")
-[ "$RESPONSE" = "200" ] || fail "reset endpoint returned $RESPONSE, expected 200"
+CODE=${RESPONSE##*$'\n'}
+BODY=${RESPONSE%$'\n'*}
+[ "$CODE" = "200" ] || fail "reset endpoint returned $CODE, expected 200; body: $BODY"
 pass "internal reset endpoint returned 200"
 
 # ── Step 4: verify token_hash row was inserted ───────────────────────
@@ -78,7 +80,7 @@ pass "webauthn_reset email captured with reset_url in test-mode sent-emails"
 # Insert a row with a known token_hash and already-expired timestamp.
 # The handler calls hex::decode(token_hex) first, so the token must be valid hex.
 # We store SHA-256 of the decoded bytes as the token_hash.
-EXPIRED_RAW="aabbccdd00112233445566778899aabbccddeeff00112233445566778899aabb"
+EXPIRED_RAW=$(openssl rand -hex 32)
 EXPIRED_HASH=$(echo -n "$EXPIRED_RAW" | xxd -r -p | sha256sum | cut -d' ' -f1)
 psql_q "INSERT INTO webauthn_reset_tokens (token_hash, user_id, expires_at) VALUES ('$EXPIRED_HASH', '$USER_ID', NOW() - INTERVAL '1 hour');" >/dev/null
 
@@ -91,7 +93,7 @@ pass "expired token rejected (status=$EXPIRED_RESPONSE)"
 
 # ── Step 7: used token rejected ───────────────────────────────────────
 # Insert a valid but already-used token
-USED_RAW="deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+USED_RAW=$(openssl rand -hex 32)
 USED_HASH=$(echo -n "$USED_RAW" | xxd -r -p | sha256sum | cut -d' ' -f1)
 psql_q "INSERT INTO webauthn_reset_tokens (token_hash, user_id, expires_at, used_at) VALUES ('$USED_HASH', '$USER_ID', NOW() + INTERVAL '24 hours', NOW());" >/dev/null
 
@@ -112,12 +114,24 @@ FAKE_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
 pass "nonexistent token rejected (status=$FAKE_RESPONSE)"
 
 # ── Step 9: gateway does NOT route /internal/* ───────────────────────
-PUBLIC_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
+# Root paths miss the /api proxy and reach ServeDir, which rejects POST with
+# 405. This is distinct from the authenticated /api/internal/* deny-list's
+# 404 (covered in test_legal_tracking.sh). Supply the valid service secret
+# and user from step 3 so accidental routing cannot hide behind an API 401.
+# Compare complete token rows: a count alone would miss invalidation or
+# replacement of an existing token by an accidentally invoked reset handler.
+RESET_STATE_SQL="SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY t.token_hash), '[]'::jsonb)::text FROM webauthn_reset_tokens t WHERE t.user_id = '$USER_ID';"
+RESET_STATE_BEFORE=$(psql_q "$RESET_STATE_SQL")
+[ -n "$RESET_STATE_BEFORE" ] && [ "$RESET_STATE_BEFORE" != "[]" ] || fail "missing reset token fixture before gateway isolation check"
+PUBLIC_RESPONSE=$(curl -sS -o /dev/null -w "%{http_code}" \
     -X POST "$GATEWAY_URL/internal/webauthn/reset" \
     -H "Content-Type: application/json" \
+    -H "X-Internal-Service-Secret: $INTERNAL_SECRET" \
     -d "{\"user_id\": \"$USER_ID\"}")
-[ "$PUBLIC_RESPONSE" = "404" ] || fail "gateway should not route /internal/* (got $PUBLIC_RESPONSE)"
-pass "public gateway returns 404 for /internal/webauthn/reset"
+[ "$PUBLIC_RESPONSE" = "405" ] || fail "gateway root /internal/* POST should hit the static fallback (expected 405, got $PUBLIC_RESPONSE)"
+RESET_STATE_AFTER=$(psql_q "$RESET_STATE_SQL")
+[ "$RESET_STATE_AFTER" = "$RESET_STATE_BEFORE" ] || fail "public gateway internal reset attempt changed the user's reset tokens"
+pass "root internal reset POST rejected by static fallback (405); reset tokens unchanged"
 
 # ── Step 10: missing secret returns 401 ──────────────────────────────
 NO_SECRET_RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
