@@ -1330,12 +1330,18 @@ SELECT COALESCE(SUM(delta_cents), 0) FROM credit_ledger
 WHERE paddle_transaction_id = '$INTENT_TXN';
 " 2>/dev/null | tr -d ' \n')
 
+INTENT_GRANTS=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -A -c "
+SELECT COUNT(*), COUNT(*) FILTER (
+    WHERE organization_id = '$ORG_ID' AND entry_type = 'purchase' AND delta_cents = 2500
+) FROM credit_ledger WHERE paddle_transaction_id = '$INTENT_TXN';
+" 2>/dev/null | tr -d ' \n')
+
 log "  Credited for intent txn: ${INTENT_DELTA}c (paid 100c, custom_data declared 100000000c)"
 
-if [ "$INTENT_DELTA" = "2500" ]; then
-    step_pass "Credit purchase webhook: credited intent amount (\$25.00), ignored custom_data"
+if [ "$INTENT_DELTA" = "2500" ] && [ "$INTENT_GRANTS" = "1|1" ]; then
+    step_pass "Credit purchase webhook: one intent grant (\$25.00) for the expected org, ignored custom_data"
 else
-    step_fail "Credit purchase webhook: credited ${INTENT_DELTA}c, expected 2500 (intent amount)"
+    step_fail "Credit purchase webhook: credited ${INTENT_DELTA}c, grants=$INTENT_GRANTS; expected 2500 and 1|1 (total|matching org/purchase/amount)"
 fi
 
 # ── Step 32: Credit purchase webhook refuses without an intent row ────

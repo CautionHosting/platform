@@ -73,7 +73,6 @@ pub enum CreditOutcome {
 pub async fn credit_ledger_once(
     pool: &PgPool,
     org_id: Uuid,
-    user_id: Option<Uuid>,
     delta_cents: i64,
     entry_type: &str,
     description: &str,
@@ -84,12 +83,11 @@ pub async fn credit_ledger_once(
     let mut tx = pool.begin().await.with_context(Ctx::database())?;
 
     let inserted = sqlx::query(
-        "INSERT INTO credit_ledger (organization_id, user_id, delta_cents, entry_type, description, paddle_transaction_id)
-         VALUES ($1, $2, $3, $4, $5, $6)
+        "INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description, paddle_transaction_id)
+         VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (paddle_transaction_id) DO NOTHING",
     )
     .bind(org_id)
-    .bind(user_id)
     .bind(delta_cents)
     .bind(entry_type)
     .bind(description)
