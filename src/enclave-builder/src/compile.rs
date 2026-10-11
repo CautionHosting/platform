@@ -286,6 +286,7 @@ fn archive_http_client() -> Result<reqwest::Client, ArchiveHttpClientError> {
     use ArchiveHttpClientErrorCtx as Ctx;
 
     reqwest::Client::builder()
+        .redirect(crate::source_transport::redirect_policy())
         .connect_timeout(std::time::Duration::from_secs(30))
         .timeout(std::time::Duration::from_secs(90))
         .build()

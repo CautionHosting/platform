@@ -589,6 +589,22 @@ pub async fn begin_login_handler(
     .into_response())
 }
 
+/// Only a missing row is an authentication outcome; query failures stay server errors.
+#[track_caller]
+fn credential_lookup_error(error: db::DbError) -> LoginError {
+    if error.kind == db::DbErrorKind::CredentialNotFound {
+        LoginError::CredentialNotFound {
+            location: std::panic::Location::caller(),
+            source: Box::new(error),
+        }
+    } else {
+        LoginError::DbGetUserIdByCredential {
+            location: std::panic::Location::caller(),
+            source: Box::new(error),
+        }
+    }
+}
+
 #[tracing::instrument(skip_all, err)]
 pub async fn finish_login_handler(
     State(state): State<AppState>,
@@ -637,12 +653,7 @@ pub async fn finish_login_handler(
             let user_id = match db::get_user_id_by_credential(&state.db, &credential_id_bytes).await
             {
                 Ok(user_id) => user_id,
-                Err(e) => {
-                    return Err(LoginError::CredentialNotFound {
-                        source: Box::new(e),
-                        location: std::panic::Location::caller(),
-                    });
-                }
+                Err(e) => return Err(credential_lookup_error(e)),
             };
 
             let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
@@ -678,12 +689,7 @@ pub async fn finish_login_handler(
             let user_id = match db::get_user_id_by_credential(&state.db, &credential_id_bytes).await
             {
                 Ok(user_id) => user_id,
-                Err(e) => {
-                    return Err(LoginError::CredentialNotFound {
-                        source: Box::new(e),
-                        location: std::panic::Location::caller(),
-                    });
-                }
+                Err(e) => return Err(credential_lookup_error(e)),
             };
 
             let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
@@ -755,6 +761,10 @@ pub async fn finish_login_handler(
             location: std::panic::Location::caller(),
         });
     }
+
+    db::record_credential_use(&state.db, user_id, &credential_id_bytes)
+        .await
+        .with_context(Ctx::db_record_credential_use(user_id))?;
 
     if auth_result.needs_update() {
         let update_result = seckey.update_credential(&auth_result);
@@ -906,6 +916,18 @@ fn build_logout_cookies(secure: bool) -> (String, String) {
 mod tests {
     use super::*;
     use webauthn_rs_proto::Mediation;
+
+    #[test]
+    fn only_a_missing_credential_is_an_authentication_failure() {
+        let lookup = |kind| {
+            Err::<(), _>(std::io::Error::other("lookup"))
+                .with_context(db::DbErrorCtx::new(kind, "get_user_id_by_credential"))
+                .unwrap_err()
+        };
+        let status = |kind| credential_lookup_error(lookup(kind)).into_response().status();
+        assert_eq!(status(db::DbErrorKind::CredentialNotFound), StatusCode::UNAUTHORIZED);
+        assert_eq!(status(db::DbErrorKind::QueryFailed), StatusCode::INTERNAL_SERVER_ERROR);
+    }
 
     // --- normalize_login_username -------------------------------------
     //
@@ -1182,11 +1204,12 @@ mod tests {
             db,
             webauthn,
             relying_party_id: "example.com".to_string(),
-            api_service_url: String::new(),
+            api_service_url: "http://localhost:3000".to_string(),
             metering_service_url: String::new(),
             http_client: reqwest::Client::new(),
             reg_states: Arc::new(RwLock::new(HashMap::new())),
             passkey_reg_states: Arc::new(RwLock::new(HashMap::new())),
+            recovery_verifications: Arc::new(RwLock::new(HashMap::new())),
             auth_states: Arc::new(RwLock::new(HashMap::new())),
             sign_challenges: Arc::new(RwLock::new(HashMap::new())),
             session_timeout_hours: 24,
@@ -1195,6 +1218,63 @@ mod tests {
             login_allow_broadcast: true,
             scoped_begin_limiter: crate::rate_limit::RateLimiter::new(1000, 60),
             username_begin_limiter: crate::rate_limit::RateLimiter::new(username_limiter_max, 60),
+        }
+    }
+
+    #[tokio::test]
+    async fn quorum_writes_reject_unsigned_requests() {
+        use axum::{
+            body::Body,
+            http::{Method, Request, StatusCode},
+            middleware,
+            routing::{patch, post},
+            Router,
+        };
+        use tower::Service;
+        let app = Router::new()
+            .route("/quorum-bundles", post(|| async { "unexpected dispatch" }))
+            .route(
+                "/quorum-bundles/from-org-users",
+                post(|| async { "unexpected dispatch" }),
+            )
+            .route(
+                "/quorum-bundles/id",
+                patch(|| async { "unexpected dispatch" }),
+            )
+            .fallback(|| async { "unexpected proxy dispatch" })
+            .layer(middleware::from_fn_with_state(
+                test_app_state(100),
+                crate::auth_middleware::fido2_sign_middleware,
+            ));
+        for (method, endpoint) in [
+            (Method::POST, "/quorum-bundles"),
+            (Method::POST, "/quorum-bundles/from-org-users"),
+            (Method::PATCH, "/quorum-bundles/id"),
+            (Method::DELETE, "/quorum-bundles/id"),
+        ] {
+            for prefix in ["", "/x/..", "/x/%2e%2e", "/x/%2E%2E", "/."] {
+                let request = Request::builder()
+                    .method(method.clone())
+                    .uri([prefix, endpoint].concat())
+                    .header("X-Fido2-Signed", "true")
+                    .header("X-Authenticated-User-ID", uuid::Uuid::new_v4().to_string())
+                    .body(Body::from("{}"))
+                    .unwrap();
+                let response = app.clone().call(request).await.unwrap();
+                let (status, message) = if prefix.is_empty() {
+                    (
+                        StatusCode::FORBIDDEN,
+                        "This operation requires signature verification",
+                    )
+                } else {
+                    (StatusCode::BAD_REQUEST, "Noncanonical request path")
+                };
+                assert_eq!(response.status(), status, "{prefix}{endpoint}");
+                let body = axum::body::to_bytes(response.into_body(), 1024)
+                    .await
+                    .unwrap();
+                assert_eq!(body.as_ref(), message.as_bytes());
+            }
         }
     }
 

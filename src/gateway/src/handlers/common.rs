@@ -79,6 +79,16 @@ pub enum LoginError {
         source: BoxError,
     },
 
+    /// The credential owner lookup itself failed; a server error, not a rejection.
+    #[error("could not look up the credential owner [{location}]")]
+    DbGetUserIdByCredential {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
     #[error("authentication challenge has expired [{location}]")]
     ChallengeExpired {
         #[location]
@@ -124,6 +134,17 @@ pub enum LoginError {
 
     #[error("could not update fido2 credentials for user {user_id} [{location}]")]
     DbUpdateFido2Credential {
+        user_id: Uuid,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not record passkey use for user {user_id} [{location}]")]
+    DbRecordCredentialUse {
         user_id: Uuid,
 
         #[location]
@@ -266,6 +287,10 @@ impl IntoResponse for LoginError {
             // distinguishable from another by status code or body. These are
             // expected client-side authentication failures, not internal
             // errors, so they're logged at debug/warn, not error.
+            Self::CredentialNotFound { .. } => {
+                tracing::debug!(?self, "Login finish: credential not found");
+                generic_auth_failure_response().into_response()
+            }
             Self::UnexpectedCredentialOwner { .. } => {
                 tracing::debug!(?self, "Login finish: decoy/scope rejection");
                 generic_auth_failure_response().into_response()
@@ -556,6 +581,15 @@ pub(crate) fn build_auth_cookies(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_login_credential_is_the_generic_auth_failure() {
+        let error = LoginError::CredentialNotFound {
+            location: std::panic::Location::caller(),
+            source: Box::new(std::io::Error::other("credential not found")),
+        };
+        assert_eq!(error.into_response().status(), StatusCode::UNAUTHORIZED);
+    }
 
     #[tokio::test]
     async fn public_key_lookup_failure_is_internal() {

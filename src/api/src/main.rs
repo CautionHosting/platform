@@ -38,9 +38,11 @@ mod managed_dns;
 mod metering;
 mod middleware;
 mod onboarding;
+mod org_quorum;
 mod organizations;
 mod provisioning;
 mod resources;
+mod service_observations;
 mod subscriptions;
 mod suspension;
 mod types;
@@ -462,6 +464,7 @@ async fn build_inputs() -> impl IntoResponse {
         bootproof: enclave_builder::build::ToolSource,
         steve: enclave_builder::build::ToolSource,
         locksmith: enclave_builder::build::ToolSource,
+        services: service_observations::Snapshot,
     }
     #[derive(serde::Serialize)]
     struct PlatformSource {
@@ -484,6 +487,7 @@ async fn build_inputs() -> impl IntoResponse {
         bootproof: tools.bootproof,
         steve: tools.steve,
         locksmith: tools.locksmith,
+        services: service_observations::snapshot().await,
     })
 }
 
@@ -590,9 +594,25 @@ pub(crate) async fn wait_for_health(
     }
 }
 
+/// Host setup alone is insufficient, including in debug mode. Bootproof starts
+/// before application unlock; this checks availability, not PCR authenticity.
+#[tracing::instrument(skip_all, err)]
+pub(crate) async fn wait_for_deployment_health(
+    public_ip: &str,
+    timeout_secs: u64,
+) -> Result<(), WaitForHealthError> {
+    wait_for_health(public_ip, timeout_secs).await?;
+    wait_for_attestation_health(public_ip, timeout_secs).await
+}
+
 #[cfg(test)]
 mod deployment_health_tests {
-    use super::wait_for_health;
+    use super::{WaitForHealthError, wait_for_deployment_health, wait_for_health};
+    use axum::{
+        Router,
+        http::StatusCode,
+        routing::{get, post},
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
@@ -619,6 +639,61 @@ mod deployment_health_tests {
                 .contains("Health endpoint did not become healthy within 0 seconds")
         );
         server.await.unwrap();
+    }
+
+    async fn readiness_server(
+        host: StatusCode,
+        enclave: StatusCode,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new()
+            .route(
+                "/.well-known/caution/health",
+                get(move || async move { host }),
+            )
+            .route("/attestation", post(move || async move { enclave }))
+            // A Locksmith-backed application's HTTP server may still be locked.
+            .route("/", get(|| async { StatusCode::SERVICE_UNAVAILABLE }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (address, server)
+    }
+
+    #[tokio::test]
+    async fn completed_host_setup_without_enclave_is_not_ready() {
+        // Initial launch failed with restart=never: Caddy is up, but no enclave
+        // serves attestation. Debug deployments use this same readiness gate.
+        let (address, server) = readiness_server(StatusCode::OK, StatusCode::BAD_GATEWAY).await;
+        let result = wait_for_deployment_health(&address, 0).await;
+        server.abort();
+        assert!(matches!(
+            result,
+            Err(WaitForHealthError::AttestationTimeout { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn enclave_ready_before_application_unlock_is_accepted() {
+        let (address, server) = readiness_server(StatusCode::OK, StatusCode::OK).await;
+        let application = reqwest::get(["http://", &address, "/"].concat())
+            .await
+            .unwrap();
+        let result = wait_for_deployment_health(&address, 0).await;
+        server.abort();
+        assert_eq!(application.status().as_u16(), 503);
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn enclave_response_does_not_bypass_host_readiness() {
+        let (address, server) =
+            readiness_server(StatusCode::SERVICE_UNAVAILABLE, StatusCode::OK).await;
+        let result = wait_for_deployment_health(&address, 0).await;
+        server.abort();
+        assert!(matches!(
+            result,
+            Err(WaitForHealthError::HealthTimeout { .. })
+        ));
     }
 }
 
@@ -1147,57 +1222,58 @@ async fn list_quorum_bundles(
     Ok(Json(items))
 }
 
-/// Failure modes for [`create_quorum_bundle`] (leaf error: no underlying source).
-#[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum CreateQuorumBundleError {
-    #[error("could not look up the primary organization [{location}]")]
-    PrimaryOrgLookup {
-        #[location]
-        location: Location,
-        #[source]
-        source: BoxError,
-    },
-
-    #[error("failed to create quorum bundle [{location}]")]
-    Create {
-        #[location]
-        location: Location,
-        #[source]
-        source: BoxError,
-    },
-}
-
-impl IntoResponse for CreateQuorumBundleError {
-    fn into_response(self) -> Response {
-        let (status, body) = match &self {
-            CreateQuorumBundleError::PrimaryOrgLookup { .. } => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to get organization",
-            ),
-            CreateQuorumBundleError::Create { .. } => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
-            }
-        };
-        (status, body).into_response()
-    }
-}
-
 #[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
 async fn create_quorum_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Json(req): Json<cryptographic_bundles::CreateBundleRequest>,
-) -> Result<Json<cryptographic_bundles::QuorumBundle>, CreateQuorumBundleError> {
-    use CreateQuorumBundleErrorCtx as Ctx;
-
+) -> Result<Json<cryptographic_bundles::QuorumBundle>, org_quorum::OrgQuorumError> {
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .with_context(Ctx::primary_org_lookup())?;
+        .with_context(org_quorum::OrgQuorumErrorCtx::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unable to resolve organization",
+        ))?;
 
+    org_quorum::verify_upload(&req.data, req.allow_legacy)?;
     let bundle = cryptographic_bundles::create_quorum_bundle(&state.db, org_id, auth.user_id, req)
         .await
-        .with_context(Ctx::create())?;
+        .with_context(org_quorum::OrgQuorumErrorCtx::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unable to store quorum bundle",
+        ))?;
     Ok(Json(bundle))
+}
+
+async fn create_org_user_quorum_bundle(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<org_quorum::GenerateOrgQuorumBundleRequest>,
+) -> Result<Json<cryptographic_bundles::QuorumBundle>, org_quorum::OrgQuorumError> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .with_context(org_quorum::OrgQuorumErrorCtx::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unable to resolve organization",
+        ))?;
+    Ok(Json(
+        org_quorum::generate_org_quorum_bundle(&state.db, org_id, auth.user_id, req).await?,
+    ))
+}
+
+async fn list_org_quorum_participants(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<Vec<org_quorum::OrgQuorumMember>>, org_quorum::OrgQuorumError> {
+    let org_id = get_user_primary_org(&state.db, auth.user_id)
+        .await
+        .with_context(org_quorum::OrgQuorumErrorCtx::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unable to resolve organization",
+        ))?;
+    Ok(Json(
+        org_quorum::list_participants(&state.db, org_id).await?,
+    ))
 }
 
 /// Failure modes for [`get_quorum_bundle`] (leaf error: no underlying source).
@@ -1264,66 +1340,31 @@ async fn get_quorum_bundle(
     Ok(Json(bundle))
 }
 
-/// Failure modes for [`update_quorum_bundle`] (leaf error: no underlying source).
-#[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum UpdateQuorumBundleError {
-    #[error("could not look up the primary organization [{location}]")]
-    PrimaryOrgLookup {
-        #[location]
-        location: Location,
-        #[source]
-        source: BoxError,
-    },
-
-    #[error("quorum bundle {bundle_id} not found [{location}]")]
-    NotFound { bundle_id: Uuid, location: Location },
-
-    #[error("failed to update quorum bundle [{location}]")]
-    Update {
-        #[location]
-        location: Location,
-        #[source]
-        source: BoxError,
-    },
-}
-
-impl IntoResponse for UpdateQuorumBundleError {
-    fn into_response(self) -> Response {
-        let (status, body) = match &self {
-            UpdateQuorumBundleError::PrimaryOrgLookup { .. } => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to get organization",
-            ),
-            UpdateQuorumBundleError::NotFound { .. } => {
-                (StatusCode::NOT_FOUND, "Quorum bundle not found")
-            }
-            UpdateQuorumBundleError::Update { .. } => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
-            }
-        };
-        (status, body).into_response()
-    }
-}
-
 #[tracing::instrument(skip_all, err, fields(bundle_id = %id))]
 async fn update_quorum_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<Uuid>,
     Json(req): Json<cryptographic_bundles::UpdateBundleRequest>,
-) -> Result<Json<cryptographic_bundles::QuorumBundle>, UpdateQuorumBundleError> {
-    use UpdateQuorumBundleErrorCtx as Ctx;
-
+) -> Result<Json<cryptographic_bundles::QuorumBundle>, org_quorum::OrgQuorumError> {
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .with_context(Ctx::primary_org_lookup())?;
+        .with_context(org_quorum::OrgQuorumErrorCtx::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unable to resolve organization",
+        ))?;
 
+    if let Some(data) = &req.data {
+        org_quorum::verify_upload(data, req.allow_legacy)?;
+    }
     let bundle = cryptographic_bundles::update_quorum_bundle(&state.db, org_id, id, req)
         .await
-        .with_context(Ctx::update())?
-        .ok_or_else(|| UpdateQuorumBundleError::NotFound {
-            bundle_id: id,
-            location: std::panic::Location::caller(),
+        .with_context(org_quorum::OrgQuorumErrorCtx::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "unable to update quorum bundle",
+        ))?
+        .ok_or_else(|| {
+            org_quorum::OrgQuorumError::new(StatusCode::NOT_FOUND, "quorum bundle not found")
         })?;
 
     Ok(Json(bundle))
@@ -3467,6 +3508,8 @@ mod build_inputs_tests {
                 "missing {tool}.repo"
             );
         }
+        assert!(json["services"]["pending"].is_boolean());
+        assert!(json["services"]["entries"].is_array());
         drop(platform_sha);
     }
 }
@@ -4536,6 +4579,7 @@ async fn deploy_logic(
         cpu_count,
         disk_gb: 30, // no HCL equivalent
         debug_mode: debug_enabled,
+        restart: enclave_opt.and_then(|e| e.restart).unwrap_or_default(),
         ports: ingress_ports.clone(),
         http_port,
         e2e,
@@ -4600,8 +4644,9 @@ async fn deploy_logic(
 
     let health_timeout_secs = deployment_health_timeout_secs();
 
-    tracing::info!("Waiting for health endpoint to become healthy...");
-    let health_result = wait_for_health(&deployment_result.public_ip, health_timeout_secs).await;
+    tracing::info!("Waiting for host and enclave readiness...");
+    let health_result =
+        wait_for_deployment_health(&deployment_result.public_ip, health_timeout_secs).await;
     if let Err(ref source) = health_result {
         tracing::error!("Health check failed: {}", source);
         if let Some(reservation) = capacity_reservation.as_ref() {
@@ -4623,35 +4668,6 @@ async fn deploy_logic(
         }
     }
     health_result.with_context(Ctx::enclave_unhealthy())?;
-
-    if debug_enabled {
-        tracing::info!("Skipping attestation check: enclave is in debug mode");
-    } else {
-        tracing::info!("Waiting for attestation endpoint to become healthy...");
-        let attestation_result =
-            wait_for_attestation_health(&deployment_result.public_ip, health_timeout_secs).await;
-        if let Err(ref source) = attestation_result {
-            tracing::error!("Attestation health check failed: {}", source);
-            if let Some(reservation) = capacity_reservation.as_ref() {
-                fully_managed_capacity::release_reservation(&state.db, reservation).await;
-            }
-            if let Err(recover_error) = recover_deploy_failure(
-                &state,
-                req.org_id,
-                resource_id,
-                deploy_attempt_id,
-                &app_name,
-                previous_state,
-                should_cleanup_on_failure,
-                &deployed_region,
-            )
-            .await
-            {
-                tracing::error!(?recover_error, "failed to recover from deploy failure");
-            }
-        }
-        attestation_result.with_context(Ctx::enclave_unhealthy())?;
-    }
 
     let managed_dns_enabled = state.managed_dns.is_some();
     let resource_update = sqlx::query_as::<_, (String, Option<String>)>(
@@ -5180,6 +5196,14 @@ async fn main() -> Result<(), MainError> {
         )
         .route("/quorum-bundles", get(list_quorum_bundles))
         .route("/quorum-bundles", post(create_quorum_bundle))
+        .route(
+            "/quorum-bundles/from-org-users",
+            post(create_org_user_quorum_bundle),
+        )
+        .route(
+            "/quorum-bundles/participants",
+            get(list_org_quorum_participants),
+        )
         .route("/quorum-bundles/{id}", get(get_quorum_bundle))
         .route("/quorum-bundles/{id}", patch(update_quorum_bundle))
         .route("/quorum-bundles/{id}", delete(delete_quorum_bundle))

@@ -163,6 +163,17 @@ pub enum QrLoginFinishError {
         source: BoxError,
     },
 
+    #[error("could not record passkey use for user {user_id} [{location}]")]
+    DbRecordCredentialUse {
+        user_id: Uuid,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
     #[error("could not create auth session for user {user_id} [{location}]")]
     DbCreateAuthSession {
         user_id: Uuid,
@@ -474,7 +485,7 @@ pub(crate) async fn authenticate_session(
 }
 
 #[tracing::instrument(skip_all)]
-fn get_rp_origin() -> String {
+pub(crate) fn get_rp_origin() -> String {
     std::env::var("RP_ORIGINS")
         .unwrap_or_else(|_| "http://localhost:8000".to_string())
         .split(',')
@@ -914,6 +925,10 @@ pub async fn qr_login_authenticate_finish_handler(
             location: std::panic::Location::caller(),
         });
     }
+
+    db::record_credential_use(&state.db, user_id, &credential_id_bytes)
+        .await
+        .with_context(FinishCtx::db_record_credential_use(user_id))?;
 
     if auth_result.needs_update() {
         let update_result = seckey.update_credential(&auth_result);

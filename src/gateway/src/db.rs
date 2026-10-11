@@ -55,6 +55,7 @@ pub struct UserCredentialRecord {
     pub id: Uuid,
     pub name: Option<String>,
     pub credential_id: Vec<u8>,
+    pub uv_verified: bool,
     pub transport: Option<serde_json::Value>,
     pub created_at: OffsetDateTime,
     pub last_used_at: Option<OffsetDateTime>,
@@ -561,9 +562,10 @@ where
             transport,
             flags,
             resident,
+            uv_verified,
             created_at,
             updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())",
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), NOW())",
     )
     .bind(credential_id)
     .bind(user_id)
@@ -575,6 +577,7 @@ where
     .bind(transport)
     .bind(flags)
     .bind(resident)
+    .bind(registration_uv_verified(public_key))
     .execute(executor)
     .await
     .with_context(DbErrorCtx::new(
@@ -582,6 +585,33 @@ where
         "save_fido2_credential",
     ))?;
 
+    Ok(())
+}
+
+fn registration_uv_verified(bytes: &[u8]) -> bool {
+    use webauthn_rs::prelude::{Credential, SecurityKey};
+    serde_json::from_slice::<SecurityKey>(bytes)
+        .map(|key| Credential::from(key).user_verified)
+        .unwrap_or(false)
+}
+
+/// Parse through the same library that verified registrations, rather than
+/// trusting a JSON flag on an otherwise malformed credential. Repeatable and
+/// safe during rolling upgrades; never clears evidence from later assertions.
+pub async fn backfill_credential_uv(pool: &PgPool) -> Result<(), DbError> {
+    let rows: Vec<(Uuid, Vec<u8>)> = sqlx::query_as(
+        "SELECT id, public_key FROM fido2_credentials WHERE uv_verified = false",
+    )
+    .fetch_all(pool)
+    .await
+    .with_context(DbErrorCtx::new(DbErrorKind::QueryFailed, "load registration UV evidence"))?;
+    for (id, bytes) in rows {
+        if registration_uv_verified(&bytes) {
+            sqlx::query("UPDATE fido2_credentials SET uv_verified = true WHERE id = $1 AND public_key = $2")
+                .bind(id).bind(bytes).execute(pool).await
+                .with_context(DbErrorCtx::new(DbErrorKind::QueryFailed, "backfill registration UV evidence"))?;
+        }
+    }
     Ok(())
 }
 
@@ -716,6 +746,24 @@ pub async fn get_credential_public_keys_by_user_id(
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
+/// Distinct users owning any of the given credential IDs; unknown IDs are ignored.
+#[tracing::instrument(skip_all, err)]
+pub async fn get_credential_owners(
+    pool: &PgPool,
+    credential_ids: &[Vec<u8>],
+) -> Result<Vec<Uuid>, DbError> {
+    sqlx::query_scalar(
+        "SELECT DISTINCT user_id FROM fido2_credentials WHERE credential_id = ANY($1)",
+    )
+    .bind(credential_ids)
+    .fetch_all(pool)
+    .await
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "get_credential_owners",
+    ))
+}
+
 /// Opportunistically mark a credential as resident (discoverable) after it was
 /// successfully used in a discoverable (username-less) login assertion. Only
 /// touches rows where residency is still unknown (`NULL`) — never overwrites
@@ -749,13 +797,12 @@ pub async fn list_user_credentials(
             c.id,
             c.name,
             c.credential_id,
+            c.uv_verified,
             c.transport,
             c.created_at,
-            MAX(s.last_used_at) AS last_used_at
+            c.last_used_at
         FROM fido2_credentials c
-        LEFT JOIN auth_sessions s ON s.credential_id = c.credential_id
         WHERE c.user_id = $1
-        GROUP BY c.id, c.name, c.credential_id, c.transport, c.created_at
         ORDER BY c.created_at DESC
         "#,
     )
@@ -781,13 +828,12 @@ pub async fn get_user_credential_by_credential_id(
             c.id,
             c.name,
             c.credential_id,
+            c.uv_verified,
             c.transport,
             c.created_at,
-            MAX(s.last_used_at) AS last_used_at
+            c.last_used_at
         FROM fido2_credentials c
-        LEFT JOIN auth_sessions s ON s.credential_id = c.credential_id
         WHERE c.user_id = $1 AND c.credential_id = $2
-        GROUP BY c.id, c.name, c.credential_id, c.transport, c.created_at
         "#,
     )
     .bind(user_id)
@@ -818,6 +864,38 @@ pub async fn delete_user_credential(
         ))?;
 
     Ok(result.rows_affected())
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("failed to record passkey use for user {user_id} [{location}]")]
+pub struct RecordCredentialUseError {
+    user_id: Uuid,
+    #[location]
+    location: Location,
+    #[source]
+    source: BoxError,
+}
+
+/// Record accepted passkey verification, independently of session activity.
+pub async fn record_credential_use(
+    pool: &PgPool,
+    user_id: Uuid,
+    credential_id: &[u8],
+) -> Result<(), RecordCredentialUseError> {
+    // RETURNING also fails closed if the credential was removed concurrently.
+    // GREATEST prevents an older concurrent statement from regressing usage.
+    sqlx::query_scalar::<_, Uuid>(
+        "UPDATE fido2_credentials
+         SET last_used_at = GREATEST(last_used_at, NOW())
+         WHERE user_id = $1 AND credential_id = $2
+         RETURNING id",
+    )
+    .bind(user_id)
+    .bind(credential_id)
+    .fetch_one(pool)
+    .await
+    .with_context(RecordCredentialUseErrorCtx::new(user_id))?;
+    Ok(())
 }
 
 pub async fn update_fido2_credential(
@@ -1869,5 +1947,65 @@ mod tests {
     #[test]
     fn invitation_token_hash_rejects_invalid_base64() {
         assert!(hash_invitation_token("not base64!!!").is_none());
+    }
+}
+
+#[cfg(test)]
+mod credential_uv_tests {
+    use super::*;
+    #[test]
+    fn registration_evidence_requires_a_valid_credential_and_verified_uv() {
+        let mut value: serde_json::Value = serde_json::from_str(include_str!("../../api/src/org_quorum/test-credential.json")).unwrap();
+        assert!(!registration_uv_verified(&serde_json::to_vec(&value).unwrap()));
+        value["cred"]["user_verified"] = serde_json::json!(true);
+        assert!(registration_uv_verified(&serde_json::to_vec(&value).unwrap()));
+        for malformed in [b"invalid".as_slice(), br#"{"cred":{"user_verified":true}}"#, b"{}"] {
+            assert!(!registration_uv_verified(malformed));
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "db/passkey_usage_tests.rs"]
+mod passkey_usage_tests;
+
+#[cfg(test)]
+mod credential_owner_tests {
+    use super::*;
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires DATABASE_URL pointing to disposable Postgres"]
+    async fn owners_are_distinct_and_unknown_ids_are_ignored(pool: PgPool) {
+        sqlx::raw_sql(
+            "CREATE TABLE fido2_credentials (
+                user_id UUID NOT NULL, credential_id BYTEA UNIQUE NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (alice, bob) = (Uuid::new_v4(), Uuid::new_v4());
+        for (user, id) in [(alice, b"a1".as_slice()), (alice, b"a2"), (bob, b"b1")] {
+            sqlx::query("INSERT INTO fido2_credentials (user_id, credential_id) VALUES ($1, $2)")
+                .bind(user)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let owners = |ids: &[&[u8]]| {
+            let ids: Vec<Vec<u8>> = ids.iter().map(|id| id.to_vec()).collect();
+            let pool = pool.clone();
+            async move {
+                let mut owners = get_credential_owners(&pool, &ids).await.unwrap();
+                owners.sort();
+                owners
+            }
+        };
+        assert_eq!(owners(&[b"a1", b"a2", b"unknown"]).await, [alice]);
+        let mut both = vec![alice, bob];
+        both.sort();
+        assert_eq!(owners(&[b"a1", b"b1"]).await, both);
+        assert!(owners(&[b"unknown"]).await.is_empty());
+        assert!(owners(&[]).await.is_empty());
     }
 }

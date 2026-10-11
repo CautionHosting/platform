@@ -63,6 +63,9 @@ Start the platform services:
 make up
 ```
 
+For Key Services setup, quorum creation, and secret recovery, see the
+[secrets operator runbook](docs/secrets-operations.md).
+
 The experimental development-server admin explorer is documented in
 [docs/admin.md](docs/admin.md).
 

@@ -37,6 +37,12 @@ pub enum ValidationError {
         invalid_char: char,
         location: &'static Location<'static>,
     },
+    /// First or last character is not alphanumeric. Distinct from
+    /// `AppNameInvalidChars`: '_' and '-' are legal mid-name but not at the edge.
+    AppNameInvalidBoundary {
+        invalid_char: char,
+        location: &'static Location<'static>,
+    },
 
     AtLeastOneFieldRequired {
         location: &'static Location<'static>,
@@ -119,6 +125,12 @@ impl fmt::Display for ValidationError {
             Self::AppNameInvalidChars { invalid_char, .. } => write!(
                 f,
                 "app name contains invalid character '{}' [{}]",
+                invalid_char,
+                self.location()
+            ),
+            Self::AppNameInvalidBoundary { invalid_char, .. } => write!(
+                f,
+                "app name must start and end with a letter or digit (found '{}') [{}]",
                 invalid_char,
                 self.location()
             ),
@@ -226,6 +238,7 @@ impl ValidationError {
         match self {
             Self::AppNameLength { location, .. }
             | Self::AppNameInvalidChars { location, .. }
+            | Self::AppNameInvalidBoundary { location, .. }
             | Self::AtLeastOneFieldRequired { location }
             | Self::CmdEmpty { location }
             | Self::CmdTooLong { location, .. }
@@ -248,6 +261,7 @@ impl ValidationError {
         match self {
             Self::AppNameLength { .. } => "app_name_length",
             Self::AppNameInvalidChars { .. } => "app_name_invalid_chars",
+            Self::AppNameInvalidBoundary { .. } => "app_name_invalid_boundary",
 
             Self::AtLeastOneFieldRequired { .. } => "at_least_one_field_required",
 

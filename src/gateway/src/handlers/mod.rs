@@ -13,7 +13,7 @@ mod qr_auth;
 mod user_profile;
 mod webauthn;
 
-pub(crate) use proxy::{metering_proxy_handler, proxy_handler};
+pub(crate) use proxy::{build_api_target_url, metering_proxy_handler, proxy_handler};
 pub(crate) use webauthn::reset as reset_webauthn;
 
 #[cfg(feature = "e2e-testing-unsafe")]
@@ -22,16 +22,17 @@ pub(crate) use e2e::e2e_login_handler;
 pub(crate) use user_profile::{claim_username_handler, get_username_status_handler};
 
 pub(crate) use credentials::{
+    begin_recovery_verification, finish_recovery_verification,
     add_pgp_key_handler, add_ssh_key_handler, begin_add_passkey_handler, delete_passkey_handler,
     delete_ssh_key_handler, finish_add_passkey_handler, list_passkeys_handler,
     list_pgp_keys_handler, list_ssh_keys_handler, remove_pgp_key_handler,
 };
 
 pub(crate) use qr_auth::{
-    authenticate_session, begin_sign_request_handler, qr_login_authenticate_finish_handler,
-    qr_login_authenticate_handler, qr_login_begin_handler, qr_login_status_handler,
-    qr_sign_authenticate_finish_handler, qr_sign_authenticate_handler, qr_sign_begin_handler,
-    qr_sign_status_handler,
+    authenticate_session, begin_sign_request_handler, get_rp_origin,
+    qr_login_authenticate_finish_handler, qr_login_authenticate_handler, qr_login_begin_handler,
+    qr_login_status_handler, qr_sign_authenticate_finish_handler, qr_sign_authenticate_handler,
+    qr_sign_begin_handler, qr_sign_status_handler,
 };
 
 pub(crate) use common::{
