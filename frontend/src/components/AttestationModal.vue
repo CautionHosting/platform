@@ -58,8 +58,12 @@
             </details>
 
             <details v-if="result.verified && result.manifest" class="expandable-section">
-              <summary>Sources</summary>
+              <summary>Sources ({{ result.manifestVerified ? 'attested metadata' : 'unverified metadata' }})</summary>
               <div class="section-content">
+                <p v-if="!result.manifestVerified">
+                  This manifest was supplied outside the attestation document and is not
+                  authenticated by attestation verification.
+                </p>
                 <div class="sources-list">
                   <div v-if="result.manifest.app_source" class="source-item">
                     <span class="source-label">App:</span>
@@ -146,6 +150,7 @@ import { ref, onMounted } from 'vue'
 import { verify as verifyNitro } from 'tee-attestation-js/nitro'
 import BrailleLoader from './BrailleLoader.vue'
 import { authFetch } from '../composables/useWebAuthn.js'
+import { getSourceUrl, selectAttestationManifest } from '../utils/attestationMetadata.js'
 
 function bytesToHex(bytes) {
   if (!bytes) return ''
@@ -216,8 +221,8 @@ export default {
 
         addCheck('verify', 'Attestation verified (certificate chain, signature, nonce)', 'success')
 
-        const manifest = jsonResponse.manifest || verifyResult.userData
-        result.value = { verified: true, pcrs: verifyResult.pcrs, manifest }
+        const metadata = selectAttestationManifest(verifyResult, jsonResponse.manifest)
+        result.value = { verified: true, pcrs: verifyResult.pcrs, ...metadata }
 
       } catch (err) {
         addCheck('error', err.message, 'error')
@@ -228,12 +233,6 @@ export default {
     function formatSource(source) {
       if (typeof source === 'string') return source
       return source.url || JSON.stringify(source)
-    }
-
-    function getSourceUrl(source) {
-      if (!source) return null
-      if (typeof source === 'string') return source.startsWith('http') ? source : null
-      return source.urls?.[0] || source.url || null
     }
 
     onMounted(() => {

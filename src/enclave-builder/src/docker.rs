@@ -271,21 +271,47 @@ pub async fn build_user_image(
         None
     };
 
-    let build_command = resolve_build_command_in_dir(
-        config.build_command.as_deref(),
-        containerfile.as_deref(),
-        work_dir,
-    );
+    let mut command = if has_explicit_build_command(config.build_command.as_deref()) {
+        let build_command = resolve_build_command_in_dir(
+            config.build_command.as_deref(),
+            containerfile.as_deref(),
+            work_dir,
+        );
+        let build_command_with_tag =
+            augment_docker_build_command(&build_command, image_tag, config.no_cache);
+        let mut command = Command::new("sh");
+        command.args(["-c", &build_command_with_tag]);
+        command
+    } else {
+        let containerfile = containerfile.as_deref().unwrap_or_else(|| {
+            if work_dir.join("Containerfile").is_file() {
+                "Containerfile"
+            } else {
+                "Dockerfile"
+            }
+        });
+        let mut command = Command::new("docker");
+        command.args(["build", "--platform", "linux/amd64"])
+            .args(["-f", containerfile, "-t", image_tag]);
+        if config.no_cache {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            command.args([
+                "--no-cache",
+                "--pull",
+                "--build-arg",
+                &format!("CACHEBUST={timestamp}"),
+            ]);
+        }
+        command.arg(".");
+        command
+    };
 
-    let build_command_with_tag =
-        augment_docker_build_command(&build_command, image_tag, config.no_cache);
+    tracing::info!("Executing build command: {:?}", command.as_std());
 
-    tracing::info!("Executing build command: {}", build_command_with_tag);
-
-    // Run build command
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(&build_command_with_tag)
+    let output = command
         .current_dir(work_dir)
         .output()
         .await
@@ -450,6 +476,87 @@ mod tests {
         assert!(
             err.to_string().contains("missing file"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_default_build_preserves_literal_arguments() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if let Some(work_dir) = std::env::var_os("CAUTION_LITERAL_BUILD_TEST_DIR") {
+            let config = BuildConfig {
+                containerfile: Some(
+                    "Containerfile $(touch injected) 'quoted' . --platform".to_string(),
+                ),
+                no_cache: true,
+                ..BuildConfig::default()
+            };
+            build_user_image(Path::new(&work_dir), "test-image", &config)
+                .await
+                .unwrap();
+            return;
+        }
+
+        let work_dir = tempdir().unwrap();
+        let containerfile = "Containerfile $(touch injected) 'quoted' . --platform";
+        std::fs::write(work_dir.path().join(containerfile), "FROM scratch\n").unwrap();
+        let docker = work_dir.path().join("docker");
+        std::fs::write(&docker, "#!/bin/sh\nprintf '%s\\n' \"$@\" > docker-args\n").unwrap();
+        std::fs::set_permissions(&docker, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = std::env::var("PATH").unwrap_or_default();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "docker::tests::test_default_build_preserves_literal_arguments",
+                "--nocapture",
+            ])
+            .env("CAUTION_LITERAL_BUILD_TEST_DIR", work_dir.path())
+            .env("PATH", format!("{}:{path}", work_dir.path().display()))
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(!work_dir.path().join("injected").exists());
+        let args = std::fs::read_to_string(work_dir.path().join("docker-args")).unwrap();
+        let args: Vec<_> = args.lines().collect();
+        assert_eq!(
+            &args[..8],
+            [
+                "build",
+                "--platform",
+                "linux/amd64",
+                "-f",
+                containerfile,
+                "-t",
+                "test-image",
+                "--no-cache"
+            ]
+        );
+        assert_eq!(args[8], "--pull");
+        assert_eq!(args[9], "--build-arg");
+        assert!(args[10].starts_with("CACHEBUST="));
+        assert_eq!(args[11..], ["."]);
+    }
+
+    #[tokio::test]
+    async fn test_explicit_build_retains_shell_semantics() {
+        let work_dir = tempdir().unwrap();
+        let config = BuildConfig {
+            build_command: Some("printf explicit > built && printf shell >> built".to_string()),
+            containerfile: Some("Missing.Containerfile".to_string()),
+            ..BuildConfig::default()
+        };
+        build_user_image(work_dir.path(), "test-image", &config)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(work_dir.path().join("built")).unwrap(),
+            "explicitshell"
         );
     }
 
