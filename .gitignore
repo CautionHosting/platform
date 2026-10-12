@@ -22,3 +22,5 @@ target/
 AGENTS.md
 patch
 .worktrees/
+.caution
+.claude

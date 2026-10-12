@@ -4824,6 +4824,29 @@ async fn deploy_logic(
     })
 }
 
+/// A deploy runs in a spawned task, so an API restart abandons its `pending`
+/// row. The API is a single process: at startup no deploy can be in flight.
+async fn reset_abandoned_pending_deploys(db: &PgPool) {
+    match sqlx::query_scalar::<_, Uuid>(
+        "UPDATE compute_resources
+         SET state = $1, deploy_attempt_id = NULL
+         WHERE state = $2 AND deploy_attempt_id IS NOT NULL
+         RETURNING id",
+    )
+    .bind(types::ResourceState::Failed)
+    .bind(types::ResourceState::Pending)
+    .fetch_all(db)
+    .await
+    {
+        Ok(ids) => {
+            for id in ids {
+                tracing::warn!(resource_id = %id, "reset abandoned pending deploy to failed");
+            }
+        }
+        Err(e) => tracing::error!("Failed to reset abandoned pending deploys: {}", e),
+    }
+}
+
 async fn reconcile_terminating_resources(state: Arc<AppState>) {
     use futures::{StreamExt, stream};
 
@@ -5074,6 +5097,8 @@ async fn main() -> Result<(), MainError> {
         eif_download_cache,
         managed_dns,
     });
+
+    reset_abandoned_pending_deploys(&state.db).await;
 
     let teardown_state = state.clone();
     tokio::spawn(async move {
