@@ -50,8 +50,6 @@ impl DeploymentRequirements {
 
     /// A candidate deployment reuses its app's regional VPC and Elastic IP, so
     /// it reserves host vCPUs only.
-    // Task 9 adds the first non-test caller.
-    #[cfg_attr(not(test), expect(dead_code))]
     #[tracing::instrument(skip_all, err)]
     pub(crate) fn for_candidate(
         cpus: u32,

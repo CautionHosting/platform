@@ -5,6 +5,7 @@
 
 pub(crate) mod admission;
 pub(crate) mod internal;
+pub(crate) mod lifecycle;
 
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -89,7 +90,6 @@ pub(crate) struct AppLifecycleError {
     source: BoxError,
 }
 
-#[expect(dead_code, reason = "used by the candidate deploy path")]
 pub(crate) async fn app_lifecycle(
     db: &PgPool,
     app_id: Uuid,

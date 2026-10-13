@@ -193,6 +193,9 @@ pub struct DeployRequest {
     /// Builder instance size: "small" (default), "medium", or "large"
     #[serde(default)]
     pub builder_size: Option<String>,
+    /// Reservation the gateway took for a deployments-lifecycle push.
+    #[serde(default)]
+    pub deployment_id: Option<Uuid>,
 }
 
 fn default_branch() -> String {
@@ -235,6 +238,13 @@ pub struct DeployResponse {
     pub managed_hostname: String,
     pub dns_status: String,
     pub dns_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment_id: Option<Uuid>,
+    /// `live` or `candidate`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_deployment_id: Option<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -281,6 +291,7 @@ mod tests {
             branch: "main".to_string(),
             commit_sha: commit_sha.map(str::to_string),
             builder_size: None,
+            deployment_id: None,
         }
     }
 

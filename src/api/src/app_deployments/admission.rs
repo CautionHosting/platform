@@ -224,16 +224,25 @@ pub(crate) struct ReleaseReservationError {
 /// Releases a reservation that never became a deployment (no-op, multiple-ref
 /// or failed push, or a deploy rejected before its claim). A claimed
 /// deployment is unaffected. Idempotent.
+///
+/// `app_id` scopes the release to that app's reservations. Only the internal
+/// release route passes `None`: the gateway is trusted (internal service
+/// secret) and that route carries no app ID.
 pub(crate) async fn release_reservation(
     db: &PgPool,
     deployment_id: Uuid,
+    app_id: Option<Uuid>,
 ) -> Result<(), ReleaseReservationError> {
-    sqlx::query("DELETE FROM app_deployments WHERE id = $1 AND status = 'reserved'")
-        .bind(deployment_id)
-        .execute(db)
-        .await
-        .map(|_| ())
-        .with_context(ReleaseReservationErrorCtx::new(deployment_id))
+    sqlx::query(
+        "DELETE FROM app_deployments
+         WHERE id = $1 AND ($2::uuid IS NULL OR app_id = $2) AND status = 'reserved'",
+    )
+    .bind(deployment_id)
+    .bind(app_id)
+    .execute(db)
+    .await
+    .map(|_| ())
+    .with_context(ReleaseReservationErrorCtx::new(deployment_id))
 }
 
 /// Failure modes for [`claim_for_build`].
@@ -271,7 +280,6 @@ pub(crate) enum ClaimError {
 
 /// Binds the pushed ref/SHA to the reservation and takes ownership for this
 /// process. A destroyed app is reactivated, as Legacy does on redeploy.
-#[expect(dead_code, reason = "used by the candidate deploy path")]
 pub(crate) async fn claim_for_build(
     db: &PgPool,
     app_id: Uuid,
@@ -336,7 +344,6 @@ pub(crate) async fn claim_for_build(
 
 /// Best effort: the commit subject is display metadata only. Control
 /// characters are stripped because the subject is echoed to terminals.
-#[expect(dead_code, reason = "used by the candidate deploy path")]
 pub(crate) async fn commit_subject(git_dir: &str, commit_sha: &str) -> Option<String> {
     let output = tokio::process::Command::new("git")
         .args(["--git-dir", git_dir, "log", "-1", "--format=%s", commit_sha])

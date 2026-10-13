@@ -2269,11 +2269,15 @@ enum DeployTarget {
         previous_state: types::ResourceState,
         was_destroyed: bool,
     },
+    /// A candidate deployment of a deployments-lifecycle app, claimed from
+    /// its reservation. The live deployment keeps serving.
+    Candidate { deployment_id: Uuid },
 }
 
 impl DeployTarget {
     /// Undo the `pending` claim after the deploy is rejected before launch.
-    async fn reject(&self, state: &Arc<AppState>, org_id: Uuid, resource_id: Uuid) {
+    /// `reason` is the client-facing message recorded on a failed candidate.
+    async fn reject(&self, state: &Arc<AppState>, org_id: Uuid, resource_id: Uuid, reason: &str) {
         match *self {
             Self::Legacy {
                 deploy_attempt_id,
@@ -2293,10 +2297,22 @@ impl DeployTarget {
                     tracing::error!(?error, "failed to restore pending deploy rejection");
                 }
             }
+            Self::Candidate { deployment_id } => {
+                app_deployments::lifecycle::fail_attempt(
+                    state,
+                    org_id,
+                    resource_id,
+                    deployment_id,
+                    reason,
+                )
+                .await;
+            }
         }
     }
 
-    /// Roll back a deploy that failed after launch began.
+    /// Roll back a deploy that failed after launch began. A candidate destroys
+    /// only its own state, never a `running` one.
+    #[allow(clippy::too_many_arguments)]
     async fn recover_failure(
         &self,
         state: &Arc<AppState>,
@@ -2305,6 +2321,7 @@ impl DeployTarget {
         app_name: &str,
         should_cleanup: bool,
         deployed_region: &str,
+        reason: &str,
     ) {
         match *self {
             Self::Legacy {
@@ -2326,6 +2343,16 @@ impl DeployTarget {
                 {
                     tracing::error!(?recover_error, "failed to recover from deploy failure");
                 }
+            }
+            Self::Candidate { deployment_id } => {
+                app_deployments::lifecycle::fail_attempt(
+                    state,
+                    org_id,
+                    resource_id,
+                    deployment_id,
+                    reason,
+                )
+                .await;
             }
         }
     }
@@ -3016,6 +3043,62 @@ pub(crate) enum DeployLogicError {
         #[source]
         source: BoxError,
     },
+
+    #[error("failed to read the app lifecycle [{location}]")]
+    Lifecycle {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("deployments-lifecycle push without a reserved deployment [{location}]")]
+    DeploymentNotReserved { location: Location },
+
+    // `source` is the thiserror source by its name. It is not marked
+    // `#[source]` because the CtxError derive would then require a `BoxError`;
+    // it stays typed so `client_response` can match it.
+    #[error("failed to claim the reserved deployment [{location}]")]
+    DeploymentClaim {
+        location: Location,
+        source: app_deployments::admission::ClaimError,
+    },
+
+    #[error("BYOC credentials are linked to a deployments-lifecycle app [{location}]")]
+    ByocDeployments { location: Location },
+
+    #[error("failed to read the app network [{location}]")]
+    AppNetwork {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to check instance type offerings in the app zone [{location}]")]
+    ZoneOffering {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("instance type is not offered in the app availability zone [{location}]")]
+    InstanceTypeUnavailableInZone { location: Location },
+
+    #[error("no fully managed capacity left in app region {region} [{location}]")]
+    RegionFull { region: String, location: Location },
+
+    #[error("failed to record the deployment as running [{location}]")]
+    Activation {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("deploy task panicked [{location}]")]
+    Panicked { location: Location },
 }
 
 impl DeployLogicError {
@@ -3200,6 +3283,51 @@ impl DeployLogicError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Deployment succeeded but metering registration failed",
             ),
+            DeployLogicError::Lifecycle { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            DeployLogicError::DeploymentNotReserved { .. } => (
+                StatusCode::CONFLICT,
+                "Push again: this app deploys through reserved deployments.",
+            ),
+            DeployLogicError::DeploymentClaim { source, .. } => match source {
+                app_deployments::admission::ClaimError::ReservationGone { .. } => (
+                    StatusCode::CONFLICT,
+                    "This push's deployment reservation expired; push again.",
+                ),
+                app_deployments::admission::ClaimError::NotPushable { .. } => (
+                    StatusCode::CONFLICT,
+                    "This app was suspended or is being destroyed; the push was not deployed.",
+                ),
+                app_deployments::admission::ClaimError::Lock { .. }
+                | app_deployments::admission::ClaimError::Database { .. } => {
+                    (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+                }
+            },
+            DeployLogicError::ByocDeployments { .. } => (
+                StatusCode::BAD_REQUEST,
+                "This app deploys through Caution-managed deployments and cannot use BYOC credentials.",
+            ),
+            DeployLogicError::AppNetwork { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            DeployLogicError::ZoneOffering { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            DeployLogicError::InstanceTypeUnavailableInZone { .. } => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "This instance size is not offered in the app's availability zone.",
+            ),
+            DeployLogicError::RegionFull { .. } => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "No fully managed capacity is left in this app's region for a new candidate. Destroy a candidate or retry later.",
+            ),
+            DeployLogicError::Activation { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            DeployLogicError::Panicked { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
         }
     }
 }
@@ -3217,8 +3345,29 @@ async fn deploy_handler(
     let db_for_recovery = state.db.clone();
     let app_id_for_recovery = req.app_id;
     let org_id_for_recovery = req.org_id;
+    let deployment_id_for_recovery = req.deployment_id;
+    let state_for_recovery = state.clone();
+    let progress = Arc::new(app_deployments::lifecycle::DeployProgress::default());
     tokio::spawn(async move {
-        let result = deploy_logic(state, auth, req, deploy_attempt_id, tx.clone()).await;
+        // An inner task, so that a panic still reaches the recovery below.
+        let result = match tokio::spawn(deploy_logic(
+            state,
+            auth,
+            req,
+            deploy_attempt_id,
+            progress.clone(),
+            tx.clone(),
+        ))
+        .await
+        {
+            Ok(result) => result,
+            Err(join_error) => {
+                tracing::error!(error = %join_error, "deploy task panicked");
+                Err(DeployLogicError::Panicked {
+                    location: std::panic::Location::caller(),
+                })
+            }
+        };
 
         // Send final result as JSON
         match result {
@@ -3243,6 +3392,18 @@ async fn deploy_handler(
                 .await
                 {
                     tracing::error!("Failed to reset resource state after deploy error: {}", e);
+                }
+
+                if let Some(deployment_id) = deployment_id_for_recovery {
+                    app_deployments::lifecycle::settle_failed_push(
+                        &state_for_recovery,
+                        &progress,
+                        org_id_for_recovery,
+                        app_id_for_recovery,
+                        deployment_id,
+                        error.client_response().1,
+                    )
+                    .await;
                 }
 
                 let (status, msg) = error.client_response();
@@ -3827,6 +3988,7 @@ async fn deploy_logic(
     auth: AuthContext,
     req: DeployRequest,
     deploy_attempt_id: Uuid,
+    progress: Arc<app_deployments::lifecycle::DeployProgress>,
     tx: tokio::sync::mpsc::Sender<Result<bytes::Bytes, std::io::Error>>,
 ) -> Result<DeployResponse, DeployLogicError> {
     use DeployLogicErrorCtx as Ctx;
@@ -3925,6 +4087,10 @@ async fn deploy_logic(
     .fetch_optional(&state.db)
     .await
     .with_context(Ctx::resource_lookup())?;
+    if existing_resource.is_some() {
+        // The caller is a member of the org that owns the app.
+        progress.authorise();
+    }
 
     let (resource_id, app_name, configuration, was_destroyed, previous_state) =
         match &existing_resource {
@@ -3953,6 +4119,20 @@ async fn deploy_logic(
         };
 
     tracing::info!("Found resource: id={}, name={}", resource_id, app_name);
+
+    let lifecycle = app_deployments::app_lifecycle(&state.db, req.app_id)
+        .await
+        .with_context(Ctx::lifecycle())?
+        .unwrap_or_default();
+    let candidate_deployment_id = match (lifecycle.as_str(), req.deployment_id) {
+        (app_deployments::LIFECYCLE_DEPLOYMENTS, Some(id)) => Some(id),
+        (app_deployments::LIFECYCLE_DEPLOYMENTS, None) => {
+            return Err(DeployLogicError::DeploymentNotReserved {
+                location: std::panic::Location::caller(),
+            });
+        }
+        _ => None,
+    };
 
     // --- Billing gate (pre-deploy) --- must run before reactivation to avoid side effects on failure
     let cred = cloud_credentials::get_credential_by_resource(&state.db, req.org_id, resource_id)
@@ -4108,49 +4288,47 @@ async fn deploy_logic(
         });
     }
 
-    // Atomically transition to Pending — rejects concurrent deploys via the check above
-    if was_destroyed {
-        tracing::info!("Reactivating previously destroyed resource {}", resource_id);
-        let updated = sqlx::query("UPDATE compute_resources SET destroyed_at = NULL, state = $1, deploy_attempt_id = $2 WHERE id = $3 AND organization_id = $4 AND state != $1 AND state <> 'terminating'")
+    // Legacy claims the app by moving it to Pending; a candidate claims its
+    // reservation once the commit is known (below).
+    if candidate_deployment_id.is_none() {
+        // Atomically transition to Pending — rejects concurrent deploys via the check above
+        if was_destroyed {
+            tracing::info!("Reactivating previously destroyed resource {}", resource_id);
+            let updated = sqlx::query("UPDATE compute_resources SET destroyed_at = NULL, state = $1, deploy_attempt_id = $2 WHERE id = $3 AND organization_id = $4 AND state != $1 AND state <> 'terminating'")
+                .bind(types::ResourceState::Pending)
+                .bind(deploy_attempt_id)
+                .bind(resource_id)
+                .bind(req.org_id)
+                .execute(&state.db)
+                .await
+                .with_context(Ctx::reactivate_update())?;
+
+            if updated.rows_affected() == 0 {
+                return Err(DeployLogicError::DeployInProgress {
+                    location: std::panic::Location::caller(),
+                });
+            }
+        } else {
+            // Mark as Pending so concurrent pushes are rejected
+            let updated = sqlx::query(
+                "UPDATE compute_resources SET state = $1, deploy_attempt_id = $2
+                 WHERE id = $3 AND organization_id = $4 AND state != $1 AND state <> 'terminating'",
+            )
             .bind(types::ResourceState::Pending)
             .bind(deploy_attempt_id)
             .bind(resource_id)
             .bind(req.org_id)
             .execute(&state.db)
             .await
-            .with_context(Ctx::reactivate_update())?;
+            .with_context(Ctx::pending_update())?;
 
-        if updated.rows_affected() == 0 {
-            return Err(DeployLogicError::DeployInProgress {
-                location: std::panic::Location::caller(),
-            });
-        }
-    } else {
-        // Mark as Pending so concurrent pushes are rejected
-        let updated = sqlx::query(
-            "UPDATE compute_resources SET state = $1, deploy_attempt_id = $2
-             WHERE id = $3 AND organization_id = $4 AND state != $1 AND state <> 'terminating'",
-        )
-        .bind(types::ResourceState::Pending)
-        .bind(deploy_attempt_id)
-        .bind(resource_id)
-        .bind(req.org_id)
-        .execute(&state.db)
-        .await
-        .with_context(Ctx::pending_update())?;
-
-        if updated.rows_affected() == 0 {
-            return Err(DeployLogicError::DeployInProgress {
-                location: std::panic::Location::caller(),
-            });
+            if updated.rows_affected() == 0 {
+                return Err(DeployLogicError::DeployInProgress {
+                    location: std::panic::Location::caller(),
+                });
+            }
         }
     }
-
-    let deploy_target = DeployTarget::Legacy {
-        deploy_attempt_id,
-        previous_state,
-        was_destroyed,
-    };
 
     tracing::info!("Deploying branch: {}", req.branch);
 
@@ -4166,6 +4344,31 @@ async fn deploy_logic(
             .with_context(Ctx::commit_mismatch())?;
 
     let git_dir = format!("{}/git-repos/{}.git", state.data_dir, app_id_str);
+    let deploy_target = if let Some(deployment_id) = candidate_deployment_id {
+        let subject = app_deployments::admission::commit_subject(&git_dir, &commit_sha).await;
+        app_deployments::admission::claim_for_build(
+            &state.db,
+            resource_id,
+            deployment_id,
+            &req.branch,
+            &commit_sha,
+            subject.as_deref(),
+        )
+        .await
+        .map_err(|source| DeployLogicError::DeploymentClaim {
+            location: std::panic::Location::caller(),
+            source,
+        })?;
+        progress.claim();
+        DeployTarget::Candidate { deployment_id }
+    } else {
+        DeployTarget::Legacy {
+            deploy_attempt_id,
+            previous_state,
+            was_destroyed,
+        }
+    };
+
     let (config_content, config_file) = load_build_config_for_deploy(&git_dir, &commit_sha)
         .await
         .with_context(Ctx::build_config_git())?;
@@ -4282,26 +4485,45 @@ async fn deploy_logic(
         .map(managed_onprem_config_from_credential);
 
     if provider_requires_linked_byoc(&config_file, managed_onprem_config.is_some()) {
-        deploy_target.reject(&state, req.org_id, resource_id).await;
-        return Err(DeployLogicError::ByocRequired {
+        let error = DeployLogicError::ByocRequired {
             location: std::panic::Location::caller(),
-        });
+        };
+        deploy_target
+            .reject(&state, req.org_id, resource_id, error.client_response().1)
+            .await;
+        return Err(error);
+    }
+
+    // BYOC stays Legacy: a candidate runs on Caution-managed capacity only.
+    if matches!(deploy_target, DeployTarget::Candidate { .. }) && managed_onprem_config.is_some() {
+        let error = DeployLogicError::ByocDeployments {
+            location: std::panic::Location::caller(),
+        };
+        deploy_target
+            .reject(&state, req.org_id, resource_id, error.client_response().1)
+            .await;
+        return Err(error);
     }
 
     if !is_managed_onprem && cpu_count > fully_managed_capacity::MAX_FULLY_MANAGED_ENCLAVE_VCPUS {
-        deploy_target.reject(&state, req.org_id, resource_id).await;
-        return Err(DeployLogicError::VcpuLimit {
+        let error = DeployLogicError::VcpuLimit {
             location: std::panic::Location::caller(),
-        });
+        };
+        deploy_target
+            .reject(&state, req.org_id, resource_id, error.client_response().1)
+            .await;
+        return Err(error);
     }
 
-    let deployment_requirements_result =
-        fully_managed_capacity::DeploymentRequirements::for_enclave(cpu_count, memory_mb);
-    if deployment_requirements_result.is_err() {
-        deploy_target.reject(&state, req.org_id, resource_id).await;
+    let deployment_requirements_result: Result<_, DeployLogicError> =
+        fully_managed_capacity::DeploymentRequirements::for_enclave(cpu_count, memory_mb)
+            .with_context(Ctx::sizing_invalid());
+    if let Err(error) = &deployment_requirements_result {
+        deploy_target
+            .reject(&state, req.org_id, resource_id, error.client_response().1)
+            .await;
     }
-    let deployment_requirements =
-        deployment_requirements_result.with_context(Ctx::sizing_invalid())?;
+    let deployment_requirements = deployment_requirements_result?;
 
     // Overlay inline provider config from caution.hcl onto DB credential defaults.
     // Fields specified in the provider block take precedence.
@@ -4533,6 +4755,61 @@ async fn deploy_logic(
         );
     }
 
+    let (app_network, recorded_region): (Option<deployment::AppNetwork>, Option<String>) =
+        match deploy_target {
+            DeployTarget::Candidate { .. } => {
+                let (network, region): (Option<serde_json::Value>, Option<String>) =
+                    sqlx::query_as(
+                        "SELECT app_network, region FROM compute_resources WHERE id = $1",
+                    )
+                    .bind(resource_id)
+                    .fetch_one(&state.db)
+                    .await
+                    .with_context(Ctx::app_network())?;
+                let network = network
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .with_context(Ctx::app_network())?;
+                (network, region)
+            }
+            DeployTarget::Legacy { .. } => (None, None),
+        };
+    let (capacity_requirements, region_pin) = match &app_network {
+        Some(network) => (
+            fully_managed_capacity::DeploymentRequirements::for_candidate(cpu_count, memory_mb)
+                .with_context(Ctx::sizing_invalid())?,
+            Some(network.region.as_str()),
+        ),
+        // No network yet: still pin to a region recorded by an interrupted
+        // first apply, so the retry reuses that app state instead of leaking it.
+        None => (deployment_requirements.clone(), recorded_region.as_deref()),
+    };
+    // A candidate's instance must fit the app subnet's availability zone.
+    if let Some(network) = &app_network {
+        let offered = crate::ec2::Ec2Client::new(
+            &fully_managed_capacity::platform_credentials_for_region(&network.region),
+        )
+        .instance_type_offered_in_zone(
+            &capacity_requirements.instance_type,
+            &network.availability_zone,
+        )
+        .await
+        .with_context(Ctx::zone_offering())
+        .and_then(|offered| {
+            offered
+                .then_some(())
+                .ok_or_else(|| DeployLogicError::InstanceTypeUnavailableInZone {
+                    location: std::panic::Location::caller(),
+                })
+        });
+        if let Err(error) = &offered {
+            deploy_target
+                .reject(&state, req.org_id, resource_id, error.client_response().1)
+                .await;
+        }
+        offered?;
+    }
+
     let capacity_reservation = if managed_onprem_config.is_none() {
         let _ = tx
             .send(Ok(milestone("Checking fully managed capacity...")))
@@ -4542,14 +4819,34 @@ async fn deploy_logic(
             req.org_id,
             auth.user_id,
             resource_id,
-            &deployment_requirements,
-            None,
+            &capacity_requirements,
+            region_pin,
         )
         .await;
-        if reservation.is_err() {
-            deploy_target.reject(&state, req.org_id, resource_id).await;
+        // Only candidates pin a region. They never leave it (the app EIP is
+        // regional), and a pinned region that is no longer enabled is full too.
+        let reservation = match (reservation, region_pin) {
+            (Err(fully_managed_capacity::CapacityError::RegionFull { region, .. }), _) => {
+                Err(DeployLogicError::RegionFull {
+                    region,
+                    location: std::panic::Location::caller(),
+                })
+            }
+            (
+                Err(fully_managed_capacity::CapacityError::NoRegionsAvailable { .. }),
+                Some(region),
+            ) => Err(DeployLogicError::RegionFull {
+                region: region.to_string(),
+                location: std::panic::Location::caller(),
+            }),
+            (reservation, _) => reservation.with_context(Ctx::capacity_database()),
+        };
+        if let Err(error) = &reservation {
+            deploy_target
+                .reject(&state, req.org_id, resource_id, error.client_response().1)
+                .await;
         }
-        Some(reservation.with_context(Ctx::capacity_database())?)
+        Some(reservation?)
     } else {
         None
     };
@@ -4630,7 +4927,25 @@ async fn deploy_logic(
 
     let _ = tx.send(Ok(milestone("Uploading and launching..."))).await;
 
-    let deployment_result = deployment::deploy_nitro_enclave(nitro_request).await;
+    let deployment_result: Result<_, DeployLogicError> = match deploy_target {
+        DeployTarget::Legacy { .. } => deployment::deploy_nitro_enclave(nitro_request)
+            .await
+            .with_context(Ctx::nitro_deploy()),
+        DeployTarget::Candidate { deployment_id } => provision_candidate(
+            &state,
+            &req,
+            resource_id,
+            deployment_id,
+            app_network,
+            &nitro_request,
+            &builder_eif_s3_key,
+            &aws_account_id,
+            &deployed_region,
+            &deployment_requirements,
+        )
+        .await
+        .with_context(Ctx::nitro_deploy()),
+    };
     match &deployment_result {
         Ok(result) => {
             tracing::info!(
@@ -4639,8 +4954,8 @@ async fn deploy_logic(
                 result.public_ip
             );
         }
-        Err(source) => {
-            tracing::error!("Failed to deploy Nitro Enclave: {:?}", source);
+        Err(error) => {
+            tracing::error!("Failed to deploy Nitro Enclave: {:?}", error);
             if let Some(reservation) = capacity_reservation.as_ref() {
                 fully_managed_capacity::release_reservation(&state.db, reservation).await;
             }
@@ -4652,11 +4967,12 @@ async fn deploy_logic(
                     &app_name,
                     should_cleanup_on_failure,
                     &deployed_region,
+                    error.client_response().1,
                 )
                 .await;
         }
     }
-    let deployment_result = deployment_result.with_context(Ctx::nitro_deploy())?;
+    let deployment_result = deployment_result?;
 
     let mut final_config = eif_config.clone();
     if let Some(instance_type) = &deployment_result.instance_type {
@@ -4676,10 +4992,13 @@ async fn deploy_logic(
     let health_timeout_secs = deployment_health_timeout_secs();
 
     tracing::info!("Waiting for host and enclave readiness...");
-    let health_result =
-        wait_for_deployment_health(&deployment_result.public_ip, health_timeout_secs).await;
-    if let Err(ref source) = health_result {
-        tracing::error!("Health check failed: {}", source);
+    // A candidate is probed on its own instance IP, not the app EIP.
+    let health_result: Result<_, DeployLogicError> =
+        wait_for_deployment_health(&deployment_result.public_ip, health_timeout_secs)
+            .await
+            .inspect_err(|source| tracing::error!("Health check failed: {}", source))
+            .with_context(Ctx::enclave_unhealthy());
+    if let Err(error) = &health_result {
         if let Some(reservation) = capacity_reservation.as_ref() {
             fully_managed_capacity::release_reservation(&state.db, reservation).await;
         }
@@ -4691,13 +5010,136 @@ async fn deploy_logic(
                 &app_name,
                 should_cleanup_on_failure,
                 &deployed_region,
+                error.client_response().1,
             )
             .await;
     }
-    health_result.with_context(Ctx::enclave_unhealthy())?;
+    health_result?;
+
+    if let DeployTarget::Candidate { deployment_id } = deploy_target {
+        use app_deployments::lifecycle::{self, Role};
+
+        let metering_result: Result<_, DeployLogicError> =
+            crate::metering::upsert_tracked_resource(
+                &state,
+                &deployment_result.instance_id,
+                req.org_id,
+                Some(auth.user_id),
+                resource_id,
+                Some(deployment_id),
+                "aws",
+                deployment_result.instance_type.as_deref(),
+                Some(&deployed_region),
+                &serde_json::json!({
+                    "resource_kind": "compute_resource",
+                    "compute_resource_id": resource_id.to_string(),
+                    "deployment_id": deployment_id.to_string(),
+                    "instance_id": deployment_result.instance_id,
+                    "resource_name": app_name,
+                }),
+            )
+            .await
+            .with_context(Ctx::metering());
+        if let Err(error) = &metering_result {
+            if let Some(reservation) = capacity_reservation.as_ref() {
+                fully_managed_capacity::release_reservation(&state.db, reservation).await;
+            }
+            deploy_target
+                .recover_failure(
+                    &state,
+                    req.org_id,
+                    resource_id,
+                    &app_name,
+                    true,
+                    &deployed_region,
+                    error.client_response().1,
+                )
+                .await;
+        }
+        metering_result?;
+
+        let activation: Result<_, DeployLogicError> = lifecycle::complete_running(
+            &state,
+            resource_id,
+            &lifecycle::RunningDeployment {
+                id: deployment_id,
+                instance_id: deployment_result.instance_id.clone(),
+                instance_type: deployment_result.instance_type.clone(),
+                region: deployed_region.clone(),
+                configuration: final_config.clone(),
+            },
+        )
+        .await
+        .with_context(Ctx::activation());
+        if let Some(reservation) = capacity_reservation.as_ref() {
+            // Success or failure, the instance now counts through live EC2 usage.
+            fully_managed_capacity::release_reservation(&state.db, reservation).await;
+        }
+        if let Err(error) = &activation {
+            deploy_target
+                .recover_failure(
+                    &state,
+                    req.org_id,
+                    resource_id,
+                    &app_name,
+                    true,
+                    &deployed_region,
+                    error.client_response().1,
+                )
+                .await;
+        }
+        let activation = activation?;
+        // No `?` past this point: the deployment is Running (and possibly live).
+
+        let dns = match (activation.role, activation.dns) {
+            (Role::Live, Some(initial_dns)) => {
+                publish_managed_dns(&state, &tx, resource_id, initial_dns).await
+            }
+            // The gateway ignores DNS for candidates.
+            _ => managed_dns::dns_snapshot(&state.db, resource_id)
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::warn!(resource_id = %resource_id, error = %error, "failed to read managed DNS status");
+                    managed_dns::DnsSnapshot {
+                        status: "unknown".to_string(),
+                        error: None,
+                    }
+                }),
+        };
+        let public_ip = activation
+            .eip_public_ip
+            .unwrap_or_else(|| deployment_result.public_ip.clone());
+
+        tracing::info!(
+            "Candidate deployment complete: resource_id={}, deployment_id={}, instance_id={}, role={}",
+            resource_id,
+            deployment_id,
+            deployment_result.instance_id,
+            activation.role.as_str()
+        );
+
+        let _ = tx.send(Ok(milestone_done("Deployment successful!"))).await;
+
+        return Ok(DeployResponse {
+            url: match (activation.role, domain.as_ref()) {
+                (Role::Live, Some(domain)) => format!("https://{domain}"),
+                _ => format!("http://{public_ip}"),
+            },
+            attestation_url: format!("http://{public_ip}/attestation"),
+            resource_id,
+            public_ip,
+            domain,
+            managed_hostname: managed_dns::managed_hostname(resource_id),
+            dns_status: dns.status,
+            dns_error: dns.error,
+            deployment_id: Some(deployment_id),
+            role: Some(activation.role.as_str().to_string()),
+            live_deployment_id: activation.live_deployment_id,
+        });
+    }
 
     let managed_dns_enabled = state.managed_dns.is_some();
-    let resource_update = sqlx::query_as::<_, (String, Option<String>)>(
+    let resource_update: Result<_, DeployLogicError> = sqlx::query_as::<_, (String, Option<String>)>(
         "UPDATE compute_resources
          SET provider_resource_id = $1, state = $2, public_ip = $3, region = $4,
              configuration = COALESCE(configuration, '{}'::jsonb) || $5::jsonb,
@@ -4727,8 +5169,9 @@ async fn deploy_logic(
     .bind(req.org_id)
     .bind(deploy_attempt_id)
     .fetch_optional(&state.db)
-    .await;
-    if resource_update.is_err() {
+    .await
+    .with_context(Ctx::resource_update());
+    if let Err(error) = &resource_update {
         if let Some(reservation) = capacity_reservation.as_ref() {
             fully_managed_capacity::release_reservation(&state.db, reservation).await;
         }
@@ -4740,11 +5183,14 @@ async fn deploy_logic(
                 &app_name,
                 should_cleanup_on_failure,
                 &deployed_region,
+                error.client_response().1,
             )
             .await;
     }
-    let resource_update = resource_update.with_context(Ctx::resource_update())?;
-    let Some((initial_dns_status, initial_dns_error)) = resource_update else {
+    let Some((initial_dns_status, initial_dns_error)) = resource_update? else {
+        let error = DeployLogicError::PublishConflict {
+            location: std::panic::Location::caller(),
+        };
         if let Some(reservation) = capacity_reservation.as_ref() {
             fully_managed_capacity::release_reservation(&state.db, reservation).await;
         }
@@ -4756,11 +5202,10 @@ async fn deploy_logic(
                 &app_name,
                 should_cleanup_on_failure,
                 &deployed_region,
+                error.client_response().1,
             )
             .await;
-        return Err(DeployLogicError::PublishConflict {
-            location: std::panic::Location::caller(),
-        });
+        return Err(error);
     };
 
     let metering_result = crate::metering::upsert_tracked_resource(
@@ -4769,6 +5214,7 @@ async fn deploy_logic(
         req.org_id,
         Some(auth.user_id),
         resource_id,
+        None,
         "aws",
         deployment_result.instance_type.as_deref(),
         Some(&deployed_region),
@@ -4795,25 +5241,7 @@ async fn deploy_logic(
         status: initial_dns_status,
         error: initial_dns_error,
     };
-    let dns = if initial_dns.status == "publishing" {
-        let _ = tx.send(Ok(milestone("Publishing managed DNS..."))).await;
-        if let Some(managed_dns) = state.managed_dns.as_ref() {
-            match managed_dns.publish_resource(&state.db, resource_id).await {
-                Ok(dns) => dns,
-                Err(error) => {
-                    tracing::error!(resource_id = %resource_id, error = %error, "managed DNS publication will be retried");
-                    managed_dns::DnsSnapshot {
-                        status: initial_dns.status,
-                        error: Some(managed_dns::sanitize_error(&error)),
-                    }
-                }
-            }
-        } else {
-            initial_dns
-        }
-    } else {
-        initial_dns
-    };
+    let dns = publish_managed_dns(&state, &tx, resource_id, initial_dns).await;
 
     tracing::info!(
         "EIF deployment complete: resource_id={}, instance_id={}, public_ip={}, instance_type={:?}",
@@ -4840,6 +5268,9 @@ async fn deploy_logic(
         managed_hostname: managed_dns::managed_hostname(resource_id),
         dns_status: dns.status,
         dns_error: dns.error,
+        deployment_id: None,
+        role: None,
+        live_deployment_id: None,
     })
 }
 
@@ -4864,6 +5295,143 @@ async fn reset_abandoned_pending_deploys(db: &PgPool) {
         }
         Err(e) => tracing::error!("Failed to reset abandoned pending deploys: {}", e),
     }
+}
+
+/// Publishes managed DNS when the app projection asks for it. A failure is
+/// logged and kept in the snapshot; `reconcile_managed_dns` retries it.
+async fn publish_managed_dns(
+    state: &AppState,
+    tx: &tokio::sync::mpsc::Sender<Result<bytes::Bytes, std::io::Error>>,
+    resource_id: Uuid,
+    initial_dns: managed_dns::DnsSnapshot,
+) -> managed_dns::DnsSnapshot {
+    if initial_dns.status != "publishing" {
+        return initial_dns;
+    }
+    let _ = tx.send(Ok(milestone("Publishing managed DNS..."))).await;
+    let Some(managed_dns) = state.managed_dns.as_ref() else {
+        return initial_dns;
+    };
+    match managed_dns.publish_resource(&state.db, resource_id).await {
+        Ok(dns) => dns,
+        Err(error) => {
+            tracing::error!(resource_id = %resource_id, error = %error, "managed DNS publication will be retried");
+            managed_dns::DnsSnapshot {
+                status: initial_dns.status,
+                error: Some(managed_dns::sanitize_error(&error)),
+            }
+        }
+    }
+}
+
+/// Failure modes for [`provision_candidate`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum ProvisionCandidateError {
+    #[error("failed to provision the app network [{location}]")]
+    AppNetwork {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("failed to encode the app network [{location}]")]
+    EncodeNetwork {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("database error while provisioning a candidate [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("failed to provision the candidate deployment [{location}]")]
+    Provision {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Applies the app network on the first push, then this candidate's own
+/// deployment state inside it, recording each step on its deployment row.
+#[allow(clippy::too_many_arguments)]
+async fn provision_candidate(
+    state: &Arc<AppState>,
+    req: &DeployRequest,
+    resource_id: Uuid,
+    deployment_id: Uuid,
+    app_network: Option<deployment::AppNetwork>,
+    nitro_request: &deployment::NitroDeploymentRequest,
+    eif_s3_key: &str,
+    aws_account_id: &str,
+    region: &str,
+    requirements: &fully_managed_capacity::DeploymentRequirements,
+) -> Result<deployment::DeploymentResult, ProvisionCandidateError> {
+    use ProvisionCandidateErrorCtx as Ctx;
+
+    let network = match app_network {
+        Some(network) => network,
+        None => {
+            // Record the region first: if the API dies during the apply, app
+            // destroy and the next push still target this region's app state.
+            sqlx::query("UPDATE compute_resources SET region = $2 WHERE id = $1")
+                .bind(resource_id)
+                .bind(region)
+                .execute(&state.db)
+                .await
+                .with_context(Ctx::database())?;
+            let network = deployment::provision_app_network(&deployment::AppNetworkRequest {
+                org_id: req.org_id,
+                resource_id,
+                aws_account_id: aws_account_id.to_string(),
+                region: region.to_string(),
+                instance_type: requirements.instance_type.clone(),
+            })
+            .await
+            .with_context(Ctx::app_network())?;
+            sqlx::query("UPDATE compute_resources SET app_network = $2 WHERE id = $1")
+                .bind(resource_id)
+                .bind(serde_json::to_value(&network).with_context(Ctx::encode_network())?)
+                .execute(&state.db)
+                .await
+                .with_context(Ctx::database())?;
+            network
+        }
+    };
+    let bucket = std::env::var("EIF_S3_BUCKET")
+        .unwrap_or_else(|_| format!("caution-eif-storage-{aws_account_id}"));
+    let state_key = deployment::deployment_state_key(req.org_id, resource_id, deployment_id);
+    app_deployments::lifecycle::mark_provisioning(
+        &state.db,
+        deployment_id,
+        &state_key,
+        &network.region,
+        eif_s3_key,
+    )
+    .await
+    .with_context(Ctx::database())?;
+    let result = deployment::provision_deployment(
+        nitro_request,
+        deployment_id,
+        &network,
+        &format!("s3://{bucket}/{eif_s3_key}"),
+    )
+    .await
+    .with_context(Ctx::provision())?;
+    app_deployments::lifecycle::record_instance(
+        &state.db,
+        deployment_id,
+        &result.instance_id,
+        result.instance_type.as_deref(),
+    )
+    .await
+    .with_context(Ctx::database())?;
+    Ok(result)
 }
 
 async fn reconcile_terminating_resources(state: Arc<AppState>) {

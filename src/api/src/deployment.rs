@@ -3211,10 +3211,6 @@ pub(crate) enum ProvisionAppNetworkError {
 
 /// Applies the app network state (VPC, IAM, unassociated EIP) on the per-app key with
 /// platform credentials. Idempotent: a re-apply leaves an existing network unchanged.
-#[expect(
-    dead_code,
-    reason = "first caller lands with the deployments push flow"
-)]
 #[tracing::instrument(skip_all, err)]
 pub(crate) async fn provision_app_network(
     request: &AppNetworkRequest,
@@ -3321,10 +3317,6 @@ pub(crate) enum ProvisionDeploymentError {
 
 /// Applies one deployment's state (security group and instance) inside the app network.
 /// The result's `public_ip` is the instance's own temporary IP, not the app's EIP.
-#[expect(
-    dead_code,
-    reason = "first caller lands with the deployments push flow"
-)]
 #[tracing::instrument(skip_all, err)]
 pub(crate) async fn provision_deployment(
     request: &NitroDeploymentRequest,
@@ -3425,7 +3417,6 @@ pub(crate) enum DestroyDeploymentStateError {
 
 /// Destroys one deployment's state. Re-runnable: an empty or missing state destroys
 /// nothing and succeeds.
-#[expect(dead_code, reason = "first caller lands with deployment destruction")]
 #[tracing::instrument(skip_all, err)]
 pub(crate) async fn destroy_deployment_state(
     org_id: Uuid,

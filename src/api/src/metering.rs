@@ -32,7 +32,8 @@ pub enum UpsertTrackedResourceError {
 
 /// Upsert a tracked resource row for a compute resource that should accrue
 /// real-time metering. If a stopped row is resumed, reset billing timestamps so
-/// downtime is not charged.
+/// downtime is not charged. `deployment_id` is set for a deployments-lifecycle
+/// instance; `None` keeps any deployment already recorded for the instance.
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
 pub async fn upsert_tracked_resource(
@@ -41,6 +42,7 @@ pub async fn upsert_tracked_resource(
     organization_id: Uuid,
     user_id: Option<Uuid>,
     application_id: Uuid,
+    deployment_id: Option<Uuid>,
     provider: &str,
     instance_type: Option<&str>,
     region: Option<&str>,
@@ -71,14 +73,15 @@ pub async fn upsert_tracked_resource(
     sqlx::query(
         r#"
         INSERT INTO tracked_resources (
-            resource_id, organization_id, user_id, application_id, provider, instance_type, region,
-            metadata, status, started_at, last_billed_at
+            resource_id, organization_id, user_id, application_id, deployment_id, provider,
+            instance_type, region, metadata, status, started_at, last_billed_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'running', NOW(), NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'running', NOW(), NOW())
         ON CONFLICT (resource_id) DO UPDATE SET
             organization_id = EXCLUDED.organization_id,
             user_id = COALESCE(EXCLUDED.user_id, tracked_resources.user_id),
             application_id = EXCLUDED.application_id,
+            deployment_id = COALESCE(EXCLUDED.deployment_id, tracked_resources.deployment_id),
             provider = EXCLUDED.provider,
             instance_type = COALESCE(EXCLUDED.instance_type, tracked_resources.instance_type),
             region = COALESCE(EXCLUDED.region, tracked_resources.region),
@@ -99,6 +102,7 @@ pub async fn upsert_tracked_resource(
     .bind(organization_id)
     .bind(user_id)
     .bind(application_id)
+    .bind(deployment_id)
     .bind(provider)
     .bind(instance_type)
     .bind(region)

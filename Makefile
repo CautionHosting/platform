@@ -980,6 +980,10 @@ test-quorum-mock:
 test-quorum-db:
 	@bash tests/e2e/test_org_quorum_db.sh
 
+.PHONY: test-app-deployments-db
+test-app-deployments-db:
+	@bash tests/e2e/test_app_deployments_db.sh
+
 test-e2e-org-user-quorum:
 	@flock "$(E2E_LOCK_FILE)" /bin/bash -lc '\
 		set -euo pipefail; \

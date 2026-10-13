@@ -41,7 +41,8 @@ pub(crate) async fn release_handler(
     State(state): State<Arc<AppState>>,
     Path(deployment_id): Path<Uuid>,
 ) -> StatusCode {
-    match admission::release_reservation(&state.db, deployment_id).await {
+    // Gateway-only route behind the internal service secret: not scoped by app.
+    match admission::release_reservation(&state.db, deployment_id, None).await {
         Ok(()) => StatusCode::NO_CONTENT,
         Err(error) => {
             tracing::error!(deployment_id = %deployment_id, error = %error, "failed to release reservation");

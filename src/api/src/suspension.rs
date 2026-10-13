@@ -545,6 +545,7 @@ pub async fn unsuspend_org_resources(
             org_id,
             None,
             *resource_id,
+            None,
             "aws",
             instance_type,
             recovered_address

@@ -52,10 +52,6 @@ pub struct Region {
 
 /// An app's stable Elastic IP and the instance currently holding it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "first caller lands with deployment activation")
-)]
 pub struct AppAddress {
     pub allocation_id: String,
     pub public_ip: String,
@@ -658,7 +654,6 @@ impl Ec2Client {
 
     /// The app's Elastic IP (tagged `ResourceId`) and its current holder.
     #[tracing::instrument(skip_all, err)]
-    #[expect(dead_code, reason = "first caller lands with deployment activation")]
     pub async fn describe_app_address(
         &self,
         resource_id: &str,
@@ -692,7 +687,6 @@ impl Ec2Client {
     /// expected holder AWS itself refuses if the address got associated since
     /// it was read.
     #[tracing::instrument(skip_all, err)]
-    #[expect(dead_code, reason = "first caller lands with deployment activation")]
     pub async fn move_app_address(
         &self,
         resource_id: &str,
@@ -820,7 +814,6 @@ impl Ec2Client {
 
     /// Whether `instance_type` is offered in the availability zone `zone`.
     #[tracing::instrument(skip_all, err)]
-    #[expect(dead_code, reason = "first caller lands with candidate placement")]
     pub async fn instance_type_offered_in_zone(
         &self,
         instance_type: &str,
@@ -1616,10 +1609,11 @@ fn parse_app_address(xml: &str) -> Result<(String, String, Option<String>), Pars
             location: std::panic::Location::caller(),
         });
     }
+    // An unassociated address may carry an empty `<instanceId></instanceId>`.
     Ok((
         allocation_ids[0].clone(),
         public_ips[0].clone(),
-        parse_first_tag_value(xml, "instanceId"),
+        parse_first_tag_value(xml, "instanceId").filter(|id| !id.is_empty()),
     ))
 }
 
@@ -1831,6 +1825,14 @@ mod tests {
         assert_eq!(address.0, "eipalloc-123");
         assert_eq!(address.1, "198.51.100.42");
         assert_eq!(address.2.as_deref(), Some("i-123"));
+    }
+
+    #[test]
+    fn unassociated_app_address_has_no_holder() {
+        let empty = "<item><allocationId>eipalloc-123</allocationId><publicIp>198.51.100.42</publicIp><instanceId></instanceId></item>";
+        let absent = "<item><allocationId>eipalloc-123</allocationId><publicIp>198.51.100.42</publicIp></item>";
+        assert_eq!(parse_app_address(empty).unwrap().2, None);
+        assert_eq!(parse_app_address(absent).unwrap().2, None);
     }
 
     #[test]
