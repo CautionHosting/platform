@@ -123,6 +123,12 @@ pub struct ComputeResource {
     pub public_ip: Option<String>,
     /// Free-form configuration expected for the resource (e.g. `instance_type`).
     pub configuration: Option<serde_json::Value>,
+    /// Instances of the app's non-destroyed deployments (deployments lifecycle):
+    /// live, candidates and cleanup pending. All are tracked.
+    pub deployment_instance_ids: Vec<String>,
+    /// A deployments-lifecycle app with nothing live: `provider_resource_id`
+    /// is a placeholder, so no single instance is expected.
+    pub awaiting_live: bool,
 }
 
 /// Represents the lifecycle state of a resource.
@@ -213,6 +219,8 @@ impl From<sqlx::postgres::PgRow> for ComputeResource {
             region: row.get("region"),
             public_ip: row.get("public_ip"),
             configuration: row.get("configuration"),
+            deployment_instance_ids: row.get("deployment_instance_ids"),
+            awaiting_live: row.get("awaiting_live"),
         }
     }
 }
@@ -350,7 +358,14 @@ pub async fn get_compute_resources(
             cr.state,
             cr.region,
             cr.public_ip,
-            cr.configuration
+            cr.configuration,
+            (cr.lifecycle = 'deployments' AND cr.live_deployment_id IS NULL) AS awaiting_live,
+            ARRAY(
+                SELECT d.instance_id FROM app_deployments d
+                WHERE d.app_id = cr.id AND d.instance_id IS NOT NULL
+                  AND (d.status IN ('provisioning', 'running', 'destroying')
+                       OR (d.status = 'failed' AND d.cleaned_up_at IS NULL))
+            ) AS deployment_instance_ids
         FROM compute_resources cr
         WHERE cr.organization_id = $1 AND cr.destroyed_at IS NULL
         ORDER BY cr.created_at DESC
@@ -391,7 +406,14 @@ pub async fn get_compute_resource(
             cr.state,
             cr.region,
             cr.public_ip,
-            cr.configuration
+            cr.configuration,
+            (cr.lifecycle = 'deployments' AND cr.live_deployment_id IS NULL) AS awaiting_live,
+            ARRAY(
+                SELECT d.instance_id FROM app_deployments d
+                WHERE d.app_id = cr.id AND d.instance_id IS NOT NULL
+                  AND (d.status IN ('provisioning', 'running', 'destroying')
+                       OR (d.status = 'failed' AND d.cleaned_up_at IS NULL))
+            ) AS deployment_instance_ids
         FROM compute_resources cr
         WHERE cr.id = $1 AND cr.organization_id = $2 AND cr.destroyed_at IS NULL
         ",

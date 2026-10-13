@@ -358,6 +358,11 @@ pub fn detect_resource_drift(
     expected: &ComputeResource,
     actual: Option<&Ec2Instance>,
 ) -> Vec<DriftReport> {
+    // Nothing is live yet: retained deployments are covered by the orphan scan.
+    if expected.awaiting_live {
+        return Vec::new();
+    }
+
     let mut drifts = Vec::new();
     let resource_name = expected.resource_name.as_deref().unwrap_or("unknown");
     let region = expected.region.as_deref().unwrap_or("unknown");
@@ -553,7 +558,10 @@ pub fn detect_orphaned_resources(
     let db_resource_ids: HashSet<String> = db_resources
         .iter()
         .filter(|resource| resource.provider_account_id == account.id)
-        .map(|resource| resource.provider_resource_id.clone())
+        .flat_map(|resource| {
+            std::iter::once(&resource.provider_resource_id).chain(&resource.deployment_instance_ids)
+        })
+        .cloned()
         .collect();
 
     let mut orphaned = Vec::new();
@@ -927,6 +935,8 @@ mod tests {
             region: Some("us-west-2".to_string()),
             public_ip: None,
             configuration: None,
+            deployment_instance_ids: Vec::new(),
+            awaiting_live: false,
         }
     }
 
@@ -1020,6 +1030,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_retained_deployment_instances_are_not_orphans() {
+        let account = test_account();
+        let app_id = uuid::Uuid::new_v4();
+        let mut app = tagged_resource(&account, app_id, "i-live", ResourceState::Running);
+        app.deployment_instance_ids = vec!["i-live".to_string(), "i-candidate".to_string()];
+        let app_tags = |deployment: &str| {
+            tags(&[
+                ("ResourceId", &app_id.to_string()),
+                ("DeploymentId", deployment),
+                ("ManagedBy", "caution+tofu"),
+            ])
+        };
+        let candidate = ensure_org_tag(
+            tagged_instance("i-candidate", app_tags("d-candidate")),
+            account.organization_id,
+        );
+        let destroyed = ensure_org_tag(
+            tagged_instance("i-destroyed", app_tags("d-destroyed")),
+            account.organization_id,
+        );
+        let orphaned = detect_orphaned_resources(&[app], &[candidate, destroyed], &account);
+        assert_eq!(orphaned.len(), 1);
+        assert!(
+            matches!(&orphaned[0].drift_type, DriftType::OrphanedInAws(id) if id == "i-destroyed")
+        );
+    }
+
+    #[test]
+    fn test_deployments_app_without_live_expects_no_instance() {
+        let mut app = create_test_resource("placeholder", ResourceState::Running);
+        app.awaiting_live = true;
+        assert!(detect_resource_drift(&app, None).is_empty());
+    }
+
     fn test_account() -> ProviderAccount {
         ProviderAccount {
             id: uuid::Uuid::new_v4(),
@@ -1046,6 +1091,8 @@ mod tests {
             region: Some("us-west-2".to_string()),
             public_ip: None,
             configuration: Some(serde_json::json!({ "instance_type": "c5.xlarge" })),
+            deployment_instance_ids: Vec::new(),
+            awaiting_live: false,
         }
     }
 
@@ -1068,6 +1115,8 @@ mod tests {
             region: Some("us-west-2".to_string()),
             public_ip: Some("1.2.3.4".to_string()),
             configuration: Some(serde_json::json!({ "instance_type": "c5.xlarge" })),
+            deployment_instance_ids: Vec::new(),
+            awaiting_live: false,
         }
     }
 

@@ -98,6 +98,7 @@ The scan proceeds in phases:
 
 1. Load expected state from the database: provider accounts, compute resources, and users for the organization.
 2. Query AWS once per provider account, across every enabled region (empty static credentials fall back to the default credential chain). Compare each resource of the account against its own account's instances, then find instances that are not tracked in the database. Orphan reports are scoped to the account's organization and instances carrying a `ResourceId` tag are cross-referenced against `resources` so the report includes the matching resource's name and expected state when the row still exists.
+   Deployments-lifecycle apps: every instance of a non-destroyed deployment (live, candidate, cleanup pending) is tracked; an app with nothing live expects no instance.
 3. After the per-account passes, instances that could not be attributed to any organization (e.g. untagged instances in the shared fully-managed account) are reported once, deduplicated across organizations' scans.
 
 ```rust
