@@ -24,6 +24,12 @@ pub(crate) struct AwsAppRow {
 }
 
 #[derive(Clone, Debug, Eq, FromRow, PartialEq)]
+pub(crate) struct AwsDeploymentRow {
+    pub app_id: Uuid,
+    pub instance_id: String,
+}
+
+#[derive(Clone, Debug, Eq, FromRow, PartialEq)]
 pub(crate) struct AwsBuildRow {
     pub id: Uuid,
     pub organization_id: Uuid,
@@ -54,6 +60,7 @@ pub(crate) struct ByocSubscriptionRow {
 pub(crate) struct AwsDatabaseState {
     pub apps: Vec<AwsAppRow>,
     pub builds: Vec<AwsBuildRow>,
+    pub deployments: Vec<AwsDeploymentRow>,
     pub byoc: Vec<ByocSubscriptionRow>,
 }
 
@@ -107,6 +114,18 @@ impl Database {
         .await
         .with_context(Ctx::builds())?;
 
+        let deployments = sqlx::query_as::<_, AwsDeploymentRow>(
+            "SELECT d.app_id, d.instance_id
+             FROM app_deployments d
+             WHERE d.instance_id IS NOT NULL
+               AND (d.status IN ('provisioning', 'running', 'destroying')
+                    OR (d.status = 'failed' AND d.cleaned_up_at IS NULL))
+             ORDER BY d.created_at DESC, d.id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .with_context(Ctx::deployments())?;
+
         let byoc = sqlx::query_as::<_, ByocSubscriptionRow>(
             "SELECT s.organization_id,
                     o.name::text AS organization_name,
@@ -135,7 +154,12 @@ impl Database {
         .await
         .with_context(Ctx::byoc())?;
 
-        Ok(AwsDatabaseState { apps, builds, byoc })
+        Ok(AwsDatabaseState {
+            apps,
+            builds,
+            deployments,
+            byoc,
+        })
     }
 }
 
@@ -150,6 +174,13 @@ pub(crate) enum LoadAwsStateError {
     },
     #[error("failed to load AWS builder declarations [{location}]")]
     Builds {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("failed to load app deployments [{location}]")]
+    Deployments {
         #[location]
         location: Location,
         #[source]

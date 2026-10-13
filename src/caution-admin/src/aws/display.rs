@@ -288,6 +288,7 @@ mod tests {
         let rows = byoc_rows(&AwsDatabaseState {
             apps: Vec::new(),
             builds: Vec::new(),
+            deployments: Vec::new(),
             byoc: vec![ByocSubscriptionRow {
                 organization_id,
                 organization_name: "Acme".to_string(),

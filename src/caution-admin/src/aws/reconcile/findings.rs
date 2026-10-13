@@ -53,6 +53,17 @@ pub(super) fn reconcile_inventory(
     let apps_by_instance = map_claims(&database.apps, |app| {
         (!app.provider_resource_id.is_empty()).then(|| app.provider_resource_id.clone())
     });
+    // Retained deployments (deployments lifecycle) run beside the live instance
+    // that `provider_resource_id` names; their exact IDs are authoritative too.
+    let deployment_apps = database
+        .deployments
+        .iter()
+        .filter_map(|row| {
+            apps_by_id
+                .get(&row.app_id.to_string())
+                .map(|app| (row.instance_id.as_str(), *app))
+        })
+        .collect::<HashMap<_, _>>();
     let builds_by_id = database
         .builds
         .iter()
@@ -116,6 +127,15 @@ pub(super) fn reconcile_inventory(
                 &builds_by_id,
                 &mut result.findings,
             );
+        } else if let Some(app) = deployment_apps.get(instance.instance_id.as_str()).copied() {
+            mark_caution(instance, &mut result);
+            observed_apps.insert(app.id);
+            add_app_host(instance, app, "retained deployment", account, &mut result);
+            // Suspension stops every retained instance; one still running is
+            // the one lifecycle warning that applies to a non-live host.
+            if app.state == "stopped" && instance.state == "running" {
+                result.findings.extend(lifecycle_finding(instance, app));
+            }
         } else {
             reconcile_tag_only(
                 instance,

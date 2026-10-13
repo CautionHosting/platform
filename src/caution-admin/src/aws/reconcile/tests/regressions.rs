@@ -137,6 +137,7 @@ fn duplicate_exact_host_claims_are_reported_as_ambiguous() {
         AwsDatabaseState {
             apps: vec![first],
             builds: vec![build],
+            deployments: Vec::new(),
             byoc: Vec::new(),
         },
         InventorySnapshot {

@@ -13,7 +13,7 @@ use crate::{
         cost::{CostLine, CostSnapshot},
         inventory::{AwsAddress, AwsInstance, AwsVolume, InventoryIssue},
     },
-    db::aws::{AwsAppRow, AwsBuildRow, AwsDatabaseState, ByocSubscriptionRow},
+    db::aws::{AwsAppRow, AwsBuildRow, AwsDatabaseState, AwsDeploymentRow, ByocSubscriptionRow},
 };
 
 mod regressions;
@@ -81,6 +81,7 @@ fn database(apps: Vec<AwsAppRow>) -> AwsDatabaseState {
     AwsDatabaseState {
         apps,
         builds: Vec::new(),
+        deployments: Vec::new(),
         byoc: Vec::new(),
     }
 }
@@ -90,6 +91,69 @@ fn has(snapshot: &AwsSnapshot, kind: FindingKind, severity: DriftSeverity) -> bo
         .findings
         .iter()
         .any(|finding| finding.kind == kind && finding.severity == severity)
+}
+
+#[test]
+fn retained_deployment_hosts_match_exactly_but_unknown_or_unsuspended_ones_warn() {
+    let app = app("bluegreen", "running", false);
+    let live = instance(&app, "running");
+    let mut candidate = instance(&app, "running");
+    candidate.instance_id = "i-candidate".to_string();
+    candidate
+        .tags
+        .insert("DeploymentId".into(), uuid::Uuid::new_v4().to_string());
+    let mut stale = candidate.clone();
+    stale.instance_id = "i-destroyed".to_string();
+    let mut db = database(vec![app.clone()]);
+    db.deployments = vec![AwsDeploymentRow {
+        app_id: app.id,
+        instance_id: "i-candidate".to_string(),
+    }];
+    let with_candidate = snapshot(
+        db.clone(),
+        InventorySnapshot {
+            instances: vec![live.clone(), candidate],
+            ..InventorySnapshot::default()
+        },
+    );
+    assert!(!has(
+        &with_candidate,
+        FindingKind::LinkMismatch,
+        DriftSeverity::Warning
+    ));
+    assert_eq!(with_candidate.app_hosts.len(), 2);
+    // An instance of no retained deployment is still a mismatch.
+    let with_stale = snapshot(
+        db.clone(),
+        InventorySnapshot {
+            instances: vec![live.clone(), stale],
+            ..InventorySnapshot::default()
+        },
+    );
+    assert!(has(
+        &with_stale,
+        FindingKind::LinkMismatch,
+        DriftSeverity::Warning
+    ));
+    // A suspended app whose candidate still runs keeps its state warning.
+    let mut suspended = db;
+    suspended.apps[0].state = "stopped".to_string();
+    let mut stopped_live = live;
+    stopped_live.state = "stopped".to_string();
+    let mut running_candidate = instance(&app, "running");
+    running_candidate.instance_id = "i-candidate".to_string();
+    let suspended = snapshot(
+        suspended,
+        InventorySnapshot {
+            instances: vec![stopped_live, running_candidate],
+            ..InventorySnapshot::default()
+        },
+    );
+    assert!(has(
+        &suspended,
+        FindingKind::StateMismatch,
+        DriftSeverity::Warning
+    ));
 }
 
 #[test]
@@ -469,6 +533,7 @@ fn active_builder_with_a_different_tagged_instance_is_a_link_mismatch() {
         AwsDatabaseState {
             apps: Vec::new(),
             builds: vec![build],
+            deployments: Vec::new(),
             byoc: Vec::new(),
         },
         InventorySnapshot {
@@ -495,6 +560,7 @@ fn byoc_rows_use_current_subscriptions_and_deploy_gate() {
         AwsDatabaseState {
             apps: Vec::new(),
             builds: Vec::new(),
+            deployments: Vec::new(),
             byoc: vec![ByocSubscriptionRow {
                 organization_id,
                 organization_name: "Acme".to_string(),

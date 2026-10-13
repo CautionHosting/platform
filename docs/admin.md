@@ -68,8 +68,10 @@ findings name terminated-app hosts, AWS/Platform state differences, association
 errors, provider-account errors, and orphan builders. Pending and terminating
 Platform apps do not produce host presence/state findings. Exact Platform
 instance IDs are authoritative; tags are secondary evidence and never hide an
-absent expected host. If multiple Platform apps or builds claim the same exact
-instance ID, the tool reports the ambiguity instead of choosing one.
+absent expected host. For deployments-lifecycle apps, the instances of every
+non-destroyed deployment are exact matches as well; only instances of no
+recorded deployment raise a link mismatch. If multiple Platform apps or builds
+claim the same exact instance ID, the tool reports the ambiguity instead of choosing one.
 
 Observed EC2 instances are correlated against all AWS-backed Platform apps
 before account filtering. Absence and provider-account checks are then limited
