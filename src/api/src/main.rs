@@ -4346,6 +4346,8 @@ async fn deploy_logic(
     let git_dir = format!("{}/git-repos/{}.git", state.data_dir, app_id_str);
     let deploy_target = if let Some(deployment_id) = candidate_deployment_id {
         let subject = app_deployments::admission::commit_subject(&git_dir, &commit_sha).await;
+        let bundle_hash =
+            app_deployments::admission::deployed_bundle_hash(&git_dir, &commit_sha).await;
         app_deployments::admission::claim_for_build(
             &state.db,
             resource_id,
@@ -4353,6 +4355,7 @@ async fn deploy_logic(
             &req.branch,
             &commit_sha,
             subject.as_deref(),
+            bundle_hash.as_deref(),
         )
         .await
         .map_err(|source| DeployLogicError::DeploymentClaim {

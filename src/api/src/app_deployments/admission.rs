@@ -286,6 +286,7 @@ pub(crate) async fn claim_for_build(
     branch: &str,
     commit_sha: &str,
     commit_subject: Option<&str>,
+    bundle_hash: Option<&str>,
 ) -> Result<(), ClaimError> {
     use ClaimErrorCtx as Ctx;
 
@@ -310,7 +311,7 @@ pub(crate) async fn claim_for_build(
     let claimed = sqlx::query(
         "UPDATE app_deployments
          SET status = 'building', pushed_ref = $3, commit_sha = $4, commit_subject = $5,
-             owner_process_id = $6, reservation_expires_at = NULL
+             owner_process_id = $6, reservation_expires_at = NULL, bundle_hash = $7
          WHERE id = $1 AND app_id = $2 AND status = 'reserved' AND reservation_expires_at > NOW()",
     )
     .bind(deployment_id)
@@ -319,6 +320,7 @@ pub(crate) async fn claim_for_build(
     .bind(commit_sha)
     .bind(commit_subject)
     .bind(*PROCESS_ID)
+    .bind(bundle_hash)
     .execute(&mut *tx)
     .await
     .with_context(Ctx::database())?;
@@ -358,6 +360,31 @@ pub(crate) async fn commit_subject(git_dir: &str, commit_sha: &str) -> Option<St
         .filter(|c| !c.is_control())
         .collect();
     (!subject.is_empty()).then_some(subject)
+}
+
+/// The documented source of the bundle an app copies into its image
+/// (`COPY .caution/quorum-bundle.json /etc/caution/bundle.json`).
+const DEPLOYED_BUNDLE_PATH: &str = ".caution/quorum-bundle.json";
+
+/// Best effort: the canonical hash of the bundle committed at `commit_sha`.
+/// `None` when the source has none or it does not parse; share release to
+/// this deployment then requires an explicit, operator-chosen bundle.
+pub(crate) async fn deployed_bundle_hash(git_dir: &str, commit_sha: &str) -> Option<String> {
+    let output = tokio::process::Command::new("git")
+        .args([
+            "--git-dir",
+            git_dir,
+            "show",
+            &format!("{commit_sha}:{DEPLOYED_BUNDLE_PATH}"),
+        ])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let data: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    crate::cryptographic_bundles::canonical_hash(&data)
 }
 
 #[cfg(test)]
@@ -402,5 +429,58 @@ mod tests {
         for state in ["stopped", "terminating", "pending"] {
             assert!(!deployments_push_state_allowed(state), "{state}");
         }
+    }
+
+    /// The canonical-hash fixture of `cryptographic_bundles::identity_tests`.
+    const BUNDLE: &str = r#"{"data":{"version":"V1","bundle_id":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],"label":{"a":"1","b":"2"},"keyring":[],"threshold":1,"max":1,"shardfile":"shares","public_key":"key"},"necroproof":[]}"#;
+
+    #[tokio::test]
+    async fn deployed_bundle_hash_reads_the_bundle_at_the_exact_commit() {
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .current_dir(repo.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "test"]);
+        git(&["config", "commit.gpgsign", "false"]);
+        std::fs::write(repo.path().join("README"), "app").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "no bundle"]);
+        let without = git(&["rev-parse", "HEAD"]);
+        // Only the documented image input counts; the CLI's download cache does not.
+        std::fs::create_dir_all(repo.path().join(".caution/secrets")).unwrap();
+        std::fs::write(repo.path().join(".caution/secrets/bundle.json"), BUNDLE).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "cached download only"]);
+        let cached_only = git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.path().join(".caution/quorum-bundle.json"), BUNDLE).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "bundle"]);
+        let with_bundle = git(&["rev-parse", "HEAD"]);
+
+        let git_dir = repo.path().join(".git");
+        let git_dir = git_dir.to_str().unwrap();
+        let expected =
+            crate::cryptographic_bundles::canonical_hash(&serde_json::from_str(BUNDLE).unwrap());
+        assert!(expected.is_some());
+        assert_eq!(deployed_bundle_hash(git_dir, &with_bundle).await, expected);
+        assert_eq!(deployed_bundle_hash(git_dir, &cached_only).await, None);
+        // An earlier commit does not inherit a later bundle.
+        assert_eq!(deployed_bundle_hash(git_dir, &without).await, None);
+        assert_eq!(
+            deployed_bundle_hash(git_dir, "0000000000000000000000000000000000000000").await,
+            None
+        );
     }
 }

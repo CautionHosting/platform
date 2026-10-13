@@ -201,3 +201,11 @@ STEP_NUM=6
 psql_exec "INSERT INTO fully_managed_capacity_reservations (organization_id, resource_id, region, host_vcpus, vpcs, eips)
            VALUES ('$ORG_ID', '$APP_ID', 'us-west-2', 4, 0, 0)" || step_fail "vCPU-only reservation accepted"
 step_pass "Candidate capacity reservations need no VPC or EIP"
+
+# ── Step 7: Deployment bundle hash ───────────────────────────────────
+
+STEP_NUM=7
+[ "$(psql_value "SELECT COUNT(*) FROM information_schema.columns
+                 WHERE table_name = 'app_deployments' AND column_name = 'bundle_hash'")" = "1" ] \
+    || step_fail "app_deployments.bundle_hash exists"
+step_pass "Deployments record their bundle hash"
