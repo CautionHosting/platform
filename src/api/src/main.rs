@@ -19,6 +19,7 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 use uuid::Uuid;
 
+mod app_deployments;
 mod billing;
 mod builder;
 #[cfg(feature = "e2e-testing-unsafe")]
@@ -4954,6 +4955,14 @@ pub(crate) enum MainError {
         source: BoxError,
     },
 
+    #[error("invalid MAX_CANDIDATES_PER_APP [{location}]")]
+    MaxCandidates {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
     #[error("could not bind the API listener [{location}]")]
     Bind {
         #[location]
@@ -5076,6 +5085,8 @@ async fn main() -> Result<(), MainError> {
     let managed_dns = managed_dns::ManagedDns::from_env()
         .await
         .with_context(Ctx::managed_dns_config())?;
+    app_deployments::parse_max_candidates(std::env::var("MAX_CANDIDATES_PER_APP").ok().as_deref())
+        .with_context(Ctx::max_candidates())?;
 
     let state = Arc::new(AppState {
         db: pool,
@@ -5325,6 +5336,14 @@ async fn main() -> Result<(), MainError> {
         .route(
             "/internal/webauthn/reset",
             post(webauthn_reset::reset_webauthn_credentials),
+        )
+        .route(
+            "/internal/apps/{id}/deployments/reserve",
+            post(app_deployments::internal::reserve_handler),
+        )
+        .route(
+            "/internal/deployments/{id}/reservation",
+            delete(app_deployments::internal::release_handler),
         );
 
     #[cfg(feature = "e2e-testing-unsafe")]
