@@ -173,9 +173,9 @@ step_pass "Partial unique index allows one active operation and any number of ru
 
 STEP_NUM=5
 log "Metering allows one running meter per deployment, and still one per Legacy app..."
-D1=$(psql_value "INSERT INTO app_deployments (app_id, organization_id, status) VALUES ('$APP_ID', '$ORG_ID', 'running') RETURNING id" | head -1) \
+D1=$(psql_value "INSERT INTO app_deployments (app_id, organization_id, status) VALUES ('$APP_ID', '$ORG_ID', 'running') RETURNING id" | sed -n 1p) \
     || step_fail "Insert deployment D1"
-D2=$(psql_value "INSERT INTO app_deployments (app_id, organization_id, status) VALUES ('$APP_ID', '$ORG_ID', 'running') RETURNING id" | head -1) \
+D2=$(psql_value "INSERT INTO app_deployments (app_id, organization_id, status) VALUES ('$APP_ID', '$ORG_ID', 'running') RETURNING id" | sed -n 1p) \
     || step_fail "Insert deployment D2"
 psql_exec "INSERT INTO tracked_resources (resource_id, organization_id, application_id, deployment_id, provider, status, started_at, last_billed_at)
            VALUES ('i-bg-1', '$ORG_ID', '$APP_ID', '$D1', 'aws', 'running', NOW(), NOW()),
