@@ -187,13 +187,19 @@ pub async fn create_resource(
     // than persisted resource configuration.
     let configuration = initial_resource_configuration();
 
+    // New fully managed apps follow the deployments lifecycle only when the flag
+    // is on. BYOC (`create_managed_onprem_resource`) always stays legacy.
+    let lifecycle = crate::app_deployments::lifecycle_for_new_app(
+        crate::app_deployments::enabled_for_new_apps(),
+    );
+
     tracing::debug!("Creating resource with slug: {}", resource_slug);
 
     let resource: (Uuid, types::ResourceState, DateTime<Utc>) = sqlx::query_as(
         "INSERT INTO compute_resources
          (organization_id, provider_account_id, resource_type_id, provider_resource_id,
-          resource_name, state, configuration, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+          resource_name, state, configuration, created_by, lifecycle)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          RETURNING id, state, created_at",
     )
     .bind(org_id)
@@ -204,6 +210,7 @@ pub async fn create_resource(
     .bind(types::ResourceState::Initialized)
     .bind(&configuration)
     .bind(auth.user_id)
+    .bind(lifecycle)
     .fetch_one(&state.db)
     .await
     .with_context(Ctx::insert(provider_resource_id.as_str()))?;

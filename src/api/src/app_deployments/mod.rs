@@ -22,6 +22,7 @@ use uuid::Uuid;
 pub(crate) static PROCESS_ID: LazyLock<Uuid> = LazyLock::new(Uuid::new_v4);
 
 pub(crate) const LIFECYCLE_DEPLOYMENTS: &str = "deployments";
+pub(crate) const LIFECYCLE_LEGACY: &str = "legacy";
 const DEFAULT_MAX_CANDIDATES: i64 = 3;
 
 /// Failure modes for [`parse_max_candidates`] (source-less leaf error).
@@ -50,12 +51,17 @@ pub(crate) fn max_candidates_per_app() -> i64 {
         .unwrap_or(DEFAULT_MAX_CANDIDATES)
 }
 
-#[expect(
-    dead_code,
-    reason = "used by POST /resources once the feature flag lands"
-)]
 pub(crate) fn enabled_for_new_apps() -> bool {
     std::env::var("APP_DEPLOYMENTS_ENABLED").is_ok_and(|value| value.trim() == "true")
+}
+
+/// The lifecycle of a new fully managed app: `deployments` only when the flag is on.
+pub(crate) fn lifecycle_for_new_app(enabled: bool) -> &'static str {
+    if enabled {
+        LIFECYCLE_DEPLOYMENTS
+    } else {
+        LIFECYCLE_LEGACY
+    }
 }
 
 /// Failure modes for [`lock_app_operations`].
@@ -108,6 +114,12 @@ pub(crate) async fn app_lifecycle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_apps_are_legacy_unless_the_flag_is_on() {
+        assert_eq!(lifecycle_for_new_app(false), "legacy");
+        assert_eq!(lifecycle_for_new_app(true), "deployments");
+    }
 
     #[test]
     fn max_candidates_defaults_to_three() {

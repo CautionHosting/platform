@@ -69,6 +69,9 @@ For Key Services setup, quorum creation, and secret recovery, see the
 The experimental development-server admin explorer is documented in
 [docs/admin.md](docs/admin.md).
 
+Blue-green app deployments (feature flag, lifecycle, recovery, rollout) are
+documented in [docs/app-deployments.md](docs/app-deployments.md).
+
 #### Frontend development
 
 For the normal frontend development server:

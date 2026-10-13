@@ -3,7 +3,7 @@
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: admin build-admin build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-host install-cli install-cli-stagex install-cli-host release-cli sign-cli verify-cli reproduce-cli test test-unit test-live-caddy-nitro test-cli-install test-e2e test-e2e-admin test-e2e-ssh-units test-e2e-pgp-units test-e2e-pgp-audit test-e2e-stuck-pending test-e2e-app-deployments-schema test-e2e-platform-ports test-e2e-legal test-e2e-webauthn test-e2e-webauthn-reset test-e2e-webauthn-roundtrip test-e2e-webauthn-browser test-e2e-org-user-quorum test-e2e-byoc test-e2e-billing-gates test-e2e-paddle-subscriptions test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e build-drift-detector run-drift-detector
+.PHONY: admin build-admin build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-host install-cli install-cli-stagex install-cli-host release-cli sign-cli verify-cli reproduce-cli test test-unit test-live-caddy-nitro test-cli-install test-e2e test-e2e-admin test-e2e-ssh-units test-e2e-pgp-units test-e2e-pgp-audit test-e2e-stuck-pending test-e2e-app-deployments-schema test-e2e-platform-ports test-e2e-legal test-e2e-webauthn test-e2e-webauthn-reset test-e2e-webauthn-roundtrip test-e2e-webauthn-browser test-e2e-org-user-quorum test-e2e-byoc test-e2e-billing-gates test-e2e-paddle-subscriptions test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e build-drift-detector run-drift-detector test-e2e-app-deployments
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -729,6 +729,7 @@ run-api-test: network
 		-e PUBLIC_CERTIFICATE_SERVICE_URL \
 		-e BYOC_PADDLE_SUBSCRIPTIONS_ENABLED \
 		-e GIT_HOSTNAME=localhost \
+		$(API_EXTRA_ENV) \
 		-v $(PWD)/terraform:/app/terraform:ro \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
@@ -913,6 +914,21 @@ test-e2e-app-deployments-schema:
 	@bash tests/e2e/test_app_deployments_schema.sh; \
 	status=$$?; \
 	$(MAKE) down-test; \
+	exit $$status
+
+# Lifecycle e2e: AWS-backed (real enclave builds). MAX_CANDIDATES_PER_APP=1 lets a
+# single candidate hit the limit. Exit 86 means the script could not destroy the app:
+# keep the stack and its database, which record what leaked.
+test-e2e-app-deployments:
+	@$(MAKE) build-cli
+	@$(MAKE) up-test API_EXTRA_ENV="-e APP_DEPLOYMENTS_ENABLED=true -e MAX_CANDIDATES_PER_APP=1"
+	@CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_app_deployments.sh; \
+	status=$$?; \
+	if [ $$status -eq 86 ]; then \
+		echo "LEAKED infrastructure: test stack and database kept. Destroy the app listed above, then run: make down-test"; \
+	else \
+		$(MAKE) down-test; \
+	fi; \
 	exit $$status
 
 test-e2e-qr-login:
