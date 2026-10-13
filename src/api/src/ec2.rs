@@ -50,6 +50,32 @@ pub struct Region {
     pub opt_in_status: Option<String>,
 }
 
+/// An app's stable Elastic IP and the instance currently holding it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "first caller lands with deployment activation")
+)]
+pub struct AppAddress {
+    pub allocation_id: String,
+    pub public_ip: String,
+    /// `None` when the address is unassociated.
+    pub instance_id: Option<String>,
+}
+
+/// Live EC2 runtime of one instance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "first caller lands with live endpoint resolution")
+)]
+pub struct InstanceRuntime {
+    /// EC2 instance state name (`pending`, `running`, `stopped`, ...).
+    pub state: String,
+    /// `None` when the instance has no public IPv4 (for example while stopped).
+    pub public_ip: Option<String>,
+}
+
 /// Failure modes for [`Ec2Client::count_vpcs`].
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum CountVpcsError {
@@ -98,7 +124,8 @@ pub(crate) enum DescribeRegionsError {
     },
 }
 
-/// Failure modes for [`Ec2Client::instance_type_offered`].
+/// Failure modes for [`Ec2Client::instance_type_offered`] and
+/// [`Ec2Client::instance_type_offered_in_zone`].
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum InstanceTypeOfferedError {
     #[error("failed to check instance type offering [{location}]")]
@@ -394,6 +421,128 @@ pub(crate) enum ParseAppAddressError {
     NotExactlyOne { location: Location },
 }
 
+/// Failure modes for [`Ec2Client::describe_app_address`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum DescribeAppAddressError {
+    #[error("could not describe Elastic IP addresses [{location}]")]
+    DescribeAddresses {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not parse app Elastic IP address [{location}]")]
+    ParseAddress {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Failure modes for [`Ec2Client::move_app_address`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum MoveAppAddressError {
+    #[error("could not read the app Elastic IP address [{location}]")]
+    DescribeAddress {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    /// The address is held by someone other than the expected holder. Nothing
+    /// was moved.
+    #[error(
+        "app Elastic IP is held by {}, expected {} [{location}]",
+        holder_label(.actual),
+        holder_label(.expected)
+    )]
+    HolderMismatch {
+        /// Instance the caller expected to hold the address (`None` =
+        /// unassociated).
+        expected: Option<String>,
+        /// Instance that holds the address now (`None` = unassociated).
+        actual: Option<String>,
+        location: Location,
+    },
+
+    #[error("could not associate Elastic IP address [{location}]")]
+    AssociateAddress {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+fn holder_label(holder: &Option<String>) -> &str {
+    holder.as_deref().unwrap_or("no instance")
+}
+
+/// Failure modes for [`Ec2Client::describe_instance_runtime`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum DescribeInstanceRuntimeError {
+    #[error("EC2 DescribeInstances request failed [{location}]")]
+    Request {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// What [`Ec2Client::move_app_address`] has to do to reach the target.
+#[derive(Debug, PartialEq, Eq)]
+enum AppAddressMove {
+    /// The target already holds the address (an idempotent retry).
+    AlreadyAtTarget,
+    Associate {
+        /// `false` makes AWS refuse if anyone holds the address by then.
+        allow_reassociation: bool,
+    },
+}
+
+/// Decide how to move `address` to `target`, refusing an unexpected holder.
+#[track_caller]
+fn plan_app_address_move(
+    address: &AppAddress,
+    target: &str,
+    expected_holder: Option<&str>,
+) -> Result<AppAddressMove, MoveAppAddressError> {
+    if address.instance_id.as_deref() == Some(target) {
+        return Ok(AppAddressMove::AlreadyAtTarget);
+    }
+    if address.instance_id.as_deref() != expected_holder {
+        return Err(MoveAppAddressError::HolderMismatch {
+            expected: expected_holder.map(str::to_string),
+            actual: address.instance_id.clone(),
+            location: std::panic::Location::caller(),
+        });
+    }
+    Ok(AppAddressMove::Associate {
+        allow_reassociation: expected_holder.is_some(),
+    })
+}
+
+fn associate_address_params(
+    allocation_id: &str,
+    instance_id: &str,
+    allow_reassociation: bool,
+) -> Vec<(String, String)> {
+    vec![
+        ("Action".to_string(), "AssociateAddress".to_string()),
+        ("Version".to_string(), "2016-11-15".to_string()),
+        ("AllocationId".to_string(), allocation_id.to_string()),
+        ("InstanceId".to_string(), instance_id.to_string()),
+        (
+            "AllowReassociation".to_string(),
+            allow_reassociation.to_string(),
+        ),
+    ]
+}
+
 impl Ec2Client {
     pub fn new(credentials: &AwsCredentials) -> Self {
         Self {
@@ -507,6 +656,105 @@ impl Ec2Client {
         Ok(public_ip)
     }
 
+    /// The app's Elastic IP (tagged `ResourceId`) and its current holder.
+    #[tracing::instrument(skip_all, err)]
+    #[expect(dead_code, reason = "first caller lands with deployment activation")]
+    pub async fn describe_app_address(
+        &self,
+        resource_id: &str,
+    ) -> Result<AppAddress, DescribeAppAddressError> {
+        use DescribeAppAddressErrorCtx as Ctx;
+
+        let params = vec![
+            ("Action".to_string(), "DescribeAddresses".to_string()),
+            ("Version".to_string(), "2016-11-15".to_string()),
+            ("Filter.1.Name".to_string(), "tag:ResourceId".to_string()),
+            ("Filter.1.Value.1".to_string(), resource_id.to_string()),
+        ];
+        let body = self
+            .signed_request(&params)
+            .await
+            .with_context(Ctx::describe_addresses())?;
+        let (allocation_id, public_ip, instance_id) =
+            parse_app_address(&body).with_context(Ctx::parse_address())?;
+        Ok(AppAddress {
+            allocation_id,
+            public_ip,
+            instance_id,
+        })
+    }
+
+    /// Moves the app EIP to `target` only if it is currently held by
+    /// `expected_holder` (`None` = unassociated). Returns the EIP.
+    ///
+    /// Already being at `target` succeeds, so retries are safe. Any other
+    /// holder fails with [`MoveAppAddressError::HolderMismatch`]. Without an
+    /// expected holder AWS itself refuses if the address got associated since
+    /// it was read.
+    #[tracing::instrument(skip_all, err)]
+    #[expect(dead_code, reason = "first caller lands with deployment activation")]
+    pub async fn move_app_address(
+        &self,
+        resource_id: &str,
+        target: &str,
+        expected_holder: Option<&str>,
+    ) -> Result<String, MoveAppAddressError> {
+        use MoveAppAddressErrorCtx as Ctx;
+
+        let address = self
+            .describe_app_address(resource_id)
+            .await
+            .with_context(Ctx::describe_address())?;
+        match plan_app_address_move(&address, target, expected_holder)? {
+            AppAddressMove::AlreadyAtTarget => {}
+            AppAddressMove::Associate {
+                allow_reassociation,
+            } => {
+                let params =
+                    associate_address_params(&address.allocation_id, target, allow_reassociation);
+                self.signed_request(&params)
+                    .await
+                    .with_context(Ctx::associate_address())?;
+            }
+        }
+        Ok(address.public_ip)
+    }
+
+    /// The live runtime of an instance, or `None` when EC2 does not know it.
+    #[tracing::instrument(skip_all, err)]
+    #[expect(dead_code, reason = "first caller lands with live endpoint resolution")]
+    pub async fn describe_instance_runtime(
+        &self,
+        instance_id: &str,
+    ) -> Result<Option<InstanceRuntime>, DescribeInstanceRuntimeError> {
+        use DescribeInstanceRuntimeErrorCtx as Ctx;
+
+        let params = vec![
+            ("Action".to_string(), "DescribeInstances".to_string()),
+            ("Version".to_string(), "2016-11-15".to_string()),
+            ("InstanceId.1".to_string(), instance_id.to_string()),
+        ];
+        // The free request keeps the AWS error code that the boxed
+        // `Ec2Client::signed_request` error hides.
+        match signed_request(
+            &self.http,
+            &self.access_key_id,
+            &self.secret_access_key,
+            &self.region,
+            "ec2",
+            &params,
+        )
+        .await
+        {
+            Ok(body) => Ok(parse_instance_runtime(&body)),
+            Err(SignedRequestError::NonSuccess {
+                aws_code: Some(code),
+                ..
+            }) if code == "InvalidInstanceID.NotFound" => Ok(None),
+            Err(error) => Err(error).with_context(Ctx::request()),
+        }
+    }
+
     #[tracing::instrument(skip_all, err)]
     pub async fn active_instance_types(&self) -> Result<Vec<String>, ActiveInstanceTypesError> {
         use ActiveInstanceTypesErrorCtx as Ctx;
@@ -561,6 +809,36 @@ impl Ec2Client {
             ("LocationType".to_string(), "region".to_string()),
             ("Filter.1.Name".to_string(), "instance-type".to_string()),
             ("Filter.1.Value.1".to_string(), instance_type.to_string()),
+        ];
+
+        let body = self
+            .signed_request(&params)
+            .await
+            .with_context(Ctx::request())?;
+        Ok(!parse_tag_values(&body, "instanceType").is_empty())
+    }
+
+    /// Whether `instance_type` is offered in the availability zone `zone`.
+    #[tracing::instrument(skip_all, err)]
+    #[expect(dead_code, reason = "first caller lands with candidate placement")]
+    pub async fn instance_type_offered_in_zone(
+        &self,
+        instance_type: &str,
+        zone: &str,
+    ) -> Result<bool, InstanceTypeOfferedError> {
+        use InstanceTypeOfferedErrorCtx as Ctx;
+
+        let params = vec![
+            (
+                "Action".to_string(),
+                "DescribeInstanceTypeOfferings".to_string(),
+            ),
+            ("Version".to_string(), "2016-11-15".to_string()),
+            ("LocationType".to_string(), "availability-zone".to_string()),
+            ("Filter.1.Name".to_string(), "instance-type".to_string()),
+            ("Filter.1.Value.1".to_string(), instance_type.to_string()),
+            ("Filter.2.Name".to_string(), "location".to_string()),
+            ("Filter.2.Value.1".to_string(), zone.to_string()),
         ];
 
         let body = self
@@ -989,6 +1267,8 @@ pub(crate) enum SignedRequestError {
     NonSuccess {
         service: String,
         status: u16,
+        /// The AWS error `Code` from the response body, when it has one.
+        aws_code: Option<String>,
         location: Location,
     },
 
@@ -1073,14 +1353,21 @@ async fn signed_request(
         .with_context(Ctx::read_response(service))?;
 
     if !status.is_success() {
-        return Err(SignedRequestError::NonSuccess {
-            service: service.to_string(),
-            status: status.as_u16(),
-            location: std::panic::Location::caller(),
-        });
+        return Err(signed_request_non_success(service, status.as_u16(), &text));
     }
 
     Ok(text)
+}
+
+/// A non-success AWS response; keeps the error `Code` from the XML body.
+#[track_caller]
+fn signed_request_non_success(service: &str, status: u16, body: &str) -> SignedRequestError {
+    SignedRequestError::NonSuccess {
+        service: service.to_string(),
+        status,
+        aws_code: parse_first_tag_value(body, "Code"),
+        location: std::panic::Location::caller(),
+    }
 }
 
 /// Failure modes for the free [`signed_json_request`] helper.
@@ -1336,6 +1623,21 @@ fn parse_app_address(xml: &str) -> Result<(String, String, Option<String>), Pars
     ))
 }
 
+/// Runtime of the first instance in a DescribeInstances response; `None` when
+/// it lists no instance.
+fn parse_instance_runtime(xml: &str) -> Option<InstanceRuntime> {
+    let state_block = xml
+        .split_once("<instanceState>")?
+        .1
+        .split_once("</instanceState>")?
+        .0;
+    let state = parse_first_tag_value(state_block, "name")?;
+    Some(InstanceRuntime {
+        state,
+        public_ip: parse_first_tag_value(xml, "ipAddress"),
+    })
+}
+
 fn parse_first_tag_value(xml: &str, tag_name: &str) -> Option<String> {
     parse_tag_values(xml, tag_name).into_iter().next()
 }
@@ -1529,6 +1831,113 @@ mod tests {
         assert_eq!(address.0, "eipalloc-123");
         assert_eq!(address.1, "198.51.100.42");
         assert_eq!(address.2.as_deref(), Some("i-123"));
+    }
+
+    #[test]
+    fn instance_runtime_parses_state_and_public_ip() {
+        let xml = "<DescribeInstancesResponse><reservationSet><item><instancesSet><item>\
+            <instanceId>i-0abc</instanceId><instanceState><code>16</code><name>running</name></instanceState>\
+            <ipAddress>203.0.113.9</ipAddress><tagSet><item><key>Name</key><value>x</value></item></tagSet>\
+            </item></instancesSet></item></reservationSet></DescribeInstancesResponse>";
+        let runtime = parse_instance_runtime(xml).unwrap();
+        assert_eq!(runtime.state, "running");
+        assert_eq!(runtime.public_ip.as_deref(), Some("203.0.113.9"));
+    }
+
+    #[test]
+    fn instance_runtime_without_public_ip_or_instances() {
+        let stopped = "<instancesSet><item><instanceState><code>80</code><name>stopped</name></instanceState></item></instancesSet>";
+        assert_eq!(parse_instance_runtime(stopped).unwrap().public_ip, None);
+        assert!(parse_instance_runtime("<reservationSet/>").is_none());
+    }
+
+    #[test]
+    fn non_success_carries_the_aws_error_code() {
+        let body = "<Response><Errors><Error><Code>InvalidInstanceID.NotFound</Code>\
+            <Message>The instance ID 'i-0abc' does not exist</Message></Error></Errors>\
+            <RequestID>r-1</RequestID></Response>";
+        let error = signed_request_non_success("ec2", 400, body);
+        assert!(matches!(
+            &error,
+            SignedRequestError::NonSuccess { aws_code: Some(code), status: 400, .. }
+                if code == "InvalidInstanceID.NotFound"
+        ));
+        // The code is carried as data; the message stays as before.
+        assert!(error.to_string().starts_with("ec2 API returned 400 ["));
+
+        let opaque = signed_request_non_success("ec2", 503, "<html>unavailable</html>");
+        assert!(matches!(
+            opaque,
+            SignedRequestError::NonSuccess { aws_code: None, .. }
+        ));
+    }
+
+    fn app_address(instance_id: Option<&str>) -> AppAddress {
+        AppAddress {
+            allocation_id: "eipalloc-1".to_string(),
+            public_ip: "198.51.100.42".to_string(),
+            instance_id: instance_id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn move_is_idempotent_when_target_already_holds_the_address() {
+        let address = app_address(Some("i-new"));
+        // Idempotent even when the caller's expectation is stale.
+        for expected in [None, Some("i-old"), Some("i-new")] {
+            assert_eq!(
+                plan_app_address_move(&address, "i-new", expected).unwrap(),
+                AppAddressMove::AlreadyAtTarget
+            );
+        }
+    }
+
+    #[test]
+    fn move_refuses_an_unexpected_holder() {
+        let held = app_address(Some("i-other"));
+        let unassociated = app_address(None);
+        for (address, expected) in [
+            (&held, Some("i-old")),
+            (&held, None),
+            (&unassociated, Some("i-old")),
+        ] {
+            let error = plan_app_address_move(address, "i-new", expected).unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    MoveAppAddressError::HolderMismatch { expected: e, actual: a, .. }
+                        if e.as_deref() == expected && *a == address.instance_id
+                ),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn move_only_allows_reassociation_from_an_expected_holder() {
+        assert_eq!(
+            plan_app_address_move(&app_address(None), "i-new", None).unwrap(),
+            AppAddressMove::Associate {
+                allow_reassociation: false
+            }
+        );
+        assert_eq!(
+            plan_app_address_move(&app_address(Some("i-old")), "i-new", Some("i-old")).unwrap(),
+            AppAddressMove::Associate {
+                allow_reassociation: true
+            }
+        );
+    }
+
+    #[test]
+    fn associate_address_params_mirror_the_app_address_association() {
+        let params = associate_address_params("eipalloc-1", "i-new", false);
+        assert_eq!(param_value(&params, "Action"), Some("AssociateAddress"));
+        assert_eq!(param_value(&params, "AllocationId"), Some("eipalloc-1"));
+        assert_eq!(param_value(&params, "InstanceId"), Some("i-new"));
+        assert_eq!(param_value(&params, "AllowReassociation"), Some("false"));
+        let params = associate_address_params("eipalloc-1", "i-new", true);
+        assert_eq!(param_value(&params, "AllowReassociation"), Some("true"));
     }
 
     #[test]
