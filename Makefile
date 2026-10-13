@@ -3,7 +3,7 @@
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: admin build-admin build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-host install-cli install-cli-stagex install-cli-host release-cli sign-cli verify-cli reproduce-cli test test-unit test-live-caddy-nitro test-cli-install test-e2e test-e2e-admin test-e2e-ssh-units test-e2e-pgp-units test-e2e-pgp-audit test-e2e-stuck-pending test-e2e-platform-ports test-e2e-legal test-e2e-webauthn test-e2e-webauthn-reset test-e2e-webauthn-roundtrip test-e2e-webauthn-browser test-e2e-org-user-quorum test-e2e-byoc test-e2e-billing-gates test-e2e-paddle-subscriptions test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e build-drift-detector run-drift-detector
+.PHONY: admin build-admin build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-host install-cli install-cli-stagex install-cli-host release-cli sign-cli verify-cli reproduce-cli test test-unit test-live-caddy-nitro test-cli-install test-e2e test-e2e-admin test-e2e-ssh-units test-e2e-pgp-units test-e2e-pgp-audit test-e2e-stuck-pending test-e2e-app-deployments-schema test-e2e-platform-ports test-e2e-legal test-e2e-webauthn test-e2e-webauthn-reset test-e2e-webauthn-roundtrip test-e2e-webauthn-browser test-e2e-org-user-quorum test-e2e-byoc test-e2e-billing-gates test-e2e-paddle-subscriptions test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e build-drift-detector run-drift-detector
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -904,6 +904,13 @@ test-e2e-stuck-pending:
 	@$(MAKE) up-test
 	@echo "Running stuck-pending e2e tests..."
 	@bash tests/e2e/test_stuck_pending.sh; \
+	status=$$?; \
+	$(MAKE) down-test; \
+	exit $$status
+
+test-e2e-app-deployments-schema:
+	@$(MAKE) up-test
+	@bash tests/e2e/test_app_deployments_schema.sh; \
 	status=$$?; \
 	$(MAKE) down-test; \
 	exit $$status

@@ -7,6 +7,7 @@ ALTER TABLE tracked_resources
 CREATE INDEX IF NOT EXISTS idx_tracked_resources_application_id
   ON tracked_resources(application_id);
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_tracked_resources_active_application
-  ON tracked_resources(application_id)
-  WHERE application_id IS NOT NULL AND status = 'running';
+-- Replaced by 056_app_deployments.sql (one running meter per Legacy app or per deployment).
+--CREATE UNIQUE INDEX IF NOT EXISTS idx_tracked_resources_active_application
+--  ON tracked_resources(application_id)
+--  WHERE application_id IS NOT NULL AND status = 'running';
