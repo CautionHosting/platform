@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-FileCopyrightText: 2026 Caution SEZC
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Caution-Commercial
-# App deployments concurrency tests against an isolated, fully migrated
-# PostgreSQL database (anonymous container on a random port; no test stack).
+# App deployments concurrency and metering reconcile tests against an isolated,
+# fully migrated PostgreSQL database (anonymous container on a random port; no test stack).
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 WORK=$(mktemp -d)
@@ -29,8 +29,11 @@ docker exec -e MIGRATION_DB_HOST=127.0.0.1 -e MIGRATION_DB_NAME=caution_app_depl
     || { cat "$WORK/migrations.log"; exit 1; }
 PORT=$(docker port "$CONTAINER" 5432/tcp | sed 's/.*://')
 cd "$ROOT"
+export APP_DEPLOYMENTS_TEST_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$PORT/caution_app_deployments_test"
 # A syntactically valid framework commit lets /deploy reach its later gates.
-APP_DEPLOYMENTS_TEST_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$PORT/caution_app_deployments_test" \
-    PLATFORM_GIT_SHA=0000000000000000000000000000000000000000 \
+PLATFORM_GIT_SHA=0000000000000000000000000000000000000000 \
     cargo test -p api app_deployments::lifecycle::db_tests --locked \
+    -- --ignored --test-threads=1 --nocapture
+# The metering service's reconcile SQL runs against the same schema.
+cargo test -p metering handlers::collection::tests --locked \
     -- --ignored --test-threads=1 --nocapture

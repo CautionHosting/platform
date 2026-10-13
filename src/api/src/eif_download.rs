@@ -1,6 +1,6 @@
 use axum::{
     body::Body,
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -118,6 +118,9 @@ pub(crate) enum DownloadEifError {
     #[error("no completed builds found for this resource [{location}]")]
     BuildNotFound { location: Location },
 
+    #[error("this app does not use deployments [{location}]")]
+    DeploymentsNotUsed { location: Location },
+
     #[error("credential error [{location}]")]
     CredentialError {
         #[location]
@@ -159,6 +162,10 @@ impl IntoResponse for DownloadEifError {
             DownloadEifError::BuildNotFound { .. } => (
                 StatusCode::NOT_FOUND,
                 "no completed builds found for this resource",
+            ),
+            DownloadEifError::DeploymentsNotUsed { .. } => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "This app does not use deployments.",
             ),
             DownloadEifError::CredentialError { .. } => {
                 (StatusCode::BAD_REQUEST, "credential error")
@@ -325,12 +332,137 @@ impl EifDownloadCache {
 }
 
 #[derive(serde::Deserialize)]
-struct BuildDownloadRow {
-    eif_s3_key: String,
-    eif_sha256: String,
+pub(crate) struct BuildDownloadRow {
+    pub(crate) eif_s3_key: String,
+    pub(crate) eif_sha256: String,
     #[allow(dead_code)]
     eif_size_bytes: i64,
-    resource_name: Option<String>,
+    pub(crate) resource_name: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct DownloadEifParams {
+    /// A deployment of the app; the live one when omitted.
+    deployment: Option<Uuid>,
+}
+
+/// Which EIF to serve.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum EifSource {
+    /// Legacy app: the latest completed build.
+    LatestBuild,
+    /// Deployments app: the build stored under this S3 key.
+    Key(String),
+}
+
+/// `(lifecycle, deployment id, deployment EIF key, app configuration EIF key)`
+/// of the requested deployment, or of the live one.
+type EifSourceRow = (String, Option<Uuid>, Option<String>, Option<String>);
+
+/// A requested deployment never falls back to the live EIF.
+fn decide_eif_source(
+    row: Option<EifSourceRow>,
+    requested: Option<Uuid>,
+) -> Result<EifSource, DownloadEifError> {
+    let not_found = || DownloadEifError::BuildNotFound {
+        location: std::panic::Location::caller(),
+    };
+    let (lifecycle, deployment_id, deployment_key, configuration_key) =
+        row.ok_or_else(not_found)?;
+    if lifecycle != crate::app_deployments::LIFECYCLE_DEPLOYMENTS {
+        return match requested {
+            Some(_) => Err(DownloadEifError::DeploymentsNotUsed {
+                location: std::panic::Location::caller(),
+            }),
+            None => Ok(EifSource::LatestBuild),
+        };
+    }
+    // Unknown or another app's deployment, or nothing live.
+    deployment_id.ok_or_else(not_found)?;
+    let key = match requested {
+        Some(_) => deployment_key,
+        None => deployment_key.or(configuration_key),
+    };
+    key.map(EifSource::Key).ok_or_else(not_found)
+}
+
+pub(crate) async fn resolve_eif_source(
+    db: &sqlx::PgPool,
+    org_id: Uuid,
+    resource_id: Uuid,
+    requested: Option<Uuid>,
+) -> Result<EifSource, DownloadEifError> {
+    let row: Option<EifSourceRow> = sqlx::query_as(
+        r"SELECT cr.lifecycle, d.id, d.eif_s3_key, cr.configuration->>'eif_s3_key'
+          FROM compute_resources cr
+          LEFT JOIN app_deployments d
+            ON d.app_id = cr.id AND d.id = COALESCE($3, cr.live_deployment_id)
+          WHERE cr.id = $1 AND cr.organization_id = $2",
+    )
+    .bind(resource_id)
+    .bind(org_id)
+    .bind(requested)
+    .fetch_optional(db)
+    .await
+    .with_context(DownloadEifErrorCtx::database())?;
+    decide_eif_source(row, requested)
+}
+
+type BuildTuple = (String, String, i64, Option<String>);
+
+fn build_row(
+    (eif_s3_key, eif_sha256, eif_size_bytes, resource_name): BuildTuple,
+) -> BuildDownloadRow {
+    BuildDownloadRow {
+        eif_s3_key,
+        eif_sha256,
+        eif_size_bytes,
+        resource_name,
+    }
+}
+
+/// Legacy: the app's latest completed build.
+async fn latest_build(
+    db: &sqlx::PgPool,
+    org_id: Uuid,
+    resource_id: Uuid,
+) -> Result<Option<BuildDownloadRow>, sqlx::Error> {
+    sqlx::query_as::<_, BuildTuple>(
+        r"SELECT eb.eif_s3_key, eb.eif_sha256, eb.eif_size_bytes, cr.resource_name
+          FROM eif_builds eb
+          JOIN compute_resources cr ON cr.id = eb.app_id
+          WHERE eb.app_id = $1 AND eb.organization_id = $2 AND eb.status = 'completed'
+          ORDER BY eb.completed_at DESC NULLS LAST
+          LIMIT 1",
+    )
+    .bind(resource_id)
+    .bind(org_id)
+    .fetch_optional(db)
+    .await
+    .map(|row| row.map(build_row))
+}
+
+/// The completed build stored under `eif_s3_key`, named after the app.
+pub(crate) async fn build_for_key(
+    db: &sqlx::PgPool,
+    org_id: Uuid,
+    resource_id: Uuid,
+    eif_s3_key: &str,
+) -> Result<Option<BuildDownloadRow>, sqlx::Error> {
+    sqlx::query_as::<_, BuildTuple>(
+        r"SELECT eb.eif_s3_key, eb.eif_sha256, eb.eif_size_bytes, cr.resource_name
+          FROM eif_builds eb
+          JOIN compute_resources cr ON cr.id = $1 AND cr.organization_id = eb.organization_id
+          WHERE eb.eif_s3_key = $3 AND eb.organization_id = $2 AND eb.status = 'completed'
+          ORDER BY eb.completed_at DESC NULLS LAST
+          LIMIT 1",
+    )
+    .bind(resource_id)
+    .bind(org_id)
+    .bind(eif_s3_key)
+    .fetch_optional(db)
+    .await
+    .map(|row| row.map(build_row))
 }
 
 #[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
@@ -338,6 +470,7 @@ pub(crate) async fn download_eif(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(resource_id): Path<Uuid>,
+    Query(params): Query<DownloadEifParams>,
     req: axum::extract::Request,
 ) -> Result<Response<Body>, DownloadEifError> {
     use DownloadEifErrorCtx as Ctx;
@@ -356,26 +489,14 @@ pub(crate) async fn download_eif(
         });
     }
 
-    let build: Option<BuildDownloadRow> =
-        sqlx::query_as::<_, (String, String, i64, Option<String>)>(
-            r"SELECT eb.eif_s3_key, eb.eif_sha256, eb.eif_size_bytes, cr.resource_name
-              FROM eif_builds eb
-              JOIN compute_resources cr ON cr.id = eb.app_id
-              WHERE eb.app_id = $1 AND eb.organization_id = $2 AND eb.status = 'completed'
-              ORDER BY eb.completed_at DESC NULLS LAST
-              LIMIT 1",
-        )
-        .bind(resource_id)
-        .bind(org_id)
-        .fetch_optional(&state.db)
-        .await
-        .with_context(Ctx::database())?
-        .map(|(s3_key, sha256, size, name)| BuildDownloadRow {
-            eif_s3_key: s3_key,
-            eif_sha256: sha256,
-            eif_size_bytes: size,
-            resource_name: name,
-        });
+    let build =
+        match resolve_eif_source(&state.db, org_id, resource_id, params.deployment).await? {
+            EifSource::Key(eif_s3_key) => {
+                build_for_key(&state.db, org_id, resource_id, &eif_s3_key).await
+            }
+            EifSource::LatestBuild => latest_build(&state.db, org_id, resource_id).await,
+        }
+        .with_context(Ctx::database())?;
 
     let build = build.ok_or_else(|| DownloadEifError::BuildNotFound {
         location: std::panic::Location::caller(),
@@ -458,4 +579,89 @@ pub(crate) async fn download_eif(
     );
 
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn deployments_row(
+        deployment: Option<Uuid>,
+        deployment_key: Option<&str>,
+        configuration_key: Option<&str>,
+    ) -> Option<EifSourceRow> {
+        Some((
+            "deployments".to_string(),
+            deployment,
+            deployment_key.map(str::to_string),
+            configuration_key.map(str::to_string),
+        ))
+    }
+
+    fn key(value: &str) -> EifSource {
+        EifSource::Key(value.to_string())
+    }
+
+    #[test]
+    fn legacy_app_keeps_the_latest_build_and_rejects_a_deployment() {
+        let legacy = || Some(("legacy".to_string(), None, None, None));
+        assert_eq!(
+            decide_eif_source(legacy(), None).unwrap(),
+            EifSource::LatestBuild
+        );
+        assert!(matches!(
+            decide_eif_source(legacy(), Some(Uuid::new_v4())),
+            Err(DownloadEifError::DeploymentsNotUsed { .. })
+        ));
+    }
+
+    #[test]
+    fn requested_deployment_never_falls_back_to_the_live_eif() {
+        let id = Uuid::new_v4();
+        assert_eq!(
+            decide_eif_source(deployments_row(Some(id), Some("k"), Some("live")), Some(id))
+                .unwrap(),
+            key("k")
+        );
+        // Unknown or another app's deployment: the join finds no row.
+        assert!(matches!(
+            decide_eif_source(deployments_row(None, None, Some("live")), Some(id)),
+            Err(DownloadEifError::BuildNotFound { .. })
+        ));
+        // No EIF recorded: not the app configuration's either.
+        assert!(matches!(
+            decide_eif_source(deployments_row(Some(id), None, Some("live")), Some(id)),
+            Err(DownloadEifError::BuildNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn default_download_is_the_live_deployment() {
+        let live = Uuid::new_v4();
+        assert_eq!(
+            decide_eif_source(deployments_row(Some(live), Some("k"), Some("c")), None).unwrap(),
+            key("k")
+        );
+        assert_eq!(
+            decide_eif_source(deployments_row(Some(live), None, Some("c")), None).unwrap(),
+            key("c")
+        );
+        assert!(matches!(
+            decide_eif_source(deployments_row(Some(live), None, None), None),
+            Err(DownloadEifError::BuildNotFound { .. })
+        ));
+        // Nothing live: the configuration of a not-yet-live app is not served.
+        assert!(matches!(
+            decide_eif_source(deployments_row(None, None, Some("c")), None),
+            Err(DownloadEifError::BuildNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn missing_app_is_not_found() {
+        assert!(matches!(
+            decide_eif_source(None, None),
+            Err(DownloadEifError::BuildNotFound { .. })
+        ));
+    }
 }

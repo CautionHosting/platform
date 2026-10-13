@@ -155,14 +155,8 @@ async fn run_collection_cycle(state: &AppState) -> Result<usize, CollectionCycle
     result
 }
 
-#[tracing::instrument(skip_all, err)]
-pub(crate) async fn run_collection_cycle_inner(
-    state: &AppState,
-) -> Result<usize, CollectionCycleError> {
-    use CollectionCycleErrorCtx as Ctx;
-
-    tracing::info!("Running metering collection cycle");
-
+/// Stops the meters of resources that are gone or no longer running.
+async fn reconcile_tracked_resources(pool: &sqlx::PgPool) {
     // Reconcile: stop tracking resources that have been destroyed in compute_resources
     let reconciled = sqlx::query(
         r#"
@@ -170,6 +164,7 @@ pub(crate) async fn run_collection_cycle_inner(
         SET status = 'stopped', stopped_at = NOW()
         WHERE tr.status = 'running'
           AND tr.application_id IS NOT NULL
+          AND tr.deployment_id IS NULL
           AND EXISTS (
               SELECT 1
               FROM compute_resources cr
@@ -178,7 +173,7 @@ pub(crate) async fn run_collection_cycle_inner(
           )
         "#,
     )
-    .execute(&state.pool)
+    .execute(pool)
     .await;
 
     match reconciled {
@@ -193,6 +188,58 @@ pub(crate) async fn run_collection_cycle_inner(
         }
         _ => {}
     }
+
+    // A deployment meter stops once its instance is confirmed gone: destroyed,
+    // failed and cleaned up, or lost at runtime. A failed row not yet cleaned
+    // up may still run an instance, so it stays metered. The first deployment
+    // runs while the app is `initialized`, so only `stopped` (suspended)
+    // stops a meter here; `terminating` does not, so a failed teardown keeps
+    // the remaining instances metered. Keep in step with `retained_instances`
+    // (api), which resumes the meters of exactly the rows this leaves running.
+    let reconciled_deployments = sqlx::query(
+        r#"
+        UPDATE tracked_resources tr
+        SET status = 'stopped', stopped_at = NOW()
+        WHERE tr.status = 'running'
+          AND tr.deployment_id IS NOT NULL
+          AND EXISTS (
+              SELECT 1 FROM app_deployments d
+              JOIN compute_resources cr ON cr.id = d.app_id
+              WHERE d.id = tr.deployment_id
+                AND (d.status = 'destroyed'
+                     OR (d.status = 'failed'
+                         AND (d.cleaned_up_at IS NOT NULL OR d.failure_kind = 'runtime_lost'))
+                     OR cr.destroyed_at IS NOT NULL
+                     OR cr.state = 'stopped')
+          )
+        "#,
+    )
+    .execute(pool)
+    .await;
+
+    match reconciled_deployments {
+        Ok(result) if result.rows_affected() > 0 => {
+            tracing::warn!(
+                "Reconciliation: stopped {} deployment meters whose instance is gone or suspended",
+                result.rows_affected()
+            );
+        }
+        Err(e) => {
+            tracing::error!("Deployment reconciliation query failed: {}", e);
+        }
+        _ => {}
+    }
+}
+
+#[tracing::instrument(skip_all, err)]
+pub(crate) async fn run_collection_cycle_inner(
+    state: &AppState,
+) -> Result<usize, CollectionCycleError> {
+    use CollectionCycleErrorCtx as Ctx;
+
+    tracing::info!("Running metering collection cycle");
+
+    reconcile_tracked_resources(&state.pool).await;
 
     let resources = sqlx::query_as::<_, TrackedResource>(
         r#"
@@ -525,5 +572,185 @@ mod tests {
             now,
             std::time::Duration::ZERO
         ));
+    }
+
+    /// `(status, failure_kind, cleaned up)` of a deployment.
+    type DeploymentRow = (&'static str, Option<&'static str>, bool);
+
+    async fn test_pool() -> sqlx::PgPool {
+        let url = std::env::var("APP_DEPLOYMENTS_TEST_DATABASE_URL")
+            .expect("use the isolated app deployments database test runner");
+        assert!(url.contains("@127.0.0.1:") && url.ends_with("/caution_app_deployments_test"));
+        sqlx::PgPool::connect(&url).await.unwrap()
+    }
+
+    async fn organization(pool: &sqlx::PgPool) -> uuid::Uuid {
+        let org: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO organizations(name) VALUES ('metering reconcile test') RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO provider_accounts(organization_id, provider_id, external_account_id, account_name)
+             SELECT $1, id, '123456789012', 'test' FROM providers WHERE provider_type = 'aws'",
+        )
+        .bind(org)
+        .execute(pool)
+        .await
+        .unwrap();
+        org
+    }
+
+    async fn app(
+        pool: &sqlx::PgPool,
+        org: uuid::Uuid,
+        lifecycle: &str,
+        state: &str,
+        destroyed: bool,
+    ) -> uuid::Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO compute_resources
+                 (organization_id, provider_account_id, resource_type_id, provider_resource_id,
+                  resource_name, state, lifecycle, destroyed_at)
+             SELECT $1, pa.id, rt.id, $2, 'rc-' || $2, $3::text::resource_state, $4,
+                    CASE WHEN $5 THEN NOW() END
+             FROM provider_accounts pa, resource_types rt
+             WHERE pa.organization_id = $1 AND rt.type_code = 'ec2-instance'
+             LIMIT 1
+             RETURNING id",
+        )
+        .bind(org)
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(state)
+        .bind(lifecycle)
+        .bind(destroyed)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn deployment(
+        pool: &sqlx::PgPool,
+        org: uuid::Uuid,
+        app: uuid::Uuid,
+        (status, failure_kind, cleaned_up): DeploymentRow,
+    ) -> uuid::Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO app_deployments
+                 (app_id, organization_id, status, failure_kind, cleaned_up_at)
+             VALUES ($1, $2, $3, $4, CASE WHEN $5 THEN NOW() END)
+             RETURNING id",
+        )
+        .bind(app)
+        .bind(org)
+        .bind(status)
+        .bind(failure_kind)
+        .bind(cleaned_up)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn meter(
+        pool: &sqlx::PgPool,
+        org: uuid::Uuid,
+        app: uuid::Uuid,
+        deployment: Option<uuid::Uuid>,
+    ) -> String {
+        let resource_id = format!("i-{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(
+            "INSERT INTO tracked_resources
+                 (resource_id, organization_id, application_id, deployment_id, provider)
+             VALUES ($1, $2, $3, $4, 'aws')",
+        )
+        .bind(&resource_id)
+        .bind(org)
+        .bind(app)
+        .bind(deployment)
+        .execute(pool)
+        .await
+        .unwrap();
+        resource_id
+    }
+
+    async fn is_running(pool: &sqlx::PgPool, resource_id: &str) -> bool {
+        sqlx::query_scalar(
+            "SELECT status = 'running' FROM tracked_resources WHERE resource_id = $1",
+        )
+        .bind(resource_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    /// Runs the reconcile SQL against the migrated schema:
+    /// `bash tests/e2e/test_app_deployments_db.sh` (isolated PostgreSQL).
+    #[tokio::test]
+    #[ignore = "run bash tests/e2e/test_app_deployments_db.sh (isolated PostgreSQL)"]
+    async fn reconcile_stops_a_meter_only_once_its_instance_is_gone() {
+        let pool = test_pool().await;
+        let org = organization(&pool).await;
+        let running: DeploymentRow = ("running", None, false);
+        let cleaned: DeploymentRow = ("failed", Some("provisioning"), true);
+        let uncleaned: DeploymentRow = ("failed", Some("provisioning"), false);
+        let lost: DeploymentRow = ("failed", Some("runtime_lost"), false);
+        let destroying: DeploymentRow = ("destroying", None, false);
+        let destroyed: DeploymentRow = ("destroyed", None, true);
+
+        // (label, app state, deployment (none: a Legacy app), meter keeps running).
+        // A `terminated` app is destroyed.
+        let cases: [(&str, &str, Option<DeploymentRow>, bool); 16] = [
+            // Legacy meters keep the previous rule: stop unless the app is `running`.
+            ("legacy running", "running", None, true),
+            ("legacy stopped", "stopped", None, false),
+            ("legacy terminating", "terminating", None, false),
+            ("legacy destroyed", "terminated", None, false),
+            // The first deployment runs while the app is still `initialized`.
+            ("first deployment", "initialized", Some(running), true),
+            ("live or candidate", "running", Some(running), true),
+            ("suspended app", "stopped", Some(running), false),
+            // Teardown stops each meter when its instance is destroyed.
+            ("terminating app", "terminating", Some(running), true),
+            ("destroying", "running", Some(destroying), true),
+            ("destroyed", "running", Some(destroyed), false),
+            // A failed row may still run an instance until it is cleaned up.
+            ("failed uncleaned", "running", Some(uncleaned), true),
+            ("failed cleaned", "running", Some(cleaned), false),
+            ("lost runtime", "running", Some(lost), false),
+            ("failed teardown", "terminating", Some(uncleaned), true),
+            ("destroyed app", "terminated", Some(running), false),
+            ("forced delete", "terminated", Some(uncleaned), false),
+        ];
+
+        let mut meters = Vec::new();
+        for (label, state, deployment_row, keeps_running) in cases {
+            let lifecycle = if deployment_row.is_some() {
+                "deployments"
+            } else {
+                "legacy"
+            };
+            let app = app(&pool, org, lifecycle, state, state == "terminated").await;
+            let deployment = match deployment_row {
+                Some(row) => Some(deployment(&pool, org, app, row).await),
+                None => None,
+            };
+            meters.push((
+                label,
+                meter(&pool, org, app, deployment).await,
+                keeps_running,
+            ));
+        }
+
+        reconcile_tracked_resources(&pool).await;
+
+        for (label, resource_id, keeps_running) in &meters {
+            assert_eq!(
+                is_running(&pool, resource_id).await,
+                *keeps_running,
+                "{label}"
+            );
+        }
+        pool.close().await;
     }
 }

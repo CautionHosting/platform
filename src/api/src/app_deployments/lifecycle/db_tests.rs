@@ -1363,6 +1363,399 @@ async fn deploy_error_recovery_touches_only_its_own_progress() {
     pool.close().await;
 }
 
+#[tokio::test]
+#[ignore = "run bash tests/e2e/test_app_deployments_db.sh (isolated PostgreSQL)"]
+async fn candidate_meters_and_eif_downloads() {
+    let pool = test_pool().await;
+    let state = test_state(&pool, "/nonexistent");
+
+    retained_instances_are_those_the_reconcile_keeps_metered(&pool).await;
+    suspension_stops_and_unsuspension_resumes_retained_meters(&state).await;
+    eif_source_follows_lifecycle_and_deployment(&pool).await;
+    eif_build_is_found_by_key(&pool).await;
+    pool.close().await;
+}
+
+async fn set_live(pool: &PgPool, app: Uuid, live: Uuid) {
+    sqlx::query("UPDATE compute_resources SET live_deployment_id = $2 WHERE id = $1")
+        .bind(app)
+        .bind(live)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// Records how a deployment ended, as failure cleanup does.
+async fn set_outcome(pool: &PgPool, id: Uuid, failure_kind: Option<&str>, cleaned_up: bool) {
+    sqlx::query(
+        "UPDATE app_deployments
+         SET failure_kind = $2, cleaned_up_at = CASE WHEN $3 THEN NOW() END WHERE id = $1",
+    )
+    .bind(id)
+    .bind(failure_kind)
+    .bind(cleaned_up)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn retained_instances_are_those_the_reconcile_keeps_metered(pool: &PgPool) {
+    let org = organization(pool).await;
+    let app = deployments_app(pool, org).await;
+    let live = deployment(pool, org, app, "running", Some("i-live")).await;
+    let candidate = deployment(pool, org, app, "running", Some("i-candidate")).await;
+    sqlx::query("UPDATE app_deployments SET instance_type = 'm5.xlarge' WHERE id = $1")
+        .bind(candidate)
+        .execute(pool)
+        .await
+        .unwrap();
+    // Retained: still running, being destroyed, or failed with cleanup pending.
+    let destroying = deployment(pool, org, app, "destroying", Some("i-destroying")).await;
+    let uncleaned = deployment(pool, org, app, "failed", Some("i-uncleaned")).await;
+    set_outcome(pool, uncleaned, Some("provisioning"), false).await;
+    // Gone, or never provisioned: not retained.
+    deployment(pool, org, app, "running", None).await;
+    deployment(pool, org, app, "provisioning", Some("i-provisioning")).await;
+    deployment(pool, org, app, "destroyed", Some("i-destroyed")).await;
+    let cleaned = deployment(pool, org, app, "failed", Some("i-cleaned")).await;
+    set_outcome(pool, cleaned, Some("provisioning"), true).await;
+    let lost = deployment(pool, org, app, "failed", Some("i-lost")).await;
+    set_outcome(pool, lost, Some("runtime_lost"), false).await;
+    set_live(pool, app, live).await;
+
+    let mut expected = vec![
+        (
+            candidate,
+            "i-candidate".to_string(),
+            Some("m5.xlarge".to_string()),
+        ),
+        (destroying, "i-destroying".to_string(), None),
+        (uncleaned, "i-uncleaned".to_string(), None),
+    ];
+    expected.sort();
+    let mut retained = retained_instances(pool, app).await.unwrap();
+    retained.sort();
+    assert_eq!(retained, expected);
+
+    // Legacy and destroyed apps have none: nothing may restart their meters.
+    sqlx::query("UPDATE compute_resources SET lifecycle = 'legacy' WHERE id = $1")
+        .bind(app)
+        .execute(pool)
+        .await
+        .unwrap();
+    assert!(retained_instances(pool, app).await.unwrap().is_empty());
+    sqlx::query(
+        "UPDATE compute_resources SET lifecycle = 'deployments', state = 'terminated',
+                destroyed_at = NOW() WHERE id = $1",
+    )
+    .bind(app)
+    .execute(pool)
+    .await
+    .unwrap();
+    assert!(retained_instances(pool, app).await.unwrap().is_empty());
+}
+
+/// `(status, application, deployment, region, instance type, name in metadata)`.
+async fn meter_row(
+    pool: &PgPool,
+    instance_id: &str,
+) -> (
+    String,
+    Option<Uuid>,
+    Option<Uuid>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+) {
+    sqlx::query_as(
+        "SELECT status, application_id, deployment_id, region, instance_type,
+                metadata->>'resource_name'
+         FROM tracked_resources WHERE resource_id = $1",
+    )
+    .bind(instance_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// The instances EC2 reports `pending` or `running` after the unsuspend.
+async fn resume(state: &AppState, org: Uuid, app: Uuid, region: Option<&str>, running: &[&str]) {
+    let running = running.iter().map(|id| id.to_string()).collect();
+    crate::suspension::resume_retained_meters(
+        state,
+        org,
+        app,
+        "my-app",
+        region,
+        std::future::ready(running),
+    )
+    .await;
+}
+
+/// For a Legacy or destroyed app, or a failed query, EC2 is never asked.
+async fn resume_without_asking_ec2(state: &AppState, org: Uuid, app: Uuid) {
+    crate::suspension::resume_retained_meters(state, org, app, "my-app", None, async {
+        panic!("EC2 must not be asked");
+    })
+    .await;
+}
+
+async fn suspension_stops_and_unsuspension_resumes_retained_meters(state: &AppState) {
+    let pool = &state.db;
+    let org = organization(pool).await;
+    let app = deployments_app(pool, org).await;
+    let live = deployment(pool, org, app, "running", None).await;
+    let first = deployment(pool, org, app, "running", None).await;
+    let second = deployment(pool, org, app, "running", None).await;
+    let destroying = deployment(pool, org, app, "destroying", None).await;
+    let uncleaned = deployment(pool, org, app, "failed", None).await;
+    set_outcome(pool, uncleaned, Some("provisioning"), false).await;
+    let lost = deployment(pool, org, app, "failed", None).await;
+    set_outcome(pool, lost, Some("runtime_lost"), false).await;
+    let mut instances = Vec::new();
+    for id in [live, first, second, destroying, uncleaned, lost] {
+        let instance_id = set_instance(pool, id).await;
+        meter(pool, org, id, &instance_id).await;
+        instances.push(instance_id);
+    }
+    sqlx::query("UPDATE app_deployments SET instance_type = 'm5.xlarge' WHERE id = $1")
+        .bind(first)
+        .execute(pool)
+        .await
+        .unwrap();
+    set_live(pool, app, live).await;
+    let [live_i, first_i, second_i, destroying_i, uncleaned_i, lost_i] =
+        [0, 1, 2, 3, 4, 5].map(|i| instances[i].as_str());
+
+    // The live meter stops through `provider_resource_id`, not here. A lost
+    // runtime is gone: its meter is the reconcile's, not suspension's.
+    crate::suspension::stop_retained_meters(state, app).await;
+    assert!(metered(pool, live_i).await);
+    for instance in [first_i, second_i, destroying_i, uncleaned_i] {
+        assert!(!metered(pool, instance).await, "{instance}");
+    }
+    assert!(metered(pool, lost_i).await);
+
+    // Only retained instances running after the unsuspend are metered again.
+    resume(
+        state,
+        org,
+        app,
+        Some("us-east-1"),
+        &[live_i, first_i, destroying_i, uncleaned_i, lost_i],
+    )
+    .await;
+    assert!(!metered(pool, second_i).await);
+    assert!(metered(pool, destroying_i).await);
+    assert!(metered(pool, uncleaned_i).await);
+    assert_eq!(
+        meter_row(pool, first_i).await,
+        (
+            "running".to_string(),
+            Some(app),
+            Some(first),
+            Some("us-east-1".to_string()),
+            Some("m5.xlarge".to_string()),
+            Some("my-app".to_string()),
+        )
+    );
+
+    // A retried unsuspend: an earlier attempt started the instances, then
+    // failed, so none is `stopped` any more. Running instances are metered again.
+    let stop = "UPDATE tracked_resources SET status = 'stopped' WHERE resource_id = $1";
+    for instance in [first_i, destroying_i, uncleaned_i] {
+        sqlx::query(stop)
+            .bind(instance)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+    resume(state, org, app, None, &[live_i, first_i, uncleaned_i]).await;
+    assert!(metered(pool, first_i).await);
+    assert!(metered(pool, uncleaned_i).await);
+    assert!(!metered(pool, destroying_i).await);
+    assert!(!metered(pool, second_i).await);
+
+    // Nothing restarts for an app that is Legacy or destroyed meanwhile.
+    sqlx::query(stop).bind(first_i).execute(pool).await.unwrap();
+    for (lifecycle, destroyed) in [("legacy", false), ("deployments", true)] {
+        sqlx::query(
+            "UPDATE compute_resources SET lifecycle = $2,
+                    destroyed_at = CASE WHEN $3 THEN NOW() END WHERE id = $1",
+        )
+        .bind(app)
+        .bind(lifecycle)
+        .bind(destroyed)
+        .execute(pool)
+        .await
+        .unwrap();
+        resume_without_asking_ec2(state, org, app).await;
+        assert!(!metered(pool, first_i).await, "{lifecycle} {destroyed}");
+    }
+
+    // A database error is logged, never raised: it must not abort the org's unsuspend.
+    sqlx::query(
+        "UPDATE compute_resources SET lifecycle = 'deployments', destroyed_at = NULL WHERE id = $1",
+    )
+    .bind(app)
+    .execute(pool)
+    .await
+    .unwrap();
+    let broken = test_pool().await;
+    broken.close().await;
+    resume_without_asking_ec2(&test_state(&broken, "/nonexistent"), org, app).await;
+    assert!(!metered(pool, first_i).await);
+}
+
+async fn eif_source_follows_lifecycle_and_deployment(pool: &PgPool) {
+    use crate::eif_download::{DownloadEifError, EifSource, resolve_eif_source};
+
+    async fn set_key(pool: &PgPool, deployment: Uuid, key: Option<&str>) {
+        sqlx::query("UPDATE app_deployments SET eif_s3_key = $2 WHERE id = $1")
+            .bind(deployment)
+            .bind(key)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+    fn key(value: &str) -> EifSource {
+        EifSource::Key(value.to_string())
+    }
+
+    let org = organization(pool).await;
+    let app = deployments_app(pool, org).await;
+    let other_app = deployments_app(pool, org).await;
+    let live = deployment(pool, org, app, "running", Some("i-live")).await;
+    let candidate = deployment(pool, org, app, "running", Some("i-candidate")).await;
+    let keyless = deployment(pool, org, app, "building", None).await;
+    let foreign = deployment(pool, org, other_app, "running", Some("i-foreign")).await;
+    set_key(pool, live, Some("eifs/live.eif")).await;
+    set_key(pool, candidate, Some("eifs/candidate.eif")).await;
+    set_key(pool, foreign, Some("eifs/foreign.eif")).await;
+    set_live(pool, app, live).await;
+    for (id, eif) in [(app, "eifs/config.eif"), (other_app, "eifs/stale.eif")] {
+        sqlx::query("UPDATE compute_resources SET configuration = jsonb_build_object('eif_s3_key', $2::text) WHERE id = $1")
+            .bind(id)
+            .bind(eif)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+    let resolve = |org, app, requested| resolve_eif_source(pool, org, app, requested);
+
+    assert_eq!(resolve(org, app, None).await.unwrap(), key("eifs/live.eif"));
+    assert_eq!(
+        resolve(org, app, Some(live)).await.unwrap(),
+        key("eifs/live.eif")
+    );
+    assert_eq!(
+        resolve(org, app, Some(candidate)).await.unwrap(),
+        key("eifs/candidate.eif")
+    );
+    // No key, another app's deployment, an unknown one, another org: never the live EIF.
+    for requested in [keyless, foreign, Uuid::new_v4()] {
+        assert!(matches!(
+            resolve(org, app, Some(requested)).await,
+            Err(DownloadEifError::BuildNotFound { .. })
+        ));
+    }
+    assert!(matches!(
+        resolve(organization(pool).await, app, None).await,
+        Err(DownloadEifError::BuildNotFound { .. })
+    ));
+    // Nothing live: the app configuration of a not-yet-live app is not served.
+    assert!(matches!(
+        resolve(org, other_app, None).await,
+        Err(DownloadEifError::BuildNotFound { .. })
+    ));
+    // A live deployment without a key falls back to the app configuration.
+    set_key(pool, live, None).await;
+    assert_eq!(
+        resolve(org, app, None).await.unwrap(),
+        key("eifs/config.eif")
+    );
+    assert!(matches!(
+        resolve(org, app, Some(live)).await,
+        Err(DownloadEifError::BuildNotFound { .. })
+    ));
+
+    // Legacy: the latest completed build, and no deployments.
+    sqlx::query("UPDATE compute_resources SET lifecycle = 'legacy' WHERE id = $1")
+        .bind(app)
+        .execute(pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        resolve(org, app, None).await.unwrap(),
+        EifSource::LatestBuild
+    );
+    assert!(matches!(
+        resolve(org, app, Some(candidate)).await,
+        Err(DownloadEifError::DeploymentsNotUsed { .. })
+    ));
+}
+
+async fn eif_build_is_found_by_key(pool: &PgPool) {
+    use crate::eif_download::build_for_key;
+
+    async fn build(pool: &PgPool, org: Uuid, app: Uuid, key: &str, status: &str) {
+        sqlx::query(
+            "INSERT INTO eif_builds
+                 (organization_id, app_id, commit_sha, procfile_hash, cache_key, eif_s3_key,
+                  eif_sha256, eif_size_bytes, status, completed_at)
+             VALUES ($1, $2, 'c', 'p', $3, $3, 'sha-' || $3, 42, $4, NOW())",
+        )
+        .bind(org)
+        .bind(app)
+        .bind(key)
+        .bind(status)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    let org = organization(pool).await;
+    let app = deployments_app(pool, org).await;
+    let other_app = deployments_app(pool, org).await;
+    let name: String =
+        sqlx::query_scalar("SELECT resource_name FROM compute_resources WHERE id = $1")
+            .bind(app)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    // A cache hit may be another app's build of the same key: named after the requested app.
+    build(pool, org, other_app, "eifs/shared.eif", "completed").await;
+    build(pool, org, app, "eifs/unfinished.eif", "failed").await;
+
+    let found = build_for_key(pool, org, app, "eifs/shared.eif")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.eif_s3_key, "eifs/shared.eif");
+    assert_eq!(found.eif_sha256, "sha-eifs/shared.eif");
+    assert_eq!(found.resource_name.as_deref(), Some(name.as_str()));
+    assert!(
+        build_for_key(pool, org, app, "eifs/unfinished.eif")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        build_for_key(pool, org, app, "eifs/missing.eif")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // Another org's build is never served.
+    let intruder = organization(pool).await;
+    assert!(
+        build_for_key(pool, intruder, app, "eifs/shared.eif")
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
 fn test_state(pool: &PgPool, data_dir: &str) -> std::sync::Arc<AppState> {
     Arc::new(AppState {
         db: pool.clone(),

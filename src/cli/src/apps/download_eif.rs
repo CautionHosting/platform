@@ -22,6 +22,13 @@ pub(crate) struct DownloadEif {
 
     #[arg(short, long, help = "Overwrite existing file")]
     pub(crate) force: bool,
+
+    #[arg(
+        short = 'd',
+        long = "deployment",
+        help = "Deployment ID (default: the live deployment)"
+    )]
+    pub(crate) deployment: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
@@ -65,8 +72,18 @@ pub(crate) enum DownloadEifError {
         location: Location,
     },
 
-    #[error("resource not found [{location:?}]")]
+    #[error("resource not found: {message} [{location:?}]")]
     NotFound {
+        message: String,
+
+        #[location]
+        location: Location,
+    },
+
+    #[error("{message} [{location:?}]")]
+    Rejected {
+        message: String,
+
         #[location]
         location: Location,
     },
@@ -175,20 +192,22 @@ pub(crate) async fn download_eif(
         .await
         .with_context(Ctx::auth())?;
 
-    let mut response = client
+    let mut request = client
         .http_client()
         .get(format!(
             "{}/api/resources/{}/eif/download",
             client.api_base_url(),
             resource_id
         ))
-        .header("X-Session-ID", config.session_id())
-        .send()
-        .await
-        .with_context(Ctx::http())?;
+        .header("X-Session-ID", config.session_id());
+    if let Some(deployment) = &args.deployment {
+        request = request.query(&[("deployment", deployment)]);
+    }
+    let mut response = request.send().await.with_context(Ctx::http())?;
 
     let status = response.status();
     if !status.is_success() {
+        let message = response.text().await.unwrap_or_default();
         return Err(match status.as_u16() {
             401 => DownloadEifError::Unauthorized {
                 location: std::panic::Location::caller(),
@@ -197,6 +216,11 @@ pub(crate) async fn download_eif(
                 location: std::panic::Location::caller(),
             },
             404 => DownloadEifError::NotFound {
+                message,
+                location: std::panic::Location::caller(),
+            },
+            422 => DownloadEifError::Rejected {
+                message,
                 location: std::panic::Location::caller(),
             },
             code => DownloadEifError::HttpStatus {
@@ -306,4 +330,31 @@ pub(crate) async fn download_eif(
     output::success(format!("Downloaded {} ({size_str})", output_path.display()));
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{AppCommands, Cli, Commands};
+    use clap::Parser;
+
+    fn deployment_arg(args: &[&str]) -> Option<String> {
+        let cli =
+            Cli::try_parse_from(["caution", "apps", "download-eif"].iter().chain(args)).unwrap();
+        match cli.command {
+            Commands::Apps {
+                command: AppCommands::DownloadEif(args),
+            } => args.deployment,
+            _ => panic!("not download-eif"),
+        }
+    }
+
+    #[test]
+    fn deployment_flag_is_optional() {
+        assert_eq!(deployment_arg(&[]), None);
+        assert_eq!(deployment_arg(&["-d", "abc"]).as_deref(), Some("abc"));
+        assert_eq!(
+            deployment_arg(&["--deployment", "abc"]).as_deref(),
+            Some("abc")
+        );
+    }
 }

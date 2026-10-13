@@ -570,9 +570,69 @@ pub(crate) async fn stop_meter(state: &AppState, instance_id: &str) {
     }
 }
 
+/// Failure modes for [`retained_instances`].
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("failed to list the retained instances of app {app_id} [{location}]")]
+pub(crate) struct RetainedInstancesError {
+    app_id: Uuid,
+    #[location]
+    location: Location,
+    #[source]
+    source: BoxError,
+}
+
+/// `(deployment_id, instance_id, instance_type)` of the non-live instances of a
+/// deployments app whose meter must keep running until their absence is
+/// confirmed: running candidates, `destroying` ones, and `failed` ones still
+/// awaiting cleanup. These are the rows the metering reconcile does not treat
+/// as gone. Suspension stops and restarts them with the live instance, whose
+/// meter follows `provider_resource_id`. Empty for a Legacy or destroyed app:
+/// nothing may restart a meter after destruction.
+pub(crate) async fn retained_instances(
+    db: &PgPool,
+    app_id: Uuid,
+) -> Result<Vec<(Uuid, String, Option<String>)>, RetainedInstancesError> {
+    sqlx::query_as(
+        "SELECT d.id, d.instance_id, d.instance_type
+         FROM app_deployments d JOIN compute_resources cr ON cr.id = d.app_id
+         WHERE d.app_id = $1 AND d.instance_id IS NOT NULL
+           AND d.id IS DISTINCT FROM cr.live_deployment_id
+           AND (d.status IN ('running', 'destroying')
+                OR (d.status = 'failed' AND d.cleaned_up_at IS NULL
+                    AND d.failure_kind IS DISTINCT FROM 'runtime_lost'))
+           AND cr.lifecycle = $2 AND cr.destroyed_at IS NULL",
+    )
+    .bind(app_id)
+    .bind(super::LIFECYCLE_DEPLOYMENTS)
+    .fetch_all(db)
+    .await
+    .with_context(RetainedInstancesErrorCtx::new(app_id))
+}
+
+/// The retained instances that run after an unsuspend: only those resume
+/// metering, so an instance that stayed stopped is never billed.
+pub(crate) fn resumable_meters(
+    retained: &[(Uuid, String, Option<String>)],
+    running: &[String],
+) -> Vec<(Uuid, String, Option<String>)> {
+    retained
+        .iter()
+        .filter(|(_, instance, _)| running.contains(instance))
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsuspend_meters_only_restarted_candidates() {
+        let (d1, d2) = (Uuid::new_v4(), Uuid::new_v4());
+        let candidates = vec![(d1, "i-1".to_string(), None), (d2, "i-2".to_string(), None)];
+        let resumed = resumable_meters(&candidates, &["i-2".to_string(), "i-live".to_string()]);
+        assert_eq!(resumed, vec![(d2, "i-2".to_string(), None)]);
+    }
 
     #[test]
     fn a_deployment_goes_live_only_when_none_is_live() {

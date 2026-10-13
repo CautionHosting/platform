@@ -8,7 +8,7 @@ use dterror::{BoxError, CtxError, Location, ResultExt};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::{AppState, cloud_credentials, deployment, ec2, metering};
+use crate::{AppState, app_deployments, cloud_credentials, deployment, ec2, metering};
 
 /// A stopped `compute_resources` row used when unsuspending an org.
 type StoppedResourceRow = (
@@ -178,6 +178,7 @@ pub async fn suspend_managed_resources(
             .execute(&state.db)
             .await;
         }
+        stop_retained_meters(&state, *resource_id).await;
         stopped += 1;
     }
 
@@ -294,6 +295,7 @@ pub async fn suspend_org_resources(
             .execute(&state.db)
             .await;
         }
+        stop_retained_meters(&state, *resource_id).await;
         stopped += 1;
     }
 
@@ -539,6 +541,10 @@ pub async fn unsuspend_org_resources(
             "instance_id": provider_resource_id,
             "resource_name": resource_name,
         });
+        let metering_region = recovered_address
+            .as_ref()
+            .map(|address| address.1.as_str())
+            .or(region.as_deref());
         if let Err(e) = metering::upsert_tracked_resource(
             &state,
             provider_resource_id,
@@ -548,10 +554,7 @@ pub async fn unsuspend_org_resources(
             None,
             "aws",
             instance_type,
-            recovered_address
-                .as_ref()
-                .map(|address| address.1.as_str())
-                .or(region.as_deref()),
+            metering_region,
             &metadata,
         )
         .await
@@ -562,6 +565,38 @@ pub async fn unsuspend_org_resources(
                 e
             );
         }
+        // Instances an earlier unsuspend attempt already started (it then failed,
+        // leaving the app `stopped`) are no longer `stopped`, so they are not in
+        // `started_instance_ids`; the ones just started may not be listed yet.
+        let running_instance_ids = async {
+            let mut ids = started_instance_ids.clone();
+            if let Some(creds) = aws_creds.as_ref() {
+                let filters = running_instance_filters(&resource_id.to_string());
+                match ec2::Ec2Client::new(creds)
+                    .describe_instances(&filters)
+                    .await
+                {
+                    Ok(instances) => ids.extend(instances.into_iter().map(|i| i.instance_id)),
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to list running instances for {}: {}",
+                            resource_name,
+                            e
+                        );
+                    }
+                }
+            }
+            ids
+        };
+        resume_retained_meters(
+            &state,
+            org_id,
+            *resource_id,
+            resource_name,
+            metering_region,
+            running_instance_ids,
+        )
+        .await;
         if let Some(error) = degraded_readiness_error {
             errors.push(resource_name.clone() + ": " + &error);
         }
@@ -584,6 +619,94 @@ pub async fn unsuspend_org_resources(
         "total": resources.len(),
         "errors": errors,
     })))
+}
+
+/// Stops the meters of a deployments app's retained non-live instances (running
+/// candidates and instances awaiting cleanup), which suspension stopped with the
+/// live one (its meter follows `provider_resource_id`). An error is only logged:
+/// the metering service stops a meter of a `stopped` app on its next collection.
+pub(crate) async fn stop_retained_meters(state: &AppState, resource_id: Uuid) {
+    match app_deployments::lifecycle::retained_instances(&state.db, resource_id).await {
+        Ok(retained) => {
+            for (_, instance_id, _) in &retained {
+                app_deployments::lifecycle::stop_meter(state, instance_id).await;
+            }
+        }
+        Err(error) => {
+            tracing::error!(resource_id = %resource_id, ?error, "failed to list retained instances to stop their meters");
+        }
+    }
+}
+
+/// Resumes the meters of the retained non-live instances of a deployments app
+/// that run after the unsuspend. `running_instance_ids` is awaited only for a
+/// deployments app with retained instances. One app's errors are logged, never
+/// returned: they must not abort the unsuspend of the org's other apps.
+pub(crate) async fn resume_retained_meters(
+    state: &AppState,
+    org_id: Uuid,
+    resource_id: Uuid,
+    resource_name: &str,
+    region: Option<&str>,
+    running_instance_ids: impl std::future::Future<Output = Vec<String>>,
+) {
+    match app_deployments::app_lifecycle(&state.db, resource_id).await {
+        Ok(Some(lifecycle)) if lifecycle == app_deployments::LIFECYCLE_DEPLOYMENTS => {}
+        Ok(_) => return,
+        Err(error) => {
+            tracing::error!(resource_id = %resource_id, ?error, "failed to read the app lifecycle; retained meters stay stopped");
+            return;
+        }
+    }
+    let retained = match app_deployments::lifecycle::retained_instances(&state.db, resource_id)
+        .await
+    {
+        Ok(retained) if !retained.is_empty() => retained,
+        Ok(_) => return,
+        Err(error) => {
+            tracing::error!(resource_id = %resource_id, ?error, "failed to list retained instances; their meters stay stopped");
+            return;
+        }
+    };
+    let running = running_instance_ids.await;
+    for (deployment_id, instance_id, instance_type) in
+        app_deployments::lifecycle::resumable_meters(&retained, &running)
+    {
+        let metadata = serde_json::json!({
+            "resource_kind": "compute_resource",
+            "compute_resource_id": resource_id.to_string(),
+            "deployment_id": deployment_id.to_string(),
+            "instance_id": instance_id,
+            "resource_name": resource_name,
+        });
+        if let Err(e) = metering::upsert_tracked_resource(
+            state,
+            &instance_id,
+            org_id,
+            None,
+            resource_id,
+            Some(deployment_id),
+            "aws",
+            instance_type.as_deref(),
+            region,
+            &metadata,
+        )
+        .await
+        {
+            tracing::error!(
+                "Failed to resume metering for deployment {}: {}",
+                deployment_id,
+                e
+            );
+        }
+    }
+}
+
+fn running_instance_filters(resource_id: &str) -> [ec2::Filter; 2] {
+    [
+        ec2::Filter::new("tag:ResourceId", &[resource_id]),
+        ec2::Filter::new("instance-state-name", &["pending", "running"]),
+    ]
 }
 
 fn instance_lookup_filters(resource_id: &str, instance_state: &str) -> [ec2::Filter; 2] {
@@ -666,5 +789,14 @@ mod tests {
         );
         assert_eq!(filters[1].name, "instance-state-name");
         assert_eq!(filters[1].values, vec!["running"]);
+    }
+
+    #[test]
+    fn running_instance_filters_cover_pending_and_running() {
+        let filters = running_instance_filters("8c93ce84-8e77-47a3-bb0c-7f568ef3aa1a");
+
+        assert_eq!(filters[0].name, "tag:ResourceId");
+        assert_eq!(filters[1].name, "instance-state-name");
+        assert_eq!(filters[1].values, vec!["pending", "running"]);
     }
 }
