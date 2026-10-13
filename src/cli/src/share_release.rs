@@ -282,6 +282,12 @@ async fn decode_response<R: DeserializeOwned>(response: reqwest::Response) -> Re
     serde_json::from_slice(&bytes).with_context(Ctx::new("invalid release response"))
 }
 
+/// The deployment a release targets (`send-shard -d`). Descriptive only.
+pub(crate) struct ReleaseDeployment {
+    pub id: String,
+    pub commit_sha: Option<String>,
+}
+
 /// Display metadata is never an input to release authorization.
 pub(crate) struct ReleaseSummary {
     pub application_id: String,
@@ -291,6 +297,7 @@ pub(crate) struct ReleaseSummary {
     pub threshold: u8,
     pub holders: u8,
     pub method: &'static str,
+    pub deployment: Option<ReleaseDeployment>,
 }
 
 // Escape terminal controls, including bidirectional formatting controls, in labels.
@@ -310,11 +317,24 @@ impl ReleaseSummary {
             .or(self.application_name.as_deref()).filter(|s| !s.is_empty())
             .unwrap_or("Application name unavailable");
         let mut text = format!("\nRelease one share\n\nApplication  {}\n", terminal_label(name));
+        if let Some(selected) = &self.deployment {
+            let commit = selected.commit_sha.as_deref()
+                .map(|sha| format!(" · {}", terminal_label(sha.get(..7).unwrap_or(sha))))
+                .unwrap_or_default();
+            text.push_str(&format!("Deployment   {}{commit}\n", terminal_label(&selected.id)));
+        }
         if let Some(org) = metadata.and_then(|m| m["organization"]["name"].as_str()).filter(|s| !s.is_empty()) {
             text.push_str(&format!("Organization {}\n", terminal_label(org)));
         }
         text.push_str(&format!("Holder       {}\nDestination  {}\nQuorum       {} of {} holders required\nMethod       {}\n\nApplication labels are Platform metadata; destination is CLI-reported.", terminal_label(&self.holder), self.address, self.threshold, self.holders, self.method));
-        if let Some(recorded) = app.and_then(|a| a["public_ip"].as_str()) {
+        // A selected deployment is compared against its own address, never the app's.
+        let recorded = match &self.deployment {
+            Some(selected) => metadata.and_then(|m| m.get("deployment"))
+                .filter(|d| d["id"].as_str() == Some(selected.id.as_str()))
+                .and_then(|d| d["public_ip"].as_str()),
+            None => app.and_then(|a| a["public_ip"].as_str()),
+        };
+        if let Some(recorded) = recorded {
             if recorded.parse::<std::net::IpAddr>().ok() != Some(self.address.ip()) {
                 text.push_str(&format!("\nRecorded address {} differs from the connection destination.", terminal_label(recorded)));
             }
@@ -596,9 +616,13 @@ async fn recover_inner(
     );
     let approval = async {
         if client.qr {
-            browser_assertion(client, &attested_prepared, &prepare.client_nonce, &json!({
+            let mut display = json!({
                 "application_id":summary.application_id, "destination_address":address.to_string(), "custody_url":url,
-            }), &summary, native).await
+            });
+            if let Some(selected) = &summary.deployment {
+                display["deployment_id"] = json!(selected.id);
+            }
+            browser_assertion(client, &attested_prepared, &prepare.client_nonce, &display, &summary, native).await
         } else {
             summary.print(None);
             output::status("Waiting for passkey approval…");
@@ -656,7 +680,7 @@ mod holder_selection_tests {
         let summary = ReleaseSummary {
             application_id: "app-id".into(), application_name: Some("local-name".into()),
             holder: "alice · Passkey".into(), address: "203.0.113.42:49504".parse().unwrap(),
-            threshold: 3, holders: 3, method: "Browser passkey",
+            threshold: 3, holders: 3, method: "Browser passkey", deployment: None,
         };
         let metadata = json!({"application":{"id":"app-id","name":"server-name","public_ip":"203.0.113.43"},"organization":{"name":"My org"},"bundle":{"username":"wrong-holder","threshold":1}});
         let text = summary.render(Some(&metadata));
@@ -671,6 +695,28 @@ mod holder_selection_tests {
         let text = native.render(None);
         assert!(text.contains("Application name unavailable"));
         assert!(!text.contains("COMPARE") && !text.contains("app-id"));
+    }
+
+    #[test]
+    fn summary_names_the_selected_deployment_and_compares_its_address() {
+        let summary = ReleaseSummary {
+            application_id: "app".into(),
+            application_name: Some("key-service".into()),
+            holder: "alice".into(),
+            address: "203.0.113.9:49504".parse().unwrap(),
+            threshold: 2,
+            holders: 3,
+            method: "Native passkey",
+            deployment: Some(ReleaseDeployment { id: "d2".into(), commit_sha: Some("b6e8c92aa1".into()) }),
+        };
+        let text = summary.render(Some(&json!({
+            "application": {"id": "app", "public_ip": "198.51.100.42"},
+            "deployment": {"id": "d2", "public_ip": "203.0.113.9"}})));
+        assert!(text.contains("Deployment   d2 · b6e8c92"));
+        assert!(!text.contains("differs"), "a candidate's own endpoint is not a mismatch");
+        let moved = summary.render(Some(&json!({
+            "application": {"id": "app"}, "deployment": {"id": "d2", "public_ip": "203.0.113.10"}})));
+        assert!(moved.contains("Recorded address 203.0.113.10 differs"));
     }
 
     #[test]

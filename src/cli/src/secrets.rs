@@ -2164,6 +2164,10 @@ pub async fn send_shard(
             (false, _, true) => "Private-key file",
             (false, _, false) => "OpenPGP smartcard",
         },
+        deployment: target.deployment.as_ref().map(|d| crate::share_release::ReleaseDeployment {
+            id: d.id.clone(),
+            commit_sha: d.commit_sha.clone(),
+        }),
     };
     output::verbose(client.verbose, format!("Application ID: {}; bundle identity: {}", crate::share_release::terminal_label(&target.app_info.id), bundle.bundle_id().map(hex::encode).unwrap_or_else(|| "Legacy V0".into())));
     let status: Result<_, BoxError> = if webauthn {
