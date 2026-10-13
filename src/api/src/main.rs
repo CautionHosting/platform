@@ -2259,6 +2259,78 @@ async fn restore_pending_deploy_rejection(
     result.map(|_| ()).with_context(Ctx::update())
 }
 
+/// What a deploy is acting on, which decides how a rejected or failed deploy
+/// is rolled back.
+#[derive(Clone, Copy, Debug)]
+enum DeployTarget {
+    /// The app's single compute resource, claimed by moving it to `pending`.
+    Legacy {
+        deploy_attempt_id: Uuid,
+        previous_state: types::ResourceState,
+        was_destroyed: bool,
+    },
+}
+
+impl DeployTarget {
+    /// Undo the `pending` claim after the deploy is rejected before launch.
+    async fn reject(&self, state: &Arc<AppState>, org_id: Uuid, resource_id: Uuid) {
+        match *self {
+            Self::Legacy {
+                deploy_attempt_id,
+                previous_state,
+                was_destroyed,
+            } => {
+                if let Err(error) = restore_pending_deploy_rejection(
+                    state,
+                    org_id,
+                    resource_id,
+                    deploy_attempt_id,
+                    previous_state,
+                    was_destroyed,
+                )
+                .await
+                {
+                    tracing::error!(?error, "failed to restore pending deploy rejection");
+                }
+            }
+        }
+    }
+
+    /// Roll back a deploy that failed after launch began.
+    async fn recover_failure(
+        &self,
+        state: &Arc<AppState>,
+        org_id: Uuid,
+        resource_id: Uuid,
+        app_name: &str,
+        should_cleanup: bool,
+        deployed_region: &str,
+    ) {
+        match *self {
+            Self::Legacy {
+                deploy_attempt_id,
+                previous_state,
+                ..
+            } => {
+                if let Err(recover_error) = recover_deploy_failure(
+                    state,
+                    org_id,
+                    resource_id,
+                    deploy_attempt_id,
+                    app_name,
+                    previous_state,
+                    should_cleanup,
+                    deployed_region,
+                )
+                .await
+                {
+                    tracing::error!(?recover_error, "failed to recover from deploy failure");
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 struct ResolvedBuilderTarget {
     config: builder::BuilderConfig,
@@ -4074,6 +4146,12 @@ async fn deploy_logic(
         }
     }
 
+    let deploy_target = DeployTarget::Legacy {
+        deploy_attempt_id,
+        previous_state,
+        was_destroyed,
+    };
+
     tracing::info!("Deploying branch: {}", req.branch);
 
     let resolved_commit_sha = get_commit_sha(&app_id_str, &req.branch, &state.data_dir)
@@ -4204,36 +4282,14 @@ async fn deploy_logic(
         .map(managed_onprem_config_from_credential);
 
     if provider_requires_linked_byoc(&config_file, managed_onprem_config.is_some()) {
-        if let Err(error) = restore_pending_deploy_rejection(
-            &state,
-            req.org_id,
-            resource_id,
-            deploy_attempt_id,
-            previous_state,
-            was_destroyed,
-        )
-        .await
-        {
-            tracing::error!(?error, "failed to restore pending deploy rejection");
-        }
+        deploy_target.reject(&state, req.org_id, resource_id).await;
         return Err(DeployLogicError::ByocRequired {
             location: std::panic::Location::caller(),
         });
     }
 
     if !is_managed_onprem && cpu_count > fully_managed_capacity::MAX_FULLY_MANAGED_ENCLAVE_VCPUS {
-        if let Err(error) = restore_pending_deploy_rejection(
-            &state,
-            req.org_id,
-            resource_id,
-            deploy_attempt_id,
-            previous_state,
-            was_destroyed,
-        )
-        .await
-        {
-            tracing::error!(?error, "failed to restore pending deploy rejection");
-        }
+        deploy_target.reject(&state, req.org_id, resource_id).await;
         return Err(DeployLogicError::VcpuLimit {
             location: std::panic::Location::caller(),
         });
@@ -4241,18 +4297,8 @@ async fn deploy_logic(
 
     let deployment_requirements_result =
         fully_managed_capacity::DeploymentRequirements::for_enclave(cpu_count, memory_mb);
-    if deployment_requirements_result.is_err()
-        && let Err(error) = restore_pending_deploy_rejection(
-            &state,
-            req.org_id,
-            resource_id,
-            deploy_attempt_id,
-            previous_state,
-            was_destroyed,
-        )
-        .await
-    {
-        tracing::error!(?error, "failed to restore pending deploy rejection");
+    if deployment_requirements_result.is_err() {
+        deploy_target.reject(&state, req.org_id, resource_id).await;
     }
     let deployment_requirements =
         deployment_requirements_result.with_context(Ctx::sizing_invalid())?;
@@ -4500,21 +4546,8 @@ async fn deploy_logic(
             None,
         )
         .await;
-        if reservation.is_err()
-            && let Err(rejection_error) = restore_pending_deploy_rejection(
-                &state,
-                req.org_id,
-                resource_id,
-                deploy_attempt_id,
-                previous_state,
-                was_destroyed,
-            )
-            .await
-        {
-            tracing::error!(
-                ?rejection_error,
-                "failed to restore pending deploy rejection"
-            );
+        if reservation.is_err() {
+            deploy_target.reject(&state, req.org_id, resource_id).await;
         }
         Some(reservation.with_context(Ctx::capacity_database())?)
     } else {
@@ -4611,20 +4644,16 @@ async fn deploy_logic(
             if let Some(reservation) = capacity_reservation.as_ref() {
                 fully_managed_capacity::release_reservation(&state.db, reservation).await;
             }
-            if let Err(recover_error) = recover_deploy_failure(
-                &state,
-                req.org_id,
-                resource_id,
-                deploy_attempt_id,
-                &app_name,
-                previous_state,
-                should_cleanup_on_failure,
-                &deployed_region,
-            )
-            .await
-            {
-                tracing::error!(?recover_error, "failed to recover from deploy failure");
-            }
+            deploy_target
+                .recover_failure(
+                    &state,
+                    req.org_id,
+                    resource_id,
+                    &app_name,
+                    should_cleanup_on_failure,
+                    &deployed_region,
+                )
+                .await;
         }
     }
     let deployment_result = deployment_result.with_context(Ctx::nitro_deploy())?;
@@ -4654,20 +4683,16 @@ async fn deploy_logic(
         if let Some(reservation) = capacity_reservation.as_ref() {
             fully_managed_capacity::release_reservation(&state.db, reservation).await;
         }
-        if let Err(recover_error) = recover_deploy_failure(
-            &state,
-            req.org_id,
-            resource_id,
-            deploy_attempt_id,
-            &app_name,
-            previous_state,
-            should_cleanup_on_failure,
-            &deployed_region,
-        )
-        .await
-        {
-            tracing::error!(?recover_error, "failed to recover from deploy failure");
-        }
+        deploy_target
+            .recover_failure(
+                &state,
+                req.org_id,
+                resource_id,
+                &app_name,
+                should_cleanup_on_failure,
+                &deployed_region,
+            )
+            .await;
     }
     health_result.with_context(Ctx::enclave_unhealthy())?;
 
@@ -4707,40 +4732,32 @@ async fn deploy_logic(
         if let Some(reservation) = capacity_reservation.as_ref() {
             fully_managed_capacity::release_reservation(&state.db, reservation).await;
         }
-        if let Err(recover_error) = recover_deploy_failure(
-            &state,
-            req.org_id,
-            resource_id,
-            deploy_attempt_id,
-            &app_name,
-            previous_state,
-            should_cleanup_on_failure,
-            &deployed_region,
-        )
-        .await
-        {
-            tracing::error!(?recover_error, "failed to recover from deploy failure");
-        }
+        deploy_target
+            .recover_failure(
+                &state,
+                req.org_id,
+                resource_id,
+                &app_name,
+                should_cleanup_on_failure,
+                &deployed_region,
+            )
+            .await;
     }
     let resource_update = resource_update.with_context(Ctx::resource_update())?;
     let Some((initial_dns_status, initial_dns_error)) = resource_update else {
         if let Some(reservation) = capacity_reservation.as_ref() {
             fully_managed_capacity::release_reservation(&state.db, reservation).await;
         }
-        if let Err(recover_error) = recover_deploy_failure(
-            &state,
-            req.org_id,
-            resource_id,
-            deploy_attempt_id,
-            &app_name,
-            previous_state,
-            should_cleanup_on_failure,
-            &deployed_region,
-        )
-        .await
-        {
-            tracing::error!(?recover_error, "failed to recover from deploy failure");
-        }
+        deploy_target
+            .recover_failure(
+                &state,
+                req.org_id,
+                resource_id,
+                &app_name,
+                should_cleanup_on_failure,
+                &deployed_region,
+            )
+            .await;
         return Err(DeployLogicError::PublishConflict {
             location: std::panic::Location::caller(),
         });
