@@ -13,6 +13,10 @@ pub struct DisplayContext {
     pub application_id: Uuid,
     pub destination_address: SocketAddr,
     pub custody_url: String,
+    /// Sent by CLIs releasing to one deployment (`send-shard -d`). Gateways ship
+    /// before such CLIs because this context rejects unknown fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment_id: Option<Uuid>,
 }
 impl DisplayContext {
     pub fn valid(&self) -> bool {
@@ -116,6 +120,37 @@ fn app_metadata(app: Value, id: Uuid, org: Uuid) -> Option<Value> {
     )
 }
 
+fn deployment_metadata(view: Value, app: Uuid, id: Uuid) -> Option<Value> {
+    if view["id"].as_str()? != id.to_string() || view["app_id"].as_str()? != app.to_string() {
+        return None;
+    }
+    Some(
+        json!({"id":view["id"], "role":view["role"], "status":view["status"],
+        "commit_sha":view["commit_sha"], "commit_subject":view["commit_subject"],
+        "pushed_ref":view["pushed_ref"], "public_ip":view["public_ip"]}),
+    )
+}
+
+/// Labels for the displayed app and deployment. A deployment is labelled only
+/// when its app is the displayed one and belongs to the release's organization.
+fn display_metadata(
+    app: Option<Value>,
+    deployment: Option<Value>,
+    display: Option<&DisplayContext>,
+    org: Uuid,
+) -> (Option<Value>, Option<Value>) {
+    let Some(display) = display else {
+        return (None, None);
+    };
+    let application = app.and_then(|app| app_metadata(app, display.application_id, org));
+    let deployment = application.as_ref().and(deployment).and_then(|view| {
+        display
+            .deployment_id
+            .and_then(|id| deployment_metadata(view, display.application_id, id))
+    });
+    (application, deployment)
+}
+
 pub async fn load(
     state: &AppState,
     user: Uuid,
@@ -129,15 +164,27 @@ pub async fn load(
         if organization["id"].as_str()? != org.to_string() {
             return None;
         }
-        let (rows, app) = tokio::join!(get(state, user, "/quorum-bundles"), async {
-            match display {
-                Some(d) => get(state, user, &format!("/resources/{}", d.application_id)).await,
-                None => None,
-            }
-        });
+        let (rows, app, deployment) = tokio::join!(
+            get(state, user, "/quorum-bundles"),
+            async {
+                match display {
+                    Some(d) => get(state, user, &format!("/resources/{}", d.application_id)).await,
+                    None => None,
+                }
+            },
+            async {
+                match display.and_then(|d| d.deployment_id.map(|id| (d.application_id, id))) {
+                    Some((app, id)) => {
+                        get(state, user, &format!("/resources/{app}/deployments/{id}")).await
+                    }
+                    None => None,
+                }
+            },
+        );
+        let (application, deployment) = display_metadata(app, deployment, display, org);
         Some(json!({"organization":{"name":organization["name"]},
             "bundle":rows.as_ref().and_then(|rows| bundle_metadata(rows, prepared)),
-            "application":app.and_then(|app| display.and_then(|d| app_metadata(app,d.application_id,org)))}))
+            "application":application, "deployment":deployment}))
     };
     tokio::time::timeout(Duration::from_secs(4), lookup)
         .await
@@ -172,6 +219,59 @@ mod tests {
                 .unwrap()
                 .valid());
         }
+    }
+
+    #[test]
+    fn display_context_accepts_an_optional_deployment() {
+        let (app, deployment) = (Uuid::new_v4(), Uuid::new_v4());
+        let base = json!({"application_id": app, "destination_address": "203.0.113.9:49504",
+                          "custody_url": "https://keys.example.com"});
+        let without: DisplayContext = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(without.deployment_id, None);
+        assert!(!serde_json::to_string(&without)
+            .unwrap()
+            .contains("deployment_id"));
+        let mut with = base;
+        with["deployment_id"] = json!(deployment);
+        let with: DisplayContext = serde_json::from_value(with).unwrap();
+        assert_eq!(with.deployment_id, Some(deployment));
+    }
+
+    #[test]
+    fn deployment_metadata_requires_the_displayed_app_and_deployment() {
+        let (app, deployment) = (Uuid::new_v4(), Uuid::new_v4());
+        let view = json!({"id": deployment, "app_id": app, "role": "candidate", "status": "running",
+                          "commit_sha": "b6e8c92", "commit_subject": "Fix", "pushed_ref": "main",
+                          "public_ip": "203.0.113.9", "instance_id": "i-0abc"});
+        let shown = deployment_metadata(view.clone(), app, deployment).unwrap();
+        assert_eq!(shown["public_ip"], "203.0.113.9");
+        assert!(shown.get("instance_id").is_none());
+        assert!(deployment_metadata(view.clone(), Uuid::new_v4(), deployment).is_none());
+        assert!(deployment_metadata(view, app, Uuid::new_v4()).is_none());
+    }
+
+    #[test]
+    fn deployment_labels_require_the_release_organization() {
+        let (org, other, app, deployment) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        let display: DisplayContext = serde_json::from_value(json!({"application_id": app,
+            "destination_address": "203.0.113.9:49504", "custody_url": "https://keys.example.com",
+            "deployment_id": deployment}))
+        .unwrap();
+        let view = json!({"id": deployment, "app_id": app, "role": "candidate", "public_ip": "203.0.113.9"});
+        let app_in =
+            |org: Uuid| json!({"id": app, "organization_id": org, "resource_name": "key-service"});
+        let (application, shown) =
+            display_metadata(Some(app_in(org)), Some(view.clone()), Some(&display), org);
+        assert!(application.is_some() && shown.is_some());
+        assert_eq!(
+            display_metadata(Some(app_in(other)), Some(view), Some(&display), org),
+            (None, None)
+        );
     }
 
     #[test]

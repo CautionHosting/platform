@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { comparisonCode, secondsRemaining, displayValue, uuid, destinationAddressDiffers } from '../src/composables/releaseDetails.js'
+import { comparisonCode, secondsRemaining, displayValue, uuid, destinationAddressDiffers, recordedDestination } from '../src/composables/releaseDetails.js'
 test('comparison uses exactly the same uppercase grouped prefix as the CLI', () => {
   assert.equal(comparisonCode('edcd12bf40e1c288' + '0'.repeat(48)), 'EDCD 12BF 40E1 C288')
   assert.equal(comparisonCode('invalid'), 'Unavailable')
@@ -23,4 +23,17 @@ test('address differences compare the host, not the destination port', () => {
   assert.equal(destinationAddressDiffers('203.0.113.43', '203.0.113.42:49504'), true)
   assert.equal(destinationAddressDiffers('::1', '[::1]:49504'), false)
   assert.equal(destinationAddressDiffers(null, '203.0.113.42:49504'), false)
+})
+test('a deployment release compares only against that deployment endpoint', () => {
+  const app = { application: { public_ip: '198.51.100.42' } }
+  // No deployment named (Legacy and bare releases): the app address, as before.
+  assert.equal(recordedDestination(app, undefined), '198.51.100.42')
+  assert.equal(recordedDestination({}, undefined), null)
+  // A deployment named: its own endpoint.
+  assert.equal(recordedDestination({ ...app, deployment: { public_ip: '203.0.113.9' } }, 'd2'), '203.0.113.9')
+  // A deployment named but its metadata missing (lookup timed out): nothing to
+  // compare, never the app address, so no false "address differs" warning.
+  assert.equal(recordedDestination(app, 'd2'), null)
+  assert.equal(recordedDestination({ ...app, deployment: null }, 'd2'), null)
+  assert.equal(destinationAddressDiffers(recordedDestination(app, 'd2'), '203.0.113.9:49504'), false)
 })

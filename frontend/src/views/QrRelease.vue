@@ -9,9 +9,10 @@
         <section class="destination">
           <h2>Destination</h2>
           <p class="app-name">{{ app.name || 'Application name unavailable' }}</p>
+          <p v-if="reported.deployment_id" class="source">Deployment {{ reported.deployment_id }}<span v-if="deployment.commit_sha"> · {{ deployment.commit_sha.slice(0, 7) }}</span><span v-if="deployment.role"> · {{ deployment.role }}</span><span v-if="!metadata.deployment"> · address unavailable</span></p>
           <p class="source"><span v-if="metadata.organization?.name">{{ metadata.organization.name }} · </span>Platform-provided labels</p>
           <p v-if="reported.destination_address" class="address">{{ reported.destination_address }}<small>Connection reported by your CLI</small></p>
-          <p v-if="addressMismatch" class="notice">The Platform-recorded address ({{ app.public_ip }}) differs from the CLI-reported destination. Check this difference before approving.</p>
+          <p v-if="addressMismatch" class="notice">The Platform-recorded address ({{ recorded }}) differs from the CLI-reported destination. Check this difference before approving.</p>
         </section>
         <section class="contribution" aria-label="Your contribution">
           <div><h2>Your share</h2><p class="emphasis">{{ bundle.username || 'Holder name unavailable' }}</p><p class="source">Passkey</p></div>
@@ -50,7 +51,7 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { releaseOptions, releaseAssertion } from '../composables/releaseApproval.js'
-import { hex, uuid, comparisonCode, secondsRemaining, destinationAddressDiffers } from '../composables/releaseDetails.js'
+import { hex, uuid, comparisonCode, secondsRemaining, destinationAddressDiffers, recordedDestination } from '../composables/releaseDetails.js'
 import ReleaseValue from '../components/ReleaseValue.vue'
 const token = window.location.hash.slice(1)
 const request = ref(null), state = ref('loading'), status = ref('Loading release request…'), remaining = ref(0), delivering = ref(false)
@@ -64,9 +65,11 @@ const active = computed(() => request.value !== null && ['pending', 'submitting'
 const title = computed(() => ({ loading: 'Loading approval', pending: 'Approve one share', submitting: 'Approve one share', relayed: 'Approval sent', cancelled: 'Approval cancelled', unavailable: 'Approval link inactive', error: 'Approval interrupted' })[state.value])
 const metadata = computed(() => request.value?.metadata || {})
 const app = computed(() => metadata.value.application || {})
+const deployment = computed(() => metadata.value.deployment || {})
 const bundle = computed(() => metadata.value.bundle || {})
 const reported = computed(() => request.value?.reported || {})
-const addressMismatch = computed(() => destinationAddressDiffers(app.value.public_ip, reported.value.destination_address))
+const recorded = computed(() => recordedDestination(metadata.value, reported.value.deployment_id))
+const addressMismatch = computed(() => destinationAddressDiffers(recorded.value, reported.value.destination_address))
 const drawer = ref(null), selectedTab = ref(0)
 function openDetails() { selectedTab.value = 0; drawer.value.showModal(); drawer.value.scrollTop = 0 }
 function trapFocus(event) {
@@ -90,7 +93,7 @@ const groups = computed(() => {
   const measurements = policy => Object.entries(policy || {}).map(([index, value]) => [`PCR${index}`, value])
   return [
     { title: 'Destination', explanation: 'The key-service enclave checked fresh destination attestation against the requested PCR policy. The CLI also checks the destination before requesting approval. Platform labels and reported addresses are descriptive, not attested application identity.', sections: [
-      section('Application & connection', [['Application ID', app.value.id], ['Domain', app.value.domain], ['Recorded state', app.value.state, false], ['Connection (CLI-reported)', reported.value.destination_address], ['Platform-recorded IP', app.value.public_ip]]),
+      section('Application & connection', [['Application ID', app.value.id], ['Domain', app.value.domain], ['Recorded state', app.value.state, false], ['Connection (CLI-reported)', reported.value.destination_address], ['Platform-recorded IP', app.value.public_ip], ['Deployment (CLI-reported)', reported.value.deployment_id], ['Deployment role', deployment.value.role, false], ['Deployment commit', deployment.value.commit_sha], ['Deployment subject', deployment.value.commit_subject, false], ['Platform-recorded deployment IP', deployment.value.public_ip]]),
       section('Attested session', [['Destination session key', hex(r.destination_key)], ['Destination attestation hash', r.destination_attestation_hash]]),
       section('Approved destination measurements', measurements(c.destination_policy)),
     ] },

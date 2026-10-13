@@ -10,3 +10,11 @@ export function destinationAddressDiffers(recorded, socket) {
   const host = socket.startsWith('[') ? socket.slice(1, socket.indexOf(']')) : socket.slice(0, socket.lastIndexOf(':'))
   return recorded !== host
 }
+
+// A deployment release compares the CLI destination with that deployment's
+// recorded endpoint only. If its metadata is missing (the gateway's lookup timed
+// out) there is nothing to compare: the app address belongs to another deployment.
+export const recordedDestination = (metadata, reportedDeploymentId) =>
+  reportedDeploymentId
+    ? (metadata?.deployment?.public_ip ?? null)
+    : (metadata?.application?.public_ip ?? null)

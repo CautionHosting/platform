@@ -469,7 +469,7 @@ mod verification_tests {
         assert_eq!(display["custody_policy"], serde_json::to_value(&pcrs).unwrap());
         let (mut descriptive, _) = fixture();
         descriptive.display = Some(metadata::DisplayContext { application_id: Uuid::new_v4(),
-            destination_address: "203.0.113.42:49504".parse().unwrap(), custody_url: "https://custody.example.test".into() });
+            destination_address: "203.0.113.42:49504".parse().unwrap(), custody_url: "https://custody.example.test".into(), deployment_id: None });
         let original = verified_request(&descriptive, &pcrs, "example.com").unwrap().0;
         descriptive.display.as_mut().unwrap().application_id = Uuid::new_v4();
         assert_eq!(verified_request(&descriptive, &pcrs, "example.com").unwrap().0, original);
