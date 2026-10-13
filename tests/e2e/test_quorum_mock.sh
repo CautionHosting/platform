@@ -173,6 +173,13 @@ PUBLIC_CERTIFICATE_SERVICE_URL="$PUBLIC_CERTIFICATE_SERVICE_URL" \
 QUORUM_RECOVERY_TEST_DIR="$WORK" \
     "$RECOVERY_TEST" --ignored --exact \
     quorum_init::tests::downloaded_bundles_require_explicit_noninteractive_holder --nocapture < /dev/null
+# One deployment's endpoint, trust and recorded bundle; wrong bundle, no endpoint and bare targets refuse.
+CAUTION_UNSAFE_KEY_SERVICE_E2E=1 \
+KEYMAKER_PCR_POLICY_PATH="$WORK/policies/keymaker-pcr-policy.json" \
+PUBLIC_CERTIFICATE_SERVICE_URL="$PUBLIC_CERTIFICATE_SERVICE_URL" \
+QUORUM_RECOVERY_TEST_DIR="$WORK" \
+    "$RECOVERY_TEST" --ignored --exact \
+    secrets::send_shard_tests::deployment_release_resolves_exact_target_trust_and_bundle --nocapture < /dev/null
 # A terminal receives no JSON dump, even in a directory without app metadata.
 "${COMMON[@]}" python3 - "$CARGO_TARGET_DIR/debug/caution" "$WORK" <<'PY'
 import errno, json, os, pathlib, pty, subprocess, sys

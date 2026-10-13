@@ -105,6 +105,21 @@ fn serve(mut stream: TcpStream, work: &Path, ca: &Cert, wrong_ca: &Cert) -> Resu
             200,
             serde_json::json!({"id":"quorum-test", "state":"running", "provider_resource_id":"test", "public_ip":"127.0.0.1"}),
         )
+    } else if let Some(fixture) = first
+        .strip_prefix("GET ")
+        .and_then(|rest| rest.split_once(' '))
+        .map(|(path, _)| path)
+        .filter(|path| path.starts_with("/api/resources/") || path.starts_with("/api/deployments/"))
+        // Lowercase UUID characters and `/` only: no `.`, so no path traversal.
+        .filter(|path| {
+            path.chars()
+                .all(|c| c.is_ascii_hexdigit() || c.is_ascii_lowercase() || c == '/' || c == '-')
+        })
+        .map(|path| work.join(format!("mock-resources{path}.json")))
+        .filter(|file| file.is_file())
+    {
+        // Deployment fixtures written by the CLI's deployment release test.
+        (200, serde_json::from_slice(&fs::read(fixture)?)?)
     } else if authorization
         != format!(
             "Bearer {}",
