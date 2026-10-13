@@ -61,10 +61,6 @@ pub struct AppAddress {
 
 /// Live EC2 runtime of one instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "first caller lands with live endpoint resolution")
-)]
 pub struct InstanceRuntime {
     /// EC2 instance state name (`pending`, `running`, `stopped`, ...).
     pub state: String,
@@ -716,7 +712,6 @@ impl Ec2Client {
 
     /// The live runtime of an instance, or `None` when EC2 does not know it.
     #[tracing::instrument(skip_all, err)]
-    #[expect(dead_code, reason = "first caller lands with live endpoint resolution")]
     pub async fn describe_instance_runtime(
         &self,
         instance_id: &str,

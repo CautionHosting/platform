@@ -5794,6 +5794,10 @@ async fn main() -> Result<(), MainError> {
         .route("/resources/{id}", patch(resources::rename_resource))
         .route("/resources/{id}", delete(resources::delete_resource))
         .route(
+            "/resources/{id}/deployments/{deployment_id}/switch",
+            post(app_deployments::switch::switch_handler),
+        )
+        .route(
             "/resources/{id}/attestation",
             post(resources::proxy_attestation),
         )

@@ -6,6 +6,7 @@
 pub(crate) mod admission;
 pub(crate) mod internal;
 pub(crate) mod lifecycle;
+pub(crate) mod switch;
 
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use sqlx::{PgPool, Postgres, Transaction};

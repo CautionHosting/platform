@@ -981,6 +981,23 @@ fn requires_fido2_signature(method: &Method, path: &str) -> bool {
         || (path.starts_with("/pgp-keys/") && *method == Method::DELETE)
         || (path == "/passkeys/register/begin" && *method == Method::POST)
         || (path.starts_with("/passkeys/") && *method == Method::DELETE)
+        || is_deployment_switch(method, path)
+}
+
+fn is_deployment_switch(method: &Method, path: &str) -> bool {
+    *method == Method::POST
+        && path.starts_with("/resources/")
+        && path.contains("/deployments/")
+        && path.ends_with("/switch")
+}
+
+/// E2E builds skip request signing except on these boundaries, which their
+/// tests exercise with a soft authenticator (spec: switch stays signed in E2E).
+#[cfg_attr(not(feature = "e2e-testing-unsafe"), allow(dead_code))]
+fn e2e_keeps_signature(method: &Method, path: &str) -> bool {
+    (path.starts_with("/quorum-bundles")
+        && matches!(*method, Method::POST | Method::PATCH | Method::DELETE))
+        || is_deployment_switch(method, path)
 }
 
 /// Handler error for `fido2_sign_middleware`: every variant maps to an explicit
@@ -1267,13 +1284,12 @@ async fn fido2_sign_flow(
     use Fido2SignError as E;
     use Fido2SignErrorCtx as Ctx;
 
-    // Keep quorum writes signed even in E2E mode so tests exercise this boundary.
-    // Other E2E routes retain their existing session-only behavior.
+    // Keep quorum writes and the deployment switch signed even in E2E mode so
+    // tests exercise these boundaries. Other E2E routes retain their existing
+    // session-only behavior.
     #[cfg(feature = "e2e-testing-unsafe")]
     {
-        if !(req.uri().path().starts_with("/quorum-bundles")
-            && matches!(*req.method(), Method::POST | Method::PATCH | Method::DELETE))
-        {
+        if !e2e_keeps_signature(req.method(), req.uri().path()) {
             return Ok(next.run(req).await);
         }
     }
@@ -1574,6 +1590,31 @@ mod tests {
         assert!(!requires_fido2_signature(
             &Method::POST,
             "/pgp-keys/unexpected"
+        ));
+    }
+
+    #[test]
+    fn deployment_switch_requires_fido2_signature() {
+        let path = format!("/resources/{RESOURCE_ID}/deployments/{RESOURCE_ID}/switch");
+        assert!(requires_fido2_signature(&Method::POST, &path));
+        assert!(!requires_fido2_signature(&Method::GET, &path));
+        assert!(!requires_fido2_signature(
+            &Method::DELETE,
+            &format!("/resources/{RESOURCE_ID}")
+        ));
+        // Never SSH-signed: the switch is not on the SSH allowlist.
+        assert!(!is_ssh_signed_resource_request(&Method::POST, &path));
+    }
+
+    #[test]
+    fn e2e_builds_keep_switch_and_quorum_writes_signed() {
+        let switch = format!("/resources/{RESOURCE_ID}/deployments/{RESOURCE_ID}/switch");
+        assert!(e2e_keeps_signature(&Method::POST, &switch));
+        assert!(e2e_keeps_signature(&Method::POST, "/quorum-bundles"));
+        assert!(!e2e_keeps_signature(&Method::POST, "/ssh-keys"));
+        assert!(!e2e_keeps_signature(
+            &Method::DELETE,
+            &format!("/resources/{RESOURCE_ID}/deployments/{RESOURCE_ID}")
         ));
     }
 

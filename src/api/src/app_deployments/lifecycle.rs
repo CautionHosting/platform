@@ -7,7 +7,7 @@
 use super::{PROCESS_ID, admission, lock_app_operations};
 use crate::{AppState, deployment, ec2, fully_managed_capacity, managed_dns};
 use dterror::{BoxError, CtxError, Location, ResultExt};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use std::sync::atomic::{AtomicU8, Ordering};
 use uuid::Uuid;
 
@@ -174,15 +174,20 @@ pub(crate) enum CompleteRunningError {
     },
 }
 
-/// Moves the app Elastic IP. A seam so the database-backed tests can pause or
-/// fail the EC2 call; production uses [`ec2::Ec2Client`].
-trait AppAddressMover {
+/// Reads and moves the app Elastic IP. A seam so the database-backed tests can
+/// pause or fail the EC2 calls; production uses [`ec2::Ec2Client`].
+pub(super) trait AppAddressMover {
     async fn move_address(
         &self,
         resource_id: &str,
         target: &str,
         expected_holder: Option<&str>,
     ) -> Result<String, ec2::MoveAppAddressError>;
+
+    async fn describe_address(
+        &self,
+        resource_id: &str,
+    ) -> Result<ec2::AppAddress, ec2::DescribeAppAddressError>;
 }
 
 impl AppAddressMover for ec2::Ec2Client {
@@ -195,6 +200,76 @@ impl AppAddressMover for ec2::Ec2Client {
         self.move_app_address(resource_id, target, expected_holder)
             .await
     }
+
+    async fn describe_address(
+        &self,
+        resource_id: &str,
+    ) -> Result<ec2::AppAddress, ec2::DescribeAppAddressError> {
+        self.describe_app_address(resource_id).await
+    }
+}
+
+/// Failure modes for [`project_live`].
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("failed to record deployment {deployment_id} live for app {app_id} [{location}]")]
+pub(crate) struct ProjectLiveError {
+    app_id: Uuid,
+    deployment_id: Uuid,
+    #[location]
+    location: Location,
+    #[source]
+    source: BoxError,
+}
+
+/// Makes `deployment_id` live and refreshes the app-level projection from it:
+/// `provider_resource_id`, `state`, `public_ip` (= the app EIP), `region`,
+/// `configuration` and managed DNS. The caller holds the app lock, has
+/// re-validated the selection and placed `eip_public_ip` on its instance.
+pub(crate) async fn project_live(
+    tx: &mut Transaction<'_, Postgres>,
+    app_id: Uuid,
+    deployment_id: Uuid,
+    eip_public_ip: &str,
+    managed_dns_enabled: bool,
+) -> Result<managed_dns::DnsSnapshot, ProjectLiveError> {
+    let ctx = || ProjectLiveErrorCtx::new(app_id, deployment_id);
+
+    let (status, error): (String, Option<String>) = sqlx::query_as(
+        "UPDATE compute_resources cr
+         SET live_deployment_id = d.id, provider_resource_id = d.instance_id, state = 'running',
+             public_ip = $3, region = d.region,
+             configuration = COALESCE(cr.configuration, '{}'::jsonb) || d.configuration,
+             dns_status = CASE
+                 WHEN NOT $4::boolean THEN cr.dns_status
+                 WHEN cr.dns_status = 'ready' AND cr.public_ip = $3 THEN 'ready'
+                 ELSE 'publishing'
+             END,
+             dns_error = CASE WHEN $4::boolean THEN NULL ELSE cr.dns_error END,
+             dns_change_id = CASE
+                 WHEN $4::boolean AND NOT (cr.dns_status = 'ready' AND cr.public_ip = $3) THEN NULL
+                 ELSE cr.dns_change_id
+             END,
+             dns_release_not_before = CASE
+                 WHEN $4::boolean THEN NULL ELSE cr.dns_release_not_before
+             END,
+             updated_at = NOW()
+         FROM app_deployments d
+         WHERE cr.id = $1 AND d.id = $2 AND d.app_id = cr.id
+         RETURNING cr.dns_status, cr.dns_error",
+    )
+    .bind(app_id)
+    .bind(deployment_id)
+    .bind(eip_public_ip)
+    .bind(managed_dns_enabled)
+    .fetch_one(&mut **tx)
+    .await
+    .with_context(ctx())?;
+    sqlx::query("UPDATE app_deployments SET activated_at = NOW() WHERE id = $1")
+        .bind(deployment_id)
+        .execute(&mut **tx)
+        .await
+        .with_context(ctx())?;
+    Ok(managed_dns::DnsSnapshot { status, error })
 }
 
 /// Records Running and, iff nothing is live, attaches the app EIP and makes
@@ -341,49 +416,22 @@ async fn complete_running_with(
         .await
         .with_context(Ctx::attach_address())?;
 
-    let (dns_status, dns_error): (String, Option<String>) = sqlx::query_as(
-        "UPDATE compute_resources
-         SET live_deployment_id = $2, provider_resource_id = $3, state = 'running',
-             public_ip = $4, region = $5,
-             configuration = COALESCE(configuration, '{}'::jsonb) || $6::jsonb,
-             dns_status = CASE
-                 WHEN NOT $7::boolean THEN dns_status
-                 WHEN dns_status = 'ready' AND public_ip = $4 THEN 'ready'
-                 ELSE 'publishing'
-             END,
-             dns_error = CASE WHEN $7::boolean THEN NULL ELSE dns_error END,
-             dns_change_id = CASE
-                 WHEN $7::boolean AND NOT (dns_status = 'ready' AND public_ip = $4) THEN NULL
-                 ELSE dns_change_id
-             END,
-             dns_release_not_before = CASE WHEN $7::boolean THEN NULL ELSE dns_release_not_before END,
-             updated_at = NOW()
-         WHERE id = $1 AND (live_deployment_id IS NULL OR live_deployment_id = $2)
-         RETURNING dns_status, dns_error",
+    // Projects the row written above (instance, configuration) and the
+    // region recorded at provisioning.
+    let dns = project_live(
+        &mut tx,
+        app_id,
+        deployment.id,
+        &eip_public_ip,
+        managed_dns_enabled,
     )
-    .bind(app_id)
-    .bind(deployment.id)
-    .bind(&deployment.instance_id)
-    .bind(&eip_public_ip)
-    .bind(&deployment.region)
-    .bind(&deployment.configuration)
-    .bind(managed_dns_enabled)
-    .fetch_one(&mut *tx)
     .await
     .with_context(Ctx::database())?;
-    sqlx::query("UPDATE app_deployments SET activated_at = NOW() WHERE id = $1")
-        .bind(deployment.id)
-        .execute(&mut *tx)
-        .await
-        .with_context(Ctx::database())?;
     tx.commit().await.with_context(Ctx::database())?;
     Ok(Activation {
         role: Role::Live,
         live_deployment_id: Some(deployment.id),
-        dns: Some(managed_dns::DnsSnapshot {
-            status: dns_status,
-            error: dns_error,
-        }),
+        dns: Some(dns),
         eip_public_ip: Some(eip_public_ip),
     })
 }

@@ -1,11 +1,14 @@
 // SPDX-FileCopyrightText: 2026 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-//! Database-backed concurrency regressions for [`complete_running`]: run
-//! `bash tests/e2e/test_app_deployments_db.sh` (isolated PostgreSQL).
+//! Database-backed concurrency regressions for [`complete_running`] and the
+//! deployment switch: run `bash tests/e2e/test_app_deployments_db.sh`
+//! (isolated PostgreSQL).
 
 use super::*;
-use sqlx::{Postgres, Transaction};
+use crate::app_deployments::switch::{
+    SwitchError, SwitchRejection, SwitchRequest, SwitchResponse, commit_switch,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -53,6 +56,8 @@ enum Response {
 struct ControlledMover {
     response: Response,
     calls: AtomicUsize,
+    /// The `expected_holder` of each move.
+    expected: Mutex<Vec<Option<String>>>,
     /// Instance holding the EIP.
     holder: Mutex<Option<String>>,
     reached: Notify,
@@ -61,10 +66,15 @@ struct ControlledMover {
 
 impl ControlledMover {
     fn new(response: Response) -> Arc<Self> {
+        Self::holding(response, None)
+    }
+
+    fn holding(response: Response, holder: Option<&str>) -> Arc<Self> {
         Arc::new(Self {
             response,
             calls: AtomicUsize::new(0),
-            holder: Mutex::new(None),
+            expected: Mutex::new(Vec::new()),
+            holder: Mutex::new(holder.map(str::to_string)),
             reached: Notify::new(),
             release: Semaphore::new(0),
         })
@@ -74,12 +84,18 @@ impl ControlledMover {
         self.calls.load(Ordering::SeqCst)
     }
 
+    fn expected(&self) -> Vec<Option<String>> {
+        self.expected.lock().unwrap().clone()
+    }
+
     fn holder(&self) -> Option<String> {
         self.holder.lock().unwrap().clone()
     }
 }
 
 impl AppAddressMover for ControlledMover {
+    /// Mirrors `Ec2Client::move_app_address`: succeeds at the target, refuses
+    /// any holder but the expected one.
     async fn move_address(
         &self,
         _resource_id: &str,
@@ -87,14 +103,17 @@ impl AppAddressMover for ControlledMover {
         expected_holder: Option<&str>,
     ) -> Result<String, ec2::MoveAppAddressError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        assert_eq!(
-            expected_holder, None,
-            "activation never takes the EIP from a holder"
-        );
-        if self.response == Response::Fail {
+        self.expected
+            .lock()
+            .unwrap()
+            .push(expected_holder.map(str::to_string));
+        let holder = self.holder();
+        if self.response == Response::Fail
+            || (holder.as_deref() != Some(target) && holder.as_deref() != expected_holder)
+        {
             return Err(ec2::MoveAppAddressError::HolderMismatch {
-                expected: None,
-                actual: Some("i-elsewhere".to_string()),
+                expected: expected_holder.map(str::to_string),
+                actual: holder.or(Some("i-elsewhere".to_string())),
                 location: std::panic::Location::caller(),
             });
         }
@@ -104,6 +123,17 @@ impl AppAddressMover for ControlledMover {
             self.release.acquire().await.unwrap().forget();
         }
         Ok(EIP.to_string())
+    }
+
+    async fn describe_address(
+        &self,
+        _resource_id: &str,
+    ) -> Result<ec2::AppAddress, ec2::DescribeAppAddressError> {
+        Ok(ec2::AppAddress {
+            allocation_id: "eipalloc-test".to_string(),
+            public_ip: EIP.to_string(),
+            instance_id: self.holder(),
+        })
     }
 }
 
@@ -116,17 +146,32 @@ enum Rival {
     Switch,
 }
 
+#[derive(Clone, Copy)]
 struct Fixture {
     org: Uuid,
     app: Uuid,
+    /// An org member, allowed to switch.
+    user: Uuid,
     target: Uuid,
 }
 
+/// A deployments app whose first push recorded its region.
 async fn fixture(pool: &PgPool, target_status: &str) -> Fixture {
     let org = organization(pool).await;
     let app = deployments_app(pool, org).await;
+    sqlx::query("UPDATE compute_resources SET region = 'us-east-1' WHERE id = $1")
+        .bind(app)
+        .execute(pool)
+        .await
+        .unwrap();
+    let user = member(pool, org).await;
     let target = deployment(pool, org, app, target_status, None).await;
-    Fixture { org, app, target }
+    Fixture {
+        org,
+        app,
+        user,
+        target,
+    }
 }
 
 /// An organization with an active AWS provider account.
@@ -213,25 +258,31 @@ struct AppRow {
     live: Option<Uuid>,
     state: String,
     public_ip: Option<String>,
+    region: Option<String>,
     provider_resource_id: String,
     dns_status: String,
+    commit_sha: Option<String>,
 }
 
 async fn app_row(pool: &PgPool, app: Uuid) -> AppRow {
-    let (live, state, public_ip, provider_resource_id, dns_status) = sqlx::query_as(
-        "SELECT live_deployment_id, state::text, public_ip, provider_resource_id, dns_status
-         FROM compute_resources WHERE id = $1",
-    )
-    .bind(app)
-    .fetch_one(pool)
-    .await
-    .unwrap();
+    let (live, state, public_ip, region, provider_resource_id, dns_status, commit_sha) =
+        sqlx::query_as(
+            "SELECT live_deployment_id, state::text, public_ip, region, provider_resource_id,
+                    dns_status, configuration->>'commit_sha'
+             FROM compute_resources WHERE id = $1",
+        )
+        .bind(app)
+        .fetch_one(pool)
+        .await
+        .unwrap();
     AppRow {
         live,
         state,
         public_ip,
+        region,
         provider_resource_id,
         dns_status,
+        commit_sha,
     }
 }
 
@@ -272,28 +323,63 @@ async fn wait_for_lock_waiters(pool: &PgPool, count: i64) {
     panic!("expected {count} lock waiters");
 }
 
-async fn run_rival(pool: PgPool, app: Uuid, target: Uuid, other: Uuid, kind: Rival) {
-    let mut tx = hold_app_lock(&pool, app).await;
+fn switch_request(expected_live_deployment_id: Option<Uuid>) -> SwitchRequest {
+    SwitchRequest {
+        expected_live_deployment_id,
+        acknowledged_verification: true,
+    }
+}
+
+/// The switch after its unlocked validation and health check.
+fn spawn_switch(
+    pool: &PgPool,
+    mover: &Arc<ControlledMover>,
+    f: &Fixture,
+    target: Uuid,
+    expected: Option<Uuid>,
+) -> JoinHandle<Result<SwitchResponse, SwitchError>> {
+    let (pool, mover, user, app) = (pool.clone(), mover.clone(), f.user, f.app);
+    tokio::spawn(async move {
+        commit_switch(
+            &pool,
+            true,
+            &*mover,
+            user,
+            app,
+            target,
+            &switch_request(expected),
+        )
+        .await
+    })
+}
+
+async fn run_rival(pool: PgPool, f: Fixture, other: Uuid, kind: Rival) {
     match kind {
         // The current teardown entry point, on its own connection.
-        Rival::TerminateApp => managed_dns::begin_termination(&pool, app).await.unwrap(),
-        Rival::DestroyTarget => {
-            sqlx::query("UPDATE app_deployments SET status = 'destroying' WHERE id = $1")
-                .bind(target)
-                .execute(&mut *tx)
-                .await
-                .unwrap();
+        Rival::TerminateApp => {
+            let tx = hold_app_lock(&pool, f.app).await;
+            managed_dns::begin_termination(&pool, f.app).await.unwrap();
+            tx.commit().await.unwrap();
         }
-        Rival::Switch => {
-            sqlx::query("UPDATE compute_resources SET live_deployment_id = $2 WHERE id = $1")
-                .bind(app)
-                .bind(other)
+        Rival::DestroyTarget => {
+            let mut tx = hold_app_lock(&pool, f.app).await;
+            sqlx::query("UPDATE app_deployments SET status = 'destroying' WHERE id = $1")
+                .bind(f.target)
                 .execute(&mut *tx)
                 .await
                 .unwrap();
+            tx.commit().await.unwrap();
+        }
+        // The real switch, which takes the app lock itself.
+        Rival::Switch => {
+            let mover = ControlledMover::new(Response::Move);
+            let request = switch_request(None);
+            let switched = commit_switch(&pool, true, &*mover, f.user, f.app, other, &request)
+                .await
+                .unwrap();
+            assert_eq!(switched.live_deployment_id, other);
         }
     }
-    tx.commit().await.unwrap();
 }
 
 async fn first_running_deployment_goes_live(pool: &PgPool) {
@@ -309,13 +395,17 @@ async fn first_running_deployment_goes_live(pool: &PgPool) {
     assert_eq!(activation.eip_public_ip.as_deref(), Some(EIP));
     assert_eq!(activation.dns.unwrap().status, "publishing");
     assert_eq!(mover.calls(), 1);
+    // Activation never takes the EIP from a holder.
+    assert_eq!(mover.expected(), vec![None]);
     assert_eq!(mover.holder(), Some(deployment.instance_id.clone()));
     let app = app_row(pool, f.app).await;
     assert_eq!(app.live, Some(f.target));
     assert_eq!(app.state, "running");
     assert_eq!(app.public_ip.as_deref(), Some(EIP));
+    assert_eq!(app.region.as_deref(), Some("us-east-1"));
     assert_eq!(app.provider_resource_id, deployment.instance_id);
     assert_eq!(app.dns_status, "publishing");
+    assert_eq!(app.commit_sha.as_deref(), Some("0123abcd"));
     assert_eq!(
         deployment_row(pool, f.target).await,
         ("running".to_string(), true, false)
@@ -404,15 +494,18 @@ async fn rival_wins_between_running_and_activation(pool: &PgPool, kind: Rival) {
     let holder = hold_app_lock(pool, f.app).await;
     let activation = spawn_activation(pool, &mover, f.app, running(f.target));
     wait_for_lock_waiters(pool, 1).await;
-    let rival = tokio::spawn(run_rival(pool.clone(), f.app, f.target, other, kind));
+    let rival = tokio::spawn(run_rival(pool.clone(), f, other, kind));
     wait_for_lock_waiters(pool, 2).await;
     holder.commit().await.unwrap();
     let result = activation.await.unwrap();
     rival.await.unwrap();
 
-    assert_eq!(mover.calls(), 0, "{kind:?}: the EIP must not move");
+    assert_eq!(
+        mover.calls(),
+        0,
+        "{kind:?}: activation must not move the EIP"
+    );
     let app = app_row(pool, f.app).await;
-    assert_eq!(app.public_ip, None, "{kind:?}");
     let (status, activated, _) = deployment_row(pool, f.target).await;
     assert!(!activated, "{kind:?}");
     match kind {
@@ -422,6 +515,7 @@ async fn rival_wins_between_running_and_activation(pool: &PgPool, kind: Rival) {
                 Err(CompleteRunningError::AppNotActive { ref state, .. }) if state == "terminating"
             ));
             assert_eq!(app.live, None);
+            assert_eq!(app.public_ip, None);
             assert_eq!(status, "running");
         }
         Rival::DestroyTarget => {
@@ -430,6 +524,7 @@ async fn rival_wins_between_running_and_activation(pool: &PgPool, kind: Rival) {
                 Err(CompleteRunningError::OwnershipLost { .. })
             ));
             assert_eq!(app.live, None);
+            assert_eq!(app.public_ip, None);
             assert_eq!(status, "destroying");
         }
         Rival::Switch => {
@@ -437,6 +532,8 @@ async fn rival_wins_between_running_and_activation(pool: &PgPool, kind: Rival) {
             assert_eq!(activation.role, Role::Candidate);
             assert_eq!(activation.live_deployment_id, Some(other));
             assert_eq!(app.live, Some(other), "the switch's selection is kept");
+            assert_eq!(app.public_ip.as_deref(), Some(EIP));
+            assert_eq!(app.provider_resource_id, "i-other");
             assert_eq!(status, "running");
         }
     }
@@ -533,6 +630,190 @@ async fn interrupted_activation_keeps_running_for_reconciliation(pool: &PgPool) 
     assert_eq!(app.live, None);
     assert_eq!(app.state, "initialized");
     assert_eq!(app.public_ip, None);
+}
+
+#[tokio::test]
+#[ignore = "run bash tests/e2e/test_app_deployments_db.sh (isolated PostgreSQL)"]
+async fn switch_concurrency() {
+    let pool = test_pool().await;
+
+    first_switch_projects_the_app(&pool).await;
+    stale_expectation_is_rejected(&pool).await;
+    concurrent_switches_serialise(&pool).await;
+    lost_live_runtime_switches_from_an_unassigned_address(&pool).await;
+    pool.close().await;
+}
+
+/// `live` serves through the app EIP with published DNS.
+async fn serve(pool: &PgPool, app: Uuid, live: Uuid) {
+    sqlx::query(
+        "UPDATE compute_resources
+         SET live_deployment_id = $2, state = 'running', public_ip = $3, dns_status = 'ready'
+         WHERE id = $1",
+    )
+    .bind(app)
+    .bind(live)
+    .bind(EIP)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// A Running deployment that is not live after a failed first activation.
+async fn first_switch_projects_the_app(pool: &PgPool) {
+    let f = fixture(pool, "running").await;
+    sqlx::query(
+        "UPDATE app_deployments SET instance_id = 'i-first',
+                configuration = '{\"commit_sha\": \"0123abcd\"}'
+         WHERE id = $1",
+    )
+    .bind(f.target)
+    .execute(pool)
+    .await
+    .unwrap();
+    let mover = ControlledMover::new(Response::Move);
+    let switched = spawn_switch(pool, &mover, &f, f.target, None)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(switched.live_deployment_id, f.target);
+    assert_eq!(switched.previous_live_deployment_id, None);
+    assert_eq!(switched.stable_ip, EIP);
+    // With nothing live, only an unassigned address may move.
+    assert_eq!(mover.expected(), vec![None]);
+    assert_eq!(mover.holder().as_deref(), Some("i-first"));
+    let app = app_row(pool, f.app).await;
+    assert_eq!(app.live, Some(f.target));
+    assert_eq!(app.state, "running");
+    assert_eq!(app.public_ip.as_deref(), Some(EIP));
+    assert_eq!(app.region.as_deref(), Some("us-east-1"));
+    assert_eq!(app.provider_resource_id, "i-first");
+    assert_eq!(app.dns_status, "publishing");
+    assert_eq!(app.commit_sha.as_deref(), Some("0123abcd"));
+    assert_eq!(
+        deployment_row(pool, f.target).await,
+        ("running".to_string(), true, false)
+    );
+
+    // Selecting the live deployment again is a no-op.
+    let again = spawn_switch(pool, &mover, &f, f.target, Some(f.target))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(again.previous_live_deployment_id, None);
+    assert_eq!(mover.calls(), 1);
+}
+
+async fn stale_expectation_is_rejected(pool: &PgPool) {
+    let f = fixture(pool, "running").await;
+    let live = deployment(pool, f.org, f.app, "running", Some("i-live")).await;
+    sqlx::query("UPDATE app_deployments SET instance_id = 'i-target' WHERE id = $1")
+        .bind(f.target)
+        .execute(pool)
+        .await
+        .unwrap();
+    serve(pool, f.app, live).await;
+    let mover = ControlledMover::holding(Response::Move, Some("i-live"));
+    // Confirmed while nothing was live.
+    let error = spawn_switch(pool, &mover, &f, f.target, None)
+        .await
+        .unwrap()
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        SwitchError::Rejected {
+            rejection: SwitchRejection::Stale,
+            ..
+        }
+    ));
+    assert_eq!(mover.calls(), 0);
+    assert_eq!(mover.holder().as_deref(), Some("i-live"));
+    assert_eq!(app_row(pool, f.app).await.live, Some(live));
+}
+
+/// Two switches confirmed against the same live deployment: the second waits
+/// on the app lock, then fails its expectation.
+async fn concurrent_switches_serialise(pool: &PgPool) {
+    let f = fixture(pool, "running").await;
+    let live = deployment(pool, f.org, f.app, "running", Some("i-live")).await;
+    let rival = deployment(pool, f.org, f.app, "running", Some("i-rival")).await;
+    sqlx::query("UPDATE app_deployments SET instance_id = 'i-target' WHERE id = $1")
+        .bind(f.target)
+        .execute(pool)
+        .await
+        .unwrap();
+    serve(pool, f.app, live).await;
+    let mover = ControlledMover::holding(Response::MoveAndPause, Some("i-live"));
+
+    let first = spawn_switch(pool, &mover, &f, f.target, Some(live));
+    mover.reached.notified().await;
+    let second = spawn_switch(pool, &mover, &f, rival, Some(live));
+    wait_for_lock_waiters(pool, 1).await;
+    assert!(!second.is_finished());
+    mover.release.add_permits(1);
+
+    let switched = first.await.unwrap().unwrap();
+    assert_eq!(switched.previous_live_deployment_id, Some(live));
+    assert!(matches!(
+        second.await.unwrap(),
+        Err(SwitchError::Rejected {
+            rejection: SwitchRejection::Stale,
+            ..
+        })
+    ));
+    assert_eq!(mover.calls(), 1);
+    assert_eq!(mover.expected(), vec![Some("i-live".to_string())]);
+    assert_eq!(mover.holder().as_deref(), Some("i-target"));
+    let app = app_row(pool, f.app).await;
+    assert_eq!(app.live, Some(f.target));
+    assert_eq!(app.provider_resource_id, "i-target");
+    // The stable EIP keeps its published record.
+    assert_eq!(app.dns_status, "ready");
+    // The previous live deployment is retained as a candidate.
+    assert_eq!(
+        deployment_row(pool, live).await,
+        ("running".to_string(), false, false)
+    );
+}
+
+/// Host failure: the live instance terminated and released the EIP.
+async fn lost_live_runtime_switches_from_an_unassigned_address(pool: &PgPool) {
+    let f = fixture(pool, "running").await;
+    let live = deployment(pool, f.org, f.app, "running", Some("i-dead")).await;
+    sqlx::query("UPDATE app_deployments SET instance_id = 'i-target' WHERE id = $1")
+        .bind(f.target)
+        .execute(pool)
+        .await
+        .unwrap();
+    serve(pool, f.app, live).await;
+    let mover = ControlledMover::new(Response::Move);
+
+    // Until reconciliation confirms the loss, an unassigned EIP is unexpected.
+    let error = spawn_switch(pool, &mover, &f, f.target, Some(live))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(error, SwitchError::AssociationMismatch { .. }));
+    assert_eq!(app_row(pool, f.app).await.live, Some(live));
+
+    sqlx::query(
+        "UPDATE app_deployments SET status = 'failed', failure_kind = 'runtime_lost'
+         WHERE id = $1",
+    )
+    .bind(live)
+    .execute(pool)
+    .await
+    .unwrap();
+    let switched = spawn_switch(pool, &mover, &f, f.target, Some(live))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(switched.previous_live_deployment_id, Some(live));
+    assert_eq!(mover.expected(), vec![Some("i-dead".to_string()), None]);
+    assert_eq!(mover.holder().as_deref(), Some("i-target"));
+    assert_eq!(app_row(pool, f.app).await.live, Some(f.target));
 }
 
 /// `/deploy` takes the deployment ID from its body, so a failed request may
