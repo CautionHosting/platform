@@ -1089,11 +1089,12 @@ pub(crate) async fn dns_snapshot(
     Ok(DnsSnapshot { status, error })
 }
 
-/// A deployments-lifecycle app with a build, a provisioning or an unexpired
-/// reservation in flight (binds `$1` to the app). Its teardown waits for it.
+/// A deployments-lifecycle app with a build, a provisioning, a deployment
+/// destroy or an unexpired reservation in flight (binds `$1` to the app). Its
+/// teardown waits for it.
 const DEPLOYMENT_OPERATION_ACTIVE: &str = "lifecycle = 'deployments' AND EXISTS (
          SELECT 1 FROM app_deployments d
-         WHERE d.app_id = $1 AND (d.status IN ('building', 'provisioning')
+         WHERE d.app_id = $1 AND (d.status IN ('building', 'provisioning', 'destroying')
              OR (d.status = 'reserved' AND d.reservation_expires_at > NOW())))";
 
 #[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]

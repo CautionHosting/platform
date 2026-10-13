@@ -33,7 +33,8 @@
 # operation, then destroys the app until the database shows it terminated. If it
 # cannot, it prints `LEAKED app <id> ...` with the deployment instance IDs and
 # exits 86: destroy that infrastructure manually before `down-test` drops the
-# database. A tolerated incomplete `verify -d` is listed as `ACCEPTANCE OPEN`.
+# database. A tolerated incomplete `verify -d` is listed as `ACCEPTANCE OPEN`;
+# E2E_STRICT_VERIFY=1 fails step 11 on any `verify -d` failure instead.
 # The script refuses to run against anything but a local stack.
 
 set -euo pipefail
@@ -49,6 +50,9 @@ API_CONTAINER="${API_CONTAINER:-api}"
 PUSH_TIMEOUT="${PUSH_TIMEOUT:-2400}"
 # How long the cleanup keeps trying to destroy the app before reporting a leak.
 DESTROY_TIMEOUT="${DESTROY_TIMEOUT:-1200}"
+# 1: `verify -d` must succeed and write the trust file (default: tolerate the
+# environmental failures test_happy_path.sh tolerates).
+E2E_STRICT_VERIFY="${E2E_STRICT_VERIFY:-0}"
 # Size of the blob of the interrupted push: large enough that the client is still
 # transferring when it is killed.
 INTERRUPT_MB="${INTERRUPT_MB:-128}"
@@ -81,6 +85,8 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 
 cleanup() {
     local status=$?
+    # A second Ctrl-C must not skip the destroys, the config restore or the leak report.
+    trap '' INT TERM
     set +e
     echo ""
     echo "=== Cleanup ==="
@@ -176,12 +182,13 @@ db_raw() {
     docker exec "$DB_CONTAINER" psql -U postgres -d "$DB_NAME" -t -A -F ' ' -c "$1"
 }
 
-# The host of a URL (http://h:p/x, ssh://git@h:p/x, git@h:path).
+# The host of a URL (http://h:p/x, ssh://git@h:p/x, git@h:path). The authority ends
+# at the first /, ? or #, so an @ after it (http://evil/@localhost) is not userinfo.
 url_host() {
     local url=$1
     url=${url#*://}
-    url=${url#*@}
-    url=${url%%/*}
+    url=${url%%[/?#]*}
+    url=${url##*@}
     echo "${url%%:*}"
 }
 
@@ -255,7 +262,7 @@ destroy_app() {
             return 1
         fi
         echo "Destroying app $1..."
-        "$CAUTION_BIN" -u "$GATEWAY_URL" apps destroy "$1" --force
+        timeout "$DESTROY_TIMEOUT" "$CAUTION_BIN" -u "$GATEWAY_URL" apps destroy "$1" --force </dev/null
         app_gone "$1" && break
         sleep 15
     done
@@ -270,7 +277,7 @@ destroy_leftover_apps() {
         echo "LEAKED? cannot read the database ($DB_CONTAINER): check app ${RESOURCE_ID:-unknown} (org ${ORG_ID:-unknown}) and its deployments manually"
         LEAKED=1
         if [ -n "$RESOURCE_ID" ]; then
-            "$CAUTION_BIN" -u "$GATEWAY_URL" apps destroy "$RESOURCE_ID" --force
+            timeout "$DESTROY_TIMEOUT" "$CAUTION_BIN" -u "$GATEWAY_URL" apps destroy "$RESOURCE_ID" --force </dev/null
         fi
         return 1
     fi
@@ -713,15 +720,17 @@ if [ "$VERIFY_STATUS" -eq 0 ]; then
         step_fail "verify -d $B_ID did not write $TRUST_B"
     fi
     VERIFY_RESULT="trust stored in $TRUST_B"
-elif contains "$VERIFY_OUTPUT" "does not include a manifest" \
-    || contains "$VERIFY_OUTPUT" "private code" \
-    || contains "$VERIFY_OUTPUT" "PCR2: match"; then
+elif [ "$E2E_STRICT_VERIFY" != 1 ] && {
+    contains "$VERIFY_OUTPUT" "does not include a manifest" \
+        || contains "$VERIFY_OUTPUT" "private code" \
+        || contains "$VERIFY_OUTPUT" "PCR2: match"
+}; then
     # The same environmental limits test_happy_path.sh tolerates for `caution verify`.
     # Visible in the final summary: the trust file was not exercised.
     VERIFY_RESULT="WARN: verification incomplete in this environment, no trust file written"
     ACCEPTANCE_OPEN+=("verify -d trust file not exercised")
 else
-    step_fail "caution verify -d $B_ID"
+    step_fail "caution verify -d $B_ID (exit $VERIFY_STATUS, E2E_STRICT_VERIFY=$E2E_STRICT_VERIFY)"
 fi
 if [ "$(cat "$TRUST_APP" 2>/dev/null || echo "absent")" != "$TRUST_APP_BEFORE" ]; then
     step_fail "verify -d $B_ID created or changed the app's $TRUST_APP"

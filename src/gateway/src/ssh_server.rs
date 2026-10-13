@@ -274,14 +274,6 @@ pub(crate) enum HandleGitPushError {
         location: Location,
     },
 
-    #[error("App '{app_id}' is in state '{state}' and cannot accept a deployment [{location}]")]
-    DeploymentsAppUnavailable {
-        app_id: String,
-        state: String,
-        #[location]
-        location: Location,
-    },
-
     /// `client_message` is the source's sanitized text: `CtxError` sources
     /// are boxed, so it is captured before boxing.
     #[error("deployment reservation failed [{location}]")]
@@ -338,14 +330,6 @@ impl HandleGitPushError {
             Self::AppNotFound { app_id, .. } => {
                 format!("App '{}' not found. Run 'caution init' first.", app_id)
             }
-            Self::DeploymentsAppUnavailable { app_id, state, .. } => [
-                "App '",
-                app_id.as_str(),
-                "' is ",
-                state.as_str(),
-                " and cannot accept a deployment right now.",
-            ]
-            .concat(),
             Self::Reserve { client_message, .. } => client_message.clone(),
             Self::EnsureRepo { .. } => "Failed to create git repos directory".to_string(),
             Self::PrepareHook { .. } => "Failed to prepare post-receive hook".to_string(),
@@ -950,14 +934,6 @@ fn resource_state_allows_noop_redeploy(state: &str) -> bool {
     matches!(state, "initialized" | "terminated" | "failed")
 }
 
-/// Deployments-lifecycle apps accept pushes while serving; suspended or
-/// terminating apps do not, as for Legacy. Same rule as the API's
-/// `deployments_push_state_allowed` (`src/api/src/app_deployments/admission.rs`),
-/// which re-checks it under the app lock. Separate crates: keep both in sync.
-fn deployments_push_state_allowed(state: &str) -> bool {
-    matches!(state, "initialized" | "running" | "failed" | "terminated")
-}
-
 fn candidate_success_message(deployment_id: Uuid, live: Option<Uuid>, url: &str) -> String {
     let deployment_id = deployment_id.to_string();
     let live_line = live
@@ -978,6 +954,9 @@ fn candidate_success_message(deployment_id: Uuid, live: Option<Uuid>, url: &str)
     ]
     .concat()
 }
+
+/// Bounds the reservation call: the push waits on it before `receive-pack`.
+const RESERVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Reserves the app's deployment slot (`POST /internal/apps/{id}/deployments/reserve`).
 async fn reserve_deployment(
@@ -1003,6 +982,7 @@ async fn reserve_deployment(
         .post(format!(
             "{api_service_url}/internal/apps/{app_id}/deployments/reserve"
         ))
+        .timeout(RESERVE_TIMEOUT)
         .json(&serde_json::json!({ "org_id": org_id, "user_id": user_id }));
     if let Some(secret) = internal_service_secret {
         request = request.header("X-Internal-Service-Secret", secret);
@@ -1082,14 +1062,9 @@ async fn handle_git_push(
 
     let http = reqwest::Client::new();
     let (allow_noop_redeploy, reservation) = match existing {
-        Some((state, lifecycle, nothing_live)) if lifecycle == "deployments" => {
-            if !deployments_push_state_allowed(&state) {
-                return Err(HandleGitPushError::DeploymentsAppUnavailable {
-                    app_id: app_id.to_string(),
-                    state,
-                    location: std::panic::Location::caller(),
-                });
-            }
+        Some((_, lifecycle, nothing_live)) if lifecycle == "deployments" => {
+            // `reserve` refuses a state that cannot take a push (409) under
+            // the app lock, before `receive-pack` runs.
             let deployment_id = match reserve_deployment(
                 &http,
                 api_service_url,
@@ -1618,6 +1593,10 @@ async fn handle_git_push(
                         api_error.status,
                         api_error.error
                     );
+                    // A failure before the API claimed the reservation would
+                    // keep the app busy until it expires; after the claim this
+                    // is a no-op (only `reserved` rows are released).
+                    release_reservation().await;
                     if !stream_reported_error {
                         let error_msg = format!("remote: error: {}\n", api_error.error);
                         let _ = session_handle
@@ -2046,16 +2025,6 @@ mod tests {
 
         assert_eq!(pushed_ref.branch, "main");
         assert_eq!(pushed_ref.commit_sha, commit_sha);
-    }
-
-    #[test]
-    fn deployments_push_rejects_stopped_and_terminating() {
-        for state in ["initialized", "running", "failed", "terminated"] {
-            assert!(super::deployments_push_state_allowed(state), "{state}");
-        }
-        for state in ["stopped", "terminating", "pending"] {
-            assert!(!super::deployments_push_state_allowed(state), "{state}");
-        }
     }
 
     #[test]

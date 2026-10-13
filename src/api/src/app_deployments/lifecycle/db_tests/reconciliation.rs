@@ -21,7 +21,10 @@ async fn reconciliation() {
     settled_work_is_not_adopted(&state).await;
     interrupted_destroy_is_rerun_until_it_succeeds(&state).await;
     abandoned_cleanup_is_unlocked_and_retried(&state).await;
+    failed_destroy_of_a_lost_runtime_is_retried(&state).await;
     cleanup_spares_in_flight_destroys(&state).await;
+    stale_own_destroy_is_unlocked_and_rerun(&state).await;
+    abandoned_apply_leftovers_are_swept(&state).await;
     failure_without_state_is_recorded_cleaned_up(&state).await;
     running_teardown_defers_adoption(&state).await;
     interrupted_switch_records_the_holder_live(&state).await;
@@ -46,6 +49,7 @@ struct FakeAws {
     /// State lock deletions and destroys, in order.
     calls: Mutex<Vec<Call>>,
     fail_destroy: AtomicBool,
+    ec2: FakeEc2,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -102,6 +106,17 @@ impl FakeAws {
             })
             .collect()
     }
+
+    /// The lock deletions and destroys of one deployment, in order.
+    fn calls_for(&self, id: Uuid, state_key: &str) -> Vec<Call> {
+        self.calls()
+            .into_iter()
+            .filter(|call| match call {
+                Call::Unlock(key) => key == state_key,
+                Call::Destroy(destroyed) => *destroyed == id,
+            })
+            .collect()
+    }
 }
 
 impl DestroyBackend for FakeAws {
@@ -144,6 +159,41 @@ impl DestroyBackend for FakeAws {
             .unwrap()
             .push(Call::Unlock(state_key.to_string()));
         Ok(())
+    }
+
+    async fn tagged_instances(
+        &self,
+        _app_id: Uuid,
+        _deployment_id: Uuid,
+        _region: &str,
+    ) -> Result<Vec<ec2::Instance>, ec2::DescribeInstancesError> {
+        Ok(self.ec2.tagged_instances())
+    }
+
+    async fn terminate_instances(
+        &self,
+        _region: &str,
+        instance_ids: &[String],
+    ) -> Result<(), ec2::TerminateInstancesError> {
+        self.ec2.terminate(instance_ids);
+        Ok(())
+    }
+
+    async fn tagged_security_groups(
+        &self,
+        _app_id: Uuid,
+        _deployment_id: Uuid,
+        _region: &str,
+    ) -> Result<Vec<ec2::SecurityGroup>, ec2::DescribeSecurityGroupsError> {
+        Ok(self.ec2.tagged_groups())
+    }
+
+    async fn delete_security_group(
+        &self,
+        _region: &str,
+        group_id: &str,
+    ) -> Result<(), ec2::DeleteSecurityGroupError> {
+        self.ec2.delete_group(group_id)
     }
 }
 
@@ -219,6 +269,36 @@ async fn abandon(pool: &PgPool, id: Uuid) -> String {
         .await
         .unwrap();
     state_key
+}
+
+/// Gives a deployment of this process its own state key.
+async fn own_state_key(pool: &PgPool, id: Uuid) -> String {
+    let state_key = format!("state-{id}");
+    sqlx::query("UPDATE app_deployments SET state_key = $2 WHERE id = $1")
+        .bind(id)
+        .bind(&state_key)
+        .execute(pool)
+        .await
+        .unwrap();
+    state_key
+}
+
+/// Moves the deployment's last update past the cleanup grace (its
+/// `updated_at` trigger is off for this transaction only).
+async fn age(pool: &PgPool, id: Uuid) {
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL session_replication_role = replica")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE app_deployments SET updated_at = NOW() - INTERVAL '23 minutes' WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
 }
 
 async fn owner(pool: &PgPool, id: Uuid) -> Option<Uuid> {
@@ -394,11 +474,14 @@ async fn interrupted_destroy_is_rerun_until_it_succeeds(state: &AppState) {
     assert_eq!(owner(pool, f.target).await, Some(*PROCESS_ID));
     assert!(metered(pool, &instance_id).await);
 
-    // The unfinished cleanup is retried on the next pass.
+    // The unfinished cleanup is retried on the next pass, after deleting the
+    // lock a run killed by its timeout would have left.
     let aws = FakeAws::default();
     reconcile_with(state, &aws).await;
-    assert!(aws.destroyed().contains(&f.target));
-    assert!(!aws.cleared_locks().contains(&state_key));
+    assert_eq!(
+        aws.calls_for(f.target, &state_key),
+        vec![Call::Unlock(state_key.clone()), Call::Destroy(f.target)]
+    );
     assert_eq!(
         destroy_row(pool, f.target).await,
         ("failed".to_string(), true, false)
@@ -460,6 +543,9 @@ async fn abandoned_cleanup_is_unlocked_and_retried(state: &AppState) {
     // App teardown, under its lock, unlocks the state of every dead owner
     // before destroying it: the lost runtime and an interrupted `destroy -d`
     // of one. This process's own deployment is destroyed without unlocking.
+    // A deployment destroy now blocks termination, so the leftover of one is
+    // seeded after it.
+    managed_dns::begin_termination(pool, f.app).await.unwrap();
     let destroying = deployment(pool, f.org, f.app, "destroying", None).await;
     update(
         pool,
@@ -469,7 +555,6 @@ async fn abandoned_cleanup_is_unlocked_and_retried(state: &AppState) {
     .await;
     let destroying_state_key = abandon(pool, destroying).await;
     let own = deployment(pool, f.org, f.app, "running", None).await;
-    managed_dns::begin_termination(pool, f.app).await.unwrap();
     let aws = FakeAws::default();
     destroy_all_for_app_with(state, &aws, f.org, f.app)
         .await
@@ -508,11 +593,61 @@ async fn abandoned_cleanup_is_unlocked_and_retried(state: &AppState) {
     assert!(!deployment_row(pool, g.target).await.2);
 }
 
+/// A failed `destroy -d` of a lost runtime is owed cleanup like a failed
+/// attempt: reconciliation retries it, which clears its stale state lock.
+async fn failed_destroy_of_a_lost_runtime_is_retried(state: &AppState) {
+    let pool = &state.db;
+    let f = fixture(pool, "failed").await;
+    let live = deployment(pool, f.org, f.app, "running", Some("i-live")).await;
+    serve(pool, f.app, live).await;
+    let state_key = own_state_key(pool, f.target).await;
+    set_instance(pool, f.target).await;
+    update(
+        pool,
+        "UPDATE app_deployments
+         SET failure_kind = 'runtime_lost', failed_at = NOW() - INTERVAL '23 minutes'
+         WHERE id = $1",
+        f.target,
+    )
+    .await;
+
+    let aws = FakeAws::default().address(f.app, Some("i-live"));
+    aws.fail_destroy.store(true, Ordering::SeqCst);
+    let target = begin_destroy(pool, &aws, f.user, f.app, f.target)
+        .await
+        .unwrap()
+        .unwrap();
+    complete_destroy_with(state, &aws, &target)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        failure(pool, f.target).await,
+        (
+            "failed".to_string(),
+            Some("provisioning".to_string()),
+            Some("destroy failed; retry".to_string())
+        )
+    );
+
+    let aws = FakeAws::default();
+    reconcile_with(state, &aws).await;
+    assert_eq!(
+        aws.calls_for(f.target, &state_key),
+        vec![Call::Unlock(state_key), Call::Destroy(f.target)]
+    );
+    assert_eq!(
+        destroy_row(pool, f.target).await,
+        ("failed".to_string(), true, false)
+    );
+    assert_eq!(app_row(pool, f.app).await.live, Some(live));
+}
+
 /// `fail_attempt` marks a failure before its own destroy runs; an app teardown
-/// destroys the state itself.
+/// destroys the state itself. Neither lock is touched until the retry.
 async fn cleanup_spares_in_flight_destroys(state: &AppState) {
     let pool = &state.db;
     let f = fixture(pool, "failed").await;
+    let state_key = own_state_key(pool, f.target).await;
     update(
         pool,
         "UPDATE app_deployments SET failure_kind = 'provisioning', failed_at = NOW()
@@ -522,11 +657,11 @@ async fn cleanup_spares_in_flight_destroys(state: &AppState) {
     .await;
     let aws = FakeAws::default();
     reconcile_with(state, &aws).await;
-    assert!(!aws.destroyed().contains(&f.target));
+    assert!(aws.calls_for(f.target, &state_key).is_empty());
 
     update(
         pool,
-        "UPDATE app_deployments SET failed_at = NOW() - INTERVAL '21 minutes' WHERE id = $1",
+        "UPDATE app_deployments SET failed_at = NOW() - INTERVAL '23 minutes' WHERE id = $1",
         f.target,
     )
     .await;
@@ -537,7 +672,7 @@ async fn cleanup_spares_in_flight_destroys(state: &AppState) {
         .await
         .unwrap();
     reconcile_with(state, &aws).await;
-    assert!(!aws.destroyed().contains(&f.target));
+    assert!(aws.calls_for(f.target, &state_key).is_empty());
     assert!(!deployment_row(pool, f.target).await.2);
 
     sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 1))")
@@ -546,9 +681,102 @@ async fn cleanup_spares_in_flight_destroys(state: &AppState) {
         .await
         .unwrap();
     drop(teardown);
+    // Past the grace its own OpenTofu was killed: its lock is stale.
     reconcile_with(state, &aws).await;
-    assert!(aws.destroyed().contains(&f.target));
+    assert_eq!(
+        aws.calls_for(f.target, &state_key),
+        vec![Call::Unlock(state_key), Call::Destroy(f.target)]
+    );
     assert!(deployment_row(pool, f.target).await.2);
+}
+
+/// A deployment destroy of this process still `destroying` past the grace
+/// (its task died or its last write failed) is unlocked and re-run.
+async fn stale_own_destroy_is_unlocked_and_rerun(state: &AppState) {
+    let pool = &state.db;
+    let f = fixture(pool, "destroying").await;
+    let state_key = own_state_key(pool, f.target).await;
+    let instance_id = set_instance(pool, f.target).await;
+    meter(pool, f.org, f.target, &instance_id).await;
+
+    // Within the grace its OpenTofu may still run.
+    let aws = FakeAws::default();
+    reconcile_with(state, &aws).await;
+    assert!(aws.calls_for(f.target, &state_key).is_empty());
+    assert_eq!(status(pool, f.target).await.as_deref(), Some("destroying"));
+    assert!(metered(pool, &instance_id).await);
+
+    age(pool, f.target).await;
+    reconcile_with(state, &aws).await;
+    assert_eq!(
+        aws.calls_for(f.target, &state_key),
+        vec![Call::Unlock(state_key), Call::Destroy(f.target)]
+    );
+    assert_eq!(owner(pool, f.target).await, Some(*PROCESS_ID));
+    assert_eq!(
+        destroy_row(pool, f.target).await,
+        ("destroyed".to_string(), true, true)
+    );
+    assert!(!metered(pool, &instance_id).await);
+}
+
+/// An API restart during `tofu apply` can leave an instance and security group
+/// the state never recorded. Failure cleanup terminates them by their tags,
+/// sparing everything else, and completes only once they are gone.
+async fn abandoned_apply_leftovers_are_swept(state: &AppState) {
+    let pool = &state.db;
+    let f = fixture(pool, "provisioning").await;
+    let state_key = abandon(pool, f.target).await;
+    let instance_id = set_instance(pool, f.target).await;
+    meter(pool, f.org, f.target, &instance_id).await;
+    let (app, target) = (f.app.to_string(), f.target.to_string());
+    let both = [
+        ("ResourceId", app.as_str()),
+        ("DeploymentId", target.as_str()),
+    ];
+    let aws = FakeAws::default();
+    aws.ec2.instance("i-unrecorded", &both, "pending");
+    aws.ec2.instance(
+        "i-other-deployment",
+        &[
+            ("ResourceId", &app),
+            ("DeploymentId", &Uuid::new_v4().to_string()),
+        ],
+        "running",
+    );
+    aws.ec2.group("sg-unrecorded", &both);
+
+    // Every deployment of the pass is swept against these: only the target's
+    // own leftover is terminated.
+    reconcile_with(state, &aws).await;
+    assert_eq!(failure(pool, f.target).await.0, "failed");
+    assert_eq!(aws.ec2.terminated(), vec!["i-unrecorded".to_string()]);
+    assert!(aws.ec2.deleted_groups().is_empty());
+    assert!(!deployment_row(pool, f.target).await.2);
+    assert!(metered(pool, &instance_id).await);
+
+    // Terminated, and past the grace: the retry completes the cleanup.
+    aws.ec2.finish_terminations();
+    update(
+        pool,
+        "UPDATE app_deployments SET failed_at = NOW() - INTERVAL '23 minutes' WHERE id = $1",
+        f.target,
+    )
+    .await;
+    reconcile_with(state, &aws).await;
+    assert_eq!(
+        aws.calls_for(f.target, &state_key),
+        vec![
+            Call::Unlock(state_key.clone()),
+            Call::Destroy(f.target),
+            Call::Unlock(state_key),
+            Call::Destroy(f.target),
+        ]
+    );
+    assert_eq!(aws.ec2.terminated(), vec!["i-unrecorded".to_string()]);
+    assert_eq!(aws.ec2.deleted_groups(), vec!["sg-unrecorded".to_string()]);
+    assert!(deployment_row(pool, f.target).await.2);
+    assert!(!metered(pool, &instance_id).await);
 }
 
 /// `fail_attempt` died between marking an attempt that provisioned nothing

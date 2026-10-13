@@ -6,10 +6,12 @@
 //! by a restart. The Elastic IP association is the source of truth for the
 //! live selection.
 
-use super::destroy::{DestroyBackend, DestroyTarget, Platform, complete_destroy_with};
+use super::destroy::{
+    DestroyBackend, DestroyTarget, Platform, complete_destroy_with, destroy_and_sweep, ec2_client,
+};
 use super::lifecycle::{fail_attempt_with, project_live, stop_meter};
 use super::{LIFECYCLE_DEPLOYMENTS, PROCESS_ID, lock_app_operations};
-use crate::{AppState, deployment, ec2, fully_managed_capacity};
+use crate::{AppState, deployment, ec2};
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -62,12 +64,6 @@ pub(super) trait ReconcileBackend: DestroyBackend {
         region: &str,
         instance_id: &str,
     ) -> Result<Option<ec2::InstanceRuntime>, ec2::DescribeInstanceRuntimeError>;
-}
-
-fn ec2_client(region: &str) -> ec2::Ec2Client {
-    ec2::Ec2Client::new(&fully_managed_capacity::platform_credentials_for_region(
-        region,
-    ))
 }
 
 impl ReconcileBackend for Platform {
@@ -155,13 +151,18 @@ pub(super) async fn expire_reservations(db: &PgPool) -> Result<u64, ExpireReserv
 /// for the current transaction iff no teardown holds it (`$1`: the app ID).
 const TEARDOWN_IDLE: &str = "SELECT pg_try_advisory_xact_lock(hashtextextended($1, 1))";
 
-/// Unfinished work owned by another process ID (`$1`), which a restart
-/// abandoned. A failed attempt awaiting cleanup is included: a cleanup that
-/// died with its process left a stale state lock.
-const ABANDONED: &str = "owner_process_id IS DISTINCT FROM $1
-     AND (status IN ('building', 'provisioning', 'destroying')
-          OR (status = 'failed' AND failure_kind = 'provisioning'
-              AND cleaned_up_at IS NULL AND state_key IS NOT NULL))";
+/// Work no operation of this process still runs (`$1`: this process, `$2`:
+/// [`CLEANUP_GRACE_SECS`]): unfinished work of another process ID, which a
+/// restart abandoned (a failed attempt awaiting cleanup is included: a
+/// cleanup that died with its process left a stale state lock), and a
+/// deployment destroy of this process still `destroying` past the grace (its
+/// task died or its last write failed).
+const ABANDONED: &str = "(d.owner_process_id IS DISTINCT FROM $1
+       AND (d.status IN ('building', 'provisioning', 'destroying')
+            OR (d.status = 'failed' AND d.failure_kind = 'provisioning'
+                AND d.cleaned_up_at IS NULL AND d.state_key IS NOT NULL)))
+     OR (d.owner_process_id = $1 AND d.status = 'destroying'
+         AND d.updated_at < NOW() - make_interval(secs => $2))";
 
 /// Failure modes for [`recover_abandoned_work`].
 #[derive(Debug, thiserror::Error, CtxError)]
@@ -180,9 +181,10 @@ pub(super) async fn recover_abandoned_work(
     backend: &impl ReconcileBackend,
 ) -> Result<(), RecoverAbandonedWorkError> {
     let abandoned: Vec<(Uuid, Uuid)> = sqlx::query_as(&format!(
-        "SELECT app_id, id FROM app_deployments WHERE {ABANDONED} ORDER BY created_at"
+        "SELECT d.app_id, d.id FROM app_deployments d WHERE {ABANDONED} ORDER BY d.created_at"
     ))
     .bind(*PROCESS_ID)
+    .bind(CLEANUP_GRACE_SECS)
     .fetch_all(&state.db)
     .await
     .with_context(RecoverAbandonedWorkErrorCtx::database())?;
@@ -201,10 +203,10 @@ struct Adopted {
     target: DestroyTarget,
 }
 
-/// Failure modes for [`recover_abandoned`].
+/// Failure modes for [`reclaim`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum RecoverAbandonedError {
-    #[error("database error while adopting deployment {deployment_id} [{location}]")]
+pub(crate) enum ReclaimError {
+    #[error("database error while taking over deployment {deployment_id} [{location}]")]
     Database {
         deployment_id: Uuid,
         #[location]
@@ -214,6 +216,81 @@ pub(crate) enum RecoverAbandonedError {
     },
     #[error("failed to clear the state lock of deployment {deployment_id} [{location}]")]
     ClearStateLock {
+        deployment_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Under the app lock, and only while no app teardown runs, takes
+/// `deployment_id` for this process if it still matches `predicate` (one of
+/// [`ABANDONED`] and [`CLEANUP_DUE`]) and deletes its state lock: no OpenTofu
+/// run can still hold it. The row is re-checked here, so work settled since it
+/// was listed is left alone. `None`: nothing to take now. On failure the
+/// take-over rolls back, so a later pass retries.
+async fn reclaim(
+    state: &AppState,
+    backend: &impl DestroyBackend,
+    app_id: Uuid,
+    deployment_id: Uuid,
+    predicate: &str,
+) -> Result<Option<Adopted>, ReclaimError> {
+    use ReclaimErrorCtx as Ctx;
+
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .with_context(Ctx::database(deployment_id))?;
+    lock_app_operations(&mut tx, app_id)
+        .await
+        .with_context(Ctx::database(deployment_id))?;
+    // App teardown destroys every deployment, under this lock and whatever its
+    // owner: never delete a state lock its OpenTofu holds. Retry next pass.
+    let teardown_idle: bool = sqlx::query_scalar(TEARDOWN_IDLE)
+        .bind(app_id.to_string())
+        .fetch_one(&mut *tx)
+        .await
+        .with_context(Ctx::database(deployment_id))?;
+    if !teardown_idle {
+        return Ok(None);
+    }
+    let adopted: Option<Adopted> = sqlx::query_as(&format!(
+        "UPDATE app_deployments d SET owner_process_id = $1
+         FROM compute_resources cr
+         WHERE cr.id = d.app_id AND d.id = $3 AND ({predicate})
+         RETURNING d.status, d.organization_id AS org_id, d.app_id, d.id AS deployment_id,
+                   d.instance_id, d.region,
+                   CASE WHEN d.cleaned_up_at IS NULL THEN d.state_key END AS state_key"
+    ))
+    .bind(*PROCESS_ID)
+    .bind(CLEANUP_GRACE_SECS)
+    .bind(deployment_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .with_context(Ctx::database(deployment_id))?;
+    let Some(adopted) = adopted else {
+        return Ok(None);
+    };
+    if let Some(state_key) = adopted.target.state_key.as_deref() {
+        backend
+            .clear_state_lock(state_key)
+            .await
+            .with_context(Ctx::clear_state_lock(deployment_id))?;
+    }
+    tx.commit()
+        .await
+        .with_context(Ctx::database(deployment_id))?;
+    Ok(Some(adopted))
+}
+
+/// Failure modes for [`recover_abandoned`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum RecoverAbandonedError {
+    #[error("failed to adopt deployment {deployment_id} [{location}]")]
+    Adopt {
         deployment_id: Uuid,
         #[location]
         location: Location,
@@ -233,8 +310,7 @@ pub(crate) enum RecoverAbandonedError {
 /// Takes ownership of one abandoned deployment, clears its stale state lock and
 /// settles it: an unfinished attempt fails and its state is destroyed, an
 /// interrupted destroy is re-run, and a failed cleanup is left to
-/// [`retry_cleanup`]. The row is re-checked when adopted, so work settled
-/// meanwhile is left alone.
+/// [`retry_cleanup`]. See [`reclaim`].
 pub(super) async fn recover_abandoned(
     state: &AppState,
     backend: &impl ReconcileBackend,
@@ -243,49 +319,13 @@ pub(super) async fn recover_abandoned(
 ) -> Result<(), RecoverAbandonedError> {
     use RecoverAbandonedErrorCtx as Ctx;
 
-    let mut tx = state
-        .db
-        .begin()
-        .await
-        .with_context(Ctx::database(deployment_id))?;
-    lock_app_operations(&mut tx, app_id)
-        .await
-        .with_context(Ctx::database(deployment_id))?;
-    // App teardown destroys every deployment, under this lock and whatever its
-    // owner: never delete a state lock its OpenTofu holds. Retry next pass.
-    let teardown_idle: bool = sqlx::query_scalar(TEARDOWN_IDLE)
-        .bind(app_id.to_string())
-        .fetch_one(&mut *tx)
-        .await
-        .with_context(Ctx::database(deployment_id))?;
-    if !teardown_idle {
-        return Ok(());
-    }
-    let adopted: Option<Adopted> = sqlx::query_as(&format!(
-        "UPDATE app_deployments SET owner_process_id = $1
-         WHERE id = $2 AND {ABANDONED}
-         RETURNING status, organization_id AS org_id, app_id, id AS deployment_id, instance_id,
-                   region, CASE WHEN cleaned_up_at IS NULL THEN state_key END AS state_key"
-    ))
-    .bind(*PROCESS_ID)
-    .bind(deployment_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .with_context(Ctx::database(deployment_id))?;
-    let Some(Adopted { status, target }) = adopted else {
+    let Some(Adopted { status, target }) =
+        reclaim(state, backend, app_id, deployment_id, ABANDONED)
+            .await
+            .with_context(Ctx::adopt(deployment_id))?
+    else {
         return Ok(());
     };
-    // The previous owner's OpenTofu died with it. On failure the adoption
-    // rolls back, so the next pass retries.
-    if let Some(state_key) = target.state_key.as_deref() {
-        backend
-            .clear_state_lock(state_key)
-            .await
-            .with_context(Ctx::clear_state_lock(deployment_id))?;
-    }
-    tx.commit()
-        .await
-        .with_context(Ctx::database(deployment_id))?;
 
     match status.as_str() {
         // Never the EIP holder: `complete_running` commits Running before it
@@ -322,15 +362,30 @@ pub(crate) enum RetryCleanupError {
     },
 }
 
-/// `fail_attempt` marks an attempt failed before its `tofu init` and `tofu
-/// destroy`, each bounded by `TOFU_TIMEOUT_SECS`: a younger failure may still
-/// be cleaning up.
-const CLEANUP_GRACE_SECS: f64 = (2 * deployment::TOFU_TIMEOUT_SECS) as f64;
+/// How long an OpenTofu run of this process may still hold a deployment's
+/// state lock: `fail_attempt` marks an attempt failed, and deployment
+/// destruction marks it `destroying`, before their `tofu init` and `tofu
+/// destroy`, each bounded by `TOFU_TIMEOUT_SECS`. Past it, `run_with_timeout`
+/// has killed the run, so a lock it left is stale. The stamp is taken before
+/// lock waits and EC2 calls, hence the extra 120 s.
+const CLEANUP_GRACE_SECS: f64 = (2 * deployment::TOFU_TIMEOUT_SECS + 120) as f64;
 
-/// Destroys the state of failed attempts whose cleanup did not finish, then
-/// records it and stops the meter, which `fail_attempt` and a failed deployment
-/// destroy leave running while the instance may exist. Only adopted rows: an
-/// abandoned one may still hold a stale state lock.
+/// Failed attempts of this process whose cleanup did not finish, past the
+/// grace (`$1`: this process, `$2`: [`CLEANUP_GRACE_SECS`]); never the live
+/// deployment (`cr`: its app). A failed deployment destroy keeps its earlier
+/// `failed_at`, often none, and is due at once: its OpenTofu run had returned
+/// when it was marked.
+const CLEANUP_DUE: &str = "d.status = 'failed' AND d.failure_kind = 'provisioning'
+     AND d.cleaned_up_at IS NULL AND d.state_key IS NOT NULL AND d.region IS NOT NULL
+     AND d.owner_process_id = $1 AND d.id IS DISTINCT FROM cr.live_deployment_id
+     AND (d.failed_at IS NULL OR d.failed_at < NOW() - make_interval(secs => $2))";
+
+/// Destroys the state of failed attempts whose cleanup did not finish and
+/// sweeps their leftovers, then records it and stops the meter, which
+/// `fail_attempt` and a failed deployment destroy leave running while an
+/// instance may exist. Only this process's rows ([`CLEANUP_DUE`]): an
+/// abandoned one is adopted first. Each is reclaimed first, which deletes the
+/// stale lock of an OpenTofu run killed by its timeout.
 pub(super) async fn retry_cleanup(
     state: &AppState,
     backend: &impl ReconcileBackend,
@@ -348,42 +403,39 @@ pub(super) async fn retry_cleanup(
         tracing::error!(error = %error, "failed to record failed attempts that provisioned nothing");
     }
 
-    let pending: Vec<DestroyTarget> = sqlx::query_as(
-        "SELECT d.organization_id AS org_id, d.app_id, d.id AS deployment_id, d.instance_id,
-                d.region, d.state_key
+    let pending: Vec<(Uuid, Uuid)> = sqlx::query_as(&format!(
+        "SELECT d.app_id, d.id
          FROM app_deployments d JOIN compute_resources cr ON cr.id = d.app_id
-         WHERE d.status = 'failed' AND d.failure_kind = 'provisioning'
-           AND d.cleaned_up_at IS NULL AND d.state_key IS NOT NULL AND d.region IS NOT NULL
-           AND d.owner_process_id = $1 AND d.id IS DISTINCT FROM cr.live_deployment_id
-           AND (d.failed_at IS NULL OR d.failed_at < NOW() - make_interval(secs => $2))
-         ORDER BY d.failed_at",
-    )
+         WHERE {CLEANUP_DUE}
+         ORDER BY d.failed_at"
+    ))
     .bind(*PROCESS_ID)
     .bind(CLEANUP_GRACE_SECS)
     .fetch_all(&state.db)
     .await
     .with_context(RetryCleanupErrorCtx::database())?;
-    for target in pending {
-        let deployment_id = target.deployment_id;
+    for (app_id, deployment_id) in pending {
+        // `None` also while an app teardown runs: it destroys this state itself.
+        let target = match reclaim(state, backend, app_id, deployment_id, CLEANUP_DUE).await {
+            Ok(Some(Adopted { target, .. })) => target,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(deployment_id = %deployment_id, error = %error, "deployment cleanup will retry");
+                continue;
+            }
+        };
         let Some(region) = target.region.as_deref() else {
             continue;
         };
-        // An app teardown destroys this state itself.
-        match sqlx::query_scalar::<_, bool>(TEARDOWN_IDLE)
-            .bind(target.app_id.to_string())
-            .fetch_one(&state.db)
-            .await
-        {
-            Ok(true) => {}
-            Ok(false) => continue,
-            Err(error) => {
-                tracing::error!(deployment_id = %deployment_id, error = %error, "failed to probe the app teardown lock");
-                continue;
-            }
-        }
-        if let Err(error) = backend
-            .destroy_state(target.org_id, target.app_id, deployment_id, region)
-            .await
+        if let Err(error) = destroy_and_sweep(
+            &state.db,
+            backend,
+            target.org_id,
+            target.app_id,
+            deployment_id,
+            region,
+        )
+        .await
         {
             tracing::warn!(deployment_id = %deployment_id, error = %error, "deployment cleanup will retry");
             continue;

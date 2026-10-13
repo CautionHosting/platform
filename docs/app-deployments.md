@@ -21,6 +21,8 @@ Set both in `~/.config/caution/.env`, then restart the API (`env.example` lists 
   provisioning operation runs per app: another push is refused ("Another build or
   provisioning operation is running"). A push over the candidate cap is refused
   ("Candidate limit reached (N / M)"). Suspended or terminating apps refuse pushes.
+  The slot is reserved before `receive-pack`, so a push while a deployment is live
+  can be refused busy or over the limit even when it would change nothing.
 - **Auto-live.** A deployment goes live on its own only when nothing is live (the
   first push, or after an app destroy). Otherwise it is a candidate: it runs and is
   billed, the live deployment is unchanged. A push whose ref did not change
@@ -38,9 +40,10 @@ Set both in `~/.config/caution/.env`, then restart the API (`env.example` lists 
   platform health check.
 - **Destroy.** `caution apps destroy [APP] -d <deployment>` destroys one deployment
   (session, or `--this-is-a-ci-machine` with the app ID). The live deployment is
-  never destroyed, whatever the flags. `caution apps destroy` (the app) destroys
-  every deployment and clears the live pointer; it returns 409 while a build or
-  provisioning is active.
+  never destroyed, whatever the flags, and `-d` returns 409 while the app is being
+  destroyed. `caution apps destroy` (the app) destroys every deployment and clears
+  the live pointer; it returns 409 while a build, provisioning or deployment destroy
+  is active.
 
 ## Recovery
 
@@ -49,9 +52,13 @@ The reconciler runs at startup and every 60 s. It:
 - releases reservations no push claimed (they expire after 30 minutes);
 - adopts work abandoned by an API restart (building, provisioning, destroying):
   clears its stale state lock, fails the attempt ("abandoned by an API restart") and
-  destroys its state, or finishes the interrupted destroy;
+  destroys its state, or finishes the interrupted destroy. A `destroy -d` of this
+  process still `destroying` after the grace below (its last write failed) is
+  re-run the same way;
 - retries the cleanup of failed attempts once they are older than 2x the OpenTofu
-  timeout (2 x 600 s);
+  timeout plus 120 s (2 x 600 s + 120 s), first deleting the state lock a timed-out
+  (killed) run left. A failed `destroy -d` is owed cleanup too, a `runtime_lost`
+  deployment's included, so it is retried the same way;
 - repairs the live pointer from the Elastic IP holder (records the holder as live,
   or activates the only Running deployment when nothing is live);
 - marks a Running deployment `failed` with `failure_kind = 'runtime_lost'` once EC2
@@ -61,17 +68,36 @@ The reconciler runs at startup and every 60 s. It:
   deployment is unreachable until a switch) and `app Elastic IP is held by an
   instance of no Running deployment` (switches answer 409 until repaired).
 
+An unsuspend that finds the live deployment `runtime_lost` does not re-attach the app
+address or restart its meter: the app returns to running, as before the suspension,
+with the live deployment unreachable until you switch to a healthy one.
+
+Every cleanup (failed attempt, `destroy -d`, app destroy, reconciliation) also
+sweeps what the deployment's state may have missed: OpenTofu saves state on an
+interval, so a restart during `tofu apply` can leave an instance or security group
+that `tofu destroy` cannot see. After the state is destroyed it terminates the
+instances not yet terminated that are tagged with both `ResourceId = <app>` and
+`DeploymentId = <deployment>`, never the live instance, and deletes security groups
+tagged the same way (best effort: one still used by a terminating instance is
+retried). The cleanup is recorded, and the meter stopped, only once no such instance
+remains in a non-terminated state; until then it stays `failed` and is retried.
+
 App teardown also clears the state locks of dead owners, which would otherwise fail
 every retry. Reconciliation relies on the API being one process (work owned by
 another process ID counts as abandoned): do not run more than one API replica
 before leases exist.
+
+EC2 requests time out after 60 s (all lifecycles), so a hung call fails instead of
+holding the app operation lock indefinitely.
 
 ## State keys
 
 In the state bucket: the app state (VPC, Elastic IP) at
 `organizations/{org}/resources/{app}/terraform.tfstate`; each deployment at
 `organizations/{org}/resources/{app}/deployments/{deployment}/terraform.tfstate`.
-Both use S3 lockfiles (`<key>.tflock`).
+Only deployment states use S3 lockfiles (`<key>.tflock`; `tofu force-unlock` or
+deleting it recovers a stale one). The app state deliberately has none: it relies on
+one active operation per app, so there is nothing to unlock.
 
 ## Rollout and rollback
 
@@ -93,3 +119,7 @@ running deployment meters, so treat the migration as one-way once the flag has b
   `LEAKED app <id> ...` (with the instance IDs) and exits 86. The make target then
   keeps the stack and its database (which record the leak) and skips `down-test`:
   destroy that infrastructure by hand, then run `make down-test`.
+  `E2E_STRICT_VERIFY=1` makes the `caution verify -d` step fail on any `verify -d`
+  failure and requires the trust file; by default it tolerates the environmental
+  failures `test_happy_path.sh` tolerates and prints `ACCEPTANCE OPEN`. Run it strict
+  on caution-dev once; if it passes, make strict the default.

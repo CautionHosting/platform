@@ -14,9 +14,8 @@ pub(crate) enum Admission {
     LimitReached { candidates: i64, limit: i64 },
 }
 
-/// Same rule as the gateway's pre-`receive-pack` check
-/// (`deployments_push_state_allowed` in `src/gateway/src/ssh_server.rs`),
-/// re-checked under the app lock. Separate crates: keep both in sync.
+/// The only push-state rule: `reserve` applies it under the app lock before
+/// the gateway runs `receive-pack`, and `claim_for_build` re-applies it.
 pub(crate) fn deployments_push_state_allowed(state: &str) -> bool {
     matches!(state, "initialized" | "running" | "failed" | "terminated")
 }
@@ -140,8 +139,8 @@ pub(crate) async fn reserve(
             location: std::panic::Location::caller(),
         });
     }
-    // The gateway's state check ran without this lock; re-check it here so a
-    // suspend or destroy racing the push never gets a reservation.
+    // Under the app lock, so a suspend or destroy racing the push never gets
+    // a reservation. The gateway relays this 409 before `receive-pack`.
     if !deployments_push_state_allowed(&state) {
         return Err(ReserveError::NotPushable {
             app_id,
@@ -393,5 +392,15 @@ mod tests {
     #[test]
     fn admission_accepts_below_limit() {
         assert!(matches!(admission_decision(false, 2, 3), Admission::Accept));
+    }
+
+    #[test]
+    fn deployments_push_rejects_stopped_terminating_and_pending() {
+        for state in ["initialized", "running", "failed", "terminated"] {
+            assert!(deployments_push_state_allowed(state), "{state}");
+        }
+        for state in ["stopped", "terminating", "pending"] {
+            assert!(!deployments_push_state_allowed(state), "{state}");
+        }
     }
 }

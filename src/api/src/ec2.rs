@@ -40,6 +40,11 @@ pub struct Instance {
     pub tags: std::collections::HashMap<String, String>,
 }
 
+pub struct SecurityGroup {
+    pub group_id: String,
+    pub tags: std::collections::HashMap<String, String>,
+}
+
 pub struct Image {
     pub image_id: String,
     pub creation_date: String,
@@ -255,6 +260,30 @@ impl DescribeInstancesError {
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum TerminateInstancesError {
     #[error("EC2 TerminateInstances request failed [{location}]")]
+    Request {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Failure modes for [`Ec2Client::describe_security_groups`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum DescribeSecurityGroupsError {
+    #[error("EC2 DescribeSecurityGroups request failed [{location}]")]
+    Request {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Failure modes for [`Ec2Client::delete_security_group`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum DeleteSecurityGroupError {
+    #[error("EC2 DeleteSecurityGroup request failed [{location}]")]
     Request {
         #[location]
         location: Location,
@@ -558,7 +587,11 @@ impl Ec2Client {
             access_key_id: credentials.access_key_id.clone(),
             secret_access_key: credentials.secret_access_key.clone(),
             region: credentials.region.clone(),
-            http: reqwest::Client::new(),
+            // A hung EC2 call must not hold the app operation lock indefinitely.
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(60))
+                .build()
+                .expect("static reqwest client configuration"),
         }
     }
 
@@ -589,20 +622,53 @@ impl Ec2Client {
             ("Action".to_string(), "DescribeInstances".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
         ];
-
-        for (i, filter) in filters.iter().enumerate() {
-            let idx = i + 1;
-            params.push((format!("Filter.{}.Name", idx), filter.name.clone()));
-            for (j, value) in filter.values.iter().enumerate() {
-                params.push((format!("Filter.{}.Value.{}", idx, j + 1), value.clone()));
-            }
-        }
+        params.extend(filter_params(filters));
 
         let body = self
             .signed_request(&params)
             .await
             .with_context(Ctx::request())?;
         Ok(parse_instance_ids(&body))
+    }
+
+    /// The security groups matching every filter, with their tags.
+    #[tracing::instrument(skip_all, err)]
+    pub async fn describe_security_groups(
+        &self,
+        filters: &[Filter],
+    ) -> Result<Vec<SecurityGroup>, DescribeSecurityGroupsError> {
+        use DescribeSecurityGroupsErrorCtx as Ctx;
+
+        let mut params = vec![
+            ("Action".to_string(), "DescribeSecurityGroups".to_string()),
+            ("Version".to_string(), "2016-11-15".to_string()),
+        ];
+        params.extend(filter_params(filters));
+
+        let body = self
+            .signed_request(&params)
+            .await
+            .with_context(Ctx::request())?;
+        Ok(parse_security_groups(&body))
+    }
+
+    /// Fails (`DependencyViolation`) while an instance still uses the group.
+    #[tracing::instrument(skip_all, err)]
+    pub async fn delete_security_group(
+        &self,
+        group_id: &str,
+    ) -> Result<(), DeleteSecurityGroupError> {
+        use DeleteSecurityGroupErrorCtx as Ctx;
+
+        let params = vec![
+            ("Action".to_string(), "DeleteSecurityGroup".to_string()),
+            ("Version".to_string(), "2016-11-15".to_string()),
+            ("GroupId".to_string(), group_id.to_string()),
+        ];
+        self.signed_request(&params)
+            .await
+            .with_context(Ctx::request())?;
+        Ok(())
     }
 
     #[tracing::instrument(skip_all, err)]
@@ -1494,6 +1560,18 @@ async fn signed_json_request(
     serde_json::from_str(&text).with_context(Ctx::parse_json(service))
 }
 
+fn filter_params(filters: &[Filter]) -> Vec<(String, String)> {
+    let mut params = Vec::new();
+    for (i, filter) in filters.iter().enumerate() {
+        let idx = i + 1;
+        params.push((format!("Filter.{}.Name", idx), filter.name.clone()));
+        for (j, value) in filter.values.iter().enumerate() {
+            params.push((format!("Filter.{}.Value.{}", idx, j + 1), value.clone()));
+        }
+    }
+    params
+}
+
 fn encode_form(params: &[(String, String)]) -> String {
     params
         .iter()
@@ -1602,6 +1680,31 @@ fn parse_tag_set(instance_item: &str) -> std::collections::HashMap<String, Strin
     }
 
     tags
+}
+
+/// Extract security groups from a DescribeSecurityGroups XML response. A
+/// group's own `groupId` precedes its rules, whose `groups` items name other
+/// groups; its tags are those of its `tagSet`.
+fn parse_security_groups(xml: &str) -> Vec<SecurityGroup> {
+    let mut groups = Vec::new();
+
+    for info in top_level_blocks(xml, "<securityGroupInfo>", "</securityGroupInfo>") {
+        for item in top_level_blocks(info, "<item>", "</item>") {
+            let head = item
+                .split_once("<ipPermissions")
+                .map_or(item, |(head, _)| head);
+            let Some(group_id) = parse_first_tag_value(head, "groupId") else {
+                continue;
+            };
+            let tags = top_level_blocks(item, "<tagSet>", "</tagSet>")
+                .first()
+                .map(|tag_set| parse_tag_set(tag_set))
+                .unwrap_or_default();
+            groups.push(SecurityGroup { group_id, tags });
+        }
+    }
+
+    groups
 }
 
 #[tracing::instrument(skip_all, err)]
@@ -1852,6 +1955,50 @@ mod tests {
         assert_eq!(instances.len(), 1);
         assert_eq!(instances[0].instance_id, "i-cccc3333");
         assert!(instances[0].tags.is_empty());
+    }
+
+    #[test]
+    fn security_groups_keep_their_own_id_and_tags() {
+        let xml = r#"
+        <DescribeSecurityGroupsResponse>
+          <securityGroupInfo>
+            <item>
+              <ownerId>123456789012</ownerId>
+              <groupId>sg-aaaa1111</groupId>
+              <groupName>enclave-1</groupName>
+              <ipPermissions>
+                <item>
+                  <ipProtocol>tcp</ipProtocol>
+                  <groups>
+                    <item><userId>123456789012</userId><groupId>sg-other</groupId></item>
+                  </groups>
+                  <ipRanges><item><cidrIp>0.0.0.0/0</cidrIp></item></ipRanges>
+                </item>
+              </ipPermissions>
+              <ipPermissionsEgress/>
+              <tagSet>
+                <item><key>ResourceId</key><value>app-1</value></item>
+                <item><key>DeploymentId</key><value>deployment-1</value></item>
+              </tagSet>
+            </item>
+            <item>
+              <groupId>sg-bbbb2222</groupId>
+              <ipPermissions/>
+            </item>
+          </securityGroupInfo>
+        </DescribeSecurityGroupsResponse>"#;
+
+        let groups = parse_security_groups(xml);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].group_id, "sg-aaaa1111");
+        assert_eq!(groups[0].tags.len(), 2);
+        assert_eq!(
+            groups[0].tags.get("DeploymentId").map(String::as_str),
+            Some("deployment-1")
+        );
+        assert_eq!(groups[1].group_id, "sg-bbbb2222");
+        assert!(groups[1].tags.is_empty());
+        assert!(parse_security_groups("<securityGroupInfo/>").is_empty());
     }
 
     #[test]

@@ -20,6 +20,7 @@ use crate::deployment;
 use crate::managed_dns::BeginTerminationError;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -148,12 +149,126 @@ impl AppAddressMover for ControlledMover {
     }
 }
 
+fn tags(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+    pairs
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect()
+}
+
+/// The EC2 instances and security groups a leftover sweep sees, controlled by
+/// the test. Lists them whatever their tags (the real calls filter by tag), so
+/// only the sweep's own tag check spares the others.
+#[derive(Default)]
+struct FakeEc2 {
+    /// `(instance, tags, state)`.
+    instances: Mutex<Vec<(String, HashMap<String, String>, &'static str)>>,
+    groups: Mutex<Vec<(String, HashMap<String, String>)>>,
+    /// Instances passed to terminate, in order.
+    terminated: Mutex<Vec<String>>,
+    deleted_groups: Mutex<Vec<String>>,
+}
+
+impl FakeEc2 {
+    fn instance(&self, instance_id: &str, pairs: &[(&str, &str)], state: &'static str) {
+        self.instances
+            .lock()
+            .unwrap()
+            .push((instance_id.to_string(), tags(pairs), state));
+    }
+
+    fn group(&self, group_id: &str, pairs: &[(&str, &str)]) {
+        self.groups
+            .lock()
+            .unwrap()
+            .push((group_id.to_string(), tags(pairs)));
+    }
+
+    fn terminated(&self) -> Vec<String> {
+        self.terminated.lock().unwrap().clone()
+    }
+
+    fn deleted_groups(&self) -> Vec<String> {
+        self.deleted_groups.lock().unwrap().clone()
+    }
+
+    /// Shutting-down instances finish terminating.
+    fn finish_terminations(&self) {
+        for (_, _, state) in self.instances.lock().unwrap().iter_mut() {
+            if *state == "shutting-down" {
+                *state = "terminated";
+            }
+        }
+    }
+
+    fn tagged_instances(&self) -> Vec<ec2::Instance> {
+        self.instances
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, _, state)| *state != "terminated")
+            .map(|(instance_id, tags, _)| ec2::Instance {
+                instance_id: instance_id.clone(),
+                instance_type: None,
+                tags: tags.clone(),
+            })
+            .collect()
+    }
+
+    fn terminate(&self, instance_ids: &[String]) {
+        for (instance_id, _, state) in self.instances.lock().unwrap().iter_mut() {
+            if instance_ids.contains(instance_id) && *state != "terminated" {
+                *state = "shutting-down";
+            }
+        }
+        self.terminated
+            .lock()
+            .unwrap()
+            .extend(instance_ids.iter().cloned());
+    }
+
+    fn tagged_groups(&self) -> Vec<ec2::SecurityGroup> {
+        self.groups
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(group_id, tags)| ec2::SecurityGroup {
+                group_id: group_id.clone(),
+                tags: tags.clone(),
+            })
+            .collect()
+    }
+
+    /// A group is in use (`DependencyViolation`) while an instance shuts down.
+    fn delete_group(&self, group_id: &str) -> Result<(), ec2::DeleteSecurityGroupError> {
+        let in_use = self
+            .instances
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, _, state)| *state == "shutting-down");
+        if in_use {
+            return Err(ec2::DeleteSecurityGroupError::Request {
+                location: std::panic::Location::caller(),
+                source: "DependencyViolation".into(),
+            });
+        }
+        self.groups.lock().unwrap().retain(|(id, _)| id != group_id);
+        self.deleted_groups
+            .lock()
+            .unwrap()
+            .push(group_id.to_string());
+        Ok(())
+    }
+}
+
 /// The EIP holder and OpenTofu outcome a destroy sees, controlled by the test.
 struct FakeBackend {
     holder: Option<String>,
     fail: AtomicBool,
     /// Deployments whose state destroy ran, in order.
     destroyed: Mutex<Vec<Uuid>>,
+    ec2: FakeEc2,
 }
 
 impl FakeBackend {
@@ -162,6 +277,7 @@ impl FakeBackend {
             holder: holder.map(str::to_string),
             fail: AtomicBool::new(false),
             destroyed: Mutex::new(Vec::new()),
+            ec2: FakeEc2::default(),
         }
     }
 
@@ -201,6 +317,41 @@ impl DestroyBackend for FakeBackend {
         _state_key: &str,
     ) -> Result<(), deployment::ClearStateLockError> {
         Ok(())
+    }
+
+    async fn tagged_instances(
+        &self,
+        _app_id: Uuid,
+        _deployment_id: Uuid,
+        _region: &str,
+    ) -> Result<Vec<ec2::Instance>, ec2::DescribeInstancesError> {
+        Ok(self.ec2.tagged_instances())
+    }
+
+    async fn terminate_instances(
+        &self,
+        _region: &str,
+        instance_ids: &[String],
+    ) -> Result<(), ec2::TerminateInstancesError> {
+        self.ec2.terminate(instance_ids);
+        Ok(())
+    }
+
+    async fn tagged_security_groups(
+        &self,
+        _app_id: Uuid,
+        _deployment_id: Uuid,
+        _region: &str,
+    ) -> Result<Vec<ec2::SecurityGroup>, ec2::DescribeSecurityGroupsError> {
+        Ok(self.ec2.tagged_groups())
+    }
+
+    async fn delete_security_group(
+        &self,
+        _region: &str,
+        group_id: &str,
+    ) -> Result<(), ec2::DeleteSecurityGroupError> {
+        self.ec2.delete_group(group_id)
     }
 }
 
@@ -890,7 +1041,9 @@ async fn destruction() {
 
     live_deployment_is_never_destroyed(&state).await;
     active_operations_are_not_destroyed(&pool).await;
+    destroy_is_refused_while_the_app_terminates(&pool).await;
     failed_destroy_stays_metered_until_a_retry_succeeds(&state).await;
+    destroy_sweeps_only_its_own_leftovers(&state).await;
     app_destroy_waits_for_deployment_operations(&state).await;
     termination_serialises_with_reserve(&pool).await;
     app_teardown_destroys_every_deployment(&state).await;
@@ -1031,6 +1184,39 @@ async fn active_operations_are_not_destroyed(pool: &PgPool) {
     }
 }
 
+/// `destroy -d` during app destroy would run a second `tofu destroy` on a state
+/// the teardown also destroys.
+async fn destroy_is_refused_while_the_app_terminates(pool: &PgPool) {
+    let f = fixture(pool, "running").await;
+    let destroyed = deployment(pool, f.org, f.app, "destroyed", None).await;
+    let live = deployment(pool, f.org, f.app, "running", None).await;
+    serve(pool, f.app, live).await;
+    managed_dns::begin_termination(pool, f.app).await.unwrap();
+    let backend = FakeBackend::holding(None);
+
+    let error = begin_destroy(pool, &backend, f.user, f.app, f.target)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        DestroyError::Rejected {
+            rejection: DestroyRejection::Terminating,
+            ..
+        }
+    ));
+    assert_eq!(error.into_response().status(), StatusCode::CONFLICT);
+    assert_eq!(status(pool, f.target).await.as_deref(), Some("running"));
+    assert!(backend.destroyed().is_empty());
+
+    // Still idempotent for a deployment that is already destroyed.
+    assert!(
+        begin_destroy(pool, &backend, f.user, f.app, destroyed)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
 async fn failed_destroy_stays_metered_until_a_retry_succeeds(state: &AppState) {
     let pool = &state.db;
     let f = fixture(pool, "running").await;
@@ -1088,6 +1274,87 @@ async fn failed_destroy_stays_metered_until_a_retry_succeeds(state: &AppState) {
     assert_eq!(app_row(pool, f.app).await.live, Some(live));
 }
 
+/// A destroy also removes what its state missed, but only instances and
+/// security groups tagged with both the app and the deployment, never the live
+/// instance; it completes only once those instances are terminated.
+async fn destroy_sweeps_only_its_own_leftovers(state: &AppState) {
+    let pool = &state.db;
+    let f = fixture(pool, "running").await;
+    let live = deployment(pool, f.org, f.app, "running", None).await;
+    let live_instance = set_instance(pool, live).await;
+    serve(pool, f.app, live).await;
+    let instance_id = set_instance(pool, f.target).await;
+    meter(pool, f.org, f.target, &instance_id).await;
+    let (app, target, other) = (
+        f.app.to_string(),
+        f.target.to_string(),
+        Uuid::new_v4().to_string(),
+    );
+    let both = [
+        ("ResourceId", app.as_str()),
+        ("DeploymentId", target.as_str()),
+    ];
+    let backend = FakeBackend::holding(Some(&live_instance));
+    let ec2 = &backend.ec2;
+    ec2.instance("i-leftover", &both, "running");
+    ec2.instance(
+        "i-deployment-tag-only",
+        &[("DeploymentId", &target)],
+        "running",
+    );
+    ec2.instance("i-app-tag-only", &[("ResourceId", &app)], "running");
+    ec2.instance(
+        "i-other-app",
+        &[("ResourceId", &other), ("DeploymentId", &target)],
+        "stopped",
+    );
+    // Even tagged as the target, the live instance is never terminated.
+    ec2.instance(&live_instance, &both, "running");
+    ec2.group("sg-leftover", &both);
+    ec2.group("sg-deployment-tag-only", &[("DeploymentId", &target)]);
+    ec2.group(
+        "sg-live",
+        &[("ResourceId", &app), ("DeploymentId", &live.to_string())],
+    );
+
+    // The leftover is terminating: not destroyed yet, still counted and billed.
+    let row = begin_destroy(pool, &backend, f.user, f.app, f.target)
+        .await
+        .unwrap()
+        .unwrap();
+    let error = complete_destroy_with(state, &backend, &row)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        destroy::CompleteDestroyError::DestroyState { .. }
+    ));
+    assert_eq!(ec2.terminated(), vec!["i-leftover".to_string()]);
+    // Still in use by the terminating instance.
+    assert!(ec2.deleted_groups().is_empty());
+    assert_eq!(
+        destroy_row(pool, f.target).await,
+        ("failed".to_string(), false, false)
+    );
+    assert!(metered(pool, &instance_id).await);
+
+    // Terminated: the retry deletes its group and completes.
+    ec2.finish_terminations();
+    let row = begin_destroy(pool, &backend, f.user, f.app, f.target)
+        .await
+        .unwrap()
+        .unwrap();
+    complete_destroy_with(state, &backend, &row).await.unwrap();
+    assert_eq!(ec2.terminated(), vec!["i-leftover".to_string()]);
+    assert_eq!(ec2.deleted_groups(), vec!["sg-leftover".to_string()]);
+    assert_eq!(
+        destroy_row(pool, f.target).await,
+        ("destroyed".to_string(), true, true)
+    );
+    assert!(!metered(pool, &instance_id).await);
+    assert_eq!(app_row(pool, f.app).await.live, Some(live));
+}
+
 /// Every app destroy path goes through `begin_termination`.
 async fn app_destroy_waits_for_deployment_operations(state: &Arc<AppState>) {
     let pool = &state.db;
@@ -1136,6 +1403,15 @@ async fn app_destroy_waits_for_deployment_operations(state: &Arc<AppState>) {
             "{expires_in}"
         );
     }
+
+    // A deployment destroy in flight blocks it too.
+    let f = fixture(pool, "destroying").await;
+    let result = managed_dns::begin_termination(pool, f.app).await;
+    assert!(matches!(
+        result,
+        Err(BeginTerminationError::Deploying { .. })
+    ));
+    assert_eq!(app_row(pool, f.app).await.state, "initialized");
 
     // The guard is gated on the lifecycle: Legacy is unaffected.
     let f = fixture(pool, "building").await;
@@ -1373,6 +1649,61 @@ async fn deploy_error_recovery_touches_only_its_own_progress() {
     pool.close().await;
 }
 
+/// The gateway relays `reserve`'s 409 before `receive-pack`, so this is the
+/// push-state rule: a refused app is left with no reservation.
+#[tokio::test]
+#[ignore = "run bash tests/e2e/test_app_deployments_db.sh (isolated PostgreSQL)"]
+async fn reserve_applies_the_push_state_rule() {
+    let pool = test_pool().await;
+    let org = organization(&pool).await;
+    let user = member(&pool, org).await;
+    let app = deployments_app(&pool, org).await;
+    let set_state = |state: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query("UPDATE compute_resources SET state = $2::resource_state WHERE id = $1")
+                .bind(app)
+                .bind(state)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+
+    for state in ["stopped", "terminating", "pending"] {
+        set_state(state).await;
+        let error = admission::reserve(&pool, org, app, user).await.unwrap_err();
+        assert!(
+            matches!(error, ReserveError::NotPushable { state: ref s, .. } if s == state),
+            "{state}: {error}"
+        );
+        assert_eq!(
+            error.client_response(),
+            (
+                StatusCode::CONFLICT,
+                format!("This app is {state} and cannot accept a push right now.")
+            )
+        );
+        let reservations: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM app_deployments WHERE app_id = $1")
+                .bind(app)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(reservations, 0, "{state}");
+    }
+    for state in ["initialized", "running", "failed", "terminated"] {
+        set_state(state).await;
+        let reserved = admission::reserve(&pool, org, app, user)
+            .await
+            .unwrap_or_else(|error| panic!("{state}: {error}"));
+        admission::release_reservation(&pool, reserved, Some(app))
+            .await
+            .unwrap();
+    }
+    pool.close().await;
+}
+
 #[tokio::test]
 #[ignore = "run bash tests/e2e/test_app_deployments_db.sh (isolated PostgreSQL)"]
 async fn candidate_meters_and_eif_downloads() {
@@ -1381,6 +1712,7 @@ async fn candidate_meters_and_eif_downloads() {
 
     retained_instances_are_those_the_reconcile_keeps_metered(&pool).await;
     suspension_stops_and_unsuspension_resumes_retained_meters(&state).await;
+    unsuspend_skips_the_address_of_a_lost_live_runtime(&pool).await;
     eif_source_follows_lifecycle_and_deployment(&pool).await;
     eif_build_is_found_by_key(&pool).await;
     pool.close().await;
@@ -1407,6 +1739,56 @@ async fn set_outcome(pool: &PgPool, id: Uuid, failure_kind: Option<&str>, cleane
     .execute(pool)
     .await
     .unwrap();
+}
+
+/// Unsuspend re-attaches the app address only to a live runtime that exists.
+async fn unsuspend_skips_the_address_of_a_lost_live_runtime(pool: &PgPool) {
+    let org = organization(pool).await;
+    let app = deployments_app(pool, org).await;
+    // Nothing is live yet.
+    assert!(!live_runtime_lost(pool, app).await.unwrap());
+
+    let live = deployment(pool, org, app, "running", Some("i-live")).await;
+    let candidate = deployment(pool, org, app, "failed", Some("i-candidate")).await;
+    set_outcome(pool, candidate, Some("runtime_lost"), false).await;
+    set_live(pool, app, live).await;
+    // A running live runtime, and a lost candidate, are not it.
+    assert!(!live_runtime_lost(pool, app).await.unwrap());
+
+    for (status, failure_kind, lost) in [
+        ("failed", Some("runtime_lost"), true),
+        ("failed", Some("provisioning"), false),
+        ("running", None, false),
+    ] {
+        sqlx::query("UPDATE app_deployments SET status = $2, failure_kind = $3 WHERE id = $1")
+            .bind(live)
+            .bind(status)
+            .bind(failure_kind)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            live_runtime_lost(pool, app).await.unwrap(),
+            lost,
+            "{status} {failure_kind:?}"
+        );
+    }
+
+    // Legacy is unchanged.
+    sqlx::query(
+        "UPDATE app_deployments SET status = 'failed', failure_kind = 'runtime_lost' WHERE id = $1",
+    )
+    .bind(live)
+    .execute(pool)
+    .await
+    .unwrap();
+    assert!(live_runtime_lost(pool, app).await.unwrap());
+    sqlx::query("UPDATE compute_resources SET lifecycle = 'legacy' WHERE id = $1")
+        .bind(app)
+        .execute(pool)
+        .await
+        .unwrap();
+    assert!(!live_runtime_lost(pool, app).await.unwrap());
 }
 
 async fn retained_instances_are_those_the_reconcile_keeps_metered(pool: &PgPool) {

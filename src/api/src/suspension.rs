@@ -371,6 +371,19 @@ pub async fn unsuspend_org_resources(
         managed_on_prem,
     ) in &resources
     {
+        // Its instance is gone, so the app address stays unattached and its
+        // meter stays stopped: the app returns to the pre-suspension state and
+        // the operator switches. Failing here would leave the app `stopped`, so
+        // a failed read proceeds as before the check existed.
+        let live_lost = match app_deployments::lifecycle::live_runtime_lost(&state.db, *resource_id)
+            .await
+        {
+            Ok(lost) => lost,
+            Err(error) => {
+                tracing::warn!(resource_id = %resource_id, ?error, "failed to read the live deployment; unsuspending as usual");
+                false
+            }
+        };
         let aws_creds = get_aws_credentials_for_resource(&state, org_id, *resource_id).await;
         let mut recovered_address = None;
         let mut started_instance_ids = Vec::new();
@@ -406,7 +419,7 @@ pub async fn unsuspend_org_resources(
                 }
             }
 
-            if !managed_on_prem {
+            if !managed_on_prem && !live_lost {
                 match ec2
                     .associate_app_address(&resource_id_tag, provider_resource_id)
                     .await
@@ -545,19 +558,20 @@ pub async fn unsuspend_org_resources(
             .as_ref()
             .map(|address| address.1.as_str())
             .or(region.as_deref());
-        if let Err(e) = metering::upsert_tracked_resource(
-            &state,
-            provider_resource_id,
-            org_id,
-            None,
-            *resource_id,
-            None,
-            "aws",
-            instance_type,
-            metering_region,
-            &metadata,
-        )
-        .await
+        if !live_lost
+            && let Err(e) = metering::upsert_tracked_resource(
+                &state,
+                provider_resource_id,
+                org_id,
+                None,
+                *resource_id,
+                None,
+                "aws",
+                instance_type,
+                metering_region,
+                &metadata,
+            )
+            .await
         {
             tracing::error!(
                 "Failed to resume metering for resource {}: {}",

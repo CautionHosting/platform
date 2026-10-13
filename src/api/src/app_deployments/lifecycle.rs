@@ -4,7 +4,7 @@
 //! Candidate deployment lifecycle: provisioning bookkeeping, Running and
 //! auto-activation, and scoped failure cleanup.
 
-use super::destroy::{DestroyBackend, Platform};
+use super::destroy::{DestroyBackend, Platform, destroy_and_sweep};
 use super::{PROCESS_ID, admission, lock_app_operations};
 use crate::{AppState, ec2, fully_managed_capacity, managed_dns};
 use dterror::{BoxError, CtxError, Location, ResultExt};
@@ -433,10 +433,11 @@ async fn complete_running_with(
     })
 }
 
-/// Marks an owned, unfinished attempt failed and destroys only its own state.
-/// Never touches a `running` row: an ambiguous commit in `complete_running` may
-/// already have made it live. Best effort: reconciliation retries cleanup that
-/// does not complete here. The meter stops only once the instance is gone.
+/// Marks an owned, unfinished attempt failed, destroys only its own state and
+/// sweeps leftovers tagged with it. Never touches a `running` row: an
+/// ambiguous commit in `complete_running` may already have made it live. Best
+/// effort: reconciliation retries cleanup that does not complete here. The
+/// meter stops only once no instance of it remains.
 pub(crate) async fn fail_attempt(
     state: &AppState,
     org_id: Uuid,
@@ -479,10 +480,17 @@ pub(super) async fn fail_attempt_with(
         }
     };
     let cleaned = match (state_key, region) {
-        (Some(_), Some(region)) => backend
-            .destroy_state(org_id, app_id, deployment_id, &region)
-            .await
-            .is_ok(),
+        (Some(_), Some(region)) => {
+            match destroy_and_sweep(&state.db, backend, org_id, app_id, deployment_id, &region)
+                .await
+            {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(deployment_id = %deployment_id, error = %error, "failed attempt cleanup will retry");
+                    false
+                }
+            }
+        }
         _ => true, // nothing was provisioned
     };
     if cleaned {
@@ -614,6 +622,38 @@ pub(crate) async fn retained_instances(
     .fetch_all(db)
     .await
     .with_context(RetainedInstancesErrorCtx::new(app_id))
+}
+
+/// Failure modes for [`live_runtime_lost`].
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("failed to read the live deployment of app {app_id} [{location}]")]
+pub(crate) struct LiveRuntimeLostError {
+    app_id: Uuid,
+    #[location]
+    location: Location,
+    #[source]
+    source: BoxError,
+}
+
+/// Whether the live deployment of a deployments app lost its instance
+/// (`runtime_lost`). Always false for a Legacy app. Nothing can re-attach the
+/// app address to such an instance, so unsuspend skips that step.
+pub(crate) async fn live_runtime_lost(
+    db: &PgPool,
+    app_id: Uuid,
+) -> Result<bool, LiveRuntimeLostError> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM compute_resources cr
+             JOIN app_deployments d ON d.id = cr.live_deployment_id
+             WHERE cr.id = $1 AND cr.lifecycle = $2
+               AND d.status = 'failed' AND d.failure_kind = 'runtime_lost')",
+    )
+    .bind(app_id)
+    .bind(super::LIFECYCLE_DEPLOYMENTS)
+    .fetch_one(db)
+    .await
+    .with_context(LiveRuntimeLostErrorCtx::new(app_id))
 }
 
 /// The retained instances that run after an unsuspend: only those resume

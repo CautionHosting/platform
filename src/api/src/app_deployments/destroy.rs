@@ -16,6 +16,7 @@ use axum::{
 };
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use sqlx::PgPool;
+use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -29,6 +30,8 @@ pub(crate) enum DestroyPlan {
 pub(crate) enum DestroyRejection {
     Live,
     Busy,
+    /// App destroy is running: a second `tofu destroy` would share its state.
+    Terminating,
 }
 
 pub(crate) fn destroy_precondition(
@@ -46,9 +49,9 @@ pub(crate) fn destroy_precondition(
     }
 }
 
-/// The app EIP holder and the deployment's OpenTofu state and its lock. A seam
-/// so the database-backed tests run without AWS or OpenTofu; production uses
-/// [`Platform`].
+/// The app EIP holder, the deployment's OpenTofu state and its lock, and the
+/// EC2 resources tagged with the deployment. A seam so the database-backed
+/// tests run without AWS or OpenTofu; production uses [`Platform`].
 pub(super) trait DestroyBackend {
     /// The instance holding the app Elastic IP.
     async fn address_holder(
@@ -70,9 +73,55 @@ pub(super) trait DestroyBackend {
         &self,
         state_key: &str,
     ) -> Result<(), deployment::ClearStateLockError>;
+
+    /// Instances not yet terminated that EC2 lists as tagged with the app and
+    /// the deployment. [`sweep_leftovers`] checks both tags again.
+    async fn tagged_instances(
+        &self,
+        app_id: Uuid,
+        deployment_id: Uuid,
+        region: &str,
+    ) -> Result<Vec<ec2::Instance>, ec2::DescribeInstancesError>;
+
+    async fn terminate_instances(
+        &self,
+        region: &str,
+        instance_ids: &[String],
+    ) -> Result<(), ec2::TerminateInstancesError>;
+
+    /// Security groups EC2 lists as tagged with the app and the deployment.
+    async fn tagged_security_groups(
+        &self,
+        app_id: Uuid,
+        deployment_id: Uuid,
+        region: &str,
+    ) -> Result<Vec<ec2::SecurityGroup>, ec2::DescribeSecurityGroupsError>;
+
+    async fn delete_security_group(
+        &self,
+        region: &str,
+        group_id: &str,
+    ) -> Result<(), ec2::DeleteSecurityGroupError>;
 }
 
 pub(super) struct Platform;
+
+pub(super) fn ec2_client(region: &str) -> ec2::Ec2Client {
+    ec2::Ec2Client::new(&fully_managed_capacity::platform_credentials_for_region(
+        region,
+    ))
+}
+
+/// The EC2 filters selecting what OpenTofu tags with the app and the deployment.
+fn deployment_tag_filters(app_id: Uuid, deployment_id: Uuid) -> Vec<ec2::Filter> {
+    vec![
+        ec2::Filter::new(&format!("tag:{RESOURCE_ID_TAG}"), &[&app_id.to_string()]),
+        ec2::Filter::new(
+            &format!("tag:{DEPLOYMENT_ID_TAG}"),
+            &[&deployment_id.to_string()],
+        ),
+    ]
+}
 
 impl DestroyBackend for Platform {
     async fn address_holder(
@@ -80,8 +129,7 @@ impl DestroyBackend for Platform {
         app_id: Uuid,
         region: &str,
     ) -> Result<Option<String>, ec2::DescribeAppAddressError> {
-        let credentials = fully_managed_capacity::platform_credentials_for_region(region);
-        ec2::Ec2Client::new(&credentials)
+        ec2_client(region)
             .describe_app_address(&app_id.to_string())
             .await
             .map(|address| address.instance_id)
@@ -103,6 +151,231 @@ impl DestroyBackend for Platform {
     ) -> Result<(), deployment::ClearStateLockError> {
         deployment::clear_state_lock(state_key).await
     }
+
+    async fn tagged_instances(
+        &self,
+        app_id: Uuid,
+        deployment_id: Uuid,
+        region: &str,
+    ) -> Result<Vec<ec2::Instance>, ec2::DescribeInstancesError> {
+        let mut filters = deployment_tag_filters(app_id, deployment_id);
+        filters.push(ec2::Filter::new(
+            "instance-state-name",
+            &["pending", "running", "shutting-down", "stopping", "stopped"],
+        ));
+        ec2_client(region).describe_instances(&filters).await
+    }
+
+    async fn terminate_instances(
+        &self,
+        region: &str,
+        instance_ids: &[String],
+    ) -> Result<(), ec2::TerminateInstancesError> {
+        ec2_client(region).terminate_instances(instance_ids).await
+    }
+
+    async fn tagged_security_groups(
+        &self,
+        app_id: Uuid,
+        deployment_id: Uuid,
+        region: &str,
+    ) -> Result<Vec<ec2::SecurityGroup>, ec2::DescribeSecurityGroupsError> {
+        ec2_client(region)
+            .describe_security_groups(&deployment_tag_filters(app_id, deployment_id))
+            .await
+    }
+
+    async fn delete_security_group(
+        &self,
+        region: &str,
+        group_id: &str,
+    ) -> Result<(), ec2::DeleteSecurityGroupError> {
+        ec2_client(region).delete_security_group(group_id).await
+    }
+}
+
+/// The tags `generate_deployment_main_tf` puts on a deployment's instance and
+/// security group.
+const RESOURCE_ID_TAG: &str = "ResourceId";
+const DEPLOYMENT_ID_TAG: &str = "DeploymentId";
+
+/// Whether `tags` name both the app and the deployment.
+fn tagged_for(tags: &HashMap<String, String>, app_id: Uuid, deployment_id: Uuid) -> bool {
+    tags.get(RESOURCE_ID_TAG) == Some(&app_id.to_string())
+        && tags.get(DEPLOYMENT_ID_TAG) == Some(&deployment_id.to_string())
+}
+
+/// The instances a sweep of `deployment_id` terminates: only those tagged with
+/// both the app and the deployment, and never one of `live`.
+fn leftover_instances(
+    instances: &[ec2::Instance],
+    app_id: Uuid,
+    deployment_id: Uuid,
+    live: &[String],
+) -> Vec<String> {
+    instances
+        .iter()
+        .filter(|instance| tagged_for(&instance.tags, app_id, deployment_id))
+        .filter(|instance| !live.contains(&instance.instance_id))
+        .map(|instance| instance.instance_id.clone())
+        .collect()
+}
+
+/// Failure modes for [`sweep_leftovers`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum SweepLeftoversError {
+    #[error("failed to read the live instance of app {app_id} [{location}]")]
+    Database {
+        app_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("failed to list the instances of deployment {deployment_id} [{location}]")]
+    DescribeInstances {
+        deployment_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error(
+        "failed to terminate the leftover instances of deployment {deployment_id} [{location}]"
+    )]
+    TerminateInstances {
+        deployment_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error(
+        "leftover instances {instance_ids:?} of deployment {deployment_id} are terminating [{location}]"
+    )]
+    Terminating {
+        deployment_id: Uuid,
+        instance_ids: Vec<String>,
+        location: Location,
+    },
+}
+
+/// Removes what the deployment's OpenTofu state may have missed: OpenTofu
+/// persists state on an interval, so an API restart during `tofu apply` can
+/// leave an instance or security group that `tofu destroy` cannot see. Touches
+/// only resources tagged with both the app and the deployment, and never the
+/// live instance. `Ok` once no such instance remains; until then it fails
+/// with `Terminating` and a later pass retries. Security groups are best
+/// effort: one still used by a terminating instance is refused and retried
+/// with it.
+pub(super) async fn sweep_leftovers(
+    db: &PgPool,
+    backend: &impl DestroyBackend,
+    app_id: Uuid,
+    deployment_id: Uuid,
+    region: &str,
+) -> Result<(), SweepLeftoversError> {
+    use SweepLeftoversErrorCtx as Ctx;
+
+    let live: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT cr.provider_resource_id, d.instance_id
+         FROM compute_resources cr LEFT JOIN app_deployments d ON d.id = cr.live_deployment_id
+         WHERE cr.id = $1",
+    )
+    .bind(app_id)
+    .fetch_optional(db)
+    .await
+    .with_context(Ctx::database(app_id))?;
+    let live: Vec<String> = live
+        .into_iter()
+        .flat_map(|(app_instance, live_instance)| [app_instance, live_instance])
+        .flatten()
+        .collect();
+
+    let instances = backend
+        .tagged_instances(app_id, deployment_id, region)
+        .await
+        .with_context(Ctx::describe_instances(deployment_id))?;
+    let leftovers = leftover_instances(&instances, app_id, deployment_id, &live);
+    if !leftovers.is_empty() {
+        tracing::warn!(deployment_id = %deployment_id, instance_ids = ?leftovers, "terminating deployment instances its state missed");
+        backend
+            .terminate_instances(region, &leftovers)
+            .await
+            .with_context(Ctx::terminate_instances(deployment_id))?;
+    }
+
+    match backend
+        .tagged_security_groups(app_id, deployment_id, region)
+        .await
+    {
+        Ok(groups) => {
+            for group in groups
+                .iter()
+                .filter(|group| tagged_for(&group.tags, app_id, deployment_id))
+            {
+                if let Err(error) = backend.delete_security_group(region, &group.group_id).await {
+                    tracing::info!(deployment_id = %deployment_id, group_id = %group.group_id, error = %error, "leftover security group not deleted; retried while its deployment is cleaned up");
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(deployment_id = %deployment_id, error = %error, "failed to list leftover security groups");
+        }
+    }
+
+    if leftovers.is_empty() {
+        Ok(())
+    } else {
+        Err(SweepLeftoversError::Terminating {
+            deployment_id,
+            instance_ids: leftovers,
+            location: std::panic::Location::caller(),
+        })
+    }
+}
+
+/// Failure modes for [`destroy_and_sweep`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum DestroyAndSweepError {
+    #[error("failed to destroy the state of deployment {deployment_id} [{location}]")]
+    DestroyState {
+        deployment_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("failed to sweep the leftovers of deployment {deployment_id} [{location}]")]
+    Sweep {
+        deployment_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Destroys the deployment's state, then sweeps its leftovers. `Ok` only once
+/// nothing tagged with it remains: only then may its cleanup be recorded and
+/// its meter stopped.
+pub(super) async fn destroy_and_sweep(
+    db: &PgPool,
+    backend: &impl DestroyBackend,
+    org_id: Uuid,
+    app_id: Uuid,
+    deployment_id: Uuid,
+    region: &str,
+) -> Result<(), DestroyAndSweepError> {
+    use DestroyAndSweepErrorCtx as Ctx;
+
+    backend
+        .destroy_state(org_id, app_id, deployment_id, region)
+        .await
+        .with_context(Ctx::destroy_state(deployment_id))?;
+    sweep_leftovers(db, backend, app_id, deployment_id, region)
+        .await
+        .with_context(Ctx::sweep(deployment_id))
 }
 
 /// A deployment to destroy, as recorded on its row.
@@ -120,7 +393,7 @@ pub(crate) struct DestroyTarget {
 /// Failure modes for [`complete_destroy`].
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum CompleteDestroyError {
-    #[error("failed to destroy the state of deployment {deployment_id} [{location}]")]
+    #[error("failed to destroy deployment {deployment_id} [{location}]")]
     DestroyState {
         deployment_id: Uuid,
         #[location]
@@ -140,8 +413,9 @@ pub(crate) enum CompleteDestroyError {
     },
 }
 
-/// Destroys the deployment's state, then records it destroyed and stops its
-/// meter. On failure it is left `failed` with `cleaned_up_at` unset: the slot
+/// Destroys the deployment's state and sweeps its leftovers, then records it
+/// destroyed and stops its meter. On failure, or while a leftover instance is
+/// still terminating, it is left `failed` with `cleaned_up_at` unset: the slot
 /// stays counted and the meter running until a retry succeeds. Re-runnable;
 /// used by deployment destruction, app destruction and the recovery of
 /// `destroying` rows abandoned by a restart.
@@ -163,9 +437,7 @@ pub(super) async fn complete_destroy_with(
     // `mark_provisioning` records the state key and region together.
     let destroyed = match (&target.state_key, &target.region) {
         (Some(_), Some(region)) => {
-            backend
-                .destroy_state(target.org_id, target.app_id, id, region)
-                .await
+            destroy_and_sweep(&state.db, backend, target.org_id, target.app_id, id, region).await
         }
         _ => Ok(()), // nothing left to destroy
     };
@@ -173,7 +445,7 @@ pub(super) async fn complete_destroy_with(
         // Never reverts a row a concurrent destroy already finished.
         sqlx::query(
             "UPDATE app_deployments
-             SET status = 'failed', failure_kind = COALESCE(failure_kind, 'provisioning'),
+             SET status = 'failed', failure_kind = 'provisioning',
                  cleaned_up_at = NULL, error = 'destroy failed; retry'
              WHERE id = $1 AND app_id = $2 AND status <> 'destroyed'",
         )
@@ -252,6 +524,10 @@ impl IntoResponse for DestroyError {
                 StatusCode::CONFLICT,
                 "This deployment is being built, provisioned or destroyed; retry shortly.",
             ),
+            Self::Rejected {
+                rejection: DestroyRejection::Terminating,
+                ..
+            } => (StatusCode::CONFLICT, "The app is being destroyed."),
             Self::HoldsAddress { .. } => (
                 StatusCode::CONFLICT,
                 "This deployment currently holds the app address; wait for reconciliation or switch first.",
@@ -272,6 +548,7 @@ struct DestroyRow {
     region: Option<String>,
     status: String,
     instance_id: Option<String>,
+    app_state: String,
 }
 
 pub(crate) async fn destroy_handler(
@@ -281,18 +558,56 @@ pub(crate) async fn destroy_handler(
 ) -> Result<StatusCode, DestroyError> {
     use DestroyErrorCtx as Ctx;
 
-    let Some(target) =
-        begin_destroy(&state.db, &Platform, auth.user_id, app_id, deployment_id).await?
-    else {
-        return Ok(StatusCode::NO_CONTENT);
-    };
-    // Its own task: a dropped request must not strand the row in `destroying`.
+    // Its own task from the first write: a dropped request must not strand
+    // the row in `destroying`.
     let task_state = state.clone();
-    tokio::spawn(async move { complete_destroy(&task_state, &target).await })
-        .await
-        .with_context(Ctx::destroy_failed())?
-        .with_context(Ctx::destroy_failed())?;
-    Ok(StatusCode::NO_CONTENT)
+    let user_id = auth.user_id;
+    let task = tokio::spawn(async move {
+        let Some(target) =
+            begin_destroy(&task_state.db, &Platform, user_id, app_id, deployment_id).await?
+        else {
+            return Ok(());
+        };
+        let destroyed = complete_destroy(&task_state, &target).await;
+        if destroyed.as_ref().is_err_and(leaves_row_destroying) {
+            fail_destroying(&task_state.db, deployment_id).await;
+        }
+        destroyed.with_context(Ctx::destroy_failed())
+    });
+    match task.await {
+        Ok(destroyed) => destroyed.map(|()| StatusCode::NO_CONTENT),
+        Err(error) => {
+            fail_destroying(&state.db, deployment_id).await;
+            Err(error).with_context(Ctx::destroy_failed())
+        }
+    }
+}
+
+/// Only a lost write leaves the row `destroying`. A `DestroyState` error
+/// already marked it `failed`, and flipping it again could hit the fresh
+/// `destroying` row of a concurrent `destroy -d` retry.
+fn leaves_row_destroying(error: &CompleteDestroyError) -> bool {
+    matches!(error, CompleteDestroyError::Database { .. })
+}
+
+/// Best effort, after a failed or panicked deployment destroy: a row this
+/// process still holds in `destroying` (its last write failed) becomes
+/// `failed` and awaits cleanup, which reconciliation retries. A settled row is
+/// left alone.
+async fn fail_destroying(db: &PgPool, deployment_id: Uuid) {
+    if let Err(error) = sqlx::query(
+        "UPDATE app_deployments
+         SET status = 'failed', failure_kind = 'provisioning',
+             cleaned_up_at = NULL, error = 'destroy failed; retry'
+         WHERE id = $1 AND owner_process_id = $2 AND status = 'destroying'",
+    )
+    .bind(deployment_id)
+    .bind(*PROCESS_ID)
+    .execute(db)
+    .await
+    {
+        tracing::error!(deployment_id = %deployment_id, error = %error, "failed to record a failed deployment destroy; reconciliation re-runs it");
+    }
 }
 
 /// Under the app lock: refuses the live deployment, an active operation and
@@ -314,7 +629,7 @@ pub(super) async fn begin_destroy(
     // Membership join as in the switch.
     let row: Option<DestroyRow> = sqlx::query_as(
         "SELECT cr.live_deployment_id, COALESCE(cr.region, d.region) AS region,
-                d.status, d.instance_id
+                d.status, d.instance_id, cr.state::text AS app_state
          FROM compute_resources cr
          JOIN organization_members om ON om.organization_id = cr.organization_id AND om.user_id = $3
          JOIN app_deployments d ON d.app_id = cr.id AND d.id = $2
@@ -334,6 +649,12 @@ pub(super) async fn begin_destroy(
         });
     };
     match destroy_precondition(row.live_deployment_id, deployment_id, &row.status) {
+        Ok(DestroyPlan::Destroy) if row.app_state == "terminating" => {
+            return Err(DestroyError::Rejected {
+                rejection: DestroyRejection::Terminating,
+                location: std::panic::Location::caller(),
+            });
+        }
         Ok(DestroyPlan::Destroy) => {}
         Ok(DestroyPlan::AlreadyDestroyed) => return Ok(None),
         Err(rejection) => {
@@ -574,5 +895,62 @@ mod tests {
             destroy_precondition(None, target, "failed"),
             Ok(DestroyPlan::Destroy)
         ));
+    }
+
+    #[test]
+    fn only_a_lost_write_leaves_the_row_destroying() {
+        let deployment_id = Uuid::new_v4();
+        let location = std::panic::Location::caller();
+        let source = || BoxError::from("failed");
+        assert!(leaves_row_destroying(&CompleteDestroyError::Database {
+            deployment_id,
+            location,
+            source: source(),
+        }));
+        assert!(!leaves_row_destroying(
+            &CompleteDestroyError::DestroyState {
+                deployment_id,
+                location,
+                source: source(),
+            }
+        ));
+    }
+
+    #[test]
+    fn sweep_takes_only_instances_tagged_with_both_and_never_the_live_one() {
+        let (app, deployment) = (Uuid::new_v4(), Uuid::new_v4());
+        let (app_tag, deployment_tag) = (app.to_string(), deployment.to_string());
+        let other = Uuid::new_v4().to_string();
+        let instance = |id: &str, tags: &[(&str, &str)]| ec2::Instance {
+            instance_id: id.to_string(),
+            instance_type: None,
+            tags: tags
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        };
+        let both = [
+            ("ResourceId", app_tag.as_str()),
+            ("DeploymentId", deployment_tag.as_str()),
+        ];
+        let instances = [
+            instance("i-leftover", &both),
+            instance("i-live", &both),
+            instance("i-deployment-only", &[("DeploymentId", &deployment_tag)]),
+            instance("i-app-only", &[("ResourceId", &app_tag)]),
+            instance(
+                "i-other-app",
+                &[("ResourceId", &other), ("DeploymentId", &deployment_tag)],
+            ),
+            instance(
+                "i-other-deployment",
+                &[("ResourceId", &app_tag), ("DeploymentId", &other)],
+            ),
+            instance("i-untagged", &[]),
+        ];
+        assert_eq!(
+            leftover_instances(&instances, app, deployment, &["i-live".to_string()]),
+            vec!["i-leftover".to_string()]
+        );
     }
 }
