@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use dterror::{BoxError, CtxError, Location};
+use dterror::{BoxError, CtxError, Location, ResultExt};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -944,6 +944,116 @@ mod tests {
             "nitro-cli console",
         ] {
             assert_template_references_guarded_by_debug(&user_data, needle);
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_fully_managed_main_tf_is_unchanged() {
+        // The generator reads these (`generate_nitro_deployment_main_tf` and
+        // `enclave_instance_block`); a dev shell that exports them would produce a
+        // different file.
+        assert!(
+            std::env::var_os("EIF_S3_BUCKET").is_none()
+                && std::env::var_os("SSH_KEY_NAME").is_none(),
+            "run with EIF_S3_BUCKET and SSH_KEY_NAME unset"
+        );
+        let mut request = deployment_request("/tmp/enclave.eif", None);
+        request.managed_onprem = None;
+        request.ports = vec![8080, 9000];
+        request.http_port = Some(8080);
+        request.domain = Some("app.example.com".to_string());
+        request.locksmith = true;
+        request.e2e = true;
+        request.ssh_keys = vec!["ssh-ed25519 AAAA test".to_string()];
+
+        let work_dir = TempDir::new().unwrap();
+        generate_nitro_deployment_main_tf(work_dir.path(), &request, "s3://bucket/enclave.eif")
+            .await
+            .unwrap();
+        let main_tf = std::fs::read_to_string(work_dir.path().join("main.tf")).unwrap();
+
+        let golden =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/testdata/legacy_fully_managed_main.tf");
+        if std::env::var_os("UPDATE_GOLDEN").is_some() {
+            std::fs::create_dir_all(golden.parent().unwrap()).unwrap();
+            std::fs::write(&golden, &main_tf).unwrap();
+        }
+        assert_eq!(main_tf, std::fs::read_to_string(&golden).unwrap());
+    }
+
+    fn sample_network() -> AppNetwork {
+        AppNetwork {
+            region: "us-west-2".to_string(),
+            vpc_id: "vpc-0abc".to_string(),
+            subnet_id: "subnet-0abc".to_string(),
+            availability_zone: "us-west-2a".to_string(),
+            instance_profile_name: "enclave-00000000-profile".to_string(),
+            eip_allocation_id: "eipalloc-0abc".to_string(),
+            eip_public_ip: "198.51.100.42".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn app_network_tf_holds_network_iam_and_unassociated_eip_only() {
+        let request = AppNetworkRequest {
+            org_id: Uuid::nil(),
+            resource_id: Uuid::nil(),
+            aws_account_id: "123456789012".to_string(),
+            region: "us-west-2".to_string(),
+            instance_type: "m5.xlarge".to_string(),
+        };
+        let work_dir = TempDir::new().unwrap();
+        generate_app_network_main_tf(work_dir.path(), &request)
+            .await
+            .unwrap();
+        let tf = norm(&std::fs::read_to_string(work_dir.path().join("main.tf")).unwrap());
+        for present in [
+            r#"resource "aws_vpc" "enclave""#,
+            r#"resource "aws_subnet" "enclave""#,
+            r#"resource "aws_iam_instance_profile" "enclave""#,
+            r#"resource "aws_eip" "enclave""#,
+            r#"output "eip_allocation_id""#,
+            r#"output "availability_zone""#,
+        ] {
+            assert!(tf.contains(present), "missing {present}");
+        }
+        for absent in [
+            r#"resource "aws_instance""#,
+            r#"resource "aws_security_group""#,
+            "instance = aws_instance",
+        ] {
+            assert!(!tf.contains(absent), "unexpected {absent}");
+        }
+    }
+
+    #[tokio::test]
+    async fn deployment_tf_references_app_network_by_literal_ids() {
+        let mut request = deployment_request("/tmp/enclave.eif", None);
+        request.managed_onprem = None;
+        let deployment_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let work_dir = TempDir::new().unwrap();
+        generate_deployment_main_tf(
+            work_dir.path(),
+            &request,
+            deployment_id,
+            &sample_network(),
+            "s3://bucket/e.eif",
+        )
+        .await
+        .unwrap();
+        let tf = norm(&std::fs::read_to_string(work_dir.path().join("main.tf")).unwrap());
+        assert!(tf.contains(r#"vpc_id = "vpc-0abc""#));
+        assert!(tf.contains(r#"subnet_id = "subnet-0abc""#));
+        assert!(tf.contains(r#"iam_instance_profile = "enclave-00000000-profile""#));
+        assert!(tf.contains(r#"DeploymentId = "11111111-1111-1111-1111-111111111111""#));
+        assert!(tf.contains("value = aws_instance.enclave.public_ip"));
+        for absent in [
+            r#"resource "aws_vpc""#,
+            r#"resource "aws_eip""#,
+            r#"resource "aws_subnet""#,
+            "aws_iam_role",
+        ] {
+            assert!(!tf.contains(absent), "unexpected {absent}");
         }
     }
 
@@ -3055,74 +3165,50 @@ pub(crate) enum GenerateMainTfError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
-async fn generate_nitro_deployment_main_tf(
-    work_dir: &Path,
-    request: &NitroDeploymentRequest,
-    eif_s3_path: &str,
-) -> std::result::Result<(), GenerateMainTfError> {
-    use GenerateMainTfErrorCtx as Ctx;
+/// The `terraform { required_providers { aws } }` block shared by every generated state.
+fn tf_settings_block() -> hcl::Block {
+    hcl::Block::builder("terraform")
+        .add_attribute(("required_version", ">= 1.0"))
+        .add_block(
+            hcl::Block::builder("required_providers")
+                .add_attribute((
+                    "aws",
+                    hcl::Expression::Object(
+                        vec![
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "source",
+                                )),
+                                hcl::Expression::String("hashicorp/aws".into()),
+                            ),
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "version",
+                                )),
+                                hcl::Expression::String("~> 5.0".into()),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    ),
+                ))
+                .build(),
+        )
+        .build()
+}
 
-    let aws_region = request
-        .credentials
-        .as_ref()
-        .map(|c| c.region.clone())
-        .or_else(|| request.region.clone())
-        .ok_or_else(|| GenerateMainTfError::MissingRegion {
-            location: std::panic::Location::caller(),
-        })?;
-    let ssh_key_name = std::env::var("SSH_KEY_NAME").ok();
+/// The AWS provider block, plus the credential variables when the request carries credentials.
+fn managed_provider_blocks(
+    credentials: Option<&AwsCredentials>,
+    aws_region: &str,
+    org_id_str: &str,
+) -> Vec<hcl::Block> {
+    let mut blocks = Vec::new();
 
-    let (cpu_count_rounded, instance_type) =
-        dterror::ResultExt::with_context(compute_enclave_sizing(request), Ctx::sizing())?;
-
-    let short_id: String = request.resource_id.to_string()[..8].to_owned();
-    let resource_id_str = request.resource_id.to_string();
-    let org_id_str = request.org_id.to_string();
-
-    let eif_bucket = std::env::var("EIF_S3_BUCKET")
-        .unwrap_or_else(|_| format!("caution-eif-storage-{}", request.aws_account_id));
-
-    let mut body = hcl::Body::builder();
-
-    // terraform block
-    body = body.add_block(
-        hcl::Block::builder("terraform")
-            .add_attribute(("required_version", ">= 1.0"))
-            .add_block(
-                hcl::Block::builder("required_providers")
-                    .add_attribute((
-                        "aws",
-                        hcl::Expression::Object(
-                            vec![
-                                (
-                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                        "source",
-                                    )),
-                                    hcl::Expression::String("hashicorp/aws".into()),
-                                ),
-                                (
-                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                        "version",
-                                    )),
-                                    hcl::Expression::String("~> 5.0".into()),
-                                ),
-                            ]
-                            .into_iter()
-                            .collect(),
-                        ),
-                    ))
-                    .build(),
-            )
-            .build(),
-    );
-
-    // provider section
-    if request.credentials.is_some() {
-        body = body
-            .add_block(provider_credential_variable("provider_access_key", true))
-            .add_block(provider_credential_variable("provider_secret_key", true))
-            .add_block(provider_credential_variable("provider_region", false));
+    if credentials.is_some() {
+        blocks.push(provider_credential_variable("provider_access_key", true));
+        blocks.push(provider_credential_variable("provider_secret_key", true));
+        blocks.push(provider_credential_variable("provider_region", false));
 
         let provider_block = hcl::Block::builder("provider")
             .add_label("aws")
@@ -3139,7 +3225,7 @@ async fn generate_nitro_deployment_main_tf(
                     hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("var"))
                         .attr("provider_region")
                         .build(),
-                    hcl::Expression::String(aws_region.clone()),
+                    hcl::Expression::String(aws_region.to_string()),
                 ),
             ))
             .add_attribute(hcl::Attribute::new(
@@ -3184,7 +3270,7 @@ async fn generate_nitro_deployment_main_tf(
                                     hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
                                         "org_id",
                                     )),
-                                    hcl::Expression::String(org_id_str.clone()),
+                                    hcl::Expression::String(org_id_str.to_string()),
                                 ),
                                 (
                                     hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
@@ -3200,12 +3286,12 @@ async fn generate_nitro_deployment_main_tf(
                     .build(),
             )
             .build();
-        body = body.add_block(provider_block);
+        blocks.push(provider_block);
     } else {
-        body = body.add_block(
+        blocks.push(
             hcl::Block::builder("provider")
                 .add_label("aws")
-                .add_attribute(("region", aws_region.as_str()))
+                .add_attribute(("region", aws_region))
                 .add_block(
                     hcl::Block::builder("default_tags")
                         .add_attribute((
@@ -3216,7 +3302,7 @@ async fn generate_nitro_deployment_main_tf(
                                         hcl::expr::ObjectKey::Identifier(
                                             hcl::Identifier::unchecked("org_id"),
                                         ),
-                                        hcl::Expression::String(org_id_str.clone()),
+                                        hcl::Expression::String(org_id_str.to_string()),
                                     ),
                                     (
                                         hcl::expr::ObjectKey::Identifier(
@@ -3235,17 +3321,19 @@ async fn generate_nitro_deployment_main_tf(
         );
     }
 
-    // data "aws_availability_zones" "available"
-    body = body.add_block(
+    blocks
+}
+
+/// The availability-zone and instance-type-offering data sources that pick the subnet's AZ.
+fn availability_zone_data_blocks(instance_type: &str) -> Vec<hcl::Block> {
+    vec![
+        // data "aws_availability_zones" "available"
         hcl::Block::builder("data")
             .add_label("aws_availability_zones")
             .add_label("available")
             .add_attribute(("state", "available"))
             .build(),
-    );
-
-    // data "aws_ec2_instance_type_offerings" "enclave"
-    body = body.add_block(
+        // data "aws_ec2_instance_type_offerings" "enclave"
         hcl::Block::builder("data")
             .add_label("aws_ec2_instance_type_offerings")
             .add_label("enclave")
@@ -3273,52 +3361,60 @@ async fn generate_nitro_deployment_main_tf(
                     .build(),
             )
             .build(),
-    );
+    ]
+}
 
-    // data "aws_ami" "amazon_linux_2023"
-    body = body.add_block(
-        hcl::Block::builder("data")
-            .add_label("aws_ami")
-            .add_label("amazon_linux_2023")
-            .add_attribute(("most_recent", true))
-            .add_attribute((
-                "owners",
-                hcl::Expression::Array(vec![hcl::Expression::String("amazon".into())]),
-            ))
-            .add_block(
-                hcl::Block::builder("filter")
-                    .add_attribute(("name", "name"))
-                    .add_attribute((
-                        "values",
-                        hcl::Expression::Array(vec![hcl::Expression::String(
-                            "al2023-ami-*-x86_64".into(),
-                        )]),
-                    ))
-                    .build(),
-            )
-            .add_block(
-                hcl::Block::builder("filter")
-                    .add_attribute(("name", "virtualization-type"))
-                    .add_attribute((
-                        "values",
-                        hcl::Expression::Array(vec![hcl::Expression::String("hvm".into())]),
-                    ))
-                    .build(),
-            )
-            .add_block(
-                hcl::Block::builder("filter")
-                    .add_attribute(("name", "root-device-type"))
-                    .add_attribute((
-                        "values",
-                        hcl::Expression::Array(vec![hcl::Expression::String("ebs".into())]),
-                    ))
-                    .build(),
-            )
-            .build(),
-    );
+/// The Amazon Linux 2023 AMI data source the enclave host boots from.
+fn amazon_linux_ami_data_block() -> hcl::Block {
+    hcl::Block::builder("data")
+        .add_label("aws_ami")
+        .add_label("amazon_linux_2023")
+        .add_attribute(("most_recent", true))
+        .add_attribute((
+            "owners",
+            hcl::Expression::Array(vec![hcl::Expression::String("amazon".into())]),
+        ))
+        .add_block(
+            hcl::Block::builder("filter")
+                .add_attribute(("name", "name"))
+                .add_attribute((
+                    "values",
+                    hcl::Expression::Array(vec![hcl::Expression::String(
+                        "al2023-ami-*-x86_64".into(),
+                    )]),
+                ))
+                .build(),
+        )
+        .add_block(
+            hcl::Block::builder("filter")
+                .add_attribute(("name", "virtualization-type"))
+                .add_attribute((
+                    "values",
+                    hcl::Expression::Array(vec![hcl::Expression::String("hvm".into())]),
+                ))
+                .build(),
+        )
+        .add_block(
+            hcl::Block::builder("filter")
+                .add_attribute(("name", "root-device-type"))
+                .add_attribute((
+                    "values",
+                    hcl::Expression::Array(vec![hcl::Expression::String("ebs".into())]),
+                ))
+                .build(),
+        )
+        .build()
+}
 
-    // resource "aws_iam_role" "enclave"
-    body = body.add_block(
+/// The enclave host IAM role, its EIF-read policy and its instance profile.
+fn enclave_iam_blocks(
+    short_id: &str,
+    eif_bucket: &str,
+    org_id_str: &str,
+    resource_id_str: &str,
+) -> Vec<hcl::Block> {
+    vec![
+        // resource "aws_iam_role" "enclave"
         hcl::Block::builder("resource")
             .add_label("aws_iam_role")
             .add_label("enclave")
@@ -3392,7 +3488,7 @@ async fn generate_nitro_deployment_main_tf(
                             hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
                                 "ResourceId",
                             )),
-                            hcl::Expression::String(resource_id_str.clone()),
+                            hcl::Expression::String(resource_id_str.to_string()),
                         ),
                     ]
                     .into_iter()
@@ -3400,10 +3496,7 @@ async fn generate_nitro_deployment_main_tf(
                 ),
             ))
             .build(),
-    );
-
-    // resource "aws_iam_role_policy" "enclave_s3"
-    body = body.add_block(
+        // resource "aws_iam_role_policy" "enclave_s3"
         hcl::Block::builder("resource")
             .add_label("aws_iam_role_policy")
             .add_label("enclave_s3")
@@ -3468,10 +3561,7 @@ async fn generate_nitro_deployment_main_tf(
                     .build(),
             ))
             .build(),
-    );
-
-    // resource "aws_iam_instance_profile" "enclave"
-    body = body.add_block(
+        // resource "aws_iam_instance_profile" "enclave"
         hcl::Block::builder("resource")
             .add_label("aws_iam_instance_profile")
             .add_label("enclave")
@@ -3495,7 +3585,7 @@ async fn generate_nitro_deployment_main_tf(
                             hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
                                 "ResourceId",
                             )),
-                            hcl::Expression::String(resource_id_str.clone()),
+                            hcl::Expression::String(resource_id_str.to_string()),
                         ),
                     ]
                     .into_iter()
@@ -3503,10 +3593,13 @@ async fn generate_nitro_deployment_main_tf(
                 ),
             ))
             .build(),
-    );
+    ]
+}
 
-    // resource "aws_vpc" "enclave"
-    body = body.add_block(
+/// The VPC, internet gateway, subnet, route table and its association.
+fn enclave_network_blocks(resource_id_str: &str) -> Vec<hcl::Block> {
+    vec![
+        // resource "aws_vpc" "enclave"
         hcl::Block::builder("resource")
             .add_label("aws_vpc")
             .add_label("enclave")
@@ -3525,7 +3618,7 @@ async fn generate_nitro_deployment_main_tf(
                             hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
                                 "ResourceId",
                             )),
-                            hcl::Expression::String(resource_id_str.clone()),
+                            hcl::Expression::String(resource_id_str.to_string()),
                         ),
                     ]
                     .into_iter()
@@ -3533,10 +3626,7 @@ async fn generate_nitro_deployment_main_tf(
                 ),
             ))
             .build(),
-    );
-
-    // resource "aws_internet_gateway" "enclave"
-    body = body.add_block(
+        // resource "aws_internet_gateway" "enclave"
         hcl::Block::builder("resource")
             .add_label("aws_internet_gateway")
             .add_label("enclave")
@@ -3559,7 +3649,7 @@ async fn generate_nitro_deployment_main_tf(
                             hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
                                 "ResourceId",
                             )),
-                            hcl::Expression::String(resource_id_str.clone()),
+                            hcl::Expression::String(resource_id_str.to_string()),
                         ),
                     ]
                     .into_iter()
@@ -3567,10 +3657,7 @@ async fn generate_nitro_deployment_main_tf(
                 ),
             ))
             .build(),
-    );
-
-    // resource "aws_subnet" "enclave"
-    body = body.add_block(
+        // resource "aws_subnet" "enclave"
         hcl::Block::builder("resource")
             .add_label("aws_subnet")
             .add_label("enclave")
@@ -3611,7 +3698,7 @@ async fn generate_nitro_deployment_main_tf(
                             hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
                                 "ResourceId",
                             )),
-                            hcl::Expression::String(resource_id_str.clone()),
+                            hcl::Expression::String(resource_id_str.to_string()),
                         ),
                     ]
                     .into_iter()
@@ -3619,10 +3706,7 @@ async fn generate_nitro_deployment_main_tf(
                 ),
             ))
             .build(),
-    );
-
-    // resource "aws_route_table" "enclave"
-    body = body.add_block(
+        // resource "aws_route_table" "enclave"
         hcl::Block::builder("resource")
             .add_label("aws_route_table")
             .add_label("enclave")
@@ -3659,7 +3743,7 @@ async fn generate_nitro_deployment_main_tf(
                             hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
                                 "ResourceId",
                             )),
-                            hcl::Expression::String(resource_id_str.clone()),
+                            hcl::Expression::String(resource_id_str.to_string()),
                         ),
                     ]
                     .into_iter()
@@ -3667,10 +3751,7 @@ async fn generate_nitro_deployment_main_tf(
                 ),
             ))
             .build(),
-    );
-
-    // resource "aws_route_table_association" "enclave"
-    body = body.add_block(
+        // resource "aws_route_table_association" "enclave"
         hcl::Block::builder("resource")
             .add_label("aws_route_table_association")
             .add_label("enclave")
@@ -3689,10 +3770,13 @@ async fn generate_nitro_deployment_main_tf(
                     .build(),
             ))
             .build(),
-    );
+    ]
+}
 
-    // variable "ports"
-    body = body.add_block(
+/// The `ports` and `http_port` variables the security group and user data read.
+fn port_variable_blocks() -> Vec<hcl::Block> {
+    vec![
+        // variable "ports"
         hcl::Block::builder("variable")
             .add_label("ports")
             .add_attribute((
@@ -3705,10 +3789,7 @@ async fn generate_nitro_deployment_main_tf(
             ))
             .add_attribute(("default", hcl::Expression::Array(vec![])))
             .build(),
-    );
-
-    // variable "http_port"
-    body = body.add_block(
+        // variable "http_port"
         hcl::Block::builder("variable")
             .add_label("http_port")
             .add_attribute(hcl::Attribute::new(
@@ -3717,9 +3798,29 @@ async fn generate_nitro_deployment_main_tf(
             ))
             .add_attribute(("default", 0u64))
             .build(),
-    );
+    ]
+}
 
-    // resource "aws_security_group" "enclave"
+/// `extra_tags` as object entries, appended after a resource's fixed tags.
+fn extra_tag_entries<'a>(
+    extra_tags: &'a [(&str, String)],
+) -> impl Iterator<Item = (hcl::expr::ObjectKey, hcl::Expression)> + 'a {
+    extra_tags.iter().map(|(key, value)| {
+        (
+            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(*key)),
+            hcl::Expression::String(value.clone()),
+        )
+    })
+}
+
+/// The enclave security group. `extra_tags` are appended after the fixed tags.
+fn enclave_security_group_block(
+    request: &NitroDeploymentRequest,
+    short_id: &str,
+    resource_id_str: &str,
+    vpc_id: hcl::Expression,
+    extra_tags: &[(&str, String)],
+) -> hcl::Block {
     let mut sg_builder = hcl::Block::builder("resource")
         .add_label("aws_security_group")
         .add_label("enclave")
@@ -3728,13 +3829,7 @@ async fn generate_nitro_deployment_main_tf(
             "description",
             format!("Security group for {resource_id_str} Nitro Enclave"),
         ))
-        .add_attribute((
-            "vpc_id",
-            hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("aws_vpc"))
-                .attr("enclave")
-                .attr("id")
-                .build(),
-        ));
+        .add_attribute(("vpc_id", vpc_id));
 
     // SSH ingress (only when ssh_keys non-empty)
     if !request.ssh_keys.is_empty() {
@@ -3840,27 +3935,37 @@ async fn generate_nitro_deployment_main_tf(
     );
 
     // security group tags
-    sg_builder = sg_builder.add_attribute((
-        "tags",
-        hcl::Expression::Object(
-            vec![
-                (
-                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("Name")),
-                    hcl::Expression::String(format!("enclave-{resource_id_str}")),
-                ),
-                (
-                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("ResourceId")),
-                    hcl::Expression::String(resource_id_str.clone()),
-                ),
-            ]
-            .into_iter()
-            .collect(),
+    let mut tags = vec![
+        (
+            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("Name")),
+            hcl::Expression::String(format!("enclave-{resource_id_str}")),
         ),
-    ));
+        (
+            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("ResourceId")),
+            hcl::Expression::String(resource_id_str.to_string()),
+        ),
+    ];
+    tags.extend(extra_tag_entries(extra_tags));
+    sg_builder =
+        sg_builder.add_attribute(("tags", hcl::Expression::Object(tags.into_iter().collect())));
 
-    body = body.add_block(sg_builder.build());
+    sg_builder.build()
+}
 
-    // resource "aws_instance" "enclave"
+/// The enclave EC2 instance. `extra_tags` are appended after the fixed tags.
+#[allow(clippy::too_many_arguments)]
+fn enclave_instance_block(
+    request: &NitroDeploymentRequest,
+    eif_s3_path: &str,
+    instance_type: &str,
+    cpu_count_rounded: u32,
+    resource_id_str: &str,
+    subnet_id: hcl::Expression,
+    instance_profile: hcl::Expression,
+    extra_tags: &[(&str, String)],
+) -> hcl::Block {
+    let ssh_key_name = std::env::var("SSH_KEY_NAME").ok();
+
     let mut instance_builder = hcl::Block::builder("resource")
         .add_label("aws_instance")
         .add_label("enclave")
@@ -3873,15 +3978,7 @@ async fn generate_nitro_deployment_main_tf(
                 .build(),
         ))
         .add_attribute(("instance_type", instance_type))
-        .add_attribute((
-            "iam_instance_profile",
-            hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked(
-                "aws_iam_instance_profile",
-            ))
-            .attr("enclave")
-            .attr("name")
-            .build(),
-        ))
+        .add_attribute(("iam_instance_profile", instance_profile))
         .add_attribute((
             "vpc_security_group_ids",
             hcl::Expression::Array(vec![
@@ -3892,13 +3989,7 @@ async fn generate_nitro_deployment_main_tf(
                     .into(),
             ]),
         ))
-        .add_attribute((
-            "subnet_id",
-            hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("aws_subnet"))
-                .attr("enclave")
-                .attr("id")
-                .build(),
-        ));
+        .add_attribute(("subnet_id", subnet_id));
 
     if let Some(ref key) = ssh_key_name {
         instance_builder = instance_builder.add_attribute(("key_name", key.as_str()));
@@ -3930,11 +4021,6 @@ async fn generate_nitro_deployment_main_tf(
     let ssh_keys_json =
         serde_json::to_string(&request.ssh_keys).unwrap_or_else(|_| "[]".to_string());
     let domain_str = request.domain.as_deref().unwrap_or("");
-    let url_output = if let Some(ref d) = request.domain {
-        format!("https://{d}")
-    } else {
-        "https://${aws_eip.enclave.public_ip}".to_string()
-    };
 
     instance_builder = instance_builder.add_attribute(hcl::Attribute::new(
         "user_data",
@@ -4065,64 +4151,154 @@ async fn generate_nitro_deployment_main_tf(
     ));
 
     // instance tags
-    instance_builder = instance_builder.add_attribute((
-        "tags",
-        hcl::Expression::Object(
-            vec![
-                (
-                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("Name")),
-                    hcl::Expression::String(resource_id_str.clone()),
-                ),
-                (
-                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("ResourceId")),
-                    hcl::Expression::String(resource_id_str.clone()),
-                ),
-                (
-                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("ConfigDomain")),
-                    hcl::Expression::String(domain_str.into()),
-                ),
-            ]
-            .into_iter()
-            .collect(),
+    let mut tags = vec![
+        (
+            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("Name")),
+            hcl::Expression::String(resource_id_str.to_string()),
         ),
-    ));
+        (
+            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("ResourceId")),
+            hcl::Expression::String(resource_id_str.to_string()),
+        ),
+        (
+            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("ConfigDomain")),
+            hcl::Expression::String(domain_str.into()),
+        ),
+    ];
+    tags.extend(extra_tag_entries(extra_tags));
+    instance_builder = instance_builder
+        .add_attribute(("tags", hcl::Expression::Object(tags.into_iter().collect())));
 
-    body = body.add_block(instance_builder.build());
+    instance_builder.build()
+}
 
-    // resource "aws_eip" "enclave"
-    body = body.add_block(
-        hcl::Block::builder("resource")
-            .add_label("aws_eip")
-            .add_label("enclave")
-            .add_attribute(("domain", "vpc"))
-            .add_attribute((
-                "instance",
-                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("aws_instance"))
-                    .attr("enclave")
-                    .attr("id")
-                    .build(),
-            ))
-            .add_attribute((
-                "tags",
-                hcl::Expression::Object(
-                    vec![
-                        (
-                            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("Name")),
-                            hcl::Expression::String(format!("enclave-{resource_id_str}")),
-                        ),
-                        (
-                            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                "ResourceId",
-                            )),
-                            hcl::Expression::String(resource_id_str.clone()),
-                        ),
-                    ]
-                    .into_iter()
-                    .collect(),
-                ),
-            ))
-            .build(),
-    );
+/// The enclave EIP. Associated with `instance` when given; unassociated otherwise.
+fn enclave_eip_block(resource_id_str: &str, instance: Option<hcl::Expression>) -> hcl::Block {
+    let mut builder = hcl::Block::builder("resource")
+        .add_label("aws_eip")
+        .add_label("enclave")
+        .add_attribute(("domain", "vpc"));
+
+    if let Some(instance) = instance {
+        builder = builder.add_attribute(("instance", instance));
+    }
+
+    builder
+        .add_attribute((
+            "tags",
+            hcl::Expression::Object(
+                vec![
+                    (
+                        hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("Name")),
+                        hcl::Expression::String(format!("enclave-{resource_id_str}")),
+                    ),
+                    (
+                        hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("ResourceId")),
+                        hcl::Expression::String(resource_id_str.to_string()),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+        ))
+        .build()
+}
+
+/// Serializes `body` and writes it to `work_dir/main.tf`.
+async fn write_main_tf(
+    work_dir: &Path,
+    body: hcl::Body,
+) -> std::result::Result<(), GenerateMainTfError> {
+    use GenerateMainTfErrorCtx as Ctx;
+
+    let content = hcl::to_string(&body).with_context(Ctx::serialize())?;
+    fs::write(work_dir.join("main.tf"), &content)
+        .await
+        .with_context(Ctx::write())?;
+
+    Ok(())
+}
+
+/// A `root.attr.attr...` traversal expression.
+fn traversal(root: &str, attrs: &[&str]) -> hcl::Expression {
+    let mut builder = hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked(root));
+    for attr in attrs {
+        builder = builder.attr(*attr);
+    }
+    builder.build().into()
+}
+
+#[tracing::instrument(skip_all, err)]
+async fn generate_nitro_deployment_main_tf(
+    work_dir: &Path,
+    request: &NitroDeploymentRequest,
+    eif_s3_path: &str,
+) -> std::result::Result<(), GenerateMainTfError> {
+    use GenerateMainTfErrorCtx as Ctx;
+
+    let aws_region = request
+        .credentials
+        .as_ref()
+        .map(|c| c.region.clone())
+        .or_else(|| request.region.clone())
+        .ok_or_else(|| GenerateMainTfError::MissingRegion {
+            location: std::panic::Location::caller(),
+        })?;
+    let (cpu_count_rounded, instance_type) =
+        dterror::ResultExt::with_context(compute_enclave_sizing(request), Ctx::sizing())?;
+
+    let short_id: String = request.resource_id.to_string()[..8].to_owned();
+    let resource_id_str = request.resource_id.to_string();
+    let org_id_str = request.org_id.to_string();
+
+    let eif_bucket = std::env::var("EIF_S3_BUCKET")
+        .unwrap_or_else(|_| format!("caution-eif-storage-{}", request.aws_account_id));
+
+    let url_output = if let Some(ref d) = request.domain {
+        format!("https://{d}")
+    } else {
+        "https://${aws_eip.enclave.public_ip}".to_string()
+    };
+
+    let mut body = hcl::Body::builder().add_block(tf_settings_block());
+    let blocks = managed_provider_blocks(request.credentials.as_ref(), &aws_region, &org_id_str)
+        .into_iter()
+        .chain(availability_zone_data_blocks(instance_type))
+        .chain([amazon_linux_ami_data_block()])
+        .chain(enclave_iam_blocks(
+            &short_id,
+            &eif_bucket,
+            &org_id_str,
+            &resource_id_str,
+        ))
+        .chain(enclave_network_blocks(&resource_id_str))
+        .chain(port_variable_blocks())
+        .chain([
+            enclave_security_group_block(
+                request,
+                &short_id,
+                &resource_id_str,
+                traversal("aws_vpc", &["enclave", "id"]),
+                &[],
+            ),
+            enclave_instance_block(
+                request,
+                eif_s3_path,
+                instance_type,
+                cpu_count_rounded,
+                &resource_id_str,
+                traversal("aws_subnet", &["enclave", "id"]),
+                traversal("aws_iam_instance_profile", &["enclave", "name"]),
+                &[],
+            ),
+            enclave_eip_block(
+                &resource_id_str,
+                Some(traversal("aws_instance", &["enclave", "id"])),
+            ),
+        ]);
+    for block in blocks {
+        body = body.add_block(block);
+    }
 
     // outputs
     body = body.add_block(
@@ -4168,15 +4344,177 @@ async fn generate_nitro_deployment_main_tf(
             .build(),
     );
 
-    let content =
-        dterror::ResultExt::with_context(hcl::to_string(&body.build()), Ctx::serialize())?;
+    write_main_tf(work_dir, body.build()).await
+}
 
-    dterror::ResultExt::with_context(
-        fs::write(work_dir.join("main.tf"), &content).await,
-        Ctx::write(),
-    )?;
+/// The per-app network state: VPC, IAM and an unassociated EIP. Applied once per app;
+/// deployment states reference its outputs by literal ID. Stored as JSONB.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct AppNetwork {
+    pub(crate) region: String,
+    pub(crate) vpc_id: String,
+    pub(crate) subnet_id: String,
+    pub(crate) availability_zone: String,
+    pub(crate) instance_profile_name: String,
+    pub(crate) eip_allocation_id: String,
+    pub(crate) eip_public_ip: String,
+}
 
-    Ok(())
+pub(crate) struct AppNetworkRequest {
+    pub(crate) org_id: Uuid,
+    pub(crate) resource_id: Uuid,
+    pub(crate) aws_account_id: String,
+    pub(crate) region: String,
+    /// The first deployment's instance type; selects the subnet's AZ.
+    pub(crate) instance_type: String,
+}
+
+/// Generates the app network state: network, IAM and an unassociated EIP, with their IDs
+/// as outputs.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "first caller lands with app network provisioning")
+)]
+#[tracing::instrument(skip_all, err)]
+async fn generate_app_network_main_tf(
+    work_dir: &Path,
+    request: &AppNetworkRequest,
+) -> std::result::Result<(), GenerateMainTfError> {
+    let short_id: String = request.resource_id.to_string()[..8].to_owned();
+    let resource_id_str = request.resource_id.to_string();
+    let org_id_str = request.org_id.to_string();
+    let eif_bucket = std::env::var("EIF_S3_BUCKET")
+        .unwrap_or_else(|_| format!("caution-eif-storage-{}", request.aws_account_id));
+
+    let mut body = hcl::Body::builder().add_block(tf_settings_block());
+    let blocks = managed_provider_blocks(None, &request.region, &org_id_str)
+        .into_iter()
+        .chain(availability_zone_data_blocks(&request.instance_type))
+        .chain(enclave_iam_blocks(
+            &short_id,
+            &eif_bucket,
+            &org_id_str,
+            &resource_id_str,
+        ))
+        .chain(enclave_network_blocks(&resource_id_str))
+        .chain([enclave_eip_block(&resource_id_str, None)])
+        .chain(
+            [
+                ("vpc_id", traversal("aws_vpc", &["enclave", "id"])),
+                ("subnet_id", traversal("aws_subnet", &["enclave", "id"])),
+                (
+                    "availability_zone",
+                    traversal("aws_subnet", &["enclave", "availability_zone"]),
+                ),
+                (
+                    "instance_profile_name",
+                    traversal("aws_iam_instance_profile", &["enclave", "name"]),
+                ),
+                (
+                    "eip_allocation_id",
+                    traversal("aws_eip", &["enclave", "allocation_id"]),
+                ),
+                (
+                    "eip_public_ip",
+                    traversal("aws_eip", &["enclave", "public_ip"]),
+                ),
+            ]
+            .into_iter()
+            .map(|(name, value)| {
+                hcl::Block::builder("output")
+                    .add_label(name)
+                    .add_attribute(("value", value))
+                    .build()
+            }),
+        );
+    for block in blocks {
+        body = body.add_block(block);
+    }
+    write_main_tf(work_dir, body.build()).await
+}
+
+/// Generates one deployment's state: security group and instance, placed in the app
+/// network by literal ID.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "first caller lands with app network provisioning")
+)]
+#[tracing::instrument(skip_all, err)]
+async fn generate_deployment_main_tf(
+    work_dir: &Path,
+    request: &NitroDeploymentRequest,
+    deployment_id: Uuid,
+    network: &AppNetwork,
+    eif_s3_path: &str,
+) -> std::result::Result<(), GenerateMainTfError> {
+    use GenerateMainTfErrorCtx as Ctx;
+
+    let (cpu_count_rounded, instance_type) =
+        compute_enclave_sizing(request).with_context(Ctx::sizing())?;
+    let short_id: String = request.resource_id.to_string()[..8].to_owned();
+    let resource_id_str = request.resource_id.to_string();
+    let org_id_str = request.org_id.to_string();
+    let deployment_tag = [("DeploymentId", deployment_id.to_string())];
+    let url = match request.domain.as_deref() {
+        Some(domain) => format!("https://{domain}"),
+        None => "http://${aws_instance.enclave.public_ip}".to_string(),
+    };
+
+    let mut body = hcl::Body::builder().add_block(tf_settings_block());
+    let blocks = managed_provider_blocks(None, &network.region, &org_id_str)
+        .into_iter()
+        .chain([amazon_linux_ami_data_block()])
+        .chain(port_variable_blocks())
+        .chain([
+            enclave_security_group_block(
+                request,
+                &short_id,
+                &resource_id_str,
+                hcl::Expression::String(network.vpc_id.clone()),
+                &deployment_tag,
+            ),
+            enclave_instance_block(
+                request,
+                eif_s3_path,
+                instance_type,
+                cpu_count_rounded,
+                &resource_id_str,
+                hcl::Expression::String(network.subnet_id.clone()),
+                hcl::Expression::String(network.instance_profile_name.clone()),
+                &deployment_tag,
+            ),
+        ])
+        .chain(
+            [
+                ("instance_id", traversal("aws_instance", &["enclave", "id"])),
+                (
+                    "public_ip",
+                    traversal("aws_instance", &["enclave", "public_ip"]),
+                ),
+                (
+                    "instance_type",
+                    traversal("aws_instance", &["enclave", "instance_type"]),
+                ),
+            ]
+            .into_iter()
+            .map(|(name, value)| {
+                hcl::Block::builder("output")
+                    .add_label(name)
+                    .add_attribute(("value", value))
+                    .build()
+            }),
+        )
+        .chain([hcl::Block::builder("output")
+            .add_label("url")
+            .add_attribute(hcl::Attribute::new(
+                "value",
+                hcl::expr::TemplateExpr::from(url),
+            ))
+            .build()]);
+    for block in blocks {
+        body = body.add_block(block);
+    }
+    write_main_tf(work_dir, body.build()).await
 }
 
 /// The scoped deployment tag key, rendered as the parenthesized object-key form
