@@ -545,6 +545,7 @@ fn switch_request(expected_live_deployment_id: Option<Uuid>) -> SwitchRequest {
     SwitchRequest {
         expected_live_deployment_id,
         acknowledged_verification: true,
+        acknowledged_tls_pending: false,
     }
 }
 
@@ -858,6 +859,7 @@ async fn switch_concurrency() {
     stale_expectation_is_rejected(&pool).await;
     concurrent_switches_serialise(&pool).await;
     lost_live_runtime_switches_from_an_unassigned_address(&pool).await;
+    switch_binds_pending_tls_acknowledgement(&pool).await;
     pool.close().await;
 }
 
@@ -993,6 +995,88 @@ async fn concurrent_switches_serialise(pool: &PgPool) {
         deployment_row(pool, live).await,
         ("running".to_string(), false, false)
     );
+}
+
+/// An await-address build that never held the address needs the TLS
+/// acknowledgement; once it has, rolling back to it does not.
+async fn switch_binds_pending_tls_acknowledgement(pool: &PgPool) {
+    use crate::app_deployments::handlers::query_rows;
+
+    let f = fixture(pool, "running").await;
+    let live = deployment(pool, f.org, f.app, "running", Some("i-live")).await;
+    sqlx::query(
+        "UPDATE app_deployments SET configuration = '{\"tls_await_app_address\": true}',
+                bundle_hash = CASE WHEN id = $1 THEN 'abc123' END,
+                instance_id = CASE WHEN id = $1 THEN 'i-target' ELSE instance_id END,
+                activated_at = CASE WHEN id = $2 THEN NOW() END
+         WHERE id IN ($1, $2)",
+    )
+    .bind(f.target)
+    .bind(live)
+    .execute(pool)
+    .await
+    .unwrap();
+    serve(pool, f.app, live).await;
+    let mover = ControlledMover::holding(Response::Move, Some("i-live"));
+    let switch = |target: Uuid, expected: Uuid, acknowledged_tls_pending: bool| {
+        let (pool, mover, user, app) = (pool.clone(), mover.clone(), f.user, f.app);
+        async move {
+            let request = SwitchRequest {
+                expected_live_deployment_id: Some(expected),
+                acknowledged_verification: true,
+                acknowledged_tls_pending,
+            };
+            commit_switch(&pool, true, &*mover, user, app, target, &request).await
+        }
+    };
+
+    let views = query_rows(pool, f.user, Some(f.app), None).await.unwrap();
+    for row in views {
+        let id = row.id;
+        let view = serde_json::to_value(row.into_view(None)).unwrap();
+        // The previously live build already has its certificate.
+        assert_eq!(view["tls_after_switch"], id == f.target, "{id}");
+        assert_eq!(
+            view["bundle_hash"],
+            if id == f.target {
+                serde_json::json!("abc123")
+            } else {
+                serde_json::Value::Null
+            }
+        );
+    }
+    assert!(matches!(
+        switch(f.target, live, false).await,
+        Err(SwitchError::Rejected {
+            rejection: SwitchRejection::TlsNotAcknowledged,
+            ..
+        })
+    ));
+    assert_eq!(mover.calls(), 0);
+
+    let switched = switch(f.target, live, true).await.unwrap();
+    assert!(switched.tls_after_switch);
+    // Now it holds the address, so the certificate is no longer pending.
+    let row = query_rows(pool, f.user, Some(f.app), Some(f.target))
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        serde_json::to_value(row.into_view(None)).unwrap()["tls_after_switch"],
+        false
+    );
+    // Re-selecting the live deployment moves nothing and is not pending.
+    assert!(
+        !switch(f.target, f.target, false)
+            .await
+            .unwrap()
+            .tls_after_switch
+    );
+
+    // Rolling back to the previously live build needs no acknowledgement.
+    let back = switch(live, f.target, false).await.unwrap();
+    assert!(!back.tls_after_switch);
+    assert_eq!(back.live_deployment_id, live);
 }
 
 /// Host failure: the live instance terminated and released the EIP.

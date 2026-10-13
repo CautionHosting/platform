@@ -245,6 +245,9 @@ pub struct DeployResponse {
     pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub live_deployment_id: Option<Uuid>,
+    /// The deployment obtains its certificate only after it holds the app address.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub tls_after_switch: bool,
 }
 
 #[derive(Debug, Deserialize)]

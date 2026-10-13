@@ -22,6 +22,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
+/// SQL predicate over `app_deployments d`: an await-address build that has never
+/// held the app address, so it has no certificate yet. Shared by the deployment
+/// view and the switch, so both always agree.
+pub(crate) const TLS_AFTER_SWITCH_SQL: &str = "(COALESCE((d.configuration->>'tls_await_app_address')::boolean, false) AND d.activated_at IS NULL)";
+
 /// The address an operator reaches a deployment at: the app's stable IP for
 /// the live deployment, the instance's current IP otherwise. A candidate's IP
 /// changes on stop/start and after a switch away from it, so it is never read
@@ -55,6 +60,9 @@ pub(crate) struct DeploymentView {
     activated_at: Option<DateTime<Utc>>,
     failed_at: Option<DateTime<Utc>>,
     error: Option<String>,
+    bundle_hash: Option<String>,
+    /// An await-address build that has never held the app address.
+    tls_after_switch: bool,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -74,6 +82,8 @@ pub(super) struct DeploymentRow {
     activated_at: Option<DateTime<Utc>>,
     failed_at: Option<DateTime<Utc>>,
     error: Option<String>,
+    bundle_hash: Option<String>,
+    tls_after_switch: bool,
     pub(super) live_deployment_id: Option<Uuid>,
     /// The app Elastic IP.
     pub(super) stable_ip: Option<String>,
@@ -109,6 +119,8 @@ impl DeploymentRow {
             activated_at: self.activated_at,
             failed_at: self.failed_at,
             error: self.error,
+            bundle_hash: self.bundle_hash,
+            tls_after_switch: self.tls_after_switch,
         }
     }
 }
@@ -133,11 +145,12 @@ pub(super) async fn query_rows(
     app_id: Option<Uuid>,
     deployment_id: Option<Uuid>,
 ) -> Result<Vec<DeploymentRow>, QueryRowsError> {
-    sqlx::query_as(
+    sqlx::query_as(&format!(
         "SELECT d.id, d.app_id, d.status, d.failure_kind, d.pushed_ref, d.commit_sha,
                 d.commit_subject, d.instance_id, d.instance_type,
                 COALESCE(d.region, cr.region) AS region, d.created_at, d.running_at,
-                d.activated_at, d.failed_at, d.error,
+                d.activated_at, d.failed_at, d.error, d.bundle_hash,
+                {TLS_AFTER_SWITCH_SQL} AS tls_after_switch,
                 cr.live_deployment_id, cr.public_ip AS stable_ip
          FROM app_deployments d
          JOIN compute_resources cr ON cr.id = d.app_id
@@ -146,8 +159,8 @@ pub(super) async fn query_rows(
          WHERE cr.lifecycle = $4 AND cr.destroyed_at IS NULL
            AND ($2::uuid IS NULL OR d.app_id = $2)
            AND ($3::uuid IS NULL OR d.id = $3)
-         ORDER BY d.created_at DESC, d.id",
-    )
+         ORDER BY d.created_at DESC, d.id"
+    ))
     .bind(user_id)
     .bind(app_id)
     .bind(deployment_id)
@@ -382,6 +395,8 @@ mod tests {
             activated_at: None,
             failed_at: None,
             error: None,
+            bundle_hash: None,
+            tls_after_switch: false,
             live_deployment_id,
             stable_ip: Some("198.51.100.42".to_string()),
         }

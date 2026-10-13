@@ -934,8 +934,31 @@ fn resource_state_allows_noop_redeploy(state: &str) -> bool {
     matches!(state, "initialized" | "terminated" | "failed")
 }
 
-fn candidate_success_message(deployment_id: Uuid, live: Option<Uuid>, url: &str) -> String {
+/// Shown right after the push is durably accepted (before `receive-pack`),
+/// so a dropped connection still leaves the operator the ID and next command.
+fn accepted_message(deployment_id: Uuid) -> String {
+    format!(
+        "remote: Deployment {deployment_id} accepted. Disconnecting does not cancel it.\nremote: Follow it with: caution apps get -d {deployment_id}\n"
+    )
+}
+
+fn candidate_success_message(
+    deployment_id: Uuid,
+    live: Option<Uuid>,
+    url: &str,
+    tls_after_switch: bool,
+) -> String {
     let deployment_id = deployment_id.to_string();
+    let tls_line = if tls_after_switch {
+        [
+            "Application TLS: this deployment obtains its certificate after caution apps switch -d ",
+            deployment_id.as_str(),
+            ".\n",
+        ]
+        .concat()
+    } else {
+        String::new()
+    };
     let live_line = live
         .map(|id| ["Live deployment: ", &id.to_string(), " (unchanged)\n"].concat())
         .unwrap_or_default();
@@ -946,6 +969,7 @@ fn candidate_success_message(deployment_id: Uuid, live: Option<Uuid>, url: &str)
         url,
         "\n",
         live_line.as_str(),
+        tls_line.as_str(),
         "\nNext:\n  caution verify -d ",
         deployment_id.as_str(),
         "\n  caution apps switch -d ",
@@ -1373,6 +1397,15 @@ async fn handle_git_push(
         let _ = session_handle
             .extended_data(channel, 1, Bytes::from(deploy_ref_msg.into_bytes()))
             .await;
+        if let Some(deployment_id) = reservation {
+            let _ = session_handle
+                .extended_data(
+                    channel,
+                    1,
+                    Bytes::from(accepted_message(deployment_id).into_bytes()),
+                )
+                .await;
+        }
 
         #[derive(serde::Serialize)]
         struct DeployRequest {
@@ -1466,6 +1499,8 @@ async fn handle_git_push(
             role: Option<String>,
             #[serde(default)]
             live_deployment_id: Option<Uuid>,
+            #[serde(default)]
+            tls_after_switch: bool,
         }
 
         #[derive(serde::Deserialize)]
@@ -1643,14 +1678,24 @@ async fn handle_git_push(
                 deployment_id,
                 deploy_result.live_deployment_id,
                 &deploy_result.url,
+                deploy_result.tls_after_switch,
             ),
             (_, deployment_id) => {
                 let deployment_line = deployment_id
                     .map(|id| ["\nDeployment: ", &id.to_string(), " (live)"].concat())
                     .unwrap_or_default();
+                let tls_line = match deployment_id {
+                    Some(id) if deploy_result.tls_after_switch => [
+                        "\nApplication TLS verification pending: the certificate is issued now that this deployment is live. Run caution verify -d ",
+                        &id.to_string(),
+                        " once HTTPS answers.",
+                    ]
+                    .concat(),
+                    _ => String::new(),
+                };
                 format!(
-                    "\nApplication: {}\nAttestation: {}{}{}\n\nRun 'caution verify' to verify the application attestation against this checkout.\n\n",
-                    deploy_result.url, attestation_url, deployment_line, dns_note
+                    "\nApplication: {}\nAttestation: {}{}{}{}\n\nRun 'caution verify' to verify the application attestation against this checkout.\n\n",
+                    deploy_result.url, attestation_url, deployment_line, tls_line, dns_note
                 )
             }
         };
@@ -2031,11 +2076,33 @@ mod tests {
     fn candidate_success_message_points_at_next_commands() {
         let d1 = uuid::Uuid::from_u128(1);
         let d2 = uuid::Uuid::from_u128(2);
-        let message = super::candidate_success_message(d2, Some(d1), "http://203.0.113.9");
+        let message = super::candidate_success_message(d2, Some(d1), "http://203.0.113.9", false);
         assert!(message.contains(&format!("Candidate deployment: {d2}")));
         assert!(message.contains(&format!("Live deployment: {d1} (unchanged)")));
         assert!(message.contains(&format!("caution verify -d {d2}")));
         assert!(message.contains(&format!("caution apps switch -d {d2}")));
+        assert!(!super::contains_non_line_terminal_control(&message));
+    }
+
+    #[test]
+    fn candidate_success_message_discloses_pending_tls() {
+        let d2 = uuid::Uuid::from_u128(2);
+        let message = super::candidate_success_message(d2, None, "http://203.0.113.9", true);
+        assert!(message.contains(&format!(
+            "Application TLS: this deployment obtains its certificate after caution apps switch -d {d2}."
+        )));
+        let message = super::candidate_success_message(d2, None, "http://203.0.113.9", false);
+        assert!(!message.contains("Application TLS"));
+    }
+
+    #[test]
+    fn accepted_message_names_the_deployment_and_follow_up() {
+        let id = uuid::Uuid::from_u128(7);
+        let message = super::accepted_message(id);
+        assert!(message.contains(&format!(
+            "Deployment {id} accepted. Disconnecting does not cancel it."
+        )));
+        assert!(message.contains(&format!("Follow it with: caution apps get -d {id}")));
         assert!(!super::contains_non_line_terminal_control(&message));
     }
 

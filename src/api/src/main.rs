@@ -5149,6 +5149,7 @@ async fn deploy_logic(
             deployment_id: Some(deployment_id),
             role: Some(activation.role.as_str().to_string()),
             live_deployment_id: activation.live_deployment_id,
+            tls_after_switch: tls_await_app_address,
         });
     }
 
@@ -5285,6 +5286,7 @@ async fn deploy_logic(
         deployment_id: None,
         role: None,
         live_deployment_id: None,
+        tls_after_switch: false,
     })
 }
 

@@ -4,6 +4,7 @@
 //! Passkey-signed switch: moves the app Elastic IP to a Running deployment
 //! and records it live. The gateway refuses session-only and SSH-signed calls.
 
+use super::handlers::TLS_AFTER_SWITCH_SQL;
 use super::lifecycle::{AppAddressMover, project_live};
 use super::{LIFECYCLE_DEPLOYMENTS, lock_app_operations};
 use crate::{AppState, AuthContext, ec2, fully_managed_capacity};
@@ -23,6 +24,9 @@ pub(crate) struct SwitchRequest {
     pub(crate) expected_live_deployment_id: Option<Uuid>,
     #[serde(default)]
     pub(crate) acknowledged_verification: bool,
+    /// Required when the target obtains its certificate only after switching.
+    #[serde(default)]
+    pub(crate) acknowledged_tls_pending: bool,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -31,6 +35,9 @@ pub(crate) struct SwitchResponse {
     pub(crate) previous_live_deployment_id: Option<Uuid>,
     /// The app Elastic IP.
     pub(crate) stable_ip: String,
+    /// This switch moved the address to a deployment that obtains its
+    /// certificate only now.
+    pub(crate) tls_after_switch: bool,
 }
 
 pub(crate) struct SwitchView {
@@ -41,6 +48,8 @@ pub(crate) struct SwitchView {
     pub(crate) target_instance_id: Option<String>,
     pub(crate) expected_live_deployment_id: Option<Uuid>,
     pub(crate) acknowledged_verification: bool,
+    pub(crate) target_tls_after_switch: bool,
+    pub(crate) acknowledged_tls_pending: bool,
 }
 
 #[derive(Debug)]
@@ -54,6 +63,7 @@ pub(crate) enum SwitchRejection {
     NotAcknowledged,
     AppUnavailable,
     NotRunning,
+    TlsNotAcknowledged,
     Stale,
 }
 
@@ -75,6 +85,9 @@ pub(crate) fn switch_precondition(view: &SwitchView) -> Result<SwitchPlan, Switc
     }
     if view.target_status != "running" || view.target_instance_id.is_none() {
         return Err(SwitchRejection::NotRunning);
+    }
+    if view.target_tls_after_switch && !view.acknowledged_tls_pending {
+        return Err(SwitchRejection::TlsNotAcknowledged);
     }
     Ok(SwitchPlan::Move)
 }
@@ -154,6 +167,13 @@ impl IntoResponse for SwitchError {
                 "Only a Running deployment can become live.",
             ),
             Self::Rejected {
+                rejection: SwitchRejection::TlsNotAcknowledged,
+                ..
+            } => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "This deployment obtains its TLS certificate only after switching; acknowledge that TLS verification is pending.",
+            ),
+            Self::Rejected {
                 rejection: SwitchRejection::Stale,
                 ..
             } => (
@@ -184,22 +204,29 @@ struct SwitchRow {
     region: Option<String>,
     target_status: String,
     target_instance_id: Option<String>,
+    target_tls_after_switch: bool,
     live_instance_id: Option<String>,
     live_status: Option<String>,
     live_failure_kind: Option<String>,
 }
 
-/// Binds `$1` app, `$2` target deployment, `$3` caller (an org member) and
-/// `$4` the deployments lifecycle.
-const SWITCH_ROW: &str = "SELECT cr.state::text AS app_state, cr.live_deployment_id, cr.region,
+/// The target's switch facts; `suffix` appends a locking clause. Binds `$1`
+/// app, `$2` target deployment, `$3` caller (an org member) and `$4` the
+/// deployments lifecycle.
+fn switch_row_sql(suffix: &str) -> String {
+    format!(
+        "SELECT cr.state::text AS app_state, cr.live_deployment_id, cr.region,
         d.status AS target_status, d.instance_id AS target_instance_id,
+        {TLS_AFTER_SWITCH_SQL} AS target_tls_after_switch,
         l.instance_id AS live_instance_id, l.status AS live_status,
         l.failure_kind AS live_failure_kind
      FROM compute_resources cr
      JOIN organization_members om ON om.organization_id = cr.organization_id AND om.user_id = $3
      JOIN app_deployments d ON d.app_id = cr.id AND d.id = $2
      LEFT JOIN app_deployments l ON l.id = cr.live_deployment_id
-     WHERE cr.id = $1 AND cr.lifecycle = $4 AND cr.destroyed_at IS NULL";
+     WHERE cr.id = $1 AND cr.lifecycle = $4 AND cr.destroyed_at IS NULL{suffix}"
+    )
+}
 
 /// The plan, app region and target instance, or why the switch is refused.
 fn check(
@@ -215,6 +242,8 @@ fn check(
         target_instance_id: row.target_instance_id.clone(),
         expected_live_deployment_id: request.expected_live_deployment_id,
         acknowledged_verification: request.acknowledged_verification,
+        target_tls_after_switch: row.target_tls_after_switch,
+        acknowledged_tls_pending: request.acknowledged_tls_pending,
     })
     .map_err(|rejection| SwitchError::Rejected {
         rejection,
@@ -239,7 +268,7 @@ pub(crate) async fn switch_handler(
 
     // 1. Validate and health-check without locks: the health wait can take
     //    ~70 s and must not block pushes, destroys or other switches.
-    let row: Option<SwitchRow> = sqlx::query_as(SWITCH_ROW)
+    let row: Option<SwitchRow> = sqlx::query_as(&switch_row_sql(""))
         .bind(app_id)
         .bind(deployment_id)
         .bind(auth.user_id)
@@ -309,7 +338,7 @@ pub(super) async fn commit_switch(
     lock_app_operations(&mut tx, app_id)
         .await
         .with_context(Ctx::database())?;
-    let row: Option<SwitchRow> = sqlx::query_as(&format!("{SWITCH_ROW} FOR UPDATE OF cr, d"))
+    let row: Option<SwitchRow> = sqlx::query_as(&switch_row_sql(" FOR UPDATE OF cr, d"))
         .bind(app_id)
         .bind(deployment_id)
         .bind(user_id)
@@ -372,6 +401,7 @@ pub(super) async fn commit_switch(
         live_deployment_id: deployment_id,
         previous_live_deployment_id: row.live_deployment_id.filter(|id| *id != deployment_id),
         stable_ip: observed.public_ip,
+        tls_after_switch: matches!(plan, SwitchPlan::Move) && row.target_tls_after_switch,
     })
 }
 
@@ -388,7 +418,32 @@ mod tests {
             target_instance_id: Some("i-0abc".to_string()),
             expected_live_deployment_id: expected,
             acknowledged_verification: true,
+            target_tls_after_switch: false,
+            acknowledged_tls_pending: false,
         }
+    }
+
+    #[test]
+    fn enclave_tls_target_requires_a_pending_tls_acknowledgement() {
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        let mut pending = view(Some(a), b, "running", Some(a));
+        pending.target_tls_after_switch = true;
+        assert!(matches!(
+            switch_precondition(&pending),
+            Err(SwitchRejection::TlsNotAcknowledged)
+        ));
+        pending.acknowledged_tls_pending = true;
+        assert!(matches!(
+            switch_precondition(&pending),
+            Ok(SwitchPlan::Move)
+        ));
+        // Re-selecting the live deployment moves nothing and needs no acknowledgement.
+        let mut live = view(Some(b), b, "running", Some(b));
+        live.target_tls_after_switch = true;
+        assert!(matches!(
+            switch_precondition(&live),
+            Ok(SwitchPlan::AlreadyLive)
+        ));
     }
 
     #[test]

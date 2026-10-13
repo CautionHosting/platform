@@ -37,7 +37,13 @@ Set both in `~/.config/caution/.env`, then restart the API (`env.example` lists 
   (no CI form). It names the live deployment it was confirmed against: if that
   changed, or a retry follows a lost response, the answer is 409 (stale), so
   re-read the app and confirm again. The target must be Running and pass the
-  platform health check.
+  platform health check. A `mode = "tls"` candidate gets its certificate only after
+  it holds the app address, so switching to one that never held it needs a signed
+  `acknowledged_tls_pending: true` (else 422). Rolling back to a deployment that was
+  live needs none. The deployment view carries `bundle_hash` and `tls_after_switch`;
+  the switch and `/deploy` answers carry `tls_after_switch` when it applies, and the
+  push output says so. The push output also names the deployment right after the
+  push is accepted.
 - **Destroy.** `caution apps destroy [APP] -d <deployment>` destroys one deployment
   (session, or `--this-is-a-ci-machine` with the app ID). The live deployment is
   never destroyed, whatever the flags, and `-d` returns 409 while the app is being
