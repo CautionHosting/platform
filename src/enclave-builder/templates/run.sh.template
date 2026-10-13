@@ -119,10 +119,43 @@ cat > /etc/caddy/Caddyfile <<'CADDYFILE'
     }
 }
 CADDYFILE
+# }CADDY
+# {CADDY_IMMEDIATE
 HOME=/var/lib/caddy \
 XDG_CONFIG_HOME=/etc \
 XDG_DATA_HOME=/var/lib \
 /caddy run --config /etc/caddy/Caddyfile &
+# }CADDY_IMMEDIATE
+# {CADDY_AWAIT_ADDRESS
+# Deployments lifecycle: a candidate does not hold the app address, so ACME
+# issuance would fail and back off for hours. Start Caddy once the domain
+# resolves to this instance's public IPv4, which the host publishes from EC2
+# instance metadata as public-ipv4.caution.internal through its dnsmasq. The
+# two match only while this deployment holds the app address. Wrong answers
+# can only delay issuance.
+# The IPv4 an A lookup returns, read from socat's connection log (no resolver
+# tool exists in the enclave). TCP4: the app address is an IPv4 Elastic IP.
+caution_resolved_ip() {
+    /bin/socat -d -d -u /dev/null "TCP4:$1:80,connect-timeout=5" 2>&1 \
+        | /bin/busybox grep -oE 'AF=2 [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | /bin/busybox head -n 1 | /bin/busybox cut -d' ' -f2
+}
+caution_await_app_address() {
+    while :; do
+        own="$(caution_resolved_ip public-ipv4.caution.internal)"
+        if [ -n "$own" ] && [ "$(caution_resolved_ip "$1")" = "$own" ]; then
+            return 0
+        fi
+        /bin/busybox sleep 15
+    done
+}
+(
+    caution_await_app_address "{{CADDY_DOMAIN}}"
+    echo "{{CADDY_DOMAIN}} resolves to this enclave; starting enclave Caddy"
+    HOME=/var/lib/caddy XDG_CONFIG_HOME=/etc XDG_DATA_HOME=/var/lib \
+        /caddy run --config /etc/caddy/Caddyfile
+) &
+# }CADDY_AWAIT_ADDRESS
+# {CADDY
 CADDY_DOMAIN="{{CADDY_DOMAIN}}" /caddy-certfp.sh &
 # }CADDY
 

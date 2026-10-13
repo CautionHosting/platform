@@ -41,6 +41,11 @@ pub struct EnclaveManifest {
     pub locksmith: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub locksmith_commit: Option<String>,
+    /// Deployments-lifecycle `mode = "tls"` builds start enclave Caddy only once
+    /// the domain resolves to this instance's published public IPv4. Absent on every other
+    /// build, so their manifests and run.sh stay byte-identical.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub tls_await_app_address: bool,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -155,6 +160,7 @@ impl EnclaveManifest {
             steve_allow_plaintext_fallback: false,
             locksmith: false,
             locksmith_commit: None,
+            tls_await_app_address: false,
             extra: Map::new(),
         }
     }
@@ -465,5 +471,21 @@ mod tests {
         assert!(!manifest.locksmith);
         assert!(manifest.locksmith_commit.is_none());
         assert!(manifest.steve_commit.is_none());
+    }
+
+    #[test]
+    fn tls_await_app_address_is_recorded_only_when_set() {
+        let mut manifest = make_manifest(None, None, None, None);
+        assert!(
+            !serde_json::to_string(&manifest)
+                .unwrap()
+                .contains("tls_await_app_address")
+        );
+        manifest.tls_await_app_address = true;
+        let json = serde_json::to_string(&manifest).unwrap();
+        assert!(json.contains("\"tls_await_app_address\":true"));
+        let parsed: EnclaveManifest = serde_json::from_str(&json).unwrap();
+        assert!(parsed.tls_await_app_address);
+        assert!(!parsed.extra.contains_key("tls_await_app_address"));
     }
 }

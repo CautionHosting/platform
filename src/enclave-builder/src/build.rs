@@ -363,6 +363,9 @@ pub async fn stage_eif_components(
         .as_ref()
         .and_then(|m| m.locksmith_commit.clone())
         .unwrap_or_else(resolve_locksmith_commit);
+    // Recorded by the API for deployments-lifecycle tls builds; verification
+    // reproduces it from the attested manifest.
+    let tls_await_app_address = manifest.as_ref().is_some_and(|m| m.tls_await_app_address);
 
     if let Some(mut manifest) = manifest {
         manifest
@@ -435,6 +438,7 @@ pub async fn stage_eif_components(
         locksmith,
         e2e_cors_origins.as_deref(),
         egress,
+        tls_await_app_address,
     )
     .await
     .with_context(Ctx::render_run_sh())?;
@@ -575,6 +579,7 @@ async fn render_run_sh_template(
     locksmith: bool,
     e2e_cors_origins: Option<&str>,
     egress: bool,
+    tls_await_app_address: bool,
 ) -> Result<String, RenderRunShTemplateError> {
     use RenderRunShTemplateErrorCtx as Ctx;
 
@@ -588,6 +593,11 @@ async fn render_run_sh_template(
     }
     if e2e_mode == "tls" {
         enabled_blocks.push("CADDY");
+        enabled_blocks.push(if tls_await_app_address {
+            "CADDY_AWAIT_ADDRESS"
+        } else {
+            "CADDY_IMMEDIATE"
+        });
     }
     if locksmith {
         enabled_blocks.push("LOCKSMITH");
@@ -2058,6 +2068,7 @@ mod tests {
             true,
             None,
             false,
+            false,
         )
         .await
         .unwrap();
@@ -2085,6 +2096,7 @@ mod tests {
             false,
             None,
             true,
+            false,
         )
         .await
         .unwrap();
@@ -2112,6 +2124,7 @@ mod tests {
             false,
             None,
             true,
+            false,
         )
         .await
         .unwrap();
@@ -2141,6 +2154,7 @@ mod tests {
             false,
             None,
             false,
+            false,
         )
         .await
         .unwrap();
@@ -2166,6 +2180,7 @@ mod tests {
             false,
             None,
             true,
+            false,
         )
         .await
         .unwrap_err();
@@ -2192,6 +2207,7 @@ mod tests {
             false,
             None,
             true,
+            false,
         )
         .await
         .unwrap();
@@ -2227,6 +2243,7 @@ mod tests {
             false,
             None,
             true,
+            false,
         )
         .await
         .unwrap_err();
@@ -2252,6 +2269,7 @@ mod tests {
             false,
             None,
             true,
+            false,
         )
         .await
         .unwrap_err();
@@ -2272,6 +2290,7 @@ mod tests {
             "http",
             false,
             None,
+            false,
             false,
         )
         .await
@@ -3113,6 +3132,7 @@ mod tests {
             false,
             None,
             true,
+            false,
         )
         .await
         .unwrap();
@@ -3138,6 +3158,7 @@ mod tests {
             false,
             None,
             false,
+            false,
         )
         .await
         .unwrap();
@@ -3148,5 +3169,158 @@ mod tests {
             "# Internal service proxies use high ports so application ports like 8080 are available."
         ));
         assert!(!rendered.contains("VSOCK-LISTEN:443"));
+    }
+
+    /// Legacy enclave-TLS builds (and every build without the manifest flag)
+    /// keep their run.sh, and therefore their PCRs.
+    #[tokio::test]
+    async fn test_render_run_sh_tls_legacy_is_byte_identical() {
+        let template = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/run.sh.template");
+        let golden =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/run_sh_tls_legacy.golden");
+        let rendered = render_run_sh_template(
+            &template,
+            Some("/app/server".to_string()),
+            &[8080],
+            Some(8080),
+            false,
+            "tls",
+            "X25519",
+            false,
+            Some("app.example.com"),
+            "http",
+            false,
+            None,
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rendered, std::fs::read_to_string(&golden).unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_render_run_sh_tls_await_address_gates_caddy() {
+        let template = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/run.sh.template");
+        let immediate = render_run_sh_template(
+            &template,
+            Some("/app/server".to_string()),
+            &[8080],
+            Some(8080),
+            false,
+            "tls",
+            "X25519",
+            false,
+            Some("app.example.com"),
+            "http",
+            false,
+            None,
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        let awaiting = render_run_sh_template(
+            &template,
+            Some("/app/server".to_string()),
+            &[8080],
+            Some(8080),
+            false,
+            "tls",
+            "X25519",
+            false,
+            Some("app.example.com"),
+            "http",
+            false,
+            None,
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(immediate.contains("/caddy run --config /etc/caddy/Caddyfile &"));
+        assert!(!immediate.contains("caution_await_app_address"));
+        assert!(awaiting.contains("caution_await_app_address \"app.example.com\""));
+        assert!(!awaiting.contains("/caddy run --config /etc/caddy/Caddyfile &"));
+        for script in [&immediate, &awaiting] {
+            assert!(script.contains("CADDY_DOMAIN=\"app.example.com\" /caddy-certfp.sh &"));
+            assert!(script.contains("VSOCK-LISTEN:443"));
+        }
+        // The flag only means something in tls mode.
+        let host_mode = render_run_sh_template(
+            &template,
+            Some("/app/server".to_string()),
+            &[8080],
+            Some(8080),
+            false,
+            "disabled",
+            "X25519",
+            false,
+            None,
+            "http",
+            false,
+            None,
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(!host_mode.contains("caution_await_app_address"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_tls_await_address_compares_the_domain_with_the_published_ip() {
+        use std::os::unix::fs::PermissionsExt;
+        const FAKE_SOCAT: &str = r#"#!/bin/sh
+case "$*" in
+  *TCP4:public-ipv4.caution.internal:80*) echo "2026/10/12 10:00:00 socat[7] N opening connection to AF=2 198.51.100.42:80" >&2 ;;
+  *TCP4:app.example.com:80*) echo "2026/10/12 10:00:00 socat[7] N opening connection to AF=2 198.51.100.42:80" >&2 ;;
+  *TCP4:candidate.example.com:80*) echo "2026/10/12 10:00:00 socat[7] N opening connection to AF=2 203.0.113.9:80" >&2 ;;
+esac
+"#;
+        let template = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("templates/run.sh.template");
+        let script = render_run_sh_template(
+            &template,
+            Some("/app/server".to_string()),
+            &[8080],
+            Some(8080),
+            false,
+            "tls",
+            "X25519",
+            false,
+            Some("app.example.com"),
+            "http",
+            false,
+            None,
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+        let start = script.find("caution_resolved_ip() {").unwrap();
+        let end = start + script[start..].find("\n(\n").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let socat = dir.path().join("socat");
+        std::fs::write(&socat, FAKE_SOCAT).unwrap();
+        std::fs::set_permissions(&socat, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let functions = script[start..end]
+            .replace("/bin/socat", socat.to_str().unwrap())
+            .replace("/bin/busybox ", "");
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "{functions}\ncaution_resolved_ip app.example.com\ncaution_resolved_ip public-ipv4.caution.internal\n\
+                 caution_resolved_ip candidate.example.com\n\
+                 caution_await_app_address app.example.com && echo READY"
+            ))
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "198.51.100.42\n198.51.100.42\n203.0.113.9\nREADY\n",
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

@@ -1,0 +1,141 @@
+#!/bin/sh
+set -e
+
+log() {
+    echo "[caution-run] $*"
+}
+
+log_exit() {
+    status=$?
+    log "=== Caution Enclave Exit: status ${status} ==="
+}
+trap log_exit EXIT
+
+show_processes() {
+    log "Process snapshot:"
+    /bin/busybox ps 2>/dev/null || true
+}
+
+wait_for_socket() {
+    socket_path="$1"
+    timeout_secs="$2"
+    elapsed=0
+
+    while [ "${elapsed}" -lt "${timeout_secs}" ]; do
+        if [ -S "${socket_path}" ]; then
+            log "Socket is ready: ${socket_path}"
+            return 0
+        fi
+
+        /bin/busybox sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    log "ERROR: Socket did not appear within ${timeout_secs}s: ${socket_path}"
+    show_processes
+    log "Root directory snapshot:"
+    /bin/busybox ls -la / 2>/dev/null || true
+    return 1
+}
+
+echo "=== Caution Enclave Startup ==="
+
+echo "Setting up network loopback..."
+/bin/busybox ip addr add 127.0.0.1/8 dev lo
+/bin/busybox ip link set dev lo up
+/bin/busybox ip link show lo
+
+echo "127.0.0.1   localhost" > /etc/hosts
+echo "nameserver 127.0.0.1" > /etc/resolv.conf
+
+echo "Network loopback configured"
+
+echo "Setting up vsock network tunnel to parent..."
+/bin/tap-framer --connect 3 3 eth0 &
+SOCAT_PID=$!
+echo "VSock tunnel started (PID: $SOCAT_PID)"
+
+/bin/busybox sleep 2
+
+if /bin/busybox ip link show eth0 2>/dev/null; then
+    echo "eth0 interface created successfully"
+
+    echo "Requesting IP via DHCP..."
+    /bin/busybox udhcpc -i eth0 -n -q -s /bin/udhcpc-script 2>&1 | /bin/busybox grep -E "Lease|obtained" || true
+
+    echo "Network configuration:"
+    /bin/busybox ip addr show eth0
+    /bin/busybox ip route show
+
+    echo "nameserver 10.0.100.1" > /etc/resolv.conf
+
+    echo "Network tunnel established successfully"
+else
+    echo "WARNING: Failed to create eth0 interface, running without internet access"
+    echo "nameserver 127.0.0.1" > /etc/resolv.conf
+fi
+
+echo "Loading NSM kernel module..."
+if [ -f /nsm.ko ]; then
+    insmod /nsm.ko && echo "NSM module loaded successfully" || echo "Failed to load NSM module"
+else
+    echo "WARNING: NSM module not found at /nsm.ko"
+fi
+
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+export KEYFORKD_SOCKET_PATH=/keyforkd.sock
+export RUST_BACKTRACE=1
+
+INTERNAL_E2P_PORT=49500
+INTERNAL_AUX_PORT=49501
+INTERNAL_BOOTPROOFD_PORT=49502
+INTERNAL_LOCKSMITH_PORT=49504
+
+echo "Starting bootproofd on internal port ${INTERNAL_BOOTPROOFD_PORT}..."
+BOOTPROOFD_LISTEN_ADDR="0.0.0.0:${INTERNAL_BOOTPROOFD_PORT}" /bootproofd &
+
+
+echo "Starting enclave Caddy TLS ingress..."
+mkdir -p /etc/caddy /var/lib/caddy /var/log/caddy
+cat > /etc/caddy/Caddyfile <<'CADDYFILE'
+app.example.com {
+    handle /.well-known/caution/health {
+        respond "OK" 200
+    }
+
+    handle /attestation {
+        reverse_proxy 127.0.0.1:49502
+    }
+
+    handle {
+        reverse_proxy http://127.0.0.1:8080
+    }
+}
+CADDYFILE
+HOME=/var/lib/caddy \
+XDG_CONFIG_HOME=/etc \
+XDG_DATA_HOME=/var/lib \
+/caddy run --config /etc/caddy/Caddyfile &
+CADDY_DOMAIN="app.example.com" /caddy-certfp.sh &
+
+echo "Starting VSOCK-to-TCP proxies..."
+# Internal service proxies use high ports so application ports like 8080 are available.
+/bin/socat VSOCK-LISTEN:443,reuseaddr,fork TCP:127.0.0.1:443 &
+/bin/socat VSOCK-LISTEN:${INTERNAL_E2P_PORT},reuseaddr,fork TCP:localhost:${INTERNAL_E2P_PORT} &
+/bin/socat VSOCK-LISTEN:${INTERNAL_AUX_PORT},reuseaddr,fork TCP:localhost:${INTERNAL_AUX_PORT} &
+/bin/socat VSOCK-LISTEN:${INTERNAL_BOOTPROOFD_PORT},reuseaddr,fork TCP:localhost:${INTERNAL_BOOTPROOFD_PORT} &
+
+/bin/busybox sleep 2
+
+
+echo "Starting user application..."
+cd /
+
+echo "=== Filesystem structure ==="
+/bin/busybox find / -type f 2>/dev/null | /bin/busybox grep -v "^/proc\|^/sys\|^/dev" | /bin/busybox head -20
+echo "=== Running user application ==="
+
+sh -c '/app/server'
+APP_STATUS=$?
+echo "ERROR: user application exited with status ${APP_STATUS}"
+exit "${APP_STATUS}"
