@@ -33,8 +33,9 @@
 # operation, then destroys the app until the database shows it terminated. If it
 # cannot, it prints `LEAKED app <id> ...` with the deployment instance IDs and
 # exits 86: destroy that infrastructure manually before `down-test` drops the
-# database. A tolerated incomplete `verify -d` is listed as `ACCEPTANCE OPEN`;
-# E2E_STRICT_VERIFY=1 fails step 11 on any `verify -d` failure instead.
+# database. Step 11 fails on any `verify -d` failure; E2E_STRICT_VERIFY=0
+# tolerates the environmental failures `test_happy_path.sh` tolerates and lists
+# them as `ACCEPTANCE OPEN`.
 # The script refuses to run against anything but a local stack.
 
 set -euo pipefail
@@ -52,7 +53,7 @@ PUSH_TIMEOUT="${PUSH_TIMEOUT:-2400}"
 DESTROY_TIMEOUT="${DESTROY_TIMEOUT:-1200}"
 # 1: `verify -d` must succeed and write the trust file (default: tolerate the
 # environmental failures test_happy_path.sh tolerates).
-E2E_STRICT_VERIFY="${E2E_STRICT_VERIFY:-0}"
+E2E_STRICT_VERIFY="${E2E_STRICT_VERIFY:-1}"
 # Size of the blob of the interrupted push: large enough that the client is still
 # transferring when it is killed.
 INTERRUPT_MB="${INTERRUPT_MB:-128}"

@@ -131,7 +131,7 @@ running deployment meters, so treat the migration as one-way once the flag has b
   `LEAKED app <id> ...` (with the instance IDs) and exits 86. The make target then
   keeps the stack and its database (which record the leak) and skips `down-test`:
   destroy that infrastructure by hand, then run `make down-test`.
-  `E2E_STRICT_VERIFY=1` makes the `caution verify -d` step fail on any `verify -d`
-  failure and requires the trust file; by default it tolerates the environmental
-  failures `test_happy_path.sh` tolerates and prints `ACCEPTANCE OPEN`. Run it strict
-  on caution-dev once; if it passes, make strict the default.
+  The `caution verify -d` step fails on any `verify -d` failure and requires the
+  per-deployment trust file (strict passed on caution-dev, 2026-10-13).
+  `E2E_STRICT_VERIFY=0` tolerates the environmental failures `test_happy_path.sh`
+  tolerates and prints `ACCEPTANCE OPEN` instead.
