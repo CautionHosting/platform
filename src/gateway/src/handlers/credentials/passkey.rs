@@ -63,12 +63,6 @@ pub enum PasskeyError {
         location: Location,
     },
 
-    #[error("This passkey is already registered. [{location}]")]
-    CredentialAlreadyRegistered {
-        #[location]
-        location: Location,
-    },
-
     #[error("Too many pending passkey registrations. Please try again later. [{location}]")]
     TooManyPending {
         #[location]
@@ -150,9 +144,6 @@ impl IntoResponse for PasskeyError {
                 "Passkey registration challenge has expired. Please try again.",
             )
                 .into_response(),
-            Self::CredentialAlreadyRegistered { .. } => {
-                (StatusCode::CONFLICT, "This passkey is already registered.").into_response()
-            }
             Self::TooManyPending { .. } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many pending passkey registrations. Please try again later.",
@@ -240,6 +231,7 @@ pub async fn list_passkeys_handler(
         db::validate_auth_session(&state.db, &session_id)
             .await
             .with_context(Ctx::internal())?
+            .map(|(cred, _)| cred)
     } else {
         None
     };
@@ -326,21 +318,13 @@ pub async fn begin_add_passkey_handler(
             })?;
     let user_unique_id = Uuid::from_slice(&user_handle).with_context(Ctx::internal())?;
 
-    let existing_cred_ids = db::get_all_credential_ids(&state.db)
-        .await
-        .with_context(Ctx::internal())?;
-    let exclude_credentials: Vec<CredentialID> = existing_cred_ids
-        .into_iter()
-        .map(CredentialID::from)
-        .collect();
-
     let (mut ccr, reg_state) = state
         .webauthn
         .start_securitykey_registration(
             user_unique_id,
             &registration_user.username,
             &registration_user.username,
-            Some(exclude_credentials).filter(|v| !v.is_empty()),
+            None,
             None,
             None,
         )
@@ -423,14 +407,6 @@ pub async fn finish_add_passkey_handler(
         .with_context(Ctx::internal())?;
 
     let credential_id = seckey.cred_id().clone();
-    if db::credential_exists(&state.db, &credential_id)
-        .await
-        .with_context(Ctx::internal())?
-    {
-        return Err(PasskeyError::CredentialAlreadyRegistered {
-            location: std::panic::Location::caller(),
-        });
-    }
 
     let passkey_json = serde_json::to_vec(&seckey).with_context(Ctx::internal())?;
     let transports = req

@@ -10,13 +10,15 @@ async fn fixture(pool: &PgPool) -> Uuid {
     sqlx::raw_sql(
         "CREATE TABLE fido2_credentials (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(), user_id UUID NOT NULL,
-            credential_id BYTEA UNIQUE NOT NULL, name TEXT, transport JSONB,
+            credential_id BYTEA NOT NULL, name TEXT, transport JSONB,
             uv_verified BOOLEAN NOT NULL DEFAULT false,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(user_id, credential_id));
          CREATE TABLE signed_request_audit (
             user_id UUID, credential_id BYTEA, verified_at TIMESTAMPTZ);
          CREATE TABLE auth_sessions (
             session_id TEXT PRIMARY KEY, credential_id BYTEA,
+            user_id UUID NOT NULL,
             created_at TIMESTAMPTZ, expires_at TIMESTAMPTZ, last_used_at TIMESTAMPTZ);
          CREATE TABLE qr_login_tokens (expires_at TIMESTAMPTZ);
          CREATE TABLE qr_sign_tokens (expires_at TIMESTAMPTZ);",
@@ -67,6 +69,7 @@ async fn backfill_only_uses_matching_verification_evidence(pool: PgPool) {
         &pool,
         "recent",
         b"second",
+        user,
         OffsetDateTime::now_utc() + time::Duration::hours(1),
     )
     .await
@@ -93,6 +96,7 @@ async fn verification_survives_sessions_and_only_updates_its_credential(pool: Pg
         &pool,
         "active",
         b"first",
+        user,
         OffsetDateTime::now_utc() + time::Duration::hours(1),
     )
     .await
@@ -109,6 +113,7 @@ async fn verification_survives_sessions_and_only_updates_its_credential(pool: Pg
         &pool,
         "expired",
         b"first",
+        user,
         OffsetDateTime::now_utc() - time::Duration::hours(1),
     )
     .await

@@ -62,12 +62,6 @@ pub enum ResetRegisterError {
         location: Location,
     },
 
-    #[error("This security key is already registered. Each key can only be registered once. [{location}]")]
-    CredentialAlreadyRegistered {
-        #[location]
-        location: Location,
-    },
-
     #[error("Too many pending registrations. Please try again later. [{location}]")]
     TooManyPending {
         #[location]
@@ -125,11 +119,6 @@ impl IntoResponse for ResetRegisterError {
                     "An internal error occurred".to_string(),
                 )
             }
-            Self::CredentialAlreadyRegistered { .. } => (
-                StatusCode::CONFLICT,
-                "This security key is already registered. Each key can only be registered once."
-                    .to_string(),
-            ),
             Self::TooManyPending { .. } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many pending registrations. Please try again later.".to_string(),
@@ -286,18 +275,9 @@ pub async fn finish_reset_register_handler(
         .filter(|value| value.is_array());
     let resident = read_credprops_rk(&reg_response);
 
-    // Atomic: credential check + INSERT + token mark-used + session creation in a
+    // Atomic: credential INSERT + token mark-used + session creation in a
     // single transaction. If any step fails the entire operation rolls back.
     let mut tx = state.db.begin().await.with_context(Ctx::internal())?;
-
-    if db::credential_exists(&mut *tx, &credential_id)
-        .await
-        .with_context(Ctx::internal())?
-    {
-        return Err(ResetRegisterError::CredentialAlreadyRegistered {
-            location: std::panic::Location::caller(),
-        });
-    }
 
     db::save_fido2_credential(
         &mut *tx,
@@ -341,7 +321,7 @@ pub async fn finish_reset_register_handler(
     let csrf_token = crate::csrf::derive_csrf_token(&session_id, &state.csrf_secret);
     let expires_at = time::OffsetDateTime::now_utc() + Duration::hours(state.session_timeout_hours);
 
-    db::create_auth_session(&mut *tx, &session_id, &credential_id, expires_at)
+    db::create_auth_session(&mut *tx, &session_id, &credential_id, pending.user_id, expires_at)
         .await
         .with_context(Ctx::internal())?;
 

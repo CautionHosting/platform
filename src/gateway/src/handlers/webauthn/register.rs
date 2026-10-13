@@ -59,21 +59,6 @@ pub(crate) async fn begin_registration_challenge(
     username: String,
     kind: PendingRegistrationKind,
 ) -> Result<Json<RegisterBeginResponse>, RegisterError> {
-    // Fetch ALL existing credential IDs to pass as excludeCredentials
-    // This prevents the same authenticator from registering multiple accounts
-    let existing_cred_ids = db::get_all_credential_ids(&state.db)
-        .await
-        .with_context(Ctx::internal())?;
-    let exclude_credentials: Vec<CredentialID> = existing_cred_ids
-        .into_iter()
-        .map(CredentialID::from)
-        .collect();
-
-    tracing::debug!(
-        "Excluding {} existing credentials from registration",
-        exclude_credentials.len()
-    );
-
     let user_unique_id = Uuid::new_v4();
 
     let (mut ccr, reg_state) = state
@@ -82,7 +67,7 @@ pub(crate) async fn begin_registration_challenge(
             user_unique_id,
             &username,
             &username,
-            Some(exclude_credentials).filter(|v| !v.is_empty()),
+            None,
             None,
             None,
         )
@@ -172,15 +157,6 @@ pub(crate) async fn finish_register_handler(
         .with_context(Ctx::challenge_failed())?;
 
     let credential_id = seckey.cred_id().clone();
-    if db::credential_exists(&state.db, &credential_id)
-        .await
-        .with_context(Ctx::internal())?
-    {
-        tracing::warn!("Registration rejected - credential already registered");
-        return Err(RegisterError::CredentialAlreadyRegistered {
-            location: std::panic::Location::caller(),
-        });
-    }
 
     state.reg_states.write().await.remove(&session_key);
 
@@ -285,7 +261,7 @@ pub(crate) async fn finish_register_handler(
     let csrf_token = crate::csrf::derive_csrf_token(&session_id, &state.csrf_secret);
     let expires_at = time::OffsetDateTime::now_utc() + Duration::hours(state.session_timeout_hours);
 
-    db::create_auth_session(&state.db, &session_id, &credential_id, expires_at)
+    db::create_auth_session(&state.db, &session_id, &credential_id, user_id, expires_at)
         .await
         .with_context(Ctx::internal())?;
 

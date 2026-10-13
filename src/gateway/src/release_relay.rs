@@ -35,9 +35,13 @@ fn store() -> &'static Mutex<HashMap<String, Pending>> {
     PENDING.get_or_init(Default::default)
 }
 
-// A passkey re-registered by another user after deletion rejects rather than admits.
-fn sole_owner(owners: &[Uuid], user: Uuid) -> bool {
-    owners == [user]
+// The requester may open an approval page only if they are among the owners of
+// every passkey the attested options list. A single physical key can be
+// registered to multiple accounts, so each holder credential's owner set is
+// checked independently (the old `owners == [user]` test wrongly rejected a
+// legitimate holder whose key was shared with another account).
+fn sole_owner(holder_owners: &[Vec<Uuid>], user: Uuid) -> bool {
+    !holder_owners.is_empty() && holder_owners.iter().all(|owners| owners.contains(&user))
 }
 
 fn admit_pending(
@@ -141,7 +145,7 @@ pub async fn begin(
     headers: HeaderMap,
     Json(approval): Json<Approval>,
 ) -> Result<Json<Value>, StatusCode> {
-    let credential = crate::handlers::authenticate_session(&state, &headers)
+    let (_credential, user) = crate::handlers::authenticate_session(&state, &headers)
         .await
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
     if approval.display.as_ref().is_some_and(|display| !display.valid()) {
@@ -150,12 +154,6 @@ pub async fn begin(
     let started = Instant::now();
     let (mut request, lifetime) =
         verified_request(&approval, &trusted_measurements()?, &state.relying_party_id)?;
-    let user = crate::db::get_user_id_by_credential(&state.db, &credential)
-        .await
-        .map_err(|error| match error.kind {
-            crate::db::DbErrorKind::CredentialNotFound => StatusCode::UNAUTHORIZED,
-            _ => StatusCode::SERVICE_UNAVAILABLE,
-        })?;
     // Only the holder may open an approval page. The attested options list exactly the
     // holder's snapshot passkeys, the only credentials that can approve this release.
     let holder_credentials: Vec<Vec<u8>> = approval
@@ -167,10 +165,14 @@ pub async fn begin(
         .iter()
         .map(|credential| credential.id.to_vec())
         .collect();
-    let owners = crate::db::get_credential_owners(&state.db, &holder_credentials)
-        .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    if !sole_owner(&owners, user) {
+    let mut holder_owners: Vec<Vec<Uuid>> = Vec::with_capacity(holder_credentials.len());
+    for holder_credential in &holder_credentials {
+        match crate::db::get_user_ids_by_credential(&state.db, holder_credential).await {
+            Ok(owners) => holder_owners.push(owners),
+            Err(_) => return Err(StatusCode::SERVICE_UNAVAILABLE),
+        }
+    }
+    if !sole_owner(&holder_owners, user) {
         tracing::warn!("release relay requester does not own the holder's passkeys");
         return Err(StatusCode::FORBIDDEN);
     }
@@ -296,11 +298,19 @@ mod tests {
         assert!(!pending.contains_key("first"));
     }
     #[test]
-    fn only_the_sole_owner_of_the_holder_passkeys_is_admitted() {
+    fn only_a_holder_who_owns_every_passkey_is_admitted() {
         let (alice, bob) = (Uuid::new_v4(), Uuid::new_v4());
-        assert!(sole_owner(&[alice], alice));
-        assert!(!sole_owner(&[bob], alice));
-        assert!(!sole_owner(&[alice, bob], alice));
+        // Single-owner holder passkeys: the owner is admitted, others are not.
+        assert!(sole_owner(&[vec![alice]], alice));
+        assert!(!sole_owner(&[vec![bob]], alice));
+        // Multiple holder passkeys: must own every one of them.
+        assert!(sole_owner(&[vec![alice], vec![alice]], alice));
+        assert!(!sole_owner(&[vec![alice], vec![bob]], alice));
+        // A shared key (registered to two accounts) still admits the owner —
+        // this is the regression the old `owners == [user]` test got wrong.
+        assert!(sole_owner(&[vec![alice, bob]], alice));
+        assert!(sole_owner(&[vec![alice, bob]], bob));
+        // No holder passkeys at all: nobody is admitted.
         assert!(!sole_owner(&[], alice));
     }
     #[test]

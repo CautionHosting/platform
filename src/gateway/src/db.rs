@@ -40,6 +40,23 @@ pub(crate) struct DbError {
     source: Option<BoxError>,
 }
 
+impl DbError {
+    /// Build a `CredentialNotFound` error for the given operation. Used by
+    /// callers that resolve a credential and find no row (or, for scoped lookups,
+    /// no row for the expected account) rather than a genuine query failure. The
+    /// fields are private to this module, so this constructor is the sanctioned
+    /// way to produce the error from outside `db.rs`.
+    #[track_caller]
+    pub(crate) fn not_found(operation: &str) -> Self {
+        DbError {
+            kind: DbErrorKind::CredentialNotFound,
+            operation: operation.to_string(),
+            location: std::panic::Location::caller(),
+            source: None,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Data types
 // ---------------------------------------------------------------------------
@@ -615,24 +632,6 @@ pub async fn backfill_credential_uv(pool: &PgPool) -> Result<(), DbError> {
     Ok(())
 }
 
-pub async fn credential_exists<'e, E>(executor: E, credential_id: &[u8]) -> Result<bool, DbError>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM fido2_credentials WHERE credential_id = $1)",
-    )
-    .bind(credential_id)
-    .fetch_one(executor)
-    .await
-    .with_context(DbErrorCtx::new(
-        DbErrorKind::QueryFailed,
-        "credential_exists",
-    ))?;
-
-    Ok(exists)
-}
-
 #[tracing::instrument(skip_all, err)]
 pub async fn get_all_credential_public_keys(pool: &PgPool) -> Result<Vec<Vec<u8>>, DbError> {
     let keys: Vec<Vec<u8>> = sqlx::query_scalar("SELECT public_key FROM fido2_credentials")
@@ -646,20 +645,25 @@ pub async fn get_all_credential_public_keys(pool: &PgPool) -> Result<Vec<Vec<u8>
     Ok(keys)
 }
 
+/// Look up a credential's public key scoped to `(user_id, credential_id)` so a
+/// shared key (same rawId under multiple accounts) resolves to the correct row.
 #[tracing::instrument(skip_all, err)]
 pub async fn get_credential_public_key(
     pool: &PgPool,
+    user_id: Uuid,
     credential_id: &[u8],
 ) -> Result<Vec<u8>, DbError> {
-    let public_key: Option<Vec<u8>> =
-        sqlx::query_scalar("SELECT public_key FROM fido2_credentials WHERE credential_id = $1")
-            .bind(credential_id)
-            .fetch_optional(pool)
-            .await
-            .with_context(DbErrorCtx::new(
-                DbErrorKind::QueryFailed,
-                "get_credential_public_key",
-            ))?;
+    let public_key: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT public_key FROM fido2_credentials WHERE user_id = $1 AND credential_id = $2",
+    )
+    .bind(user_id)
+    .bind(credential_id)
+    .fetch_optional(pool)
+    .await
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "get_credential_public_key",
+    ))?;
 
     public_key.ok_or_else(|| DbError {
         kind: DbErrorKind::CredentialNotFound,
@@ -669,40 +673,34 @@ pub async fn get_credential_public_key(
     })
 }
 
+/// Resolve the set of accounts that own a credential. A single physical key may
+/// be registered to multiple accounts (composite `(user_id, credential_id)` unique
+/// constraint), so `credential_id` maps to zero or more users — this returns all
+/// of them, sorted for determinism. An empty `Vec` means the credential is not
+/// registered to any account (callers map that to a "not found" outcome rather
+/// than an error); `Err` is reserved for genuine query failures.
+///
+/// Callers decide how to use the set: login/QR finish scope it to the account
+/// the challenge was begun for (membership check), session/sign flows require
+/// exactly one owner, and release-approval checks that the requester is among
+/// the owners of every relevant credential.
 #[tracing::instrument(skip_all, err)]
-pub async fn get_user_id_by_credential(
+pub async fn get_user_ids_by_credential(
     pool: &PgPool,
     credential_id: &[u8],
-) -> Result<Uuid, DbError> {
-    let user_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT user_id FROM fido2_credentials WHERE credential_id = $1")
-            .bind(credential_id)
-            .fetch_optional(pool)
-            .await
-            .with_context(DbErrorCtx::new(
-                DbErrorKind::QueryFailed,
-                "get_user_id_by_credential",
-            ))?;
+) -> Result<Vec<Uuid>, DbError> {
+    let user_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT user_id FROM fido2_credentials WHERE credential_id = $1 ORDER BY user_id",
+    )
+    .bind(credential_id)
+    .fetch_all(pool)
+    .await
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "get_user_ids_by_credential",
+    ))?;
 
-    user_id.ok_or_else(|| DbError {
-        kind: DbErrorKind::CredentialNotFound,
-        operation: "get_user_id_by_credential".into(),
-        location: std::panic::Location::caller(),
-        source: None,
-    })
-}
-
-pub async fn get_all_credential_ids(pool: &PgPool) -> Result<Vec<Vec<u8>>, DbError> {
-    let rows: Vec<(Vec<u8>,)> =
-        sqlx::query_as("SELECT credential_id FROM fido2_credentials ORDER BY created_at DESC")
-            .fetch_all(pool)
-            .await
-            .with_context(DbErrorCtx::new(
-                DbErrorKind::QueryFailed,
-                "get_all_credential_ids",
-            ))?;
-
-    Ok(rows.into_iter().map(|r| r.0).collect())
+    Ok(user_ids)
 }
 
 /// Look up a user by their (normalized) username. Returns `None` rather than
@@ -746,36 +744,22 @@ pub async fn get_credential_public_keys_by_user_id(
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
-/// Distinct users owning any of the given credential IDs; unknown IDs are ignored.
-#[tracing::instrument(skip_all, err)]
-pub async fn get_credential_owners(
-    pool: &PgPool,
-    credential_ids: &[Vec<u8>],
-) -> Result<Vec<Uuid>, DbError> {
-    sqlx::query_scalar(
-        "SELECT DISTINCT user_id FROM fido2_credentials WHERE credential_id = ANY($1)",
-    )
-    .bind(credential_ids)
-    .fetch_all(pool)
-    .await
-    .with_context(DbErrorCtx::new(
-        DbErrorKind::QueryFailed,
-        "get_credential_owners",
-    ))
-}
-
 /// Opportunistically mark a credential as resident (discoverable) after it was
 /// successfully used in a discoverable (username-less) login assertion. Only
 /// touches rows where residency is still unknown (`NULL`) — never overwrites
 /// an explicit `false` recorded from a registration-time `credProps` reading.
+/// Scoped to `(user_id, credential_id)` so a shared key's residency backfill
+/// never flips the other account's copy.
 pub async fn mark_credential_resident_if_unknown(
     pool: &PgPool,
+    user_id: Uuid,
     credential_id: &[u8],
 ) -> Result<(), DbError> {
     sqlx::query(
         "UPDATE fido2_credentials SET resident = true, updated_at = NOW()
-         WHERE credential_id = $1 AND resident IS NULL",
+         WHERE user_id = $1 AND credential_id = $2 AND resident IS NULL",
     )
+    .bind(user_id)
     .bind(credential_id)
     .execute(pool)
     .await
@@ -898,8 +882,13 @@ pub async fn record_credential_use(
     Ok(())
 }
 
+/// Update a credential's public key and signature counter after a successful
+/// assertion. Scoped to `(user_id, credential_id)` because a single physical key
+/// may be registered to multiple accounts; without the `user_id` this would
+/// overwrite the other account's copy of a shared key.
 pub async fn update_fido2_credential(
     pool: &PgPool,
+    user_id: Uuid,
     credential_id: &[u8],
     public_key: &[u8],
     sign_count: u32,
@@ -907,10 +896,11 @@ pub async fn update_fido2_credential(
     sqlx::query(
         "UPDATE fido2_credentials 
          SET public_key = $1, sign_count = $2, updated_at = NOW() 
-         WHERE credential_id = $3",
+         WHERE user_id = $3 AND credential_id = $4",
     )
     .bind(public_key)
     .bind(sign_count as i64)
+    .bind(user_id)
     .bind(credential_id)
     .execute(pool)
     .await
@@ -926,17 +916,19 @@ pub async fn create_auth_session<'e, E>(
     executor: E,
     session_id: &str,
     credential_id: &[u8],
+    user_id: Uuid,
     expires_at: OffsetDateTime,
 ) -> Result<(), DbError>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
     sqlx::query(
-        "INSERT INTO auth_sessions (session_id, credential_id, created_at, expires_at, last_used_at)
-         VALUES ($1, $2, NOW(), $3, NOW())"
+        "INSERT INTO auth_sessions (session_id, credential_id, user_id, created_at, expires_at, last_used_at)
+         VALUES ($1, $2, $3, NOW(), $4, NOW())"
     )
     .bind(session_id)
     .bind(credential_id)
+    .bind(user_id)
     .bind(expires_at)
     .execute(executor)
     .await
@@ -952,9 +944,9 @@ where
 pub async fn validate_auth_session(
     pool: &PgPool,
     session_id: &str,
-) -> Result<Option<Vec<u8>>, DbError> {
+) -> Result<Option<(Vec<u8>, Uuid)>, DbError> {
     let session: Option<DbSession> = sqlx::query_as(
-        "SELECT session_id, credential_id, expires_at, created_at, last_used_at
+        "SELECT session_id, credential_id, user_id, expires_at, created_at, last_used_at
          FROM auth_sessions
          WHERE session_id = $1",
     )
@@ -983,7 +975,7 @@ pub async fn validate_auth_session(
         tracing::warn!("Failed to update last_used_at for session: {}", e);
     }
 
-    Ok(Some(session.credential_id))
+    Ok(Some((session.credential_id, session.user_id)))
 }
 
 pub async fn delete_auth_session(pool: &PgPool, session_id: &str) -> Result<(), DbError> {
@@ -1750,7 +1742,7 @@ pub async fn get_auth_session(
     session_id: &str,
 ) -> Result<Option<crate::types::DbSession>, DbError> {
     let session = sqlx::query_as(
-        "SELECT session_id, credential_id, expires_at, created_at, last_used_at
+        "SELECT session_id, credential_id, user_id, expires_at, created_at, last_used_at
          FROM auth_sessions WHERE session_id = $1",
     )
     .bind(session_id)
@@ -1975,37 +1967,56 @@ mod credential_owner_tests {
 
     #[sqlx::test(migrations = false)]
     #[ignore = "requires DATABASE_URL pointing to disposable Postgres"]
-    async fn owners_are_distinct_and_unknown_ids_are_ignored(pool: PgPool) {
+    async fn user_ids_by_credential_returns_all_owners(pool: PgPool) {
+        // The composite (user_id, credential_id) constraint allows the SAME
+        // credential_id under multiple users. get_user_ids_by_credential must
+        // return every account that owns a shared key (sorted), and an empty
+        // Vec for a credential no one owns — never an error. This is the query
+        // that backs login/QR finish, session resolution, and release approval.
         sqlx::raw_sql(
             "CREATE TABLE fido2_credentials (
-                user_id UUID NOT NULL, credential_id BYTEA UNIQUE NOT NULL)",
+                user_id UUID NOT NULL, credential_id BYTEA NOT NULL,
+                UNIQUE(user_id, credential_id))",
         )
         .execute(&pool)
         .await
         .unwrap();
         let (alice, bob) = (Uuid::new_v4(), Uuid::new_v4());
-        for (user, id) in [(alice, b"a1".as_slice()), (alice, b"a2"), (bob, b"b1")] {
+        // One physical key (same credential_id) registered to both accounts.
+        for user in [alice, bob] {
             sqlx::query("INSERT INTO fido2_credentials (user_id, credential_id) VALUES ($1, $2)")
                 .bind(user)
-                .bind(id)
+                .bind(b"shared")
                 .execute(&pool)
                 .await
                 .unwrap();
         }
-        let owners = |ids: &[&[u8]]| {
-            let ids: Vec<Vec<u8>> = ids.iter().map(|id| id.to_vec()).collect();
-            let pool = pool.clone();
-            async move {
-                let mut owners = get_credential_owners(&pool, &ids).await.unwrap();
-                owners.sort();
-                owners
-            }
-        };
-        assert_eq!(owners(&[b"a1", b"a2", b"unknown"]).await, [alice]);
-        let mut both = vec![alice, bob];
-        both.sort();
-        assert_eq!(owners(&[b"a1", b"b1"]).await, both);
-        assert!(owners(&[b"unknown"]).await.is_empty());
-        assert!(owners(&[]).await.is_empty());
+        // A single-owner key for contrast.
+        let carol = Uuid::new_v4();
+        sqlx::query("INSERT INTO fido2_credentials (user_id, credential_id) VALUES ($1, $2)")
+            .bind(carol)
+            .bind(b"solo")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // The shared key resolves to BOTH owners, sorted for determinism.
+        let mut shared = get_user_ids_by_credential(&pool, b"shared").await.unwrap();
+        shared.sort();
+        let mut expected = vec![alice, bob];
+        expected.sort();
+        assert_eq!(shared, expected);
+
+        // The single-owner key resolves to exactly that owner.
+        assert_eq!(
+            get_user_ids_by_credential(&pool, b"solo").await.unwrap(),
+            [carol]
+        );
+
+        // A credential no one owns returns an empty Vec (not an error).
+        assert!(get_user_ids_by_credential(&pool, b"unknown")
+            .await
+            .unwrap()
+            .is_empty());
     }
 }

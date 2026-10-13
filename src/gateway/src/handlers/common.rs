@@ -433,12 +433,6 @@ pub enum RegisterError {
         location: Location,
     },
 
-    #[error("This security key is already registered. Each key can only be registered once. [{location}]")]
-    CredentialAlreadyRegistered {
-        #[location]
-        location: Location,
-    },
-
     #[error("Too many pending registrations. Please try again later. [{location}]")]
     TooManyPending {
         #[location]
@@ -506,11 +500,6 @@ impl IntoResponse for RegisterError {
             Self::NoRegistrationState { .. } => (
                 StatusCode::GONE,
                 "No matching registration state found. Please start over.".to_string(),
-            ),
-            Self::CredentialAlreadyRegistered { .. } => (
-                StatusCode::CONFLICT,
-                "This security key is already registered. Each key can only be registered once."
-                    .to_string(),
             ),
             Self::TooManyPending { .. } => (
                 StatusCode::TOO_MANY_REQUESTS,

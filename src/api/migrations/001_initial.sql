@@ -302,7 +302,7 @@ CREATE OR REPLACE TRIGGER compute_resources_updated_at BEFORE UPDATE ON compute_
 CREATE TABLE IF NOT EXISTS fido2_credentials (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    credential_id BYTEA NOT NULL UNIQUE,
+    credential_id BYTEA NOT NULL,
     public_key BYTEA NOT NULL,
     attestation_type VARCHAR(50),
     aaguid BYTEA,
@@ -326,17 +326,14 @@ CREATE OR REPLACE TRIGGER fido2_credentials_updated_at BEFORE UPDATE ON fido2_cr
 CREATE TABLE IF NOT EXISTS auth_sessions (
     session_id VARCHAR(255) PRIMARY KEY,
     credential_id BYTEA NOT NULL,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     expires_at TIMESTAMP NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    last_used_at TIMESTAMP NOT NULL DEFAULT NOW(),
-
-    CONSTRAINT fk_auth_sessions_credential
-        FOREIGN KEY (credential_id)
-        REFERENCES fido2_credentials(credential_id)
-        ON DELETE CASCADE
+    last_used_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_credential_id ON auth_sessions(credential_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON auth_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON auth_sessions(expires_at);
 
 COMMENT ON TABLE auth_sessions IS 'Active authentication sessions - no updated_at needed';

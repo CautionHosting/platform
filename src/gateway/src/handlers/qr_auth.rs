@@ -20,7 +20,7 @@ use webauthn_rs_proto::UserVerificationPolicy;
 use super::{
     check_username_scope, generic_auth_failure_response, normalize_login_username,
     scoped_or_decoy_challenge, DomainError, SignRequestError, SignRequestErrorCtx as Ctx,
-    MAX_PENDING_CHALLENGES,
+    UsernameScope, MAX_PENDING_CHALLENGES,
 };
 use dterror::ResultExt;
 
@@ -380,20 +380,18 @@ impl IntoResponse for QrLoginError {
 async fn create_sign_challenge(
     state: &AppState,
     credential_id: &[u8],
+    user_id: Uuid,
     method: String,
     path: String,
     body_hash: String,
     flow: SignedRequestFlow,
     expires_minutes: i64,
 ) -> Result<(webauthn_rs_proto::RequestChallengeResponse, String), SignRequestError> {
-    let user_id = db::get_user_id_by_credential(&state.db, credential_id)
-        .await
-        .with_context(Ctx::internal())?;
     let requires_pin = db::user_requires_pin(&state.db, user_id)
         .await
         .with_context(Ctx::internal())?;
 
-    let cred_bytes = db::get_credential_public_key(&state.db, credential_id)
+    let cred_bytes = db::get_credential_public_key(&state.db, user_id, credential_id)
         .await
         .with_context(Ctx::internal())?;
     let seckey: SecurityKey = serde_json::from_slice(&cred_bytes).with_context(Ctx::internal())?;
@@ -441,7 +439,7 @@ async fn create_sign_challenge(
 pub(crate) async fn authenticate_session(
     state: &AppState,
     headers: &axum::http::HeaderMap,
-) -> Result<Vec<u8>, SignRequestError> {
+) -> Result<(Vec<u8>, Uuid), SignRequestError> {
     let (session_id, using_header_auth) = if let Some(header_session) = headers
         .get("X-Session-ID")
         .and_then(|h| h.to_str().ok())
@@ -456,7 +454,7 @@ pub(crate) async fn authenticate_session(
         });
     };
 
-    let credential_id = db::validate_auth_session(&state.db, &session_id)
+    let (credential_id, user_id) = db::validate_auth_session(&state.db, &session_id)
         .await
         .with_context(Ctx::internal())?
         .ok_or_else(|| SignRequestError::InvalidSession {
@@ -481,7 +479,7 @@ pub(crate) async fn authenticate_session(
         }
     }
 
-    Ok(credential_id)
+    Ok((credential_id, user_id))
 }
 
 #[tracing::instrument(skip_all)]
@@ -501,11 +499,12 @@ pub async fn begin_sign_request_handler(
     headers: axum::http::HeaderMap,
     Json(req): Json<crate::types::SignChallengeRequest>,
 ) -> Result<Json<crate::types::SignChallengeResponse>, SignRequestError> {
-    let credential_id = authenticate_session(&state, &headers).await?;
+    let (credential_id, user_id) = authenticate_session(&state, &headers).await?;
 
     let (rcr, challenge_id) = create_sign_challenge(
         &state,
         &credential_id,
+        user_id,
         req.method,
         req.path,
         req.body_hash,
@@ -831,14 +830,19 @@ pub async fn qr_login_authenticate_finish_handler(
         serde_json::from_value(req.credential).with_context(FinishCtx::parse_pubkey_credential())?;
 
     let (user_id, credential_id_bytes, mut seckey, auth_result) = match pending.auth_state {
-        AuthState::SecurityKey(auth_state) => {
+        AuthState::SecurityKey { auth_state, scope } => {
             let credential_id_bytes = auth_response.raw_id.as_ref().to_vec();
 
-            let user_id = match db::get_user_id_by_credential(&state.db, &credential_id_bytes).await
+            // Resolve the set of accounts owning this credential, then pick the
+            // one this challenge is scoped to. When a username was supplied the
+            // expected account must own it (membership); an unscoped challenge
+            // requires exactly one owner. Any other outcome collapses into the
+            // same opaque 401 as every other QR-login failure.
+            let owners = match db::get_user_ids_by_credential(&state.db, &credential_id_bytes).await
             {
-                Ok(user_id) => user_id,
+                Ok(owners) => owners,
                 Err(source) => {
-                    tracing::debug!(?source, "QR login finish: credential not found");
+                    tracing::debug!(?source, "QR login finish: credential lookup failed");
                     return Err(QrLoginFinishError::UnexpectedCredentialOwner {
                         expected_user_id: None,
                         actual_user_id: Uuid::nil(),
@@ -846,8 +850,34 @@ pub async fn qr_login_authenticate_finish_handler(
                     });
                 }
             };
+            let user_id = match &scope {
+                UsernameScope::Unscoped => match owners.as_slice() {
+                    [only] => *only,
+                    _ => {
+                        tracing::debug!("QR login finish: credential not found");
+                        return Err(QrLoginFinishError::UnexpectedCredentialOwner {
+                            expected_user_id: None,
+                            actual_user_id: Uuid::nil(),
+                            location: std::panic::Location::caller(),
+                        });
+                    }
+                },
+                expected @ (UsernameScope::Scoped { .. } | UsernameScope::Decoy { .. }) => {
+                    let expected_user = expected.expected_user_id();
+                    if owners.contains(&expected_user) {
+                        expected_user
+                    } else {
+                        tracing::debug!("QR login finish: credential not found for scope");
+                        return Err(QrLoginFinishError::UnexpectedCredentialOwner {
+                            expected_user_id: Some(expected_user),
+                            actual_user_id: Uuid::nil(),
+                            location: std::panic::Location::caller(),
+                        });
+                    }
+                }
+            };
 
-            let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
+            let cred_bytes = db::get_credential_public_key(&state.db, user_id, &credential_id_bytes)
                 .await
                 .with_context(FinishCtx::db_get_public_key_for_credential(user_id))?;
             let seckey: webauthn_rs::prelude::SecurityKey = serde_json::from_slice(&cred_bytes)
@@ -867,11 +897,13 @@ pub async fn qr_login_authenticate_finish_handler(
                 .with_context(FinishCtx::identify_discoverable_credential())?;
             let credential_id_bytes = cred_id.to_vec();
 
-            let user_id = match db::get_user_id_by_credential(&state.db, &credential_id_bytes).await
+            // Scope resolution to the account the challenge was begun for, so a
+            // shared resident key can't authenticate as another account's copy.
+            let owners = match db::get_user_ids_by_credential(&state.db, &credential_id_bytes).await
             {
-                Ok(user_id) => user_id,
+                Ok(owners) => owners,
                 Err(source) => {
-                    tracing::debug!(?source, "QR login finish: credential not found");
+                    tracing::debug!(?source, "QR login finish: credential lookup failed");
                     return Err(QrLoginFinishError::UnexpectedCredentialOwner {
                         expected_user_id: None,
                         actual_user_id: Uuid::nil(),
@@ -879,8 +911,34 @@ pub async fn qr_login_authenticate_finish_handler(
                     });
                 }
             };
+            let user_id = match &scope {
+                UsernameScope::Unscoped => match owners.as_slice() {
+                    [only] => *only,
+                    _ => {
+                        tracing::debug!("QR login finish: credential not found");
+                        return Err(QrLoginFinishError::UnexpectedCredentialOwner {
+                            expected_user_id: None,
+                            actual_user_id: Uuid::nil(),
+                            location: std::panic::Location::caller(),
+                        });
+                    }
+                },
+                expected @ (UsernameScope::Scoped { .. } | UsernameScope::Decoy { .. }) => {
+                    let expected_user = expected.expected_user_id();
+                    if owners.contains(&expected_user) {
+                        expected_user
+                    } else {
+                        tracing::debug!("QR login finish: credential not found for scope");
+                        return Err(QrLoginFinishError::UnexpectedCredentialOwner {
+                            expected_user_id: Some(expected_user),
+                            actual_user_id: Uuid::nil(),
+                            location: std::panic::Location::caller(),
+                        });
+                    }
+                }
+            };
 
-            let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
+            let cred_bytes = db::get_credential_public_key(&state.db, user_id, &credential_id_bytes)
                 .await
                 .with_context(FinishCtx::db_get_public_key_for_credential(user_id))?;
             let seckey: webauthn_rs::prelude::SecurityKey = serde_json::from_slice(&cred_bytes)
@@ -907,7 +965,7 @@ pub async fn qr_login_authenticate_finish_handler(
             }
 
             if let Err(e) =
-                db::mark_credential_resident_if_unknown(&state.db, &credential_id_bytes).await
+                db::mark_credential_resident_if_unknown(&state.db, user_id, &credential_id_bytes).await
             {
                 tracing::warn!("Failed to backfill credential resident flag: {:?}", e);
             }
@@ -937,6 +995,7 @@ pub async fn qr_login_authenticate_finish_handler(
                 .with_context(FinishCtx::serialize_security_key(user_id))?;
             db::update_fido2_credential(
                 &state.db,
+                user_id,
                 &credential_id_bytes,
                 &updated_key_json,
                 auth_result.counter(),
@@ -950,7 +1009,7 @@ pub async fn qr_login_authenticate_finish_handler(
     let session_id = db::generate_session_id();
     let expires_at = time::OffsetDateTime::now_utc() + Duration::hours(state.session_timeout_hours);
 
-    db::create_auth_session(&state.db, &session_id, &credential_id_bytes, expires_at)
+    db::create_auth_session(&state.db, &session_id, &credential_id_bytes, user_id, expires_at)
         .await
         .with_context(FinishCtx::db_create_auth_session(user_id))?;
 
@@ -1042,11 +1101,12 @@ pub async fn qr_sign_begin_handler(
     headers: axum::http::HeaderMap,
     Json(req): Json<crate::types::QrSignChallengeRequest>,
 ) -> Result<Json<crate::types::QrSignBeginResponse>, SignRequestError> {
-    let credential_id = authenticate_session(&state, &headers).await?;
+    let (credential_id, user_id) = authenticate_session(&state, &headers).await?;
 
     let (rcr, challenge_id) = create_sign_challenge(
         &state,
         &credential_id,
+        user_id,
         req.method.clone(),
         req.path.clone(),
         req.body_hash.clone(),
