@@ -9,7 +9,7 @@
         <section class="destination">
           <h2>Destination</h2>
           <p class="app-name">{{ app.name || 'Application name unavailable' }}</p>
-          <p v-if="reported.deployment_id" class="source">Deployment {{ reported.deployment_id }}<span v-if="deployment.commit_sha"> · {{ deployment.commit_sha.slice(0, 7) }}</span><span v-if="deployment.role"> · {{ deployment.role }}</span><span v-if="!metadata.deployment"> · address unavailable</span></p>
+          <p v-if="reported.deployment_id" class="source">Deployment {{ reported.deployment_id }}<span v-if="deployment.commit_sha"> · {{ deployment.commit_sha.slice(0, 7) }}</span><span v-if="deployment.role"> · {{ deployment.role }}</span><span v-if="!recorded"> · address unavailable</span></p>
           <p class="source"><span v-if="metadata.organization?.name">{{ metadata.organization.name }} · </span>Platform-provided labels</p>
           <p v-if="reported.destination_address" class="address">{{ reported.destination_address }}<small>Connection reported by your CLI</small></p>
           <p v-if="addressMismatch" class="notice">The Platform-recorded address ({{ recorded }}) differs from the CLI-reported destination. Check this difference before approving.</p>

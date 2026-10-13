@@ -1543,7 +1543,8 @@ pub enum SendShardError {
     },
 
     #[error(
-        "No trusted hashes found. Run `caution verify` first to establish trusted PCR values [{location:?}]"
+        "No trusted hashes found{}. Run {} first to establish trusted PCR values [{location:?}]",
+        trust_location_note(.path), verify_command(.path)
     )]
     ReadTrustedHashes {
         #[context(borrow = Path)]
@@ -1636,7 +1637,7 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Destination PCR mismatch ({pcr}) at {address}: the app does not match {}. No share was sent. If you intended to change the deployment, complete `caution verify` from the intended app checkout before retrying. --recryptor-pcr-policy verifies the key service, not this app [{location:?}]", .trust_path.display())]
+    #[error("Destination PCR mismatch ({pcr}) at {address}: the app does not match {}. No share was sent. If you intended to change the deployment, complete {} from the intended app checkout before retrying. --recryptor-pcr-policy verifies the key service, not this app [{location:?}]", .trust_path.display(), verify_command(.trust_path))]
     DestinationPcrMismatch {
         address: std::net::SocketAddr,
         pcr: String,
@@ -1831,6 +1832,31 @@ fn share_acceptance_message(remaining: u8) -> String {
         0 => "Quorum reconstructed successfully.".to_owned(),
         1 => "Share accepted. 1 more share required.".to_owned(),
         n => format!("Share accepted. {n} more shares required."),
+    }
+}
+
+/// The deployment ID when `trust_path` is a per-deployment trust file
+/// (`.caution/deployments/<id>/trusted_hashes.json`); `None` for the app-level file.
+fn deployment_of_trust_path(trust_path: &Path) -> Option<&str> {
+    let dir = trust_path.parent()?;
+    (dir.parent()?.file_name()? == "deployments")
+        .then(|| dir.file_name()?.to_str())
+        .flatten()
+}
+
+/// The `verify` command that writes `trust_path`; bare `verify` cannot fix `-d`.
+fn verify_command(trust_path: &Path) -> String {
+    match deployment_of_trust_path(trust_path) {
+        Some(id) => format!("`caution verify -d {id}`"),
+        None => "`caution verify`".to_string(),
+    }
+}
+
+/// Names the trust file in the `-d` message; the app-level text stays unchanged.
+fn trust_location_note(trust_path: &Path) -> String {
+    match deployment_of_trust_path(trust_path) {
+        Some(_) => format!(" at {}", trust_path.display()),
+        None => String::new(),
     }
 }
 
@@ -2319,10 +2345,32 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("deployments/2b7d4f6e-8a40-4c3e-9f1a-5d6c7b8a9e01/trusted_hashes.json"));
         assert!(!message.contains(".caution/trusted_hashes.json"));
+        assert!(message.contains("complete `caution verify -d 2b7d4f6e-8a40-4c3e-9f1a-5d6c7b8a9e01` from"));
         let wrong_nonce = super::verify_destination_attestation(address, proof, pcrs.clone(), &[1; 32], now, trust).unwrap_err();
         assert!(matches!(wrong_nonce, super::SendShardError::DestinationVerification { .. }));
         let malformed = super::verify_destination_attestation(address, vec![0; 64], pcrs, &nonce, now, trust).unwrap_err();
         assert!(matches!(malformed, super::SendShardError::DestinationVerification { .. }));
+    }
+
+    #[test]
+    fn missing_trust_hint_names_the_verify_that_writes_that_file() {
+        let read = |path: &str| {
+            super::SendShardError::ReadTrustedHashes {
+                path: path.into(),
+                location: std::panic::Location::caller(),
+                source: Box::new(std::io::Error::other("missing")),
+            }
+            .to_string()
+        };
+        // Legacy text is unchanged.
+        assert!(read(".caution/trusted_hashes.json").starts_with(
+            "No trusted hashes found. Run `caution verify` first to establish trusted PCR values ["
+        ));
+        let id = "2b7d4f6e-8a40-4c3e-9f1a-5d6c7b8a9e01";
+        let message = read(&format!(".caution/deployments/{id}/trusted_hashes.json"));
+        assert!(message.starts_with(&format!(
+            "No trusted hashes found at .caution/deployments/{id}/trusted_hashes.json. Run `caution verify -d {id}` first to establish trusted PCR values ["
+        )));
     }
 
     #[tokio::test]

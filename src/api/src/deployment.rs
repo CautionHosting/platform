@@ -1065,6 +1065,10 @@ mod tests {
         assert!(script.contains("public-ipv4.caution.internal"));
         assert!(script.contains("X-aws-ec2-metadata-token"));
         assert!(script.contains("pkill -HUP -x dnsmasq"));
+        // A stalled IMDS request must not park the publisher: every curl is bounded.
+        let curls: Vec<_> = script.lines().filter(|l| l.contains("curl ")).collect();
+        assert_eq!(curls.len(), 2);
+        assert!(curls.iter().all(|l| l.contains("--max-time 5")));
         // Read with `file()`, not `templatefile()`: no interpolation sequences.
         assert!(!script.contains("${"));
     }

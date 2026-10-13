@@ -934,8 +934,8 @@ fn resource_state_allows_noop_redeploy(state: &str) -> bool {
     matches!(state, "initialized" | "terminated" | "failed")
 }
 
-/// Shown right after the push is durably accepted (before `receive-pack`),
-/// so a dropped connection still leaves the operator the ID and next command.
+/// Shown once the push is durably accepted: after `receive-pack`, before
+/// `/deploy`. If `/deploy` fails the reservation is released and the ID can 404.
 fn accepted_message(deployment_id: Uuid) -> String {
     format!(
         "remote: Deployment {deployment_id} accepted. Disconnecting does not cancel it.\nremote: Follow it with: caution apps get -d {deployment_id}\n"
@@ -1191,8 +1191,8 @@ async fn handle_git_push(
 
     tokio::spawn(async move {
         let push_hook_dir = push_hook_dir;
-        // Every exit before `/deploy` accepts the push releases the
-        // reservation; a successful `/deploy` call binds it.
+        // Every failed exit releases the reservation; this is a no-op once
+        // the API has claimed it.
         let release_reservation = || {
             release_deployment_reservation(
                 &http,
@@ -1598,6 +1598,9 @@ async fn handle_git_push(
                     let _ = session_handle
                         .extended_data(channel, 1, Bytes::from(error_msg.into_bytes()))
                         .await;
+                    // No-op once the API claimed the reservation. After the
+                    // message: the API may be unreachable and the client has no timeout.
+                    release_reservation().await;
                     let _ = session_handle.exit_status_request(channel, 1).await;
                     let _ = session_handle.close(channel).await;
                     return;
@@ -1652,6 +1655,9 @@ async fn handle_git_push(
                 let _ = session_handle
                     .extended_data(channel, 1, Bytes::from(error_msg))
                     .await;
+                // No-op once the API claimed the reservation. After the
+                // message: the API may be unreachable and the client has no timeout.
+                release_reservation().await;
                 let _ = session_handle.exit_status_request(channel, 1).await;
                 let _ = session_handle.close(channel).await;
                 return;

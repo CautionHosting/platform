@@ -1563,14 +1563,17 @@ pub(crate) async fn switch(
             app.public_ip.as_deref().unwrap_or("none yet")
         ));
         output::status("  The previous deployment stays running and billable.");
-        if target.tls_after_switch {
-            output::status(
-                "  Application TLS verification pending: this deployment gets its certificate only after this switch.",
-            );
-            output::status(
-                "  Existing connections may close and HTTPS can be unavailable while it is issued.",
-            );
-        }
+    }
+    // The acknowledgement is signed below, so disclose it even with --force.
+    if target.tls_after_switch {
+        output::status(
+            "  Application TLS verification pending: this deployment gets its certificate only after this switch.",
+        );
+        output::status(
+            "  Existing connections may close and HTTPS can be unavailable while it is issued.",
+        );
+    }
+    if !force {
         output::status("");
         let confirmed = prompt::confirm("Confirm you verified and tested this deployment [y/N] ")
             .with_context(Ctx::confirm())?;

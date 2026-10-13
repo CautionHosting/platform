@@ -319,6 +319,30 @@ pub(crate) async fn switch_handler(
     Ok(Json(response))
 }
 
+/// Re-reads after a move while EC2 still shows another holder.
+const ASSOCIATION_READ_RETRIES: u32 = 3;
+const ASSOCIATION_READ_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Reads the address, re-reading up to `retries` more times (`interval`
+/// apart) while `target` does not hold it. Returns the last read.
+async fn observe_holder(
+    address: &impl AppAddressMover,
+    resource_id: &str,
+    target: &str,
+    retries: u32,
+    interval: std::time::Duration,
+) -> Result<ec2::AppAddress, ec2::DescribeAppAddressError> {
+    let mut observed = address.describe_address(resource_id).await?;
+    for _ in 0..retries {
+        if observed.instance_id.as_deref() == Some(target) {
+            break;
+        }
+        tokio::time::sleep(interval).await;
+        observed = address.describe_address(resource_id).await?;
+    }
+    Ok(observed)
+}
+
 /// Re-validates under the app lock (the expectation check catches a
 /// concurrent switch), moves the address from the expected holder only,
 /// confirms the association and records the target live. If the process dies
@@ -376,10 +400,22 @@ pub(super) async fn commit_switch(
     }
     // Confirm the observed association: it is the source of truth for the
     // live selection. Selecting the live deployment is a no-op once confirmed.
-    let observed = address
-        .describe_address(&resource_id)
-        .await
-        .with_context(Ctx::aws())?;
+    // EC2 reads can lag a just-made association: after a move, re-read a few
+    // times before treating a stale holder as a mismatch.
+    let retries = if matches!(plan, SwitchPlan::Move) {
+        ASSOCIATION_READ_RETRIES
+    } else {
+        0
+    };
+    let observed = observe_holder(
+        address,
+        &resource_id,
+        &instance_id,
+        retries,
+        ASSOCIATION_READ_INTERVAL,
+    )
+    .await
+    .with_context(Ctx::aws())?;
     if observed.instance_id.as_deref() != Some(instance_id.as_str()) {
         return Err(SwitchError::AssociationMismatch {
             location: std::panic::Location::caller(),
@@ -501,5 +537,75 @@ mod tests {
             Some("i-live".to_string())
         );
         assert_eq!(expected_holder(None, None, None), None);
+    }
+
+    /// Serves each scripted holder in turn, then repeats the last.
+    struct ScriptedReads {
+        holders: Vec<Option<&'static str>>,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ScriptedReads {
+        fn new(holders: Vec<Option<&'static str>>) -> Self {
+            Self {
+                holders,
+                reads: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn reads(&self) -> usize {
+            self.reads.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl AppAddressMover for ScriptedReads {
+        async fn move_address(
+            &self,
+            _resource_id: &str,
+            _target: &str,
+            _expected_holder: Option<&str>,
+        ) -> Result<String, ec2::MoveAppAddressError> {
+            unreachable!("the confirmation only reads")
+        }
+
+        async fn describe_address(
+            &self,
+            _resource_id: &str,
+        ) -> Result<ec2::AppAddress, ec2::DescribeAppAddressError> {
+            let read = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let holder = self.holders[read.min(self.holders.len() - 1)];
+            Ok(ec2::AppAddress {
+                allocation_id: "eipalloc-test".to_string(),
+                public_ip: "198.51.100.7".to_string(),
+                instance_id: holder.map(str::to_string),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stale_read_after_the_move_is_retried_until_the_target_holds_the_address() {
+        let delay = std::time::Duration::ZERO;
+        let stale_then_fresh =
+            ScriptedReads::new(vec![Some("i-old"), Some("i-old"), Some("i-new")]);
+        let observed = observe_holder(&stale_then_fresh, "app", "i-new", 3, delay)
+            .await
+            .unwrap();
+        assert_eq!(observed.instance_id.as_deref(), Some("i-new"));
+        assert_eq!(stale_then_fresh.reads(), 3);
+
+        // Still stale after every retry: the last read is returned (a mismatch).
+        let stuck = ScriptedReads::new(vec![Some("i-old")]);
+        let observed = observe_holder(&stuck, "app", "i-new", 3, delay)
+            .await
+            .unwrap();
+        assert_eq!(observed.instance_id.as_deref(), Some("i-old"));
+        assert_eq!(stuck.reads(), 4);
+
+        // No retries (no move was made): one read.
+        let single = ScriptedReads::new(vec![Some("i-old")]);
+        observe_holder(&single, "app", "i-new", 0, delay)
+            .await
+            .unwrap();
+        assert_eq!(single.reads(), 1);
     }
 }

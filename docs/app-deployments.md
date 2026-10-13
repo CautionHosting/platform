@@ -27,6 +27,9 @@ Set both in `~/.config/caution/.env`, then restart the API (`env.example` lists 
   first push, or after an app destroy). Otherwise it is a candidate: it runs and is
   billed, the live deployment is unchanged. A push whose ref did not change
   skips the deployment while one is live and rebuilds HEAD when nothing is live.
+  If a first deployment is running but cannot be made live, the push says so: for a
+  transient error the reconciler retries within about a minute; if another instance
+  holds the app address it stays a candidate until the address is repaired.
 - **Verify.** `caution verify -d <deployment>` checks it at its current address
   (a candidate's IP changes on stop/start) from a checkout at its commit, and keeps
   its trust in `.caution/deployments/<deployment>/trusted_hashes.json`, apart from
@@ -39,7 +42,9 @@ Set both in `~/.config/caution/.env`, then restart the API (`env.example` lists 
   (no CI form). It names the live deployment it was confirmed against: if that
   changed, or a retry follows a lost response, the answer is 409 (stale), so
   re-read the app and confirm again. The target must be Running and pass the
-  platform health check. A target that gets its certificate only after the switch
+  platform health check. After moving the address, the switch re-reads it up to 3
+  times (1 s apart) before reporting a mismatch, as EC2 reads can lag. A target that
+  gets its certificate only after the switch
   needs an acknowledgement (see [Enclave TLS on candidates](#enclave-tls-on-candidates)).
   The deployment view carries `bundle_hash` and `tls_after_switch`. The switch answer
   always carries `tls_after_switch` (true when this switch moved the address to a
@@ -103,7 +108,13 @@ deployment's own public IPv4. Their manifest records `tls_await_app_address: tru
   Verifying these builds needs an M2 CLI: older CLIs fail closed with a PCR mismatch.
 - **Switch.** Switching to a deployment that never held the app address needs a signed
   `acknowledged_tls_pending: true` (else 422). The CLI prints a warning and sends it
-  only for such a target; rolling back to a deployment that was live needs none.
+  only for such a target, also with `--force`, which skips only the confirmation prompt;
+  rolling back to a deployment that was live needs none. Known limit: the
+  acknowledgement is required only for a deployment that has never been live. A
+  retained previously-live deployment needs none while its instance has not
+  restarted; after a suspend/unsuspend it obtains a new certificate only after the
+  switch, the switch does not ask for the acknowledgement, and `caution verify -d`
+  reports TLS pending until the certificate is issued.
   After the switch, run `caution verify -d <deployment>` again once the certificate
   is issued.
 - **Issuance.** Each switch to a fresh deployment issues one certificate (Let's
@@ -117,6 +128,9 @@ drift-detector and `caution-admin findings` treat every non-destroyed deployment
 instance as tracked, so a candidate is not an orphan. Both stay read-only toward AWS.
 
 ## Recovery
+
+At startup the API also releases every unclaimed reservation at once, so a push
+whose upload spans an API restart fails at its claim and must be re-pushed.
 
 The reconciler runs at startup and every 60 s. It:
 

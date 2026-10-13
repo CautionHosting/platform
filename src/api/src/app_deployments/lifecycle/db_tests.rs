@@ -1031,6 +1031,7 @@ async fn switch_binds_pending_tls_acknowledgement(pool: &PgPool) {
     };
 
     let views = query_rows(pool, f.user, Some(f.app), None).await.unwrap();
+    assert_eq!(views.len(), 2);
     for row in views {
         let id = row.id;
         let view = serde_json::to_value(row.into_view(None)).unwrap();
@@ -1785,6 +1786,30 @@ async fn reserve_applies_the_push_state_rule() {
             .await
             .unwrap();
     }
+    pool.close().await;
+}
+
+/// Startup frees every reservation (their pushes died with the previous
+/// process) and never touches a claimed deployment.
+#[tokio::test]
+#[ignore = "run bash tests/e2e/test_app_deployments_db.sh (isolated PostgreSQL)"]
+async fn startup_releases_stale_reservations() {
+    let pool = test_pool().await;
+    let org = organization(&pool).await;
+    let user = member(&pool, org).await;
+    let app = deployments_app(&pool, org).await;
+    let reserved = admission::reserve(&pool, org, app, user).await.unwrap();
+    let other_app = deployments_app(&pool, org).await;
+    let in_flight = building(&pool, org, other_app).await;
+
+    let released = admission::release_stale_reservations(&pool).await.unwrap();
+
+    assert!(released >= 1);
+    assert_eq!(status(&pool, reserved).await, None);
+    assert_eq!(status(&pool, in_flight).await.as_deref(), Some("building"));
+    // The app accepts a push again.
+    let again = admission::reserve(&pool, org, app, user).await.unwrap();
+    assert_eq!(status(&pool, again).await.as_deref(), Some("reserved"));
     pool.close().await;
 }
 

@@ -244,6 +244,32 @@ pub(crate) async fn release_reservation(
     .with_context(ReleaseReservationErrorCtx::new(deployment_id))
 }
 
+/// Failure to release the reservations left by the previous process.
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum ReleaseStaleReservationsError {
+    #[error("database error while releasing stale deployment reservations [{location}]")]
+    Database {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Deletes every `reserved` row and returns how many. Run once at startup: the
+/// API is a single process, so no reservation can belong to a live request.
+/// Same release as [`release_reservation`]: claimed (`building` or later)
+/// deployments are never touched.
+pub(crate) async fn release_stale_reservations(
+    db: &PgPool,
+) -> Result<u64, ReleaseStaleReservationsError> {
+    sqlx::query("DELETE FROM app_deployments WHERE status = 'reserved'")
+        .execute(db)
+        .await
+        .map(|result| result.rows_affected())
+        .with_context(ReleaseStaleReservationsErrorCtx::database())
+}
+
 /// Failure modes for [`claim_for_build`].
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum ClaimError {
@@ -473,7 +499,11 @@ mod tests {
         let git_dir = git_dir.to_str().unwrap();
         let expected =
             crate::cryptographic_bundles::canonical_hash(&serde_json::from_str(BUNDLE).unwrap());
-        assert!(expected.is_some());
+        // The literal the CLI's `send_shard_tests` pins: a change on either side fails a test.
+        assert_eq!(
+            expected.as_deref(),
+            Some("0331123d7171622a4a4440ff3916f9d85e99199a7e146388fac2fe3e5ca79ae3")
+        );
         assert_eq!(deployed_bundle_hash(git_dir, &with_bundle).await, expected);
         assert_eq!(deployed_bundle_hash(git_dir, &cached_only).await, None);
         // An earlier commit does not inherit a later bundle.

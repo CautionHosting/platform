@@ -7,8 +7,8 @@ cat > /usr/local/bin/caution-publish-public-ip.sh <<'PUBLISH'
 #!/bin/bash
 NAME=public-ipv4.caution.internal
 while :; do
-    TOKEN=$(curl -s -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
-    IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
+    TOKEN=$(curl -s --connect-timeout 2 --max-time 5 -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+    IP=$(curl -s --connect-timeout 2 --max-time 5 -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
     [[ "$IP" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || IP=""
     CURRENT=$(awk -v name="$NAME" '$2 == name { print $1 }' /etc/hosts)
     if [ "$IP" != "$CURRENT" ]; then

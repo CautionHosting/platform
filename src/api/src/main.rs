@@ -3101,6 +3101,30 @@ pub(crate) enum DeployLogicError {
     Panicked { location: Location },
 }
 
+/// Client text for a failure in `complete_running`: the deployment is Running
+/// (and metered) unless it was destroyed or its app stopped meanwhile.
+fn activation_failure_message(source: &dterror::BoxError) -> &'static str {
+    use app_deployments::lifecycle::CompleteRunningError;
+    match source.downcast_ref::<CompleteRunningError>() {
+        Some(CompleteRunningError::AttachAddress { source, .. })
+            if matches!(
+                source.downcast_ref::<ec2::MoveAppAddressError>(),
+                Some(ec2::MoveAppAddressError::HolderMismatch { .. })
+            ) =>
+        {
+            "The deployment is running but could not be made live: the app's address is held by another instance. It stays a candidate until an operator repairs the address. See `caution apps get -d <id>`."
+        }
+        Some(
+            CompleteRunningError::OwnershipLost { .. } | CompleteRunningError::AppNotActive { .. },
+        ) => {
+            "The deployment was destroyed, or its app was suspended or is being destroyed, so it was not made live. See `caution apps get -d <id>`."
+        }
+        _ => {
+            "The deployment could not be made live. If `caution apps get -d <id>` shows it running, the platform makes it live within about a minute; if it shows it failed, push again."
+        }
+    }
+}
+
 impl DeployLogicError {
     /// Frozen status code and fixed client body for each failure path.
     fn client_response(&self) -> (StatusCode, &'static str) {
@@ -3322,9 +3346,10 @@ impl DeployLogicError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "No fully managed capacity is left in this app's region for a new candidate. Destroy a candidate or retry later.",
             ),
-            DeployLogicError::Activation { .. } => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
-            }
+            DeployLogicError::Activation { source, .. } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                activation_failure_message(source),
+            ),
             DeployLogicError::Panicked { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
@@ -3775,6 +3800,67 @@ mod deployment_target_tests {
             deployment_target_milestone("BYOC", "123456789012", "us-east-1"),
             "Deployment target: capacity=BYOC, aws_account=123456789012, region=us-east-1"
         );
+    }
+}
+
+#[cfg(test)]
+mod activation_message_tests {
+    use super::DeployLogicError;
+    use crate::app_deployments::lifecycle::CompleteRunningError;
+    use crate::ec2::MoveAppAddressError;
+    use axum::http::StatusCode;
+    use dterror::BoxError;
+    use uuid::Uuid;
+
+    fn activation(source: impl Into<BoxError>) -> (StatusCode, &'static str) {
+        DeployLogicError::Activation {
+            location: std::panic::Location::caller(),
+            source: source.into(),
+        }
+        .client_response()
+    }
+
+    fn attach(source: impl Into<BoxError>) -> CompleteRunningError {
+        CompleteRunningError::AttachAddress {
+            location: std::panic::Location::caller(),
+            source: source.into(),
+        }
+    }
+
+    #[test]
+    fn activation_failure_says_whether_the_deployment_goes_live() {
+        // A held address needs repair: the deployment stays a candidate.
+        let (status, held) = activation(attach(MoveAppAddressError::HolderMismatch {
+            expected: None,
+            actual: Some("i-other".to_string()),
+            location: std::panic::Location::caller(),
+        }));
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(held.contains("running"), "{held}");
+        assert!(held.contains("stays a candidate"), "{held}");
+        assert!(held.contains("caution apps get -d <id>"), "{held}");
+
+        // A transient failure is retried by reconciliation.
+        let (_, transient) = activation(attach(std::io::Error::other("throttled")));
+        assert!(transient.contains("within about a minute"), "{transient}");
+        assert!(
+            transient.contains("caution apps get -d <id>"),
+            "{transient}"
+        );
+        let (_, database) = activation(CompleteRunningError::Database {
+            location: std::panic::Location::caller(),
+            source: "connection reset".into(),
+        });
+        assert_eq!(database, transient);
+
+        // Destroyed or suspended meanwhile: it is not made live.
+        let (_, gone) = activation(CompleteRunningError::OwnershipLost {
+            deployment_id: Uuid::nil(),
+            location: std::panic::Location::caller(),
+        });
+        assert!(gone.contains("destroyed"), "{gone}");
+        assert_ne!(gone, transient);
+        assert_ne!(held, transient);
     }
 }
 
@@ -5313,6 +5399,18 @@ async fn reset_abandoned_pending_deploys(db: &PgPool) {
     }
 }
 
+/// A push whose upload spans an API restart fails at its claim and must be
+/// re-pushed; its reservation would otherwise keep the app busy until it
+/// expires.
+async fn release_stale_deployment_reservations(db: &PgPool) {
+    match app_deployments::admission::release_stale_reservations(db).await {
+        Ok(released) => {
+            tracing::info!(released, "released stale app deployment reservations")
+        }
+        Err(e) => tracing::error!("Failed to release stale deployment reservations: {}", e),
+    }
+}
+
 /// Publishes managed DNS when the app projection asks for it. A failure is
 /// logged and kept in the snapshot; `reconcile_managed_dns` retries it.
 async fn publish_managed_dns(
@@ -5712,6 +5810,7 @@ async fn main() -> Result<(), MainError> {
     });
 
     reset_abandoned_pending_deploys(&state.db).await;
+    release_stale_deployment_reservations(&state.db).await;
 
     let teardown_state = state.clone();
     tokio::spawn(async move {
