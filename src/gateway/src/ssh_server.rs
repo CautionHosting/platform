@@ -10,6 +10,7 @@ use russh::{Channel, ChannelId};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -204,6 +205,36 @@ pub(crate) enum GetRepoHeadBranchError {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum ReserveDeploymentError {
+    #[error("deployment reservation rejected: {message} [{location}]")]
+    Rejected {
+        message: String,
+        #[location]
+        location: Location,
+    },
+
+    #[error("deployment reservation request failed [{location}]")]
+    Request {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl ReserveDeploymentError {
+    /// The API's fixed rejection text, unless it carries terminal controls.
+    pub(crate) fn client_message(&self) -> String {
+        match self {
+            Self::Rejected { message, .. } if !contains_non_line_terminal_control(message) => {
+                message.clone()
+            }
+            _ => "Failed to reserve a deployment".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum HandleGitPushError {
     #[error("invalid app ID format [{location}]")]
     InvalidAppId {
@@ -241,6 +272,25 @@ pub(crate) enum HandleGitPushError {
         app_id: String,
         #[location]
         location: Location,
+    },
+
+    #[error("App '{app_id}' is in state '{state}' and cannot accept a deployment [{location}]")]
+    DeploymentsAppUnavailable {
+        app_id: String,
+        state: String,
+        #[location]
+        location: Location,
+    },
+
+    /// `client_message` is the source's sanitized text: `CtxError` sources
+    /// are boxed, so it is captured before boxing.
+    #[error("deployment reservation failed [{location}]")]
+    Reserve {
+        client_message: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
     },
 
     #[error("failed to ensure git repo exists [{location}]")]
@@ -288,6 +338,15 @@ impl HandleGitPushError {
             Self::AppNotFound { app_id, .. } => {
                 format!("App '{}' not found. Run 'caution init' first.", app_id)
             }
+            Self::DeploymentsAppUnavailable { app_id, state, .. } => [
+                "App '",
+                app_id.as_str(),
+                "' is ",
+                state.as_str(),
+                " and cannot accept a deployment right now.",
+            ]
+            .concat(),
+            Self::Reserve { client_message, .. } => client_message.clone(),
             Self::EnsureRepo { .. } => "Failed to create git repos directory".to_string(),
             Self::PrepareHook { .. } => "Failed to prepare post-receive hook".to_string(),
             Self::SpawnReceivePack { .. } => "Failed to spawn git receive-pack".to_string(),
@@ -354,6 +413,29 @@ pub(crate) struct SshSession {
     internal_service_secret: Option<String>,
     ssh_fingerprint: Option<String>,
     git_processes: Arc<Mutex<HashMap<ChannelId, Child>>>,
+    /// Set when the connection ends; see the `Drop` impl.
+    session_closed: Arc<AtomicBool>,
+}
+
+/// russh drops the handler when the connection ends for any reason (client
+/// disconnect, keepalive timeout, error). A vanished client sends no channel
+/// EOF, and the push task's `Arc` keeps `git_processes` alive, so without this
+/// `receive-pack` would block on stdin forever.
+impl Drop for SshSession {
+    fn drop(&mut self) {
+        self.session_closed.store(true, Ordering::SeqCst);
+        close_git_stdins(&self.git_processes);
+    }
+}
+
+/// Closes each child's stdin, as `channel_eof` does. If the lock is held, the
+/// push task is already reaping its child, and `Child::wait` closes stdin.
+fn close_git_stdins<K>(git_processes: &Mutex<HashMap<K, Child>>) {
+    if let Ok(mut processes) = git_processes.try_lock() {
+        for child in processes.values_mut() {
+            child.stdin.take();
+        }
+    }
 }
 
 impl russh::server::Server for SshServer {
@@ -368,6 +450,7 @@ impl russh::server::Server for SshServer {
             internal_service_secret: self.internal_service_secret.clone(),
             ssh_fingerprint: None,
             git_processes: Arc::new(Mutex::new(HashMap::new())),
+            session_closed: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -407,7 +490,6 @@ fn deploy_progress_completed_message(elapsed: std::time::Duration) -> String {
     deploy_progress_finished_message(elapsed, false)
 }
 
-#[cfg(test)]
 fn contains_non_line_terminal_control(message: &str) -> bool {
     message.chars().any(|ch| ch.is_control() && ch != '\n')
 }
@@ -559,6 +641,7 @@ impl russh::server::Handler for SshSession {
                 channel,
                 session,
                 self.git_processes.clone(),
+                self.session_closed.clone(),
             )
             .await
             {
@@ -867,6 +950,108 @@ fn resource_state_allows_noop_redeploy(state: &str) -> bool {
     matches!(state, "initialized" | "terminated" | "failed")
 }
 
+/// Deployments-lifecycle apps accept pushes while serving; suspended or
+/// terminating apps do not, as for Legacy. Same rule as the API's
+/// `deployments_push_state_allowed` (`src/api/src/app_deployments/admission.rs`),
+/// which re-checks it under the app lock. Separate crates: keep both in sync.
+fn deployments_push_state_allowed(state: &str) -> bool {
+    matches!(state, "initialized" | "running" | "failed" | "terminated")
+}
+
+fn candidate_success_message(deployment_id: Uuid, live: Option<Uuid>, url: &str) -> String {
+    let deployment_id = deployment_id.to_string();
+    let live_line = live
+        .map(|id| ["Live deployment: ", &id.to_string(), " (unchanged)\n"].concat())
+        .unwrap_or_default();
+    [
+        "\nCandidate deployment: ",
+        deployment_id.as_str(),
+        "\nCandidate endpoint: ",
+        url,
+        "\n",
+        live_line.as_str(),
+        "\nNext:\n  caution verify -d ",
+        deployment_id.as_str(),
+        "\n  caution apps switch -d ",
+        deployment_id.as_str(),
+        "\n\n",
+    ]
+    .concat()
+}
+
+/// Reserves the app's deployment slot (`POST /internal/apps/{id}/deployments/reserve`).
+async fn reserve_deployment(
+    http: &reqwest::Client,
+    api_service_url: &str,
+    internal_service_secret: Option<&str>,
+    app_id: Uuid,
+    org_id: Uuid,
+    user_id: Uuid,
+) -> Result<Uuid, ReserveDeploymentError> {
+    use ReserveDeploymentErrorCtx as Ctx;
+
+    #[derive(serde::Deserialize)]
+    struct Reserved {
+        deployment_id: Uuid,
+    }
+    #[derive(serde::Deserialize)]
+    struct Rejected {
+        error: String,
+    }
+
+    let mut request = http
+        .post(format!(
+            "{api_service_url}/internal/apps/{app_id}/deployments/reserve"
+        ))
+        .json(&serde_json::json!({ "org_id": org_id, "user_id": user_id }));
+    if let Some(secret) = internal_service_secret {
+        request = request.header("X-Internal-Service-Secret", secret);
+    }
+    let response = request.send().await.with_context(Ctx::request())?;
+    if response.status().is_success() {
+        let reserved: Reserved = response.json().await.with_context(Ctx::request())?;
+        return Ok(reserved.deployment_id);
+    }
+    let message = response
+        .json::<Rejected>()
+        .await
+        .map(|body| body.error)
+        .unwrap_or_else(|_| "Failed to reserve a deployment".to_string());
+    Err(ReserveDeploymentError::Rejected {
+        message,
+        location: std::panic::Location::caller(),
+    })
+}
+
+/// Best effort: an unreleased reservation expires and reconciliation deletes
+/// it. The API deletes only `reserved` rows, so this never touches a
+/// deployment that `/deploy` already claimed.
+async fn release_deployment_reservation(
+    http: &reqwest::Client,
+    api_service_url: &str,
+    internal_service_secret: Option<&str>,
+    deployment_id: Option<Uuid>,
+) {
+    let Some(deployment_id) = deployment_id else {
+        return;
+    };
+    let mut request = http.delete(format!(
+        "{api_service_url}/internal/deployments/{deployment_id}/reservation"
+    ));
+    if let Some(secret) = internal_service_secret {
+        request = request.header("X-Internal-Service-Secret", secret);
+    }
+    match request.send().await {
+        Ok(response) if response.status().is_success() => {}
+        Ok(response) => {
+            tracing::warn!(deployment_id = %deployment_id, status = %response.status(), "failed to release deployment reservation");
+        }
+        Err(error) => {
+            tracing::warn!(deployment_id = %deployment_id, error = %error, "failed to release deployment reservation");
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_git_push(
     pool: &PgPool,
@@ -879,13 +1064,14 @@ async fn handle_git_push(
     channel: ChannelId,
     session: &mut Session,
     git_processes: Arc<Mutex<HashMap<ChannelId, Child>>>,
+    session_closed: Arc<AtomicBool>,
 ) -> Result<(), HandleGitPushError> {
     use HandleGitPushErrorCtx as Ctx;
 
     let app_uuid = Uuid::parse_str(app_id).with_context(Ctx::invalid_app_id())?;
 
-    let existing: Option<(String,)> = sqlx::query_as(
-        "SELECT state::text FROM compute_resources
+    let existing: Option<(String, String, bool)> = sqlx::query_as(
+        "SELECT state::text, lifecycle, live_deployment_id IS NULL FROM compute_resources
          WHERE id = $1 AND organization_id = $2",
     )
     .bind(app_uuid)
@@ -894,8 +1080,37 @@ async fn handle_git_push(
     .await
     .with_context(Ctx::query_resource())?;
 
-    let resource_state = match existing {
-        Some((state,)) => {
+    let http = reqwest::Client::new();
+    let (allow_noop_redeploy, reservation) = match existing {
+        Some((state, lifecycle, nothing_live)) if lifecycle == "deployments" => {
+            if !deployments_push_state_allowed(&state) {
+                return Err(HandleGitPushError::DeploymentsAppUnavailable {
+                    app_id: app_id.to_string(),
+                    state,
+                    location: std::panic::Location::caller(),
+                });
+            }
+            let deployment_id = match reserve_deployment(
+                &http,
+                api_service_url,
+                internal_service_secret.as_deref(),
+                app_uuid,
+                org_id,
+                user_id,
+            )
+            .await
+            {
+                Ok(deployment_id) => deployment_id,
+                Err(source) => {
+                    let client_message = source.client_message();
+                    return Err(source).with_context(Ctx::reserve(client_message));
+                }
+            };
+            // An unchanged ref rebuilds HEAD only while nothing is live;
+            // with a live deployment it creates no deployment.
+            (nothing_live, Some(deployment_id))
+        }
+        Some((state, _, _)) => {
             if state == "running" || state == "stopped" {
                 return Err(HandleGitPushError::RunningApp {
                     app_id: app_id.to_string(),
@@ -908,7 +1123,7 @@ async fn handle_git_push(
                 app_id,
                 state
             );
-            state
+            (resource_state_allows_noop_redeploy(&state), None)
         }
         None => {
             return Err(HandleGitPushError::AppNotFound {
@@ -917,17 +1132,33 @@ async fn handle_git_push(
             });
         }
     };
-    let allow_noop_redeploy = resource_state_allows_noop_redeploy(&resource_state);
+    // No-op for Legacy (`reservation` is None).
+    let release_reservation = || {
+        release_deployment_reservation(
+            &http,
+            api_service_url,
+            internal_service_secret.as_deref(),
+            reservation,
+        )
+    };
 
     let repo_path = format!("{}/git-repos/{}.git", data_dir, app_id);
-    ensure_git_repo_exists(&repo_path).with_context(Ctx::ensure_repo())?;
-    let (push_hook_dir, push_ref_log_path) =
-        prepare_push_ref_hook().with_context(Ctx::prepare_hook())?;
+    if let Err(source) = ensure_git_repo_exists(&repo_path) {
+        release_reservation().await;
+        return Err(source).with_context(Ctx::ensure_repo());
+    }
+    let (push_hook_dir, push_ref_log_path) = match prepare_push_ref_hook() {
+        Ok(hook) => hook,
+        Err(source) => {
+            release_reservation().await;
+            return Err(source).with_context(Ctx::prepare_hook());
+        }
+    };
     let hooks_path = push_hook_dir.path().to_path_buf();
 
     tracing::info!("Spawning git receive-pack for {}", repo_path);
 
-    let mut child = tokio::process::Command::new("git")
+    let mut child = match tokio::process::Command::new("git")
         .arg("-c")
         .arg(format!("core.hooksPath={}", hooks_path.display()))
         .arg("receive-pack")
@@ -937,7 +1168,13 @@ async fn handle_git_push(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .with_context(Ctx::spawn_receive_pack())?;
+    {
+        Ok(child) => child,
+        Err(source) => {
+            release_reservation().await;
+            return Err(source).with_context(Ctx::spawn_receive_pack());
+        }
+    };
 
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
@@ -955,6 +1192,16 @@ async fn handle_git_push(
 
     tokio::spawn(async move {
         let push_hook_dir = push_hook_dir;
+        // Every exit before `/deploy` accepts the push releases the
+        // reservation; a successful `/deploy` call binds it.
+        let release_reservation = || {
+            release_deployment_reservation(
+                &http,
+                &api_service_url,
+                internal_service_secret.as_deref(),
+                reservation,
+            )
+        };
 
         let stdout_task = {
             let handle = session_handle.clone();
@@ -1017,6 +1264,8 @@ async fn handle_git_push(
                     Ok(status) => status,
                     Err(e) => {
                         tracing::error!("Failed to wait for git process: {}", e);
+                        drop(processes);
+                        release_reservation().await;
                         let error_msg = "remote: error: Failed to complete git receive-pack\n";
                         let _ = session_handle
                             .extended_data(channel, 1, Bytes::from(error_msg))
@@ -1028,6 +1277,8 @@ async fn handle_git_push(
                 }
             } else {
                 tracing::error!("Git process not found in map");
+                drop(processes);
+                release_reservation().await;
                 return;
             }
         };
@@ -1035,6 +1286,7 @@ async fn handle_git_push(
         if !exit_status.success() {
             let exit_code = exit_status.code().unwrap_or(1);
             tracing::error!("Git receive-pack failed with exit code: {}", exit_code);
+            release_reservation().await;
             let _ = session_handle
                 .exit_status_request(channel, exit_code as u32)
                 .await;
@@ -1046,7 +1298,11 @@ async fn handle_git_push(
 
         let pushed_ref = match read_pushed_branch_ref(&push_ref_log_path) {
             Ok(PushedBranchSelection::One(pushed_ref)) => pushed_ref,
-            Ok(PushedBranchSelection::None) if allow_noop_redeploy => {
+            // A client that vanished mid-pack leaves receive-pack exiting 0
+            // with no ref updated: that is not a request to redeploy HEAD.
+            Ok(PushedBranchSelection::None)
+                if allow_noop_redeploy && !session_closed.load(Ordering::SeqCst) =>
+            {
                 match get_repo_head_branch(&repo_path) {
                     Ok(Some(head_ref)) => {
                         tracing::info!(
@@ -1067,6 +1323,7 @@ async fn handle_git_push(
                         tracing::info!(
                             "No branch refs updated and no deployable HEAD; skipping deployment"
                         );
+                        release_reservation().await;
                         let msg = "\nremote: No branch updates; skipping deployment.\n".to_string();
                         let _ = session_handle
                             .extended_data(channel, 1, Bytes::from(msg.into_bytes()))
@@ -1077,6 +1334,7 @@ async fn handle_git_push(
                     }
                     Err(e) => {
                         tracing::error!("Failed to resolve repo HEAD for no-op push: {}", e);
+                        release_reservation().await;
                         let msg = "remote: error: Failed to resolve deploy branch\n".to_string();
                         let _ = session_handle
                             .extended_data(channel, 1, Bytes::from(msg.into_bytes()))
@@ -1089,6 +1347,7 @@ async fn handle_git_push(
             }
             Ok(PushedBranchSelection::None) => {
                 tracing::info!("No branch refs updated; skipping deployment");
+                release_reservation().await;
                 let msg = "\nremote: No branch updates; skipping deployment.\n".to_string();
                 let _ = session_handle
                     .extended_data(channel, 1, Bytes::from(msg.into_bytes()))
@@ -1099,6 +1358,7 @@ async fn handle_git_push(
             }
             Ok(PushedBranchSelection::Multiple) => {
                 tracing::warn!("Multiple branch refs updated; skipping deployment");
+                release_reservation().await;
                 let msg =
                     "\nremote: warning: Multiple branches updated; push one branch to deploy.\n"
                         .to_string();
@@ -1111,6 +1371,7 @@ async fn handle_git_push(
             }
             Err(e) => {
                 tracing::error!("Failed to read pushed branch refs: {}", e);
+                release_reservation().await;
                 let msg = "remote: error: Failed to read pushed refs\n".to_string();
                 let _ = session_handle
                     .extended_data(channel, 1, Bytes::from(msg.into_bytes()))
@@ -1144,6 +1405,8 @@ async fn handle_git_push(
             app_id: Uuid,
             branch: String,
             commit_sha: String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            deployment_id: Option<Uuid>,
         }
 
         let app_uuid = Uuid::parse_str(&app_id).expect("Already validated app_id");
@@ -1154,10 +1417,9 @@ async fn handle_git_push(
             commit_sha
         );
 
-        let client = reqwest::Client::new();
         let deploy_url = format!("{}/deploy", api_service_url);
 
-        let mut request = client
+        let mut request = http
             .post(&deploy_url)
             .header("X-Authenticated-User-ID", user_id.to_string());
 
@@ -1171,6 +1433,7 @@ async fn handle_git_push(
                 app_id: app_uuid,
                 branch: branch.clone(),
                 commit_sha: commit_sha.clone(),
+                deployment_id: reservation,
             })
             .timeout(std::time::Duration::from_secs(7200))
             .send()
@@ -1179,6 +1442,7 @@ async fn handle_git_push(
             Ok(resp) => resp,
             Err(e) => {
                 tracing::error!("Failed to send deployment request: {}", e);
+                release_reservation().await;
                 let error_msg =
                     "remote: error: Failed to trigger deployment, please try again later.\n"
                         .to_string();
@@ -1197,6 +1461,7 @@ async fn handle_git_push(
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
             tracing::error!("Deployment failed: {}", error_text);
+            release_reservation().await;
             let error_msg =
                 "remote: error: Deployment failed, please try again later.\n".to_string();
             let _ = session_handle
@@ -1220,6 +1485,12 @@ async fn handle_git_push(
             dns_status: Option<String>,
             #[serde(default)]
             dns_error: Option<String>,
+            #[serde(default)]
+            deployment_id: Option<Uuid>,
+            #[serde(default)]
+            role: Option<String>,
+            #[serde(default)]
+            live_deployment_id: Option<Uuid>,
         }
 
         #[derive(serde::Deserialize)]
@@ -1388,10 +1659,22 @@ async fn handle_git_push(
             deploy_result.domain.as_deref(),
         );
 
-        let success_msg = format!(
-            "\nApplication: {}\nAttestation: {}{}\n\nRun 'caution verify' to verify the application attestation against this checkout.\n\n",
-            deploy_result.url, attestation_url, dns_note
-        );
+        let success_msg = match (deploy_result.role.as_deref(), deploy_result.deployment_id) {
+            (Some("candidate"), Some(deployment_id)) => candidate_success_message(
+                deployment_id,
+                deploy_result.live_deployment_id,
+                &deploy_result.url,
+            ),
+            (_, deployment_id) => {
+                let deployment_line = deployment_id
+                    .map(|id| ["\nDeployment: ", &id.to_string(), " (live)"].concat())
+                    .unwrap_or_default();
+                format!(
+                    "\nApplication: {}\nAttestation: {}{}{}\n\nRun 'caution verify' to verify the application attestation against this checkout.\n\n",
+                    deploy_result.url, attestation_url, deployment_line, dns_note
+                )
+            }
+        };
         let _ = session_handle
             .extended_data(channel, 1, Bytes::from(success_msg.into_bytes()))
             .await;
@@ -1763,6 +2046,91 @@ mod tests {
 
         assert_eq!(pushed_ref.branch, "main");
         assert_eq!(pushed_ref.commit_sha, commit_sha);
+    }
+
+    #[test]
+    fn deployments_push_rejects_stopped_and_terminating() {
+        for state in ["initialized", "running", "failed", "terminated"] {
+            assert!(super::deployments_push_state_allowed(state), "{state}");
+        }
+        for state in ["stopped", "terminating", "pending"] {
+            assert!(!super::deployments_push_state_allowed(state), "{state}");
+        }
+    }
+
+    #[test]
+    fn candidate_success_message_points_at_next_commands() {
+        let d1 = uuid::Uuid::from_u128(1);
+        let d2 = uuid::Uuid::from_u128(2);
+        let message = super::candidate_success_message(d2, Some(d1), "http://203.0.113.9");
+        assert!(message.contains(&format!("Candidate deployment: {d2}")));
+        assert!(message.contains(&format!("Live deployment: {d1} (unchanged)")));
+        assert!(message.contains(&format!("caution verify -d {d2}")));
+        assert!(message.contains(&format!("caution apps switch -d {d2}")));
+        assert!(!super::contains_non_line_terminal_control(&message));
+    }
+
+    #[tokio::test]
+    async fn closing_git_stdins_ends_a_receive_pack_blocked_on_stdin() {
+        // Stands in for `git receive-pack` waiting on a client that vanished.
+        let child = tokio::process::Command::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let processes = tokio::sync::Mutex::new(std::collections::HashMap::from([(1u32, child)]));
+
+        super::close_git_stdins(&processes);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            // `try_wait`, unlike `wait`, does not close stdin itself.
+            if let Some(status) = processes
+                .lock()
+                .await
+                .get_mut(&1)
+                .unwrap()
+                .try_wait()
+                .unwrap()
+            {
+                assert!(status.success());
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child still blocked on stdin"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_a_session_marks_it_closed() {
+        use russh::server::Server as _;
+
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://user:pass@localhost/nonexistent")
+            .unwrap();
+        let mut server = super::SshServer::new(pool, String::new(), String::new(), None);
+        let session = server.new_client(None);
+        let closed = session.session_closed.clone();
+        assert!(!closed.load(std::sync::atomic::Ordering::SeqCst));
+        drop(session);
+        assert!(closed.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn reservation_rejection_text_is_sanitized() {
+        let ok = super::ReserveDeploymentError::Rejected {
+            message: "Candidate limit reached (3 / 3).".to_string(),
+            location: std::panic::Location::caller(),
+        };
+        assert_eq!(ok.client_message(), "Candidate limit reached (3 / 3).");
+        let hostile = super::ReserveDeploymentError::Rejected {
+            message: "bad\x1b[2Jtext".to_string(),
+            location: std::panic::Location::caller(),
+        };
+        assert_eq!(hostile.client_message(), "Failed to reserve a deployment");
     }
 
     fn run_git(args: &[&str]) {
