@@ -837,6 +837,12 @@ enum SecretCommands {
             help = "App ID or resource name (defaults to current deployment)"
         )]
         app: Option<String>,
+        #[arg(
+            short = 'd',
+            long = "deployment",
+            help = "Release to one deployment (its endpoint, `verify -d` trust and recorded bundle)"
+        )]
+        deployment: Option<String>,
         #[arg(long, help = "Path to quorum bundle JSON file")]
         bundle: Option<PathBuf>,
         #[arg(
@@ -4037,10 +4043,11 @@ pub async fn run() -> Result<(), RunError> {
             SecretCommands::SendShard {
                 release,
                 app,
+                deployment,
                 bundle,
                 keyring,
             } => {
-                secrets::send_shard(&client, app, bundle, keyring, release)
+                secrets::send_shard(&client, app, deployment, bundle, keyring, release)
                     .await
                     .with_context(Ctx::command_dispatch())?;
             }
@@ -4194,6 +4201,20 @@ mod tests {
                 inspect_attestation: true,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn send_shard_accepts_a_deployment() {
+        let cli = Cli::try_parse_from(["caution", "secret", "send-shard", "-d", "d2"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Secret {
+                command: super::SecretCommands::SendShard {
+                    deployment: Some(ref d),
+                    ..
+                }
+            } if d == "d2"
         ));
     }
 

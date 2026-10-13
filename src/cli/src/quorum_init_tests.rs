@@ -512,6 +512,7 @@ async fn downloaded_bundles_require_explicit_noninteractive_holder() {
         let error = crate::secrets::send_shard(
             &client,
             Some("quorum-test".into()),
+            None,
             Some(work.join(name)),
             None,
             crate::share_release::Options::default(),

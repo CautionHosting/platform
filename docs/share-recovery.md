@@ -161,6 +161,13 @@ sends no share. The actual release still verifies a fresh, nonce-bound attestati
 on its own submission connection. Noninteractive invocations validate holder
 selection first so missing or invalid `--holder` arguments remain actionable.
 
+For a deployments-lifecycle app, `send-shard -d <deployment>` releases to that
+one deployment: its current endpoint from the API, the trust file saved by
+`caution verify -d <deployment>` (`.caution/deployments/<id>/trusted_hashes.json`)
+and the quorum bundle recorded for its exact commit. An explicit `--bundle` must
+match that bundle, and the organization's other bundles are never used. Bare
+`send-shard` refuses when several deployments run; name one with `-d`.
+
 A **destination PCR mismatch** concerns the application, not the key service's
 `--recryptor-pcr-policy`. No share is sent. If the deployment changed intentionally,
 complete `caution verify` from the intended application checkout, then retry;

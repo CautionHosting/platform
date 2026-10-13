@@ -822,20 +822,19 @@ pub(crate) async fn destroy(
 /// A deployment of a deployments-lifecycle app, as the API returns it.
 #[derive(Debug, Deserialize)]
 pub(crate) struct DeploymentView {
-    id: String,
-    app_id: String,
-    role: String,
-    status: String,
+    pub(crate) id: String,
+    pub(crate) app_id: String,
+    pub(crate) role: String,
+    pub(crate) status: String,
     failure_kind: Option<String>,
     pushed_ref: Option<String>,
-    commit_sha: Option<String>,
+    pub(crate) commit_sha: Option<String>,
     commit_subject: Option<String>,
     instance_type: Option<String>,
-    public_ip: Option<String>,
+    pub(crate) public_ip: Option<String>,
     created_at: String,
     error: Option<String>,
-    /// Not read yet: `send-shard -d` checks the release bundle against it.
-    #[allow(dead_code)]
+    /// The bundle hash `send-shard -d` checks the release bundle against.
     #[serde(default)]
     pub(crate) bundle_hash: Option<String>,
     #[serde(default)]
@@ -981,7 +980,7 @@ async fn get_json<T: serde::de::DeserializeOwned>(
 
 /// Failure modes for [`fetch_deployment`].
 #[derive(Debug, thiserror::Error, CtxError)]
-enum FetchDeploymentError {
+pub(crate) enum FetchDeploymentError {
     #[error("{id:?} is not a valid ID; expected a UUID [{location:?}]")]
     InvalidId { id: String, location: Location },
 
@@ -1034,7 +1033,7 @@ enum FetchDeploymentError {
 /// caller reads the app-scoped path of `app`, else of the linked checkout's
 /// app. The answer must be the deployment asked for: its ID names the trust
 /// state file, so it is never taken from the platform's answer.
-async fn fetch_deployment(
+pub(crate) async fn fetch_deployment(
     client: &ApiClient,
     app: Option<String>,
     deployment: &str,

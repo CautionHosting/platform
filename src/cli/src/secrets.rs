@@ -1556,8 +1556,11 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Failed to parse .caution/trusted_hashes.json [{location:?}]")]
+    #[error("Failed to parse {} [{location:?}]", .trust_path.display())]
     ParseTrustedHashes {
+        #[context(borrow = Path)]
+        trust_path: PathBuf,
+
         #[location]
         location: Location,
 
@@ -1622,19 +1625,23 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Destination attestation verification failed at {address} against .caution/trusted_hashes.json. No share was sent [{location:?}]")]
+    #[error("Destination attestation verification failed at {address} against {}. No share was sent [{location:?}]", .trust_path.display())]
     DestinationVerification {
         address: std::net::SocketAddr,
+        #[context(borrow = Path)]
+        trust_path: PathBuf,
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
 
-    #[error("Destination PCR mismatch ({pcr}) at {address}: the app does not match .caution/trusted_hashes.json. No share was sent. If you intended to change the deployment, complete `caution verify` from the intended app checkout before retrying. --recryptor-pcr-policy verifies the key service, not this app [{location:?}]")]
+    #[error("Destination PCR mismatch ({pcr}) at {address}: the app does not match {}. No share was sent. If you intended to change the deployment, complete `caution verify` from the intended app checkout before retrying. --recryptor-pcr-policy verifies the key service, not this app [{location:?}]", .trust_path.display())]
     DestinationPcrMismatch {
         address: std::net::SocketAddr,
         pcr: String,
+        #[context(borrow = Path)]
+        trust_path: PathBuf,
         #[location]
         location: Location,
         #[source]
@@ -1680,6 +1687,132 @@ pub enum SendShardError {
         #[location]
         location: Location,
     },
+
+    #[error("Failed to fetch the deployment [{location:?}]")]
+    FetchDeployment {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("Cannot release to the app's address [{location:?}]")]
+    BareTarget {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error(
+        "deployment {deployment_id} has no reachable endpoint (status: {status}) [{location:?}]"
+    )]
+    NoDeploymentEndpoint {
+        deployment_id: String,
+        status: String,
+
+        #[location]
+        location: Location,
+    },
+
+    #[error("cannot select the bundle for deployment {deployment_id}: {selection} [{location:?}]")]
+    DeploymentBundle {
+        deployment_id: String,
+        selection: BundleSelection,
+
+        #[location]
+        location: Location,
+    },
+}
+
+/// The canonical bundle hash the API records for deployments
+/// (`cryptographic_bundles::canonical_hash`).
+pub(crate) fn bundle_text_hash(text: &str) -> Option<String> {
+    use keymaker_models::generate_quorum::{GenerateQuorumResponse, deterministic_bundle_hash};
+    let data: serde_json::Value = serde_json::from_str(text).ok()?;
+    if data.get("format").is_some() {
+        let bundle: locksmith::legacy::ImportedV0 = serde_json::from_value(data).ok()?;
+        return bundle.content_hash().ok();
+    }
+    let response: GenerateQuorumResponse = serde_json::from_value(data).ok()?;
+    deterministic_bundle_hash(&response.data)
+        .ok()
+        .map(hex::encode)
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) enum ReleaseBundle {
+    Explicit,
+    Local,
+    Org(serde_json::Value),
+}
+
+// No `#[source]` variant, so no `CtxError`: built directly, like `FetchDeploymentError::InvalidId`.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum BundleSelection {
+    #[error(
+        "--bundle hashes to {found:?}, but the deployment was built with bundle {recorded} [{location:?}]"
+    )]
+    Mismatch {
+        recorded: String,
+        found: Option<String>,
+        location: Location,
+    },
+    #[error("the deployment's source has no quorum bundle; pass --bundle [{location:?}]")]
+    NotRecorded { location: Location },
+    #[error(
+        "no local or organization bundle matches the deployment's bundle {recorded} [{location:?}]"
+    )]
+    NotFound {
+        recorded: String,
+        location: Location,
+    },
+}
+
+/// Bundle selection for `send-shard -d`. `explicit` and `local` carry each
+/// bundle's canonical hash (`None`: unparseable). Only the bundle recorded at
+/// the deployment's commit qualifies, never the organization's first bundle.
+pub(crate) fn select_deployment_bundle(
+    recorded: Option<&str>,
+    explicit: Option<Option<&str>>,
+    local: Option<Option<&str>>,
+    org: &[serde_json::Value],
+) -> Result<ReleaseBundle, BundleSelection> {
+    match (recorded, explicit) {
+        (Some(recorded), Some(found)) if found != Some(recorded) => {
+            Err(BundleSelection::Mismatch {
+                recorded: recorded.to_string(),
+                found: found.map(str::to_string),
+                location: std::panic::Location::caller(),
+            })
+        }
+        (_, Some(_)) => Ok(ReleaseBundle::Explicit),
+        (None, None) => Err(BundleSelection::NotRecorded {
+            location: std::panic::Location::caller(),
+        }),
+        (Some(recorded), None) => {
+            if local == Some(Some(recorded)) {
+                return Ok(ReleaseBundle::Local);
+            }
+            org.iter()
+                .find(|row| row["bundle_hash"].as_str() == Some(recorded))
+                .map(|row| ReleaseBundle::Org(row["data"].clone()))
+                .ok_or_else(|| BundleSelection::NotFound {
+                    recorded: recorded.to_string(),
+                    location: std::panic::Location::caller(),
+                })
+        }
+    }
+}
+
+/// The release destination, resolved once and held for the whole release.
+pub(crate) struct ReleaseTarget {
+    pub(crate) app_info: crate::App,
+    pub(crate) public_ip: String,
+    pub(crate) trust_path: PathBuf,
+    pub(crate) deployment: Option<crate::apps::crud::DeploymentView>,
 }
 
 fn connection_closed(mut error: &(dyn std::error::Error + 'static)) -> bool {
@@ -1707,6 +1840,7 @@ fn verify_destination_attestation(
     pcrs: std::collections::HashMap<u8, Vec<u8>>,
     nonce: &[u8],
     now: std::time::Duration,
+    trust_path: &Path,
 ) -> Result<(), SendShardError> {
     use bootproof_sdk::format::{Error, VerifiableSignedAttestationFormat, nitro::Nitro};
     // Use the same live verifier as the external-PGP transport. The real release
@@ -1717,12 +1851,13 @@ fn verify_destination_attestation(
         .map_err(|source| match &source {
             Error::InvalidAAD(pcr) if matches!(pcr.as_ref(), "pcr 0" | "pcr 1" | "pcr 2") => {
                 SendShardError::DestinationPcrMismatch {
-                    address, pcr: pcr.to_string(),
+                    address, pcr: pcr.to_string(), trust_path: trust_path.to_path_buf(),
                     location: std::panic::Location::caller(), source: Box::new(source),
                 }
             }
             _ => SendShardError::DestinationVerification {
-                address, location: std::panic::Location::caller(), source: Box::new(source),
+                address, trust_path: trust_path.to_path_buf(),
+                location: std::panic::Location::caller(), source: Box::new(source),
             },
         })
 }
@@ -1730,6 +1865,7 @@ fn verify_destination_attestation(
 async fn preflight_destination(
     address: std::net::SocketAddr,
     pcrs: &std::collections::HashMap<u8, Vec<u8>>,
+    trust_path: &Path,
 ) -> Result<(), SendShardError> {
     use SendShardErrorCtx as Ctx;
     let nonce = locksmith::release::random_nonce();
@@ -1739,8 +1875,8 @@ async fn preflight_destination(
     ).await.with_context(Ctx::destination_attestation(address))?
         .with_context(Ctx::destination_attestation(address))?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-        .with_context(Ctx::destination_verification(address))?;
-    verify_destination_attestation(address, destination.attestation, pcrs.clone(), nonce.as_bytes(), now)
+        .with_context(Ctx::destination_verification(address, trust_path))?;
+    verify_destination_attestation(address, destination.attestation, pcrs.clone(), nonce.as_bytes(), now, trust_path)
 }
 
 fn local_quorum_bundle(root: &Path) -> Option<PathBuf> {
@@ -1752,88 +1888,181 @@ fn local_quorum_bundle(root: &Path) -> Option<PathBuf> {
 pub async fn send_shard(
     client: &ApiClient,
     app: Option<String>,
+    deployment: Option<String>,
     bundle_path: Option<PathBuf>,
     private_keyring: Option<PathBuf>,
     release_options: crate::share_release::Options,
 ) -> Result<(), SendShardError> {
     use SendShardErrorCtx as Ctx;
 
-    // Resolve the app to get the enclave's public IP
-    let app_info = match app {
-        Some(id) => client.fetch_app(&id).await.with_context(Ctx::fetch_app())?,
-        None => client
-            .get_current_app()
-            .await
-            .with_context(Ctx::get_current_app())?,
-    };
-
-    let public_ip = app_info
-        .public_ip
-        .ok_or_else(|| SendShardError::NoPublicIp {
-            location: std::panic::Location::caller(),
-        })?;
-
-    // Resolve the bundle file
-    let bundle_file = if let Some(path) = bundle_path {
-        path
-    } else {
-        if let Some(path) = local_quorum_bundle(Path::new(".")) {
-            path
-        } else {
-            // Try to pull from Caution API
-            output::status("No local bundle found, checking Caution...");
-            let config = client
-                .ensure_authenticated()
-                .await
-                .with_context(Ctx::ensure_authenticated())?;
-
-            let bundles: Vec<serde_json::Value> = client
-                .get_protected_json(
-                    &config.session_id,
-                    "/api/quorum-bundles",
-                    "Failed to fetch quorum bundles from Caution",
-                )
-                .await
-                .with_context(Ctx::fetch_bundles())?;
-
-            if bundles.is_empty() {
-                return Err(SendShardError::NoBundleFound {
+    // Resolve the destination: one exact deployment, or the app's address
+    let target = match deployment.as_deref() {
+        Some(selector) => {
+            let deployment =
+                crate::apps::crud::fetch_deployment(client, app.clone(), selector, false)
+                    .await
+                    .with_context(Ctx::fetch_deployment())?;
+            // The current endpoint: the EIP once live, else the instance's own IP.
+            let public_ip = deployment.public_ip.clone().ok_or_else(|| {
+                SendShardError::NoDeploymentEndpoint {
+                    deployment_id: deployment.id.clone(),
+                    status: deployment.status.clone(),
                     location: std::panic::Location::caller(),
-                });
+                }
+            })?;
+            let app_info = client
+                .fetch_app(&deployment.app_id)
+                .await
+                .with_context(Ctx::fetch_app())?;
+            ReleaseTarget {
+                app_info,
+                public_ip,
+                // `fetch_deployment` canonicalized the ID it was asked for.
+                trust_path: crate::verify::trusted_hashes_path(Some(&deployment.id)),
+                deployment: Some(deployment),
             }
-
-            // Use the first bundle's data
-            let bundle_data =
-                bundles[0]
-                    .get("data")
-                    .ok_or_else(|| SendShardError::MissingBundleData {
+        }
+        None => {
+            let app_info = match app {
+                Some(id) => client.fetch_app(&id).await.with_context(Ctx::fetch_app())?,
+                None => client
+                    .get_current_app()
+                    .await
+                    .with_context(Ctx::get_current_app())?,
+            };
+            crate::apps::crud::ensure_bare_target(client, &app_info)
+                .await
+                .with_context(Ctx::bare_target())?;
+            let public_ip =
+                app_info
+                    .public_ip
+                    .clone()
+                    .ok_or_else(|| SendShardError::NoPublicIp {
                         location: std::panic::Location::caller(),
                     })?;
-
-            let secrets_dir = PathBuf::from(".caution/secrets");
-            fs::create_dir_all(&secrets_dir).with_context(Ctx::create_secrets_dir())?;
-            let path = secrets_dir.join("bundle.json");
-            let json =
-                serde_json::to_string_pretty(bundle_data).with_context(Ctx::serialize_bundle())?;
-            fs::write(&path, &json).with_context(Ctx::write_bundle(&path))?;
-            output::status(format!("Bundle saved to {}", path.display()));
-            path
+            ReleaseTarget {
+                app_info,
+                public_ip,
+                trust_path: crate::verify::trusted_hashes_path(None),
+                deployment: None,
+            }
         }
     };
 
-    if !bundle_file.exists() {
-        return Err(SendShardError::BundleMissing {
-            bundle_file,
-            location: std::panic::Location::caller(),
-        });
-    }
+    // Resolve the bundle
+    let bundle_text = match &target.deployment {
+        None => {
+            let bundle_file = if let Some(path) = bundle_path {
+                path
+            } else {
+                if let Some(path) = local_quorum_bundle(Path::new(".")) {
+                    path
+                } else {
+                    // Try to pull from Caution API
+                    output::status("No local bundle found, checking Caution...");
+                    let config = client
+                        .ensure_authenticated()
+                        .await
+                        .with_context(Ctx::ensure_authenticated())?;
+
+                    let bundles: Vec<serde_json::Value> = client
+                        .get_protected_json(
+                            &config.session_id,
+                            "/api/quorum-bundles",
+                            "Failed to fetch quorum bundles from Caution",
+                        )
+                        .await
+                        .with_context(Ctx::fetch_bundles())?;
+
+                    if bundles.is_empty() {
+                        return Err(SendShardError::NoBundleFound {
+                            location: std::panic::Location::caller(),
+                        });
+                    }
+
+                    // Use the first bundle's data
+                    let bundle_data = bundles[0].get("data").ok_or_else(|| {
+                        SendShardError::MissingBundleData {
+                            location: std::panic::Location::caller(),
+                        }
+                    })?;
+
+                    let secrets_dir = PathBuf::from(".caution/secrets");
+                    fs::create_dir_all(&secrets_dir).with_context(Ctx::create_secrets_dir())?;
+                    let path = secrets_dir.join("bundle.json");
+                    let json = serde_json::to_string_pretty(bundle_data)
+                        .with_context(Ctx::serialize_bundle())?;
+                    fs::write(&path, &json).with_context(Ctx::write_bundle(&path))?;
+                    output::status(format!("Bundle saved to {}", path.display()));
+                    path
+                }
+            };
+
+            if !bundle_file.exists() {
+                return Err(SendShardError::BundleMissing {
+                    bundle_file,
+                    location: std::panic::Location::caller(),
+                });
+            }
+            fs::read_to_string(&bundle_file).with_context(Ctx::read_bundle_file(&bundle_file))?
+        }
+        Some(deployment) => {
+            let read =
+                |path: &Path| fs::read_to_string(path).with_context(Ctx::read_bundle_file(path));
+            let explicit = bundle_path.as_deref().map(read).transpose()?;
+            let local_path = local_quorum_bundle(Path::new("."));
+            let local = local_path.as_deref().map(read).transpose()?;
+            let local_matches = local.as_deref().and_then(bundle_text_hash).is_some()
+                && local.as_deref().and_then(bundle_text_hash) == deployment.bundle_hash;
+            // The organization's bundles are fetched only when no local file matches.
+            let org: Vec<serde_json::Value> = match (&deployment.bundle_hash, &explicit) {
+                (Some(_), None) if !local_matches => {
+                    let config = client
+                        .ensure_authenticated()
+                        .await
+                        .with_context(Ctx::ensure_authenticated())?;
+                    client
+                        .get_protected_json(
+                            &config.session_id,
+                            "/api/quorum-bundles",
+                            "Failed to fetch quorum bundles from Caution",
+                        )
+                        .await
+                        .with_context(Ctx::fetch_bundles())?
+                }
+                _ => Vec::new(),
+            };
+            let explicit_hash = explicit.as_deref().map(bundle_text_hash);
+            let local_hash = local.as_deref().map(bundle_text_hash);
+            let selected = select_deployment_bundle(
+                deployment.bundle_hash.as_deref(),
+                explicit_hash.as_ref().map(Option::as_deref),
+                local_hash.as_ref().map(Option::as_deref),
+                &org,
+            )
+            .map_err(|selection| SendShardError::DeploymentBundle {
+                deployment_id: deployment.id.clone(),
+                selection,
+                location: std::panic::Location::caller(),
+            })?;
+            match selected {
+                // Returned only when that text exists.
+                ReleaseBundle::Explicit => explicit.unwrap_or_default(),
+                ReleaseBundle::Local => local.unwrap_or_default(),
+                // Kept in memory: a deployment release never overwrites local files.
+                ReleaseBundle::Org(data) => {
+                    serde_json::to_string_pretty(&data).with_context(Ctx::serialize_bundle())?
+                }
+            }
+        }
+    };
 
     // Load trusted hashes from a prior `caution verify`
-    let hashes_path = PathBuf::from(".caution/trusted_hashes.json");
+    let hashes_path = &target.trust_path;
     let hashes_text =
-        fs::read_to_string(&hashes_path).with_context(Ctx::read_trusted_hashes(&hashes_path))?;
+        fs::read_to_string(hashes_path).with_context(Ctx::read_trusted_hashes(hashes_path))?;
     let hashes: serde_json::Value =
-        serde_json::from_str(&hashes_text).with_context(Ctx::parse_trusted_hashes())?;
+        serde_json::from_str(&hashes_text).with_context(Ctx::parse_trusted_hashes(hashes_path))?;
 
     let pcrs = std::collections::HashMap::from([
         (
@@ -1874,15 +2103,16 @@ pub async fn send_shard(
         ),
     ]);
 
-    output::status("Loaded destination policy from .caution/trusted_hashes.json");
+    output::status(format!(
+        "Loaded destination policy from {}",
+        hashes_path.display()
+    ));
     if let Some(verified_at) = hashes["verified_at"].as_str() {
         output::verbose(client.verbose, format!("Recorded verification time: {} (stored metadata)", crate::share_release::terminal_label(verified_at)));
     }
     output::verbose(client.verbose, format!("Destination PCR policy: {:?}", pcrs.iter().map(|(i, value)| (*i, hex::encode(value))).collect::<std::collections::BTreeMap<_, _>>()));
 
     // Parse the quorum bundle
-    let bundle_text =
-        fs::read_to_string(&bundle_file).with_context(Ctx::read_bundle_file(&bundle_file))?;
     if !locksmith::legacy::is_imported_json(&bundle_text).with_context(Ctx::parse_bundle())? {
         crate::service_trust::ensure_keymaker(client, None)
             .await
@@ -1903,7 +2133,7 @@ pub async fn send_shard(
         output::status(format!("Legacy V0 — no Keymaker generation proof (--allow-legacy accepted)\nContent hash: {}", bundle.content_hash().with_context(Ctx::parse_bundle())?));
     }
     let keys = view.keyring;
-    let address_str = format!("{}:49504", public_ip);
+    let address_str = format!("{}:49504", target.public_ip);
     let address: std::net::SocketAddr = address_str
         .parse()
         .with_context(Ctx::invalid_address(&address_str))?;
@@ -1913,8 +2143,8 @@ pub async fn send_shard(
     // Preserve useful offline input errors in scripts, but never prompt before
     // checking the destination. Neither branch accesses a smartcard or passkey.
     let selected = if std::io::stdin().is_terminal() { None } else { Some(select_holder()?) };
-    output::status(format!("Checking destination attestation at {address} against .caution/trusted_hashes.json…"));
-    preflight_destination(address, &pcrs).await?;
+    output::status(format!("Checking destination attestation at {address} against {}…", hashes_path.display()));
+    preflight_destination(address, &pcrs, hashes_path).await?;
     output::status("Destination attestation verified. Release will verify a fresh connection again.");
     let (holder, webauthn) = match selected { Some(holder) => holder, None => select_holder()? };
     let holder_display = crate::share_release::holder_label(keys, &holder, webauthn, &names);
@@ -1922,8 +2152,8 @@ pub async fn send_shard(
 
     let latest = bundle.recovery();
     let summary = crate::share_release::ReleaseSummary {
-        application_id: app_info.id.clone(),
-        application_name: app_info.resource_name,
+        application_id: target.app_info.id.clone(),
+        application_name: target.app_info.resource_name,
         holder: holder_display,
         address,
         threshold: latest.threshold,
@@ -1935,7 +2165,7 @@ pub async fn send_shard(
             (false, _, false) => "OpenPGP smartcard",
         },
     };
-    output::verbose(client.verbose, format!("Application ID: {}; bundle identity: {}", crate::share_release::terminal_label(&app_info.id), bundle.bundle_id().map(hex::encode).unwrap_or_else(|| "Legacy V0".into())));
+    output::verbose(client.verbose, format!("Application ID: {}; bundle identity: {}", crate::share_release::terminal_label(&target.app_info.id), bundle.bundle_id().map(hex::encode).unwrap_or_else(|| "Legacy V0".into())));
     let status: Result<_, BoxError> = if webauthn {
         let proof = serde_json::from_str(&bundle_text).with_context(Ctx::parse_bundle())?;
         let measurements = pcrs.iter().map(|(&i, v)| (i, hex::encode(v))).collect();
@@ -2066,20 +2296,28 @@ mod tests {
         let nonce = hex::decode("d041b23bce8678bbc7c174bd8494c4f9759386eec963ec69bfd45c1452b10636").unwrap();
         let now = std::time::Duration::from_millis(1766509563435);
         let address = "127.0.0.1:49504".parse().unwrap();
-        assert!(super::verify_destination_attestation(address, proof.clone(), pcrs.clone(), &nonce, now).is_ok());
+        let trust = std::path::Path::new(".caution/trusted_hashes.json");
+        assert!(super::verify_destination_attestation(address, proof.clone(), pcrs.clone(), &nonce, now, trust).is_ok());
         for pcr in 0..=2 {
             let mut wrong = pcrs.clone();
             wrong.insert(pcr, vec![0xff; 48]);
-            let error = super::verify_destination_attestation(address, proof.clone(), wrong, &nonce, now).unwrap_err();
+            let error = super::verify_destination_attestation(address, proof.clone(), wrong, &nonce, now, trust).unwrap_err();
             assert!(matches!(&error, super::SendShardError::DestinationPcrMismatch { pcr: name, .. } if name == &format!("pcr {pcr}")));
             let message = error.to_string();
             assert!(message.contains(".caution/trusted_hashes.json"));
             assert!(message.contains("No share was sent"));
             assert!(message.contains("caution verify"));
         }
-        let wrong_nonce = super::verify_destination_attestation(address, proof, pcrs.clone(), &[1; 32], now).unwrap_err();
+        let deployment_trust = std::path::Path::new(".caution/deployments/2b7d4f6e-8a40-4c3e-9f1a-5d6c7b8a9e01/trusted_hashes.json");
+        let mut wrong = pcrs.clone();
+        wrong.insert(0, vec![0xff; 48]);
+        let error = super::verify_destination_attestation(address, proof.clone(), wrong, &nonce, now, deployment_trust).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("deployments/2b7d4f6e-8a40-4c3e-9f1a-5d6c7b8a9e01/trusted_hashes.json"));
+        assert!(!message.contains(".caution/trusted_hashes.json"));
+        let wrong_nonce = super::verify_destination_attestation(address, proof, pcrs.clone(), &[1; 32], now, trust).unwrap_err();
         assert!(matches!(wrong_nonce, super::SendShardError::DestinationVerification { .. }));
-        let malformed = super::verify_destination_attestation(address, vec![0; 64], pcrs, &nonce, now).unwrap_err();
+        let malformed = super::verify_destination_attestation(address, vec![0; 64], pcrs, &nonce, now, trust).unwrap_err();
         assert!(matches!(malformed, super::SendShardError::DestinationVerification { .. }));
     }
 
@@ -2093,7 +2331,7 @@ mod tests {
             let mut bytes = [0; 4096];
             assert!(stream.read(&mut bytes).await.unwrap() > 0);
         });
-        let error = super::preflight_destination(address, &Default::default()).await.unwrap_err();
+        let error = super::preflight_destination(address, &Default::default(), std::path::Path::new(".caution/trusted_hashes.json")).await.unwrap_err();
         assert!(matches!(error, super::SendShardError::DestinationAttestation { .. }));
         assert!(error.to_string().contains("No share was sent"));
         receiver.await.unwrap();
@@ -2329,3 +2567,7 @@ UNREQUESTED=nope\n",
         assert!(!certs[0].is_eligible());
     }
 }
+
+#[cfg(test)]
+#[path = "send_shard_tests.rs"]
+mod send_shard_tests;
