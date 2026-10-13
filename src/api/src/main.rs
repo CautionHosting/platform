@@ -4425,6 +4425,10 @@ async fn deploy_logic(
     let e2e_mode = e2e_config.and_then(|e| e.effective_mode());
     let e2e = e2e_mode == Some(config::E2eMode::Steve);
     let e2e_mode_value = e2e_mode.map(|mode| mode.as_str()).unwrap_or("disabled");
+    // A candidate cannot obtain a certificate before it holds the app address,
+    // so deployments-lifecycle enclave-TLS builds start Caddy only then.
+    let tls_await_app_address =
+        e2e_mode_value == "tls" && matches!(deploy_target, DeployTarget::Candidate { .. });
     let e2e_key_exchange = e2e_config
         .map(|e| e.key_exchange().steve_env_value())
         .unwrap_or(caution_config::KeyExchange::X25519.steve_env_value());
@@ -4573,6 +4577,7 @@ async fn deploy_logic(
                 .and_then(|e2e| e2e.cors_origins.as_ref())
                 .unwrap_or(&vec![]),
             &framework_commit,
+            tls_await_app_address,
         );
         let s3_client = s3_client_for_credentials(&builder_target.aws_credentials).await;
 
@@ -4687,6 +4692,7 @@ async fn deploy_logic(
                 steve_commit,
                 builder_instance_type: resolved_size.instance_type.clone(),
                 app_sources,
+                tls_await_app_address,
             };
 
             let build_result = builder::execute_remote_build(
@@ -4926,6 +4932,7 @@ async fn deploy_logic(
         region: fully_managed_region.clone(),
         credentials: deployment_credentials,
         managed_onprem: managed_onprem_config,
+        tls_await_app_address,
     };
 
     let _ = tx.send(Ok(milestone("Uploading and launching..."))).await;
@@ -4982,6 +4989,10 @@ async fn deploy_logic(
         final_config["instance_type"] = serde_json::json!(instance_type);
     }
     final_config["region"] = serde_json::json!(deployed_region.clone());
+    if tls_await_app_address {
+        // Read by the deployment view and the switch (pending TLS).
+        final_config["tls_await_app_address"] = serde_json::json!(true);
+    }
 
     let app_url = if let Some(ref d) = domain {
         format!("https://{}", d)

@@ -427,6 +427,10 @@ pub struct NitroDeploymentRequest {
     #[serde(skip)]
     pub credentials: Option<AwsCredentials>,
     pub managed_onprem: Option<ManagedOnPremConfig>,
+    /// Deployments-lifecycle tls build: the instance publishes its public IPv4
+    /// to the enclave, which starts Caddy once the app domain resolves to it.
+    #[serde(default)]
+    pub tls_await_app_address: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -871,6 +875,7 @@ mod tests {
             region: Some("us-west-2".to_string()),
             credentials: None,
             managed_onprem: Some(managed_onprem_config()),
+            tls_await_app_address: false,
         }
     }
 
@@ -1024,6 +1029,44 @@ mod tests {
         ] {
             assert!(!tf.contains(absent), "unexpected {absent}");
         }
+    }
+
+    #[tokio::test]
+    async fn only_await_address_deployments_publish_the_public_ip() {
+        let deployment_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        for (await_address, expected) in [(true, true), (false, false)] {
+            let mut request = deployment_request("/tmp/enclave.eif", None);
+            request.managed_onprem = None;
+            request.tls_await_app_address = await_address;
+            let work_dir = TempDir::new().unwrap();
+            generate_deployment_main_tf(
+                work_dir.path(),
+                &request,
+                deployment_id,
+                &sample_network(),
+                "s3://bucket/e.eif",
+            )
+            .await
+            .unwrap();
+            let tf = norm(&std::fs::read_to_string(work_dir.path().join("main.tf")).unwrap());
+            assert_eq!(tf.contains(r#"file("./publish-public-ip.sh")"#), expected);
+        }
+    }
+
+    #[test]
+    fn public_ip_publisher_reads_imds_and_reloads_dnsmasq() {
+        // `cargo test` runs in `src/api`; `nitro_module_path()` is relative to the repo root.
+        let script = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("terraform/modules/aws/nitro-enclave/publish-public-ip.sh"),
+        )
+        .unwrap();
+        assert!(script.contains("public-ipv4.caution.internal"));
+        assert!(script.contains("X-aws-ec2-metadata-token"));
+        assert!(script.contains("pkill -HUP -x dnsmasq"));
+        // Read with `file()`, not `templatefile()`: no interpolation sequences.
+        assert!(!script.contains("${"));
     }
 
     #[tokio::test]
@@ -3350,6 +3393,14 @@ pub(crate) async fn provision_deployment(
     )
     .await
     .with_context(Ctx::write_user_data())?;
+    if request.tls_await_app_address {
+        fs::copy(
+            nitro_module_path().join("publish-public-ip.sh"),
+            work_dir.join("publish-public-ip.sh"),
+        )
+        .await
+        .with_context(Ctx::write_user_data())?;
+    }
 
     run_tofu_init(work_dir, provider_lockfile().await.as_deref(), None)
         .await
@@ -4542,131 +4593,115 @@ fn enclave_instance_block(
         serde_json::to_string(&request.ssh_keys).unwrap_or_else(|_| "[]".to_string());
     let domain_str = request.domain.as_deref().unwrap_or("");
 
+    let template: hcl::Expression = hcl::expr::FuncCall::builder("templatefile")
+        .arg(hcl::Expression::String("./user-data.sh".into()))
+        .arg(hcl::Expression::Object(
+            vec![
+                (
+                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("eif_s3_path")),
+                    hcl::Expression::String(eif_s3_path.into()),
+                ),
+                (
+                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                        "tap_framer_sha256",
+                    )),
+                    hcl::Expression::String(SOURCE_TAP_FRAMER_SHA256.trim().into()),
+                ),
+                (
+                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("memory_mb")),
+                    hcl::Expression::Number(request.memory_mb.into()),
+                ),
+                (
+                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("cpu_count")),
+                    hcl::Expression::Number(cpu_count_rounded.into()),
+                ),
+                (
+                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("debug_mode")),
+                    hcl::Expression::String(
+                        if request.debug_mode { "true" } else { "false" }.into(),
+                    ),
+                ),
+                (
+                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("restart_policy")),
+                    hcl::Expression::String(request.restart.policy.as_str().into()),
+                ),
+                (
+                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                        "restart_delay_seconds",
+                    )),
+                    hcl::Expression::Number(request.restart.delay_seconds.into()),
+                ),
+                (
+                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("ports")),
+                    hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("var"))
+                        .attr("ports")
+                        .build()
+                        .into(),
+                ),
+                (
+                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("http_port")),
+                    hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("var"))
+                        .attr("http_port")
+                        .build()
+                        .into(),
+                ),
+                (
+                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("e2e")),
+                    hcl::Expression::String(if request.e2e { "true" } else { "false" }.into()),
+                ),
+                (
+                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("e2e_mode")),
+                    hcl::Expression::String(
+                        effective_e2e_mode(request.e2e, &request.e2e_mode).into(),
+                    ),
+                ),
+                (
+                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("locksmith")),
+                    hcl::Expression::String(
+                        if request.locksmith { "true" } else { "false" }.into(),
+                    ),
+                ),
+                (
+                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("egress")),
+                    hcl::Expression::String(if request.egress { "true" } else { "false" }.into()),
+                ),
+                (
+                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("ssh_keys")),
+                    hcl::Expression::from(
+                        serde_json::from_str::<Vec<String>>(&ssh_keys_json).unwrap_or_default(),
+                    ),
+                ),
+                (
+                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("domain")),
+                    hcl::Expression::String(domain_str.into()),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        ))
+        .build()
+        .into();
+    // Await-address builds also publish the public IP the enclave compares
+    // against (publish-public-ip.sh); every other build is unchanged.
+    let user_data = if request.tls_await_app_address {
+        hcl::expr::FuncCall::builder("join")
+            .arg(hcl::Expression::String(String::new()))
+            .arg(hcl::Expression::Array(vec![
+                template,
+                hcl::expr::FuncCall::builder("file")
+                    .arg(hcl::Expression::String("./publish-public-ip.sh".into()))
+                    .build()
+                    .into(),
+            ]))
+            .build()
+            .into()
+    } else {
+        template
+    };
     instance_builder = instance_builder.add_attribute(hcl::Attribute::new(
         "user_data",
         hcl::expr::FuncCall::builder("base64encode")
-            .arg(
-                hcl::expr::FuncCall::builder("templatefile")
-                    .arg(hcl::Expression::String("./user-data.sh".into()))
-                    .arg(hcl::Expression::Object(
-                        vec![
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "eif_s3_path",
-                                )),
-                                hcl::Expression::String(eif_s3_path.into()),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "tap_framer_sha256",
-                                )),
-                                hcl::Expression::String(SOURCE_TAP_FRAMER_SHA256.trim().into()),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "memory_mb",
-                                )),
-                                hcl::Expression::Number(request.memory_mb.into()),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "cpu_count",
-                                )),
-                                hcl::Expression::Number(cpu_count_rounded.into()),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "debug_mode",
-                                )),
-                                hcl::Expression::String(
-                                    if request.debug_mode { "true" } else { "false" }.into(),
-                                ),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "restart_policy",
-                                )),
-                                hcl::Expression::String(request.restart.policy.as_str().into()),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "restart_delay_seconds",
-                                )),
-                                hcl::Expression::Number(request.restart.delay_seconds.into()),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "ports",
-                                )),
-                                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked(
-                                    "var",
-                                ))
-                                .attr("ports")
-                                .build()
-                                .into(),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "http_port",
-                                )),
-                                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked(
-                                    "var",
-                                ))
-                                .attr("http_port")
-                                .build()
-                                .into(),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("e2e")),
-                                hcl::Expression::String(
-                                    if request.e2e { "true" } else { "false" }.into(),
-                                ),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "e2e_mode",
-                                )),
-                                hcl::Expression::String(
-                                    effective_e2e_mode(request.e2e, &request.e2e_mode).into(),
-                                ),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "locksmith",
-                                )),
-                                hcl::Expression::String(
-                                    if request.locksmith { "true" } else { "false" }.into(),
-                                ),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "egress",
-                                )),
-                                hcl::Expression::String(
-                                    if request.egress { "true" } else { "false" }.into(),
-                                ),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "ssh_keys",
-                                )),
-                                hcl::Expression::from(
-                                    serde_json::from_str::<Vec<String>>(&ssh_keys_json)
-                                        .unwrap_or_default(),
-                                ),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "domain",
-                                )),
-                                hcl::Expression::String(domain_str.into()),
-                            ),
-                        ]
-                        .into_iter()
-                        .collect(),
-                    ))
-                    .build(),
-            )
+            .arg(user_data)
             .build(),
     ));
 

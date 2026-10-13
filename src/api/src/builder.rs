@@ -233,6 +233,8 @@ pub struct BuildRequest {
     pub steve_commit: String,
     pub builder_instance_type: String,
     pub app_sources: Vec<String>,
+    /// Deployments-lifecycle tls build: enclave Caddy waits for the app address.
+    pub tls_await_app_address: bool,
 }
 
 pub const ACTIVE_BUILD_CONFLICT_MSG: &str =
@@ -402,6 +404,7 @@ pub fn compute_cache_key(
     locksmith: bool,
     e2e_cors_origins: &[String],
     framework_commit: &str,
+    tls_await_app_address: bool,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(commit_sha.as_bytes());
@@ -439,6 +442,10 @@ pub fn compute_cache_key(
     }
     hasher.update(b"|framework|");
     hasher.update(framework_commit.as_bytes());
+    // Only await-address builds hash the flag, so existing cache keys are unchanged.
+    if tls_await_app_address {
+        hasher.update(b"|tls-await-app-address");
+    }
     format!("{:x}", hasher.finalize())
 }
 
@@ -1485,6 +1492,7 @@ fn generate_builder_userdata(
         manifest.locksmith = true;
         manifest.locksmith_commit = Some(locksmith_commit);
     }
+    manifest.tls_await_app_address = request.tls_await_app_address;
     let manifest_json =
         serde_json::to_string(&manifest).expect("manifest serialization cannot fail");
 
@@ -2364,7 +2372,65 @@ mod tests {
             locksmith,
             &[],
             framework_commit.unwrap_or(TEST_FRAMEWORK_COMMIT),
+            false,
         )
+    }
+
+    /// `cache_key("abc123", "enclave-v1", "run: /app", false, "X25519", false, None)`
+    /// as computed at HEAD, before `tls_await_app_address` existed.
+    const LEGACY_CACHE_KEY: &str =
+        "f0b5c8c963ebbc0bba86733210780a95d0be45efbca04891ed08314b2bead71f";
+
+    #[test]
+    fn test_cache_key_changes_only_with_tls_await_app_address() {
+        let key = |tls_await_app_address| {
+            compute_cache_key(
+                "abc123",
+                "enclave-v1",
+                "steve-v1",
+                "run: /app",
+                false,
+                "X25519",
+                false,
+                false,
+                &[],
+                TEST_FRAMEWORK_COMMIT,
+                tls_await_app_address,
+            )
+        };
+        assert_ne!(key(true), key(false));
+        // Every existing build hashes exactly as before.
+        assert_eq!(key(false), LEGACY_CACHE_KEY);
+    }
+
+    #[test]
+    fn test_build_script_manifest_records_tls_await_app_address() {
+        let config = BuilderConfig {
+            ami_id: "ami-test".to_string(),
+            security_group_id: "sg-test".to_string(),
+            subnet_id: "subnet-test".to_string(),
+            instance_profile: "profile-test".to_string(),
+            region: "us-west-2".to_string(),
+            timeout_secs: 1200,
+            eif_s3_bucket: "test-bucket".to_string(),
+            git_hostname: "git.example.com".to_string(),
+            additional_instance_tags: Vec::new(),
+        };
+        let script = |tls_await_app_address| {
+            let mut request = make_test_build_request_with_egress(true);
+            request.tls_await_app_address = tls_await_app_address;
+            generate_builder_userdata(
+                Uuid::new_v4(),
+                &config,
+                &request,
+                "eifs/test.eif",
+                "builds/test/remote-build-helper",
+                &"b".repeat(64),
+            )
+            .unwrap()
+        };
+        assert!(script(true).contains("\"tls_await_app_address\":true"));
+        assert!(!script(false).contains("tls_await_app_address"));
     }
 
     #[test]
@@ -2544,6 +2610,7 @@ mod tests {
             false,
             &[],
             TEST_FRAMEWORK_COMMIT,
+            false,
         );
         let e2e_v2 = compute_cache_key(
             "abc123",
@@ -2556,6 +2623,7 @@ mod tests {
             false,
             &[],
             TEST_FRAMEWORK_COMMIT,
+            false,
         );
         assert_ne!(e2e_v1, e2e_v2);
 
@@ -2570,6 +2638,7 @@ mod tests {
             false,
             &[],
             TEST_FRAMEWORK_COMMIT,
+            false,
         );
         let plain_v2 = compute_cache_key(
             "abc123",
@@ -2582,6 +2651,7 @@ mod tests {
             false,
             &[],
             TEST_FRAMEWORK_COMMIT,
+            false,
         );
         assert_eq!(plain_v1, plain_v2);
     }
@@ -2622,6 +2692,7 @@ mod tests {
             false,
             &[],
             TEST_FRAMEWORK_COMMIT,
+            false,
         );
         let fallback = compute_cache_key(
             "abc123",
@@ -2634,6 +2705,7 @@ mod tests {
             false,
             &[],
             TEST_FRAMEWORK_COMMIT,
+            false,
         );
         assert_ne!(fail_closed, fallback);
         assert_eq!(
@@ -2652,6 +2724,7 @@ mod tests {
             false,
             &[],
             TEST_FRAMEWORK_COMMIT,
+            false,
         );
         let plain_ignored = compute_cache_key(
             "abc123",
@@ -2664,6 +2737,7 @@ mod tests {
             false,
             &[],
             TEST_FRAMEWORK_COMMIT,
+            false,
         );
         assert_eq!(plain_default, plain_ignored);
         assert_eq!(
@@ -2902,6 +2976,7 @@ mod tests {
             domain: None,
             http_upstream_protocol: "http".to_string(),
             framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
+            tls_await_app_address: false,
             locksmith: false,
             egress: false,
             e2e_cors_origins: None,
@@ -3123,6 +3198,7 @@ mod tests {
             domain: None,
             http_upstream_protocol: "http".to_string(),
             framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
+            tls_await_app_address: false,
             locksmith: false,
             egress: false,
             e2e_cors_origins: None,
@@ -3182,6 +3258,7 @@ mod tests {
             domain: None,
             http_upstream_protocol: "http".to_string(),
             framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
+            tls_await_app_address: false,
             locksmith: false,
             egress: false,
             e2e_cors_origins: None,
@@ -3239,6 +3316,7 @@ mod tests {
             domain: None,
             http_upstream_protocol: "http".to_string(),
             framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
+            tls_await_app_address: false,
             locksmith: false,
             egress: false,
             e2e_cors_origins: None,
@@ -3304,6 +3382,7 @@ mod tests {
             domain: None,
             http_upstream_protocol: "http".to_string(),
             framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
+            tls_await_app_address: false,
             locksmith: false,
             egress: false,
             e2e_cors_origins: None,
@@ -3366,6 +3445,7 @@ mod tests {
             domain: None,
             http_upstream_protocol: "http".to_string(),
             framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
+            tls_await_app_address: false,
             locksmith: false,
             egress: false,
             e2e_cors_origins: None,
@@ -3424,6 +3504,7 @@ mod tests {
             domain: None,
             http_upstream_protocol: "http".to_string(),
             framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
+            tls_await_app_address: false,
             locksmith: false,
             egress,
             e2e_cors_origins: None,
