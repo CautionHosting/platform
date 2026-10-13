@@ -1089,6 +1089,13 @@ pub(crate) async fn dns_snapshot(
     Ok(DnsSnapshot { status, error })
 }
 
+/// A deployments-lifecycle app with a build, a provisioning or an unexpired
+/// reservation in flight (binds `$1` to the app). Its teardown waits for it.
+const DEPLOYMENT_OPERATION_ACTIVE: &str = "lifecycle = 'deployments' AND EXISTS (
+         SELECT 1 FROM app_deployments d
+         WHERE d.app_id = $1 AND (d.status IN ('building', 'provisioning')
+             OR (d.status = 'reserved' AND d.reservation_expires_at > NOW())))";
+
 #[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
 pub(crate) async fn begin_termination(
     pool: &PgPool,
@@ -1096,7 +1103,13 @@ pub(crate) async fn begin_termination(
 ) -> Result<(), BeginTerminationError> {
     use BeginTerminationErrorCtx as Ctx;
 
-    let result = sqlx::query(
+    // Serializes with deployment reservation, claim, switch and destruction,
+    // which re-check the app state under this lock. Uncontended for Legacy apps.
+    let mut tx = pool.begin().await.with_context(Ctx::query())?;
+    crate::app_deployments::lock_app_operations(&mut tx, resource_id)
+        .await
+        .with_context(Ctx::query())?;
+    let result = sqlx::query(&format!(
         "UPDATE compute_resources
          SET state = 'terminating',
              dns_status = CASE WHEN dns_status = 'ready' THEN 'withdrawing' ELSE dns_status END,
@@ -1104,20 +1117,25 @@ pub(crate) async fn begin_termination(
              dns_change_id = CASE WHEN dns_status = 'ready' THEN NULL ELSE dns_change_id END,
              dns_release_not_before = CASE WHEN dns_status = 'ready' THEN NULL ELSE dns_release_not_before END,
              updated_at = NOW()
-         WHERE id = $1 AND destroyed_at IS NULL AND state <> 'pending'",
-    )
+         WHERE id = $1 AND destroyed_at IS NULL AND state <> 'pending'
+           AND NOT ({DEPLOYMENT_OPERATION_ACTIVE})"
+    ))
     .bind(resource_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .with_context(Ctx::query())?;
     if result.rows_affected() == 0 {
-        let state: Option<(String, Option<DateTime<Utc>>)> =
-            sqlx::query_as("SELECT state::text, destroyed_at FROM compute_resources WHERE id = $1")
-                .bind(resource_id)
-                .fetch_optional(pool)
-                .await
-                .with_context(Ctx::query())?;
-        if state.is_some_and(|(state, destroyed_at)| state == "pending" && destroyed_at.is_none()) {
+        let state: Option<(String, Option<DateTime<Utc>>, bool)> = sqlx::query_as(&format!(
+            "SELECT state::text, destroyed_at, {DEPLOYMENT_OPERATION_ACTIVE}
+             FROM compute_resources WHERE id = $1"
+        ))
+        .bind(resource_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .with_context(Ctx::query())?;
+        if state.is_some_and(|(state, destroyed_at, deploying)| {
+            destroyed_at.is_none() && (state == "pending" || deploying)
+        }) {
             return Err(BeginTerminationError::Deploying {
                 location: std::panic::Location::caller(),
             });
@@ -1126,6 +1144,7 @@ pub(crate) async fn begin_termination(
             location: std::panic::Location::caller(),
         });
     }
+    tx.commit().await.with_context(Ctx::query())?;
     Ok(())
 }
 

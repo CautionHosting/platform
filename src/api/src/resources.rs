@@ -1002,8 +1002,8 @@ pub(crate) async fn destroy_resource_by_id(
         }
     }
 
-    let resource: Option<(Uuid, String, String, Option<String>)> = sqlx::query_as(
-        "SELECT organization_id, resource_name, provider_resource_id, region
+    let resource: Option<(Uuid, String, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT organization_id, resource_name, provider_resource_id, region, lifecycle
          FROM compute_resources
          WHERE id = $1 AND destroyed_at IS NULL AND state = 'terminating'",
     )
@@ -1011,9 +1011,11 @@ pub(crate) async fn destroy_resource_by_id(
     .fetch_optional(&state.db)
     .await
     .with_context(Ctx::new(Kind::LoadResource, resource_id))?;
-    let Some((org_id, resource_name, tracked_resource_id, resource_region)) = resource else {
+    let Some((org_id, resource_name, tracked_resource_id, resource_region, lifecycle)) = resource
+    else {
         return Ok(());
     };
+    let deployments = lifecycle == crate::app_deployments::LIFECYCLE_DEPLOYMENTS;
 
     let resource_region = resource_region
         .or_else(|| std::env::var("AWS_REGION").ok())
@@ -1045,6 +1047,23 @@ pub(crate) async fn destroy_resource_by_id(
     if !still_terminating {
         release_teardown_lock(&mut lock_connection, resource_id).await;
         return Ok(());
+    }
+
+    // Every deployment state before the app state (VPC, Elastic IP).
+    if deployments
+        && let Err(error) =
+            crate::app_deployments::destroy::destroy_all_for_app(state, org_id, resource_id).await
+    {
+        tracing::error!(resource_id = %resource_id, error = %error, "deployment destroy failed");
+        if !force {
+            return Err(DestroyResourceByIdError {
+                kind: Kind::TofuDestroyFailed,
+                resource_id,
+                location: std::panic::Location::caller(),
+                source: Some(Box::new(error)),
+            });
+        }
+        tracing::warn!(resource_id = %resource_id, "force enabled after DNS withdrawal; destroying the app despite deployment destroy failures");
     }
 
     let terraform_result = match destroy_credentials {
@@ -1080,6 +1099,7 @@ pub(crate) async fn destroy_resource_by_id(
                  ELSE 'failed'::resource_state
              END,
              public_ip = NULL, region = NULL, deploy_attempt_id = NULL,
+             live_deployment_id = NULL, app_network = NULL,
              dns_status = 'reserved', dns_error = NULL, dns_change_id = NULL,
              dns_release_not_before = NULL, updated_at = NOW()
          WHERE id = $1 AND organization_id = $2 AND state = 'terminating'",
@@ -1106,6 +1126,11 @@ pub(crate) async fn destroy_resource_by_id(
         .bind(&tracked_resource_id)
         .execute(&state.db)
         .await;
+    }
+    // A forced delete leaves undestroyed deployments metered; nothing else
+    // stops their meters once the app row is destroyed.
+    if deployments {
+        crate::app_deployments::destroy::stop_remaining_meters(state, resource_id).await;
     }
 
     Ok(())

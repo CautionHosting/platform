@@ -4,6 +4,7 @@
 //! App deployments (blue-green) for apps on the `deployments` lifecycle.
 
 pub(crate) mod admission;
+pub(crate) mod destroy;
 pub(crate) mod internal;
 pub(crate) mod lifecycle;
 pub(crate) mod switch;

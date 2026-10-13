@@ -717,13 +717,25 @@ fn ssh_signature_header_state(req: &Request) -> SshSignatureHeaderState {
     }
 }
 
+/// Splits `/resources/{app}[/deployments[/{deployment}]]`, returning the app segment.
+fn ssh_signed_app_segment(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/resources/")?;
+    let mut parts = rest.split('/');
+    let app = parts.next().filter(|app| !app.is_empty())?;
+    match (parts.next(), parts.next(), parts.next()) {
+        (None, _, _) => Some(app),
+        (Some("deployments"), None, _) => Some(app),
+        (Some("deployments"), Some(deployment), None) if !deployment.is_empty() => Some(app),
+        _ => None,
+    }
+}
+
 fn is_ssh_signed_resource_request(method: &Method, path: &str) -> bool {
     if !matches!(*method, Method::GET | Method::DELETE) {
         return false;
     }
 
-    path.strip_prefix("/resources/")
-        .is_some_and(|resource_id| !resource_id.is_empty() && !resource_id.contains('/'))
+    ssh_signed_app_segment(path).is_some()
 }
 
 fn header_str<'a>(req: &'a Request, header: &'static str) -> Result<&'a str, HeaderStrError> {
@@ -747,19 +759,19 @@ fn ssh_signed_resource_id(method: &Method, path: &str) -> Result<Uuid, SshSigned
         ));
     }
 
-    let Some(resource_id) = path.strip_prefix("/resources/") else {
+    if !path.starts_with("/resources/") {
         return Err(SshSignedResourceIdError::new(
             SshSignedResourceIdErrorKind::MissingResourcePrefix,
             path,
         ));
-    };
+    }
 
-    if resource_id.contains('/') {
+    let Some(resource_id) = ssh_signed_app_segment(path) else {
         return Err(SshSignedResourceIdError::new(
             SshSignedResourceIdErrorKind::NestedResourcePath,
             path,
         ));
-    }
+    };
 
     Uuid::parse_str(resource_id)
         .map_err(|source| SshSignedResourceIdError::invalid_resource_id(path, source))
@@ -1604,6 +1616,28 @@ mod tests {
         ));
         // Never SSH-signed: the switch is not on the SSH allowlist.
         assert!(!is_ssh_signed_resource_request(&Method::POST, &path));
+    }
+
+    #[test]
+    fn ssh_signed_requests_may_read_and_destroy_one_deployment() {
+        let path = format!("/resources/{RESOURCE_ID}/deployments/{RESOURCE_ID}");
+        assert!(is_ssh_signed_resource_request(&Method::DELETE, &path));
+        // CI `apps get -d` reads through this app-scoped path (Task 14 registers the GET).
+        assert!(is_ssh_signed_resource_request(&Method::GET, &path));
+        assert!(is_ssh_signed_resource_request(
+            &Method::GET,
+            &format!("/resources/{RESOURCE_ID}/deployments")
+        ));
+        assert!(!is_ssh_signed_resource_request(
+            &Method::POST,
+            &format!("{path}/switch")
+        ));
+        assert_eq!(
+            ssh_signed_resource_id(&Method::DELETE, &path)
+                .unwrap()
+                .to_string(),
+            RESOURCE_ID
+        );
     }
 
     #[test]

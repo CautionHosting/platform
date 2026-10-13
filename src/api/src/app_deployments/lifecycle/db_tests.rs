@@ -1,15 +1,23 @@
 // SPDX-FileCopyrightText: 2026 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-//! Database-backed concurrency regressions for [`complete_running`] and the
-//! deployment switch: run `bash tests/e2e/test_app_deployments_db.sh`
-//! (isolated PostgreSQL).
+//! Database-backed concurrency regressions for [`complete_running`], the
+//! deployment switch and destruction: run
+//! `bash tests/e2e/test_app_deployments_db.sh` (isolated PostgreSQL).
 
 use super::*;
+use crate::app_deployments::admission::ReserveError;
+use crate::app_deployments::destroy::{
+    self, DestroyAllError, DestroyBackend, DestroyError, DestroyRejection, begin_destroy,
+    complete_destroy_with, destroy_all_for_app_with,
+};
 use crate::app_deployments::switch::{
     SwitchError, SwitchRejection, SwitchRequest, SwitchResponse, commit_switch,
 };
-use std::sync::atomic::{AtomicUsize, Ordering};
+use crate::managed_dns::BeginTerminationError;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{Notify, Semaphore};
@@ -134,6 +142,55 @@ impl AppAddressMover for ControlledMover {
             public_ip: EIP.to_string(),
             instance_id: self.holder(),
         })
+    }
+}
+
+/// The EIP holder and OpenTofu outcome a destroy sees, controlled by the test.
+struct FakeBackend {
+    holder: Option<String>,
+    fail: AtomicBool,
+    /// Deployments whose state destroy ran, in order.
+    destroyed: Mutex<Vec<Uuid>>,
+}
+
+impl FakeBackend {
+    fn holding(holder: Option<&str>) -> Self {
+        Self {
+            holder: holder.map(str::to_string),
+            fail: AtomicBool::new(false),
+            destroyed: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn destroyed(&self) -> Vec<Uuid> {
+        self.destroyed.lock().unwrap().clone()
+    }
+}
+
+impl DestroyBackend for FakeBackend {
+    async fn address_holder(
+        &self,
+        _app_id: Uuid,
+        _region: &str,
+    ) -> Result<Option<String>, ec2::DescribeAppAddressError> {
+        Ok(self.holder.clone())
+    }
+
+    async fn destroy_state(
+        &self,
+        _org_id: Uuid,
+        _app_id: Uuid,
+        deployment_id: Uuid,
+        _region: &str,
+    ) -> Result<(), deployment::DestroyDeploymentStateError> {
+        self.destroyed.lock().unwrap().push(deployment_id);
+        if self.fail.load(Ordering::SeqCst) {
+            return Err(deployment::DestroyDeploymentStateError::TofuDestroy {
+                location: std::panic::Location::caller(),
+                source: "tofu destroy failed".into(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -355,20 +412,17 @@ fn spawn_switch(
 
 async fn run_rival(pool: PgPool, f: Fixture, other: Uuid, kind: Rival) {
     match kind {
-        // The current teardown entry point, on its own connection.
+        // The teardown entry point, which takes the app lock itself.
         Rival::TerminateApp => {
-            let tx = hold_app_lock(&pool, f.app).await;
             managed_dns::begin_termination(&pool, f.app).await.unwrap();
-            tx.commit().await.unwrap();
         }
+        // The locked phase of deployment destruction.
         Rival::DestroyTarget => {
-            let mut tx = hold_app_lock(&pool, f.app).await;
-            sqlx::query("UPDATE app_deployments SET status = 'destroying' WHERE id = $1")
-                .bind(f.target)
-                .execute(&mut *tx)
+            let backend = FakeBackend::holding(None);
+            begin_destroy(&pool, &backend, f.user, f.app, f.target)
                 .await
+                .unwrap()
                 .unwrap();
-            tx.commit().await.unwrap();
         }
         // The real switch, which takes the app lock itself.
         Rival::Switch => {
@@ -549,16 +603,8 @@ async fn deployment_destruction_waits_and_sees_the_live_target(pool: &PgPool) {
     let destruction = {
         let pool = pool.clone();
         tokio::spawn(async move {
-            let mut tx = hold_app_lock(&pool, f.app).await;
-            let live: Option<Uuid> = sqlx::query_scalar(
-                "SELECT live_deployment_id FROM compute_resources WHERE id = $1 FOR UPDATE",
-            )
-            .bind(f.app)
-            .fetch_one(&mut *tx)
-            .await
-            .unwrap();
-            tx.commit().await.unwrap();
-            live
+            let backend = FakeBackend::holding(None);
+            begin_destroy(&pool, &backend, f.user, f.app, f.target).await
         })
     };
     wait_for_lock_waiters(pool, 1).await;
@@ -567,7 +613,17 @@ async fn deployment_destruction_waits_and_sees_the_live_target(pool: &PgPool) {
 
     assert_eq!(activation.await.unwrap().unwrap().role, Role::Live);
     // The committed pointer names the target, so destruction rejects it.
-    assert_eq!(destruction.await.unwrap(), Some(f.target));
+    assert!(matches!(
+        destruction.await.unwrap(),
+        Err(DestroyError::Rejected {
+            rejection: DestroyRejection::Live,
+            ..
+        })
+    ));
+    assert_eq!(
+        deployment_row(pool, f.target).await,
+        ("running".to_string(), true, false)
+    );
 }
 
 async fn app_destruction_waits_then_tears_down(pool: &PgPool) {
@@ -814,6 +870,404 @@ async fn lost_live_runtime_switches_from_an_unassigned_address(pool: &PgPool) {
     assert_eq!(mover.expected(), vec![Some("i-dead".to_string()), None]);
     assert_eq!(mover.holder().as_deref(), Some("i-target"));
     assert_eq!(app_row(pool, f.app).await.live, Some(f.target));
+}
+
+#[tokio::test]
+#[ignore = "run bash tests/e2e/test_app_deployments_db.sh (isolated PostgreSQL)"]
+async fn destruction() {
+    let pool = test_pool().await;
+    let state = test_state(&pool, "/nonexistent");
+
+    live_deployment_is_never_destroyed(&state).await;
+    active_operations_are_not_destroyed(&pool).await;
+    failed_destroy_stays_metered_until_a_retry_succeeds(&state).await;
+    app_destroy_waits_for_deployment_operations(&state).await;
+    termination_serialises_with_reserve(&pool).await;
+    app_teardown_destroys_every_deployment(&state).await;
+    pool.close().await;
+}
+
+/// An instance ID unique to the deployment (meters are keyed by instance).
+fn instance(deployment: Uuid) -> String {
+    format!("i-{}", &deployment.simple().to_string()[..12])
+}
+
+async fn set_instance(pool: &PgPool, deployment: Uuid) -> String {
+    let instance_id = instance(deployment);
+    sqlx::query("UPDATE app_deployments SET instance_id = $2 WHERE id = $1")
+        .bind(deployment)
+        .bind(&instance_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    instance_id
+}
+
+/// Starts metering the deployment's instance, as `complete_running` does.
+async fn meter(pool: &PgPool, org: Uuid, deployment: Uuid, instance_id: &str) {
+    sqlx::query(
+        "INSERT INTO tracked_resources (resource_id, organization_id, provider, deployment_id)
+         VALUES ($1, $2, 'aws', $3)",
+    )
+    .bind(instance_id)
+    .bind(org)
+    .bind(deployment)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn metered(pool: &PgPool, instance_id: &str) -> bool {
+    sqlx::query_scalar("SELECT status = 'running' FROM tracked_resources WHERE resource_id = $1")
+        .bind(instance_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// `(status, cleaned up, destroyed)` of a deployment.
+async fn destroy_row(pool: &PgPool, id: Uuid) -> (String, bool, bool) {
+    sqlx::query_as(
+        "SELECT status, cleaned_up_at IS NOT NULL, destroyed_at IS NOT NULL
+         FROM app_deployments WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// The endpoint takes no force flag (the handler extracts none); `--force`
+/// exists only on app destroy, which first takes the app to `terminating`.
+async fn live_deployment_is_never_destroyed(state: &Arc<AppState>) {
+    let pool = &state.db;
+    let f = fixture(pool, "running").await;
+    let live_instance = set_instance(pool, f.target).await;
+    serve(pool, f.app, f.target).await;
+    let backend = FakeBackend::holding(Some(&live_instance));
+
+    // The real handler refuses before any AWS or OpenTofu call.
+    let response = destroy::destroy_handler(
+        axum::extract::State(state.clone()),
+        axum::Extension(crate::AuthContext { user_id: f.user }),
+        axum::extract::Path((f.app, f.target)),
+    )
+    .await
+    .into_response();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    // Nor after its runtime was lost: a dead live instance stays selected.
+    for (status, failure_kind) in [("running", None), ("failed", Some("runtime_lost"))] {
+        sqlx::query("UPDATE app_deployments SET status = $2, failure_kind = $3 WHERE id = $1")
+            .bind(f.target)
+            .bind(status)
+            .bind(failure_kind)
+            .execute(pool)
+            .await
+            .unwrap();
+        let result = begin_destroy(pool, &backend, f.user, f.app, f.target).await;
+        assert!(
+            matches!(
+                result,
+                Err(DestroyError::Rejected {
+                    rejection: DestroyRejection::Live,
+                    ..
+                })
+            ),
+            "{status}"
+        );
+        assert_eq!(
+            result.unwrap_err().into_response().status(),
+            StatusCode::CONFLICT
+        );
+    }
+
+    // After an interrupted switch the pointer lags: the EIP holder is kept.
+    let holder = deployment(pool, f.org, f.app, "running", None).await;
+    let holder_instance = set_instance(pool, holder).await;
+    let backend = FakeBackend::holding(Some(&holder_instance));
+    let error = begin_destroy(pool, &backend, f.user, f.app, holder)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DestroyError::HoldsAddress { .. }));
+    assert_eq!(error.into_response().status(), StatusCode::CONFLICT);
+
+    assert_eq!(status(pool, f.target).await.as_deref(), Some("failed"));
+    assert_eq!(status(pool, holder).await.as_deref(), Some("running"));
+    assert!(backend.destroyed().is_empty());
+    assert_eq!(app_row(pool, f.app).await.live, Some(f.target));
+}
+
+async fn active_operations_are_not_destroyed(pool: &PgPool) {
+    for busy in ["reserved", "building", "provisioning", "destroying"] {
+        let f = fixture(pool, busy).await;
+        let backend = FakeBackend::holding(None);
+        let result = begin_destroy(pool, &backend, f.user, f.app, f.target).await;
+        assert!(
+            matches!(
+                result,
+                Err(DestroyError::Rejected {
+                    rejection: DestroyRejection::Busy,
+                    ..
+                })
+            ),
+            "{busy}"
+        );
+        assert_eq!(
+            result.unwrap_err().into_response().status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(status(pool, f.target).await.as_deref(), Some(busy));
+    }
+}
+
+async fn failed_destroy_stays_metered_until_a_retry_succeeds(state: &AppState) {
+    let pool = &state.db;
+    let f = fixture(pool, "running").await;
+    let live = deployment(pool, f.org, f.app, "running", Some("i-live")).await;
+    serve(pool, f.app, live).await;
+    let instance_id = set_instance(pool, f.target).await;
+    meter(pool, f.org, f.target, &instance_id).await;
+    let backend = FakeBackend::holding(Some("i-live"));
+
+    let outsider = member(pool, organization(pool).await).await;
+    let error = begin_destroy(pool, &backend, outsider, f.app, f.target)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DestroyError::NotFound { .. }));
+
+    backend.fail.store(true, Ordering::SeqCst);
+    let target = begin_destroy(pool, &backend, f.user, f.app, f.target)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status(pool, f.target).await.as_deref(), Some("destroying"));
+    assert_eq!(target.instance_id.as_deref(), Some(instance_id.as_str()));
+    complete_destroy_with(state, &backend, &target)
+        .await
+        .unwrap_err();
+    // Still counted and billed: the instance may still run.
+    assert_eq!(
+        destroy_row(pool, f.target).await,
+        ("failed".to_string(), false, false)
+    );
+    assert!(metered(pool, &instance_id).await);
+
+    backend.fail.store(false, Ordering::SeqCst);
+    let target = begin_destroy(pool, &backend, f.user, f.app, f.target)
+        .await
+        .unwrap()
+        .unwrap();
+    complete_destroy_with(state, &backend, &target)
+        .await
+        .unwrap();
+    assert_eq!(
+        destroy_row(pool, f.target).await,
+        ("destroyed".to_string(), true, true)
+    );
+    assert!(!metered(pool, &instance_id).await);
+
+    // Idempotent: nothing left to destroy.
+    assert!(
+        begin_destroy(pool, &backend, f.user, f.app, f.target)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(backend.destroyed(), vec![f.target, f.target]);
+    assert_eq!(app_row(pool, f.app).await.live, Some(live));
+}
+
+/// Every app destroy path goes through `begin_termination`.
+async fn app_destroy_waits_for_deployment_operations(state: &Arc<AppState>) {
+    let pool = &state.db;
+    let f = fixture(pool, "building").await;
+    let live = deployment(pool, f.org, f.app, "running", Some("i-live")).await;
+    serve(pool, f.app, live).await;
+    for force in [false, true] {
+        let response = crate::resources::delete_resource(
+            axum::extract::State(state.clone()),
+            axum::Extension(crate::AuthContext { user_id: f.user }),
+            axum::extract::Path(f.app),
+            axum::extract::Query(crate::resources::DeleteResourceQuery { force }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT, "force={force}");
+    }
+    assert_eq!(app_row(pool, f.app).await.state, "running");
+
+    // A finished attempt no longer blocks.
+    sqlx::query(
+        "UPDATE app_deployments SET status = 'failed', cleaned_up_at = NOW() WHERE id = $1",
+    )
+    .bind(f.target)
+    .execute(pool)
+    .await
+    .unwrap();
+    managed_dns::begin_termination(pool, f.app).await.unwrap();
+    assert_eq!(app_row(pool, f.app).await.state, "terminating");
+
+    // An unexpired reservation blocks; an expired one does not.
+    let f = fixture(pool, "reserved").await;
+    for (expires_in, blocks) in [("30 minutes", true), ("-1 minute", false)] {
+        sqlx::query(
+            "UPDATE app_deployments SET reservation_expires_at = NOW() + $2::interval WHERE id = $1",
+        )
+        .bind(f.target)
+        .bind(expires_in)
+        .execute(pool)
+        .await
+        .unwrap();
+        let result = managed_dns::begin_termination(pool, f.app).await;
+        assert_eq!(
+            matches!(result, Err(BeginTerminationError::Deploying { .. })),
+            blocks,
+            "{expires_in}"
+        );
+    }
+
+    // The guard is gated on the lifecycle: Legacy is unaffected.
+    let f = fixture(pool, "building").await;
+    sqlx::query("UPDATE compute_resources SET lifecycle = 'legacy' WHERE id = $1")
+        .bind(f.app)
+        .execute(pool)
+        .await
+        .unwrap();
+    managed_dns::begin_termination(pool, f.app).await.unwrap();
+}
+
+/// `begin_termination` and `reserve` serialise on the app lock.
+async fn termination_serialises_with_reserve(pool: &PgPool) {
+    let f = fixture(pool, "running").await;
+
+    // A reservation committed while termination waits is seen: reserve's
+    // critical section (app lock, app row, reservation) in one transaction.
+    let mut reserving = hold_app_lock(pool, f.app).await;
+    sqlx::query("SELECT 1 FROM compute_resources WHERE id = $1 FOR UPDATE")
+        .bind(f.app)
+        .execute(&mut *reserving)
+        .await
+        .unwrap();
+    let reserved: Uuid = sqlx::query_scalar(
+        "INSERT INTO app_deployments (app_id, organization_id, reservation_expires_at)
+         VALUES ($1, $2, NOW() + INTERVAL '30 minutes')
+         RETURNING id",
+    )
+    .bind(f.app)
+    .bind(f.org)
+    .fetch_one(&mut *reserving)
+    .await
+    .unwrap();
+    let termination = {
+        let pool = pool.clone();
+        tokio::spawn(async move { managed_dns::begin_termination(&pool, f.app).await })
+    };
+    wait_for_lock_waiters(pool, 1).await;
+    assert!(!termination.is_finished());
+    reserving.commit().await.unwrap();
+    assert!(matches!(
+        termination.await.unwrap(),
+        Err(BeginTerminationError::Deploying { .. })
+    ));
+    assert_eq!(app_row(pool, f.app).await.state, "initialized");
+
+    // A reservation queued behind termination is refused.
+    admission::release_reservation(pool, reserved, Some(f.app))
+        .await
+        .unwrap();
+    let holder = hold_app_lock(pool, f.app).await;
+    let termination = {
+        let pool = pool.clone();
+        tokio::spawn(async move { managed_dns::begin_termination(&pool, f.app).await })
+    };
+    wait_for_lock_waiters(pool, 1).await;
+    let reservation = {
+        let pool = pool.clone();
+        tokio::spawn(async move { admission::reserve(&pool, f.org, f.app, f.user).await })
+    };
+    wait_for_lock_waiters(pool, 2).await;
+    holder.commit().await.unwrap();
+    termination.await.unwrap().unwrap();
+    assert!(matches!(
+        reservation.await.unwrap(),
+        Err(ReserveError::NotPushable { ref state, .. }) if state == "terminating"
+    ));
+}
+
+async fn app_teardown_destroys_every_deployment(state: &AppState) {
+    let pool = &state.db;
+    let f = fixture(pool, "running").await;
+    let live = deployment(pool, f.org, f.app, "running", None).await;
+    let live_instance = set_instance(pool, live).await;
+    serve(pool, f.app, live).await;
+    let candidate_instance = set_instance(pool, f.target).await;
+    for (deployment, instance_id) in [(live, &live_instance), (f.target, &candidate_instance)] {
+        meter(pool, f.org, deployment, instance_id).await;
+    }
+    let cleaned = deployment(pool, f.org, f.app, "failed", None).await;
+    sqlx::query("UPDATE app_deployments SET cleaned_up_at = NOW() WHERE id = $1")
+        .bind(cleaned)
+        .execute(pool)
+        .await
+        .unwrap();
+    let expired = deployment(pool, f.org, f.app, "reserved", None).await;
+    sqlx::query(
+        "UPDATE app_deployments SET reservation_expires_at = NOW() - INTERVAL '1 minute'
+         WHERE id = $1",
+    )
+    .bind(expired)
+    .execute(pool)
+    .await
+    .unwrap();
+    managed_dns::begin_termination(pool, f.app).await.unwrap();
+
+    // Every deployment is attempted, the live one included; a cleaned-up
+    // failure has no state left.
+    let backend = FakeBackend::holding(Some(&live_instance));
+    backend.fail.store(true, Ordering::SeqCst);
+    let error = destroy_all_for_app_with(state, &backend, f.org, f.app)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DestroyAllError::Destroy { .. }));
+    let mut attempted = backend.destroyed();
+    attempted.sort();
+    let mut expected = vec![live, f.target];
+    expected.sort();
+    assert_eq!(attempted, expected);
+    assert_eq!(status(pool, expired).await, None);
+    for id in [live, f.target] {
+        assert_eq!(
+            destroy_row(pool, id).await,
+            ("failed".to_string(), false, false)
+        );
+    }
+    // A failed teardown keeps them billed; a forced one stops every meter.
+    assert!(metered(pool, &live_instance).await);
+    assert!(metered(pool, &candidate_instance).await);
+    destroy::stop_remaining_meters(state, f.app).await;
+    assert!(!metered(pool, &live_instance).await);
+    assert!(!metered(pool, &candidate_instance).await);
+
+    backend.fail.store(false, Ordering::SeqCst);
+    destroy_all_for_app_with(state, &backend, f.org, f.app)
+        .await
+        .unwrap();
+    for id in [live, f.target, cleaned] {
+        assert_eq!(
+            destroy_row(pool, id).await,
+            ("destroyed".to_string(), true, true)
+        );
+    }
+    assert_eq!(backend.destroyed().len(), 4);
+
+    // A build this process runs is never destroyed underneath OpenTofu.
+    let building = deployment(pool, f.org, f.app, "building", None).await;
+    let error = destroy_all_for_app_with(state, &backend, f.org, f.app)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, DestroyAllError::Busy { .. }));
+    assert_eq!(status(pool, building).await.as_deref(), Some("building"));
 }
 
 /// `/deploy` takes the deployment ID from its body, so a failed request may
