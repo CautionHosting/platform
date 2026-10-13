@@ -46,8 +46,8 @@ pub(crate) fn destroy_precondition(
     }
 }
 
-/// The app EIP holder and the deployment's OpenTofu state. A seam so the
-/// database-backed tests run without AWS or OpenTofu; production uses
+/// The app EIP holder and the deployment's OpenTofu state and its lock. A seam
+/// so the database-backed tests run without AWS or OpenTofu; production uses
 /// [`Platform`].
 pub(super) trait DestroyBackend {
     /// The instance holding the app Elastic IP.
@@ -64,9 +64,15 @@ pub(super) trait DestroyBackend {
         deployment_id: Uuid,
         region: &str,
     ) -> Result<(), deployment::DestroyDeploymentStateError>;
+
+    /// Deletes a state lock left by an OpenTofu run that died with its process.
+    async fn clear_state_lock(
+        &self,
+        state_key: &str,
+    ) -> Result<(), deployment::ClearStateLockError>;
 }
 
-struct Platform;
+pub(super) struct Platform;
 
 impl DestroyBackend for Platform {
     async fn address_holder(
@@ -89,6 +95,13 @@ impl DestroyBackend for Platform {
         region: &str,
     ) -> Result<(), deployment::DestroyDeploymentStateError> {
         deployment::destroy_deployment_state(org_id, app_id, deployment_id, region).await
+    }
+
+    async fn clear_state_lock(
+        &self,
+        state_key: &str,
+    ) -> Result<(), deployment::ClearStateLockError> {
+        deployment::clear_state_lock(state_key).await
     }
 }
 
@@ -383,6 +396,17 @@ pub(crate) enum DestroyAllError {
         #[source]
         source: BoxError,
     },
+    #[error(
+        "failed to clear the stale state lock of deployment {deployment_id} of app {app_id} [{location}]"
+    )]
+    ClearStateLock {
+        app_id: Uuid,
+        deployment_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
     #[error("failed to destroy deployment {deployment_id} of app {app_id} [{location}]")]
     Destroy {
         app_id: Uuid,
@@ -460,9 +484,23 @@ pub(super) async fn destroy_all_for_app_with(
                     region: row.region,
                     state_key: row.state_key,
                 };
-                complete_destroy_with(state, backend, &target)
-                    .await
-                    .with_context(Ctx::destroy(app_id, deployment_id))
+                // The caller holds the teardown lock and the API is a single
+                // process: another owner died with its OpenTofu, so any lock
+                // it left is stale. Reconciliation never unlocks a lost
+                // runtime, whose stale lock would fail every retry.
+                let unlocked = match target.state_key.as_deref() {
+                    Some(state_key) if row.owner_process_id != Some(*PROCESS_ID) => backend
+                        .clear_state_lock(state_key)
+                        .await
+                        .with_context(Ctx::clear_state_lock(app_id, deployment_id)),
+                    _ => Ok(()),
+                };
+                match unlocked {
+                    Ok(()) => complete_destroy_with(state, backend, &target)
+                        .await
+                        .with_context(Ctx::destroy(app_id, deployment_id)),
+                    Err(error) => Err(error),
+                }
             }
         };
         if let Err(error) = result {

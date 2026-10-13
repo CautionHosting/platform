@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 //! Database-backed concurrency regressions for [`complete_running`], the
-//! deployment switch and destruction: run
+//! deployment switch, destruction and reconciliation: run
 //! `bash tests/e2e/test_app_deployments_db.sh` (isolated PostgreSQL).
+
+mod reconciliation;
 
 use super::*;
 use crate::app_deployments::admission::ReserveError;
@@ -14,6 +16,7 @@ use crate::app_deployments::destroy::{
 use crate::app_deployments::switch::{
     SwitchError, SwitchRejection, SwitchRequest, SwitchResponse, commit_switch,
 };
+use crate::deployment;
 use crate::managed_dns::BeginTerminationError;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -190,6 +193,13 @@ impl DestroyBackend for FakeBackend {
                 source: "tofu destroy failed".into(),
             });
         }
+        Ok(())
+    }
+
+    async fn clear_state_lock(
+        &self,
+        _state_key: &str,
+    ) -> Result<(), deployment::ClearStateLockError> {
         Ok(())
     }
 }

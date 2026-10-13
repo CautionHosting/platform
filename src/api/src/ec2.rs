@@ -483,6 +483,23 @@ pub(crate) enum DescribeInstanceRuntimeError {
         #[source]
         source: BoxError,
     },
+
+    #[error("could not parse the EC2 DescribeInstances response [{location}]")]
+    Parse {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Failure modes for [`parse_instance_runtime`] (leaf error: no underlying source).
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ParseInstanceRuntimeError {
+    #[error("DescribeInstances response has no reservation set [{location}]")]
+    NoReservationSet { location: Location },
+    #[error("DescribeInstances response lists an instance without a state [{location}]")]
+    NoState { location: Location },
 }
 
 /// What [`Ec2Client::move_app_address`] has to do to reach the target.
@@ -716,8 +733,6 @@ impl Ec2Client {
         &self,
         instance_id: &str,
     ) -> Result<Option<InstanceRuntime>, DescribeInstanceRuntimeError> {
-        use DescribeInstanceRuntimeErrorCtx as Ctx;
-
         let params = vec![
             ("Action".to_string(), "DescribeInstances".to_string()),
             ("Version".to_string(), "2016-11-15".to_string()),
@@ -725,23 +740,17 @@ impl Ec2Client {
         ];
         // The free request keeps the AWS error code that the boxed
         // `Ec2Client::signed_request` error hides.
-        match signed_request(
-            &self.http,
-            &self.access_key_id,
-            &self.secret_access_key,
-            &self.region,
-            "ec2",
-            &params,
+        instance_runtime(
+            signed_request(
+                &self.http,
+                &self.access_key_id,
+                &self.secret_access_key,
+                &self.region,
+                "ec2",
+                &params,
+            )
+            .await,
         )
-        .await
-        {
-            Ok(body) => Ok(parse_instance_runtime(&body)),
-            Err(SignedRequestError::NonSuccess {
-                aws_code: Some(code),
-                ..
-            }) if code == "InvalidInstanceID.NotFound" => Ok(None),
-            Err(error) => Err(error).with_context(Ctx::request()),
-        }
     }
 
     #[tracing::instrument(skip_all, err)]
@@ -1612,19 +1621,52 @@ fn parse_app_address(xml: &str) -> Result<(String, String, Option<String>), Pars
     ))
 }
 
-/// Runtime of the first instance in a DescribeInstances response; `None` when
-/// it lists no instance.
-fn parse_instance_runtime(xml: &str) -> Option<InstanceRuntime> {
-    let state_block = xml
-        .split_once("<instanceState>")?
-        .1
-        .split_once("</instanceState>")?
-        .0;
-    let state = parse_first_tag_value(state_block, "name")?;
-    Some(InstanceRuntime {
+/// Absence is confirmed only by `InvalidInstanceID.NotFound` or a response
+/// listing no instance. A false `None` would mark a runtime lost, which stops
+/// its billing and blocks switching back to it.
+fn instance_runtime(
+    response: Result<String, SignedRequestError>,
+) -> Result<Option<InstanceRuntime>, DescribeInstanceRuntimeError> {
+    use DescribeInstanceRuntimeErrorCtx as Ctx;
+
+    match response {
+        Ok(body) => parse_instance_runtime(&body).with_context(Ctx::parse()),
+        Err(SignedRequestError::NonSuccess {
+            aws_code: Some(code),
+            ..
+        }) if code == "InvalidInstanceID.NotFound" => Ok(None),
+        Err(error) => Err(error).with_context(Ctx::request()),
+    }
+}
+
+/// Runtime of the first instance in a DescribeInstances response; `None` only
+/// when its reservation set lists no instance.
+fn parse_instance_runtime(xml: &str) -> Result<Option<InstanceRuntime>, ParseInstanceRuntimeError> {
+    let reservations = if xml.contains("<reservationSet/>") {
+        ""
+    } else {
+        xml.split_once("<reservationSet>")
+            .and_then(|(_, rest)| rest.rsplit_once("</reservationSet>"))
+            .map(|(reservations, _)| reservations)
+            .ok_or_else(|| ParseInstanceRuntimeError::NoReservationSet {
+                location: std::panic::Location::caller(),
+            })?
+    };
+    if !reservations.contains("<instanceId>") {
+        return Ok(None);
+    }
+    let state = reservations
+        .split_once("<instanceState>")
+        .and_then(|(_, rest)| rest.split_once("</instanceState>"))
+        .and_then(|(state_block, _)| parse_first_tag_value(state_block, "name"))
+        .filter(|state| !state.is_empty())
+        .ok_or_else(|| ParseInstanceRuntimeError::NoState {
+            location: std::panic::Location::caller(),
+        })?;
+    Ok(Some(InstanceRuntime {
         state,
-        public_ip: parse_first_tag_value(xml, "ipAddress"),
-    })
+        public_ip: parse_first_tag_value(reservations, "ipAddress"),
+    }))
 }
 
 fn parse_first_tag_value(xml: &str, tag_name: &str) -> Option<String> {
@@ -1836,16 +1878,69 @@ mod tests {
             <instanceId>i-0abc</instanceId><instanceState><code>16</code><name>running</name></instanceState>\
             <ipAddress>203.0.113.9</ipAddress><tagSet><item><key>Name</key><value>x</value></item></tagSet>\
             </item></instancesSet></item></reservationSet></DescribeInstancesResponse>";
-        let runtime = parse_instance_runtime(xml).unwrap();
+        let runtime = parse_instance_runtime(xml).unwrap().unwrap();
         assert_eq!(runtime.state, "running");
         assert_eq!(runtime.public_ip.as_deref(), Some("203.0.113.9"));
     }
 
     #[test]
     fn instance_runtime_without_public_ip_or_instances() {
-        let stopped = "<instancesSet><item><instanceState><code>80</code><name>stopped</name></instanceState></item></instancesSet>";
-        assert_eq!(parse_instance_runtime(stopped).unwrap().public_ip, None);
-        assert!(parse_instance_runtime("<reservationSet/>").is_none());
+        let stopped = "<reservationSet><item><instancesSet><item><instanceId>i-0abc</instanceId>\
+            <instanceState><code>80</code><name>stopped</name></instanceState></item></instancesSet>\
+            </item></reservationSet>";
+        assert_eq!(
+            parse_instance_runtime(stopped).unwrap().unwrap().public_ip,
+            None
+        );
+        for empty in [
+            "<DescribeInstancesResponse><reservationSet/></DescribeInstancesResponse>",
+            "<DescribeInstancesResponse><reservationSet>\n </reservationSet></DescribeInstancesResponse>",
+            "<reservationSet><item><reservationId>r-1</reservationId><instancesSet/></item></reservationSet>",
+        ] {
+            assert_eq!(parse_instance_runtime(empty).unwrap(), None, "{empty}");
+        }
+    }
+
+    /// A false "gone" stops billing and blocks switching back (`runtime_lost`).
+    #[test]
+    fn instance_runtime_is_absent_only_when_confirmed() {
+        let not_found = signed_request_non_success(
+            "ec2",
+            400,
+            "<Response><Errors><Error><Code>InvalidInstanceID.NotFound</Code></Error></Errors></Response>",
+        );
+        assert_eq!(instance_runtime(Err(not_found)).unwrap(), None);
+        let malformed = signed_request_non_success(
+            "ec2",
+            400,
+            "<Response><Errors><Error><Code>InvalidInstanceID.Malformed</Code></Error></Errors></Response>",
+        );
+        assert!(matches!(
+            instance_runtime(Err(malformed)),
+            Err(DescribeInstanceRuntimeError::Request { .. })
+        ));
+        let unavailable = signed_request_non_success("ec2", 503, "<html>unavailable</html>");
+        assert!(instance_runtime(Err(unavailable)).is_err());
+
+        // A 200 that lists an instance it cannot read, or is no DescribeInstances
+        // response (including a truncated one), is an error, never `None`.
+        for unreadable in [
+            "<reservationSet><item><instancesSet><item><instanceId>i-0abc</instanceId>\
+             </item></instancesSet></item></reservationSet>",
+            "<reservationSet><item><instancesSet><item><instanceId>i-0abc</instanceId>\
+             <instanceState><name></name></instanceState></item></instancesSet></item></reservationSet>",
+            "<reservationSet><item><instancesSet><item><instanceId>i-0abc</instanceId>",
+            "<html>ok</html>",
+            "",
+        ] {
+            assert!(
+                matches!(
+                    instance_runtime(Ok(unreadable.to_string())),
+                    Err(DescribeInstanceRuntimeError::Parse { .. })
+                ),
+                "{unreadable}"
+            );
+        }
     }
 
     #[test]

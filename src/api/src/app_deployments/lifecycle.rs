@@ -4,8 +4,9 @@
 //! Candidate deployment lifecycle: provisioning bookkeeping, Running and
 //! auto-activation, and scoped failure cleanup.
 
+use super::destroy::{DestroyBackend, Platform};
 use super::{PROCESS_ID, admission, lock_app_operations};
-use crate::{AppState, deployment, ec2, fully_managed_capacity, managed_dns};
+use crate::{AppState, ec2, fully_managed_capacity, managed_dns};
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use sqlx::{PgPool, Postgres, Transaction};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -447,6 +448,17 @@ pub(crate) async fn fail_attempt(
     deployment_id: Uuid,
     message: &str,
 ) {
+    fail_attempt_with(state, &Platform, org_id, app_id, deployment_id, message).await;
+}
+
+pub(super) async fn fail_attempt_with(
+    state: &AppState,
+    backend: &impl DestroyBackend,
+    org_id: Uuid,
+    app_id: Uuid,
+    deployment_id: Uuid,
+    message: &str,
+) {
     // Scoped to the app: the deployment ID of a failed push comes from the request.
     let failed = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>)>(
         "UPDATE app_deployments
@@ -471,11 +483,10 @@ pub(crate) async fn fail_attempt(
         }
     };
     let cleaned = match (state_key, region) {
-        (Some(_), Some(region)) => {
-            deployment::destroy_deployment_state(org_id, app_id, deployment_id, &region)
-                .await
-                .is_ok()
-        }
+        (Some(_), Some(region)) => backend
+            .destroy_state(org_id, app_id, deployment_id, &region)
+            .await
+            .is_ok(),
         _ => true, // nothing was provisioned
     };
     if cleaned {

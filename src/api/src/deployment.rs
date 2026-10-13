@@ -33,7 +33,7 @@ fn generate_provider_lock_config() -> String {
 }
 
 /// Default timeout for tofu init/apply/destroy operations (10 minutes).
-const TOFU_TIMEOUT_SECS: u64 = 600;
+pub(crate) const TOFU_TIMEOUT_SECS: u64 = 600;
 
 /// Returns the path to the cached provider lockfile in the data directory.
 pub fn cached_lockfile_path(data_dir: &str) -> PathBuf {
@@ -3468,7 +3468,6 @@ pub(crate) enum ClearStateLockError {
 
 /// Deletes `<state_key>.tflock` from the state bucket. Only for reconciling work whose
 /// owning process is dead. Deleting an absent lock succeeds.
-#[expect(dead_code, reason = "first caller lands with reconciliation")]
 #[tracing::instrument(skip_all, err)]
 pub(crate) async fn clear_state_lock(
     state_key: &str,

@@ -7,6 +7,7 @@ pub(crate) mod admission;
 pub(crate) mod destroy;
 pub(crate) mod internal;
 pub(crate) mod lifecycle;
+pub(crate) mod reconcile;
 pub(crate) mod switch;
 
 use dterror::{BoxError, CtxError, Location, ResultExt};

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-FileCopyrightText: 2026 Caution SEZC
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Caution-Commercial
-# App deployments concurrency and metering reconcile tests against an isolated,
+# App deployments concurrency, reconciliation and metering reconcile tests against an isolated,
 # fully migrated PostgreSQL database (anonymous container on a random port; no test stack).
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)

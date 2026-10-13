@@ -5710,6 +5710,18 @@ async fn main() -> Result<(), MainError> {
     });
     info!("App teardown reconciler started (runs every 30 seconds)");
 
+    // The first tick fires immediately, which covers startup.
+    let deployments_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            app_deployments::reconcile::reconcile(deployments_state.clone()).await;
+        }
+    });
+    info!("App deployments reconciler started (runs every 60 seconds)");
+
     if let Some(managed_dns) = state.managed_dns.clone() {
         let dns_state = state.clone();
         tokio::spawn(async move {
