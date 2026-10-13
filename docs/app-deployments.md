@@ -32,30 +32,89 @@ Set both in `~/.config/caution/.env`, then restart the API (`env.example` lists 
   its trust in `.caution/deployments/<deployment>/trusted_hashes.json`, apart from
   the app's `.caution/trusted_hashes.json`. `caution apps get [APP] -d <deployment>`
   shows one deployment. With several running deployments, bare `caution verify`
-  refuses and asks for `-d`. For a `mode = "tls"` build whose reproduced manifest
-  records `tls_await_app_address` (bound by PCR0, never read from the API),
-  `verify -d` reports "PCRs verified; application TLS verification pending" while
-  its certificate does not exist yet (a candidate before its switch, a live
-  deployment before issuance); verify again once issued. Other builds fail as before.
+  refuses and asks for `-d`. A `mode = "tls"` build may report TLS pending (see
+  [Enclave TLS on candidates](#enclave-tls-on-candidates)); other builds fail as before.
 - **Switch.** `caution apps switch -d <deployment>` needs a passkey tap; a session
   or SSH-signed request gets 403 `This operation requires signature verification`
   (no CI form). It names the live deployment it was confirmed against: if that
   changed, or a retry follows a lost response, the answer is 409 (stale), so
   re-read the app and confirm again. The target must be Running and pass the
-  platform health check. A `mode = "tls"` candidate gets its certificate only after
-  it holds the app address, so switching to one that never held it needs a signed
-  `acknowledged_tls_pending: true` (else 422); the CLI prints a warning and sends it
-  only for such a target. Rolling back to a deployment that was
-  live needs none. The deployment view carries `bundle_hash` and `tls_after_switch`;
-  the switch and `/deploy` answers carry `tls_after_switch` when it applies, and the
-  push output says so. The push output also names the deployment right after the
-  push is accepted.
+  platform health check. A target that gets its certificate only after the switch
+  needs an acknowledgement (see [Enclave TLS on candidates](#enclave-tls-on-candidates)).
+  The deployment view carries `bundle_hash` and `tls_after_switch`. The switch answer
+  always carries `tls_after_switch` (true when this switch moved the address to a
+  deployment that obtains its certificate only now); `/deploy` carries it only when
+  true, and the push output says so. The push output also names the deployment right
+  after the push is accepted.
 - **Destroy.** `caution apps destroy [APP] -d <deployment>` destroys one deployment
   (session, or `--this-is-a-ci-machine` with the app ID). The live deployment is
   never destroyed, whatever the flags, and `-d` returns 409 while the app is being
   destroyed. `caution apps destroy` (the app) destroys every deployment and clears
   the live pointer; it returns 409 while a build, provisioning or deployment destroy
   is active.
+
+## Releasing shares to a deployment
+
+Release shares to the exact deployment a candidate runs, before switching to it:
+
+```sh
+caution verify -d <deployment>
+caution secret send-shard -d <deployment>   # once per holder
+```
+
+- **Trust.** `verify -d` keeps the PCRs in `.caution/deployments/<deployment>/trusted_hashes.json`;
+  `send-shard -d` checks the live attestation against that file only, never the
+  app's `.caution/trusted_hashes.json`.
+- **Endpoint.** Resolved from the API on every run (a candidate's IP changes on
+  stop/start); a destroyed or address-less deployment has none and is refused.
+- **Bundle.** The API records the canonical hash of `.caution/quorum-bundle.json`
+  committed at the deployment's commit (the documented `COPY` source of the image's
+  bundle). `send-shard -d` uses that bundle (the checkout's file or the
+  organization's copy with that hash), or an explicit `--bundle` that must match it;
+  it never picks another organization bundle. An image that copies its bundle from
+  elsewhere records none: pass `--bundle`.
+- **Bare commands.** With several running deployments, bare `verify` and
+  `send-shard` refuse and require `-d`. Legacy apps, and apps with at most one running
+  deployment, keep bare `verify`/`send-shard` and `.caution/trusted_hashes.json`.
+- **Approval display.** The CLI names the deployment in the release summary and
+  the QR approval page shows it ([share recovery](share-recovery.md)). Roll out the
+  gateway before the CLI: an older gateway rejects a display context carrying a
+  deployment ID.
+
+## Enclave TLS on candidates
+
+An enclave-TLS app (`mode = "tls"`) obtains its certificate from inside the enclave,
+which fails while the deployment does not hold the app's Elastic IP. Deployments-lifecycle
+`mode = "tls"` builds therefore start Caddy only once the domain resolves to the
+deployment's own public IPv4. Their manifest records `tls_await_app_address: true`
+(bound by PCR0). Legacy builds and host-mode builds are unchanged.
+
+- **Address check.** The host publishes the instance's public IPv4 (from EC2 instance
+  metadata) as `public-ipv4.caution.internal` through its dnsmasq. Every 15 s the
+  enclave resolves that name and the app domain, each with socat, which opens a TCP
+  connection to port 80 of the resolved address (5 s timeout) and logs the address
+  it reached. Caddy starts once both give the same IPv4, which holds only while this
+  deployment holds the app address. The host path is untrusted: a wrong answer can
+  only delay issuance.
+- **Verify.** While the certificate does not exist yet (a candidate before its
+  switch, a live deployment before issuance), `verify -d` reports "PCRs verified;
+  application TLS verification pending" and stores the PCR trust. The policy comes
+  from the reproduced manifest, never from the API; other builds fail as before.
+  Verifying these builds needs an M2 CLI: older CLIs fail closed with a PCR mismatch.
+- **Switch.** Switching to a deployment that never held the app address needs a signed
+  `acknowledged_tls_pending: true` (else 422). The CLI prints a warning and sends it
+  only for such a target; rolling back to a deployment that was live needs none.
+  After the switch, run `caution verify -d <deployment>` again once the certificate
+  is issued.
+- **Issuance.** Each switch to a fresh deployment issues one certificate (Let's
+  Encrypt allows 5 per exact domain set per week).
+- **Probe.** `tests/e2e/measure_cutover.sh URL SECONDS` polls a URL and reports the
+  longest interruption across a switch.
+
+## Inventory
+
+drift-detector and `caution-admin findings` treat every non-destroyed deployment
+instance as tracked, so a candidate is not an orphan. Both stay read-only toward AWS.
 
 ## Recovery
 
@@ -113,8 +172,9 @@ one active operation per app, so there is nothing to unlock.
 
 ## Rollout and rollback
 
-Deploy the API (migration 056) before the gateway, whose push check selects
-`compute_resources.lifecycle`. Migration 030 no longer creates the one-meter-per-app
+Deploy the API (migrations 056, 057) before the gateway, whose push check selects
+`compute_resources.lifecycle`, and the gateway before the CLI (its display context
+accepts `deployment_id`). Migration 030 no longer creates the one-meter-per-app
 index: rolling back to a release with the old 030 fails startup once an app has two
 running deployment meters, so treat the migration as one-way once the flag has been on.
 

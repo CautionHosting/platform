@@ -463,6 +463,7 @@ caution secret send-shard --keyring /absolute/path/to/bob.private.asc
 ```
 
 Each holder uses their own keyring (omit `--keyring` for a supported smart card).
+For an app on the deployments lifecycle, release to the exact deployment: `caution verify -d <ID>` then `caution secret send-shard -d <ID>`.
 Restart the enclave and repeat to exercise recovery. These are manual test
 instructions, not a claim of completed Nitro validation. For the existing local
 creation/encryption test with synthetic proofs, run `make test-quorum-mock` from

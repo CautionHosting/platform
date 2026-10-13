@@ -217,6 +217,22 @@ caution secrets encrypt \
   --secrets-dir ./.caution/secrets
 ```
 
+### Releasing shares to a deployment
+
+For an app on the deployments lifecycle, release to the exact deployment:
+
+```sh
+caution verify -d <deployment>
+caution secret send-shard -d <deployment>
+```
+
+`send-shard -d` resolves the deployment's endpoint from the API on every run,
+checks its attestation against `.caution/deployments/<deployment>/trusted_hashes.json`
+(written by `verify -d`) and uses the quorum bundle recorded for its commit. An
+explicit `--bundle` must match that bundle; if none was recorded, `--bundle` is
+required. With several running deployments, bare `verify` and `send-shard` refuse
+and require `-d`. See [app deployments](../../docs/app-deployments.md).
+
 ### Moderate Trust
 
 These steps allow proving that at least two Caution engineers

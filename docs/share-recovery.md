@@ -311,14 +311,19 @@ not authenticate descriptive app labels or CLI-reported addresses.
   verifies key-service evidence before publishing the approval screen. Its accepted
   key-service PCR policy is displayed separately.
 - **Platform metadata:** accessible organization/app names, app ID/domain/recorded
-  IP/state, and current holder username. Bundle threshold, holder count and eligible
-  passkey count are displayed only after matching the stored bundle's deterministic
-  hash and selected certificate/position to the authenticated context. Multiple
-  passkeys still represent one share. Labels are not attested app identities.
-- **CLI-reported context:** actual destination socket address and key-service URL.
-  These describe the connection attempt; the enclave evidence does not establish
-  the hostname or a unique Platform app identity. Recorded IP and reported socket
-  are displayed separately, including when they differ.
+  IP/state, and current holder username. When the CLI names a deployment
+  (`send-shard -d`), also its short commit and role (the drawer adds commit subject
+  and recorded IP). Bundle threshold, holder count and eligible passkey count are
+  displayed only after matching the stored bundle's deterministic hash and selected
+  certificate/position to the authenticated context. Multiple passkeys still
+  represent one share. Labels are not attested app identities.
+- **CLI-reported context:** actual destination socket address and key-service URL,
+  and the deployment ID when `-d` is used. These describe the connection attempt;
+  the enclave evidence does not establish the hostname or a unique Platform app
+  identity. Recorded IP and reported socket are displayed separately, including when they differ. When a deployment is named,
+  the recorded address shown and compared is that deployment's own IP, never the
+  app's address (which belongs to the live deployment); if the deployment's
+  metadata is missing the page shows "address unavailable" and compares nothing.
 
 Optional display fields are passed only to the existing gateway relay. It resolves
 records using the authenticated requester and the release organization, retains

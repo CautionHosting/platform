@@ -19,6 +19,7 @@
 #    6    Push A: goes live (nothing was live)
 #    7    A push interrupted mid-transfer releases its reservation
 #    8    Push B (background): busy push refused, app destroy 409, B candidate
+#    8a   B's view carries bundle/TLS fields, bare verify needs -d
 #    9    A stays live, stable IP unchanged, health 200
 #   10    Push C: candidate limit reached, no new deployment
 #   11    caution verify -d B, apps get -d B (SSH-signed CI read)
@@ -51,8 +52,8 @@ API_CONTAINER="${API_CONTAINER:-api}"
 PUSH_TIMEOUT="${PUSH_TIMEOUT:-2400}"
 # How long the cleanup keeps trying to destroy the app before reporting a leak.
 DESTROY_TIMEOUT="${DESTROY_TIMEOUT:-1200}"
-# 1: `verify -d` must succeed and write the trust file (default: tolerate the
-# environmental failures test_happy_path.sh tolerates).
+# 1 (default, strict): `verify -d` must succeed and write the trust file. 0 tolerates
+# the environmental failures test_happy_path.sh tolerates.
 E2E_STRICT_VERIFY="${E2E_STRICT_VERIFY:-1}"
 # Size of the blob of the interrupted push: large enough that the client is still
 # transferring when it is killed.
@@ -662,6 +663,19 @@ if ! jq -e --arg d "$B_ID" --arg sha "$B_SHA" \
     step_fail "Deployments list does not show B ($B_ID) as a running candidate at $B_SHA"
 fi
 step_pass "Push B: busy push refused, app destroy 409, B is a running candidate ($B_ID)"
+
+# ── Step 8a: Release targets and bare verify (M2) ────────────────────
+
+STEP_NUM=8a
+log "Release targets: the view carries the bundle and TLS fields; bare verify needs -d..."
+B_VIEW=$(api_get "/resources/$RESOURCE_ID/deployments/$B_ID") || step_fail "GET deployment B"
+[ "$(echo "$B_VIEW" | jq -r '.bundle_hash')" = "null" ] || step_fail "Demo app source has no bundle"
+[ "$(echo "$B_VIEW" | jq -r '.tls_after_switch')" = "false" ] || step_fail "Host-mode candidate gets no after-switch TLS"
+if "$CAUTION_BIN" -u "$GATEWAY_URL" verify --no-cache 2>"$WORK_DIR/bare-verify.err" </dev/null; then
+    step_fail "Bare verify with A live and B running is refused"
+fi
+grep -q 'name one with -d' "$WORK_DIR/bare-verify.err" || step_fail "Bare verify names the -d fix"
+step_pass "Deployment targets are explicit"
 
 # ── Step 9: A stays live (brief step 4) ──────────────────────────────
 
