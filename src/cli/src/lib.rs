@@ -489,13 +489,20 @@ enum Commands {
     )]
     Verify {
         /// Discover, reproduce and save trust for a hosted service on the selected Platform.
-        #[arg(long, value_enum, conflicts_with_all = ["attestation_url", "from_local", "from_tarball", "app_source_url", "pcrs", "save_pcrs", "inspect_attestation"])]
+        #[arg(long, value_enum, conflicts_with_all = ["attestation_url", "deployment", "from_local", "from_tarball", "app_source_url", "pcrs", "save_pcrs", "inspect_attestation"])]
         service: Option<service_trust::Service>,
         #[arg(
             long,
             help = "Attestation endpoint URL (default: inferred from .caution/deployment)"
         )]
         attestation_url: Option<String>,
+        #[arg(
+            short = 'd',
+            long = "deployment",
+            conflicts_with = "attestation_url",
+            help = "Verify one deployment of the app (stores its trust separately)"
+        )]
+        deployment: Option<String>,
         #[arg(
             long,
             group = "verify_source",
@@ -594,6 +601,8 @@ enum AppCommands {
     Get {
         #[arg(help = "App ID (default: from .caution/deployment)")]
         id: Option<String>,
+        #[arg(short = 'd', long = "deployment", help = "Show one deployment")]
+        deployment: Option<String>,
         #[arg(
             long,
             help = "CI-only: allow SSH-signed API access without a logged-in session"
@@ -604,6 +613,13 @@ enum AppCommands {
     Destroy {
         #[arg(help = "App ID (default: from .caution/deployment)")]
         id: Option<String>,
+        #[arg(
+            short = 'd',
+            long = "deployment",
+            conflicts_with = "force_delete",
+            help = "Destroy one non-live deployment instead of the app"
+        )]
+        deployment: Option<String>,
         #[arg(short, long, help = "Skip confirmation prompt")]
         force: bool,
         #[arg(
@@ -616,6 +632,15 @@ enum AppCommands {
             help = "CI-only: allow SSH-signed API access without a logged-in session"
         )]
         this_is_a_ci_machine: bool,
+    },
+    #[command(about = "Make a deployment live by moving the app's stable IP (passkey required)")]
+    Switch {
+        #[arg(help = "App ID (default: from .caution/deployment)")]
+        id: Option<String>,
+        #[arg(short = 'd', long = "deployment", help = "Deployment ID to make live")]
+        deployment: String,
+        #[arg(short, long, help = "Skip the confirmation prompt")]
+        force: bool,
     },
     #[command(about = "Build enclave image locally for inspection")]
     Build {
@@ -886,6 +911,10 @@ pub struct App {
     pub configuration: Option<serde_json::Value>,
     #[serde(default)]
     pub git_url: String,
+    #[serde(default)]
+    pub lifecycle: Option<String>,
+    #[serde(default)]
+    pub live_deployment_id: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -1818,6 +1847,7 @@ pub(crate) enum GetProtectedJsonError {
     ApiFailure {
         #[context(borrow = str)]
         failure_context: String,
+        status: reqwest::StatusCode,
         api_response: String,
         #[location]
         location: Location,
@@ -2293,6 +2323,7 @@ impl ApiClient {
 
             return Err(GetProtectedJsonError::ApiFailure {
                 failure_context: failure_context.to_string(),
+                status,
                 api_response: self.format_api_error(status, &body),
                 location: std::panic::Location::caller(),
             });
@@ -3701,6 +3732,7 @@ pub async fn run() -> Result<(), RunError> {
         Commands::Verify {
             service,
             attestation_url,
+            deployment,
             from_local,
             from_tarball,
             app_source_url,
@@ -3714,6 +3746,33 @@ pub async fn run() -> Result<(), RunError> {
                     .await
                     .with_context(Ctx::command_dispatch())?;
             } else {
+                let (attestation_url, trust_path, candidate) = match deployment {
+                    Some(deployment) => {
+                        // Only a verification that rebuilds from this checkout
+                        // needs the checkout to be at the deployment's commit.
+                        let rebuilds_checkout = from_tarball.is_none()
+                            && app_source_url.is_none()
+                            && pcrs.is_none()
+                            && !inspect_attestation;
+                        let target = apps::crud::prepare_deployment_verify(
+                            &client,
+                            &deployment,
+                            rebuilds_checkout,
+                        )
+                        .await
+                        .with_context(Ctx::command_dispatch())?;
+                        (
+                            Some(target.attestation_url),
+                            target.trust_path,
+                            target.candidate,
+                        )
+                    }
+                    None => (
+                        attestation_url,
+                        PathBuf::from(".caution/trusted_hashes.json"),
+                        false,
+                    ),
+                };
                 verify::verify(
                     &client,
                     attestation_url,
@@ -3724,6 +3783,8 @@ pub async fn run() -> Result<(), RunError> {
                     no_cache,
                     save_pcrs,
                     inspect_attestation,
+                    trust_path,
+                    candidate,
                 )
                 .await
                 .with_context(Ctx::command_dispatch())?;
@@ -3742,19 +3803,50 @@ pub async fn run() -> Result<(), RunError> {
             }
             AppCommands::Get {
                 id,
+                deployment,
                 this_is_a_ci_machine,
-            } => {
-                apps::crud::get(&client, id, this_is_a_ci_machine)
-                    .await
-                    .with_context(Ctx::command_dispatch())?;
-            }
+            } => match deployment {
+                Some(deployment) => {
+                    apps::crud::get_deployment(&client, id, &deployment, this_is_a_ci_machine)
+                        .await
+                        .with_context(Ctx::command_dispatch())?;
+                }
+                None => {
+                    apps::crud::get(&client, id, this_is_a_ci_machine)
+                        .await
+                        .with_context(Ctx::command_dispatch())?;
+                }
+            },
             AppCommands::Destroy {
                 id,
+                deployment,
                 force,
                 force_delete,
                 this_is_a_ci_machine,
+            } => match deployment {
+                Some(deployment) => {
+                    apps::crud::destroy_deployment(
+                        &client,
+                        id,
+                        &deployment,
+                        force,
+                        this_is_a_ci_machine,
+                    )
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
+                }
+                None => {
+                    apps::crud::destroy(&client, id, force, force_delete, this_is_a_ci_machine)
+                        .await
+                        .with_context(Ctx::command_dispatch())?;
+                }
+            },
+            AppCommands::Switch {
+                id,
+                deployment,
+                force,
             } => {
-                apps::crud::destroy(&client, id, force, force_delete, this_is_a_ci_machine)
+                apps::crud::switch(&client, id, &deployment, force)
                     .await
                     .with_context(Ctx::command_dispatch())?;
             }
@@ -3962,7 +4054,7 @@ mod tests {
         validate_attested_tls, verify_deprecation_warnings,
     };
     use super::{
-        AccountCommands, ApiClient, Cli, Commands, PgpKeyCommands, RunError,
+        AccountCommands, ApiClient, AppCommands, Cli, Commands, PgpKeyCommands, RunError,
         deployment_target_summary, inspect_checkout_link, linked_checkout_error,
         prepare_pgp_public_key_for_upload, resolve_local_build_command_from_dir,
         resolve_procfile_build_command, validate_global_qr,
@@ -4090,6 +4182,93 @@ mod tests {
             Commands::Verify {
                 inspect_attestation: true,
                 ..
+            }
+        ));
+    }
+
+    #[test]
+    fn deployment_flags_parse() {
+        let cli = Cli::try_parse_from(["caution", "verify", "-d", "d2"]).unwrap();
+        assert!(
+            matches!(cli.command, Commands::Verify { deployment: Some(ref d), .. } if d == "d2")
+        );
+        let cli = Cli::try_parse_from(["caution", "apps", "switch", "-d", "d2"]).unwrap();
+        assert!(
+            matches!(cli.command, Commands::Apps { command: AppCommands::Switch { ref deployment, .. } } if deployment == "d2")
+        );
+        let cli = Cli::try_parse_from([
+            "caution",
+            "apps",
+            "destroy",
+            "-d",
+            "d2",
+            "--this-is-a-ci-machine",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Apps {
+                command: AppCommands::Destroy {
+                    deployment: Some(_),
+                    this_is_a_ci_machine: true,
+                    ..
+                }
+            }
+        ));
+        let cli = Cli::try_parse_from([
+            "caution",
+            "apps",
+            "get",
+            "-d",
+            "d2",
+            "--this-is-a-ci-machine",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Apps {
+                command: AppCommands::Get {
+                    deployment: Some(_),
+                    this_is_a_ci_machine: true,
+                    ..
+                }
+            }
+        ));
+        assert!(
+            Cli::try_parse_from(["caution", "apps", "destroy", "-d", "d2", "--force-delete"])
+                .is_err()
+        );
+        assert!(Cli::try_parse_from(["caution", "apps", "switch"]).is_err());
+        // A deployment's endpoint comes from the platform, never from a URL flag.
+        assert!(
+            Cli::try_parse_from([
+                "caution",
+                "verify",
+                "-d",
+                "d2",
+                "--attestation-url",
+                "https://app.example.com/attestation",
+            ])
+            .is_err()
+        );
+        // The bare forms keep working.
+        let cli = Cli::try_parse_from(["caution", "verify"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Verify {
+                deployment: None,
+                ..
+            }
+        ));
+        let cli = Cli::try_parse_from(["caution", "apps", "destroy", "--force-delete"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Apps {
+                command: AppCommands::Destroy {
+                    deployment: None,
+                    force_delete: true,
+                    ..
+                }
             }
         ));
     }
@@ -4432,6 +4611,68 @@ enclave "main" {{
         std::fs::create_dir(&directory_state).unwrap();
         assert!(persist_trusted_hashes(&directory_state, &trusted_hashes("new", None)).is_err());
         assert!(directory_state.is_dir());
+    }
+
+    #[test]
+    fn deployment_trust_is_kept_apart_from_the_app_trust() {
+        use super::verify::ensure_state_dirs;
+
+        let work_dir = tempdir().unwrap();
+        let app = Path::new(".caution/trusted_hashes.json");
+        let deployment = Path::new(".caution/deployments/d2/trusted_hashes.json");
+
+        // The app's own state file needs nothing created above its directory.
+        ensure_state_dirs(work_dir.path(), app).unwrap();
+        assert!(!work_dir.path().join(".caution").exists());
+
+        ensure_state_dirs(work_dir.path(), deployment).unwrap();
+        persist_trusted_hashes(&work_dir.path().join(app), &trusted_hashes("app", None)).unwrap();
+        persist_trusted_hashes(
+            &work_dir.path().join(deployment),
+            &trusted_hashes("d2", None),
+        )
+        .unwrap();
+        // Verifying the deployment leaves the app's trust alone.
+        let pcr0 = |path: &Path| {
+            serde_json::from_slice::<serde_json::Value>(
+                &std::fs::read(work_dir.path().join(path)).unwrap(),
+            )
+            .unwrap()["pcr0"]
+                .clone()
+        };
+        assert_eq!(pcr0(app), "app");
+        assert_eq!(pcr0(deployment), "d2");
+
+        ensure_state_dirs(work_dir.path(), deployment).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deployment_trust_never_follows_a_symlinked_state_directory() {
+        use super::verify::ensure_state_dirs;
+        use std::os::unix::fs::symlink;
+
+        let work_dir = tempdir().unwrap();
+        let elsewhere = work_dir.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        let deployment = Path::new(".caution/deployments/d2/trusted_hashes.json");
+
+        let linked_state = work_dir.path().join("linked-state");
+        std::fs::create_dir(&linked_state).unwrap();
+        symlink(&elsewhere, linked_state.join(".caution")).unwrap();
+        assert!(ensure_state_dirs(&linked_state, deployment).is_err());
+
+        let linked_deployments = work_dir.path().join("linked-deployments");
+        std::fs::create_dir_all(linked_deployments.join(".caution")).unwrap();
+        symlink(&elsewhere, linked_deployments.join(".caution/deployments")).unwrap();
+        assert!(ensure_state_dirs(&linked_deployments, deployment).is_err());
+
+        let file_state = work_dir.path().join("file-state");
+        std::fs::create_dir(&file_state).unwrap();
+        std::fs::write(file_state.join(".caution"), b"not a directory").unwrap();
+        assert!(ensure_state_dirs(&file_state, deployment).is_err());
+
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
     }
 
     #[test]

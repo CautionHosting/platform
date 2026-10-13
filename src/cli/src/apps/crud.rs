@@ -1,15 +1,17 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use dterror::{BoxError, CtxError, Location, ResultExt};
+use serde::Deserialize;
 
 use crate::output;
 use crate::output::{Spinner, SpinnerStyle};
 use crate::prompt;
 use crate::resolve_local_build_command_from_dir;
-use crate::{ApiClient, App, CheckoutLink, CreateAppResponse};
+use crate::{ApiClient, App, CheckoutLink, CreateAppResponse, GetProtectedJsonError};
 
 /// Extract a UUID-formatted resource ID from a Caution git remote URL.
 ///
@@ -480,6 +482,15 @@ pub(crate) enum GetError {
         #[source]
         source: BoxError,
     },
+
+    #[error("failed to list deployments [{location:?}]")]
+    ListDeployments {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
 }
 
 pub(crate) async fn get(
@@ -572,6 +583,13 @@ pub(crate) async fn get(
         app.dns_error.as_deref(),
         app.domain.as_deref(),
     );
+
+    if app.lifecycle.as_deref() == Some("deployments") {
+        let deployments = list_deployments(client, &app.id, allow_ci_ssh)
+            .await
+            .with_context(Ctx::list_deployments())?;
+        print_deployments(&app, deployments);
+    }
 
     Ok(())
 }
@@ -799,6 +817,900 @@ pub(crate) async fn destroy(
             })
         }
     }
+}
+
+/// A deployment of a deployments-lifecycle app, as the API returns it.
+#[derive(Debug, Deserialize)]
+pub(crate) struct DeploymentView {
+    id: String,
+    app_id: String,
+    role: String,
+    status: String,
+    failure_kind: Option<String>,
+    pushed_ref: Option<String>,
+    commit_sha: Option<String>,
+    commit_subject: Option<String>,
+    instance_type: Option<String>,
+    public_ip: Option<String>,
+    created_at: String,
+    error: Option<String>,
+}
+
+/// The `error` text of an API error body, or the whole body when it has none.
+fn api_error_text(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|body| Some(body.get("error")?.as_str()?.to_string()))
+        .unwrap_or_else(|| body.to_string())
+}
+
+/// The canonical form of a UUID, so IDs are safe to put in URLs and file paths.
+fn canonical_id(id: &str) -> Option<String> {
+    uuid::Uuid::parse_str(id).ok().map(|id| id.to_string())
+}
+
+/// Failure modes for [`get_json`].
+#[derive(Debug, thiserror::Error, CtxError)]
+enum GetJsonError {
+    #[error("failed to send SSH-signed request for {path} [{location:?}]")]
+    SshRequest {
+        #[context(borrow = str)]
+        path: String,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to read the response for {path} [{location:?}]")]
+    ReadBody {
+        #[context(borrow = str)]
+        path: String,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to parse the response for {path} [{location:?}]")]
+    Parse {
+        #[context(borrow = str)]
+        path: String,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("request for {path} failed (status {status}): {message} [{location:?}]")]
+    Api {
+        path: String,
+
+        status: reqwest::StatusCode,
+
+        message: String,
+
+        location: Location,
+    },
+
+    #[error("failed to ensure authentication [{location:?}]")]
+    EnsureAuthenticated {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to get {path} [{location:?}]")]
+    Session {
+        #[context(borrow = str)]
+        path: String,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// GETs `path`: SSH-signed when `allow_ci_ssh` and an SSH signing identity is
+/// configured (the gateway allows it on the app-scoped deployment paths),
+/// session-authenticated otherwise.
+async fn get_json<T: serde::de::DeserializeOwned>(
+    client: &ApiClient,
+    path: &str,
+    allow_ci_ssh: bool,
+) -> Result<T, GetJsonError> {
+    use GetJsonErrorCtx as Ctx;
+
+    if allow_ci_ssh
+        && let Some(response) = client
+            .ssh_signed_request(reqwest::Method::GET, path, None)
+            .await
+            .with_context(Ctx::ssh_request(path))?
+    {
+        let status = response.status();
+        let body = response.text().await.with_context(Ctx::read_body(path))?;
+        if !status.is_success() {
+            return Err(GetJsonError::Api {
+                path: path.to_string(),
+                status,
+                message: api_error_text(&client.format_api_error(status, &body)),
+                location: std::panic::Location::caller(),
+            });
+        }
+        return serde_json::from_str(&body).with_context(Ctx::parse(path));
+    }
+
+    let config = client
+        .ensure_authenticated()
+        .await
+        .with_context(Ctx::ensure_authenticated())?;
+    match client
+        .get_protected_json(&config.session_id, path, "Failed to get deployment data")
+        .await
+    {
+        Ok(value) => Ok(value),
+        Err(GetProtectedJsonError::ApiFailure {
+            status,
+            api_response,
+            ..
+        }) => Err(GetJsonError::Api {
+            path: path.to_string(),
+            status,
+            message: api_error_text(&api_response),
+            location: std::panic::Location::caller(),
+        }),
+        Err(error) => Err(error).with_context(Ctx::session(path)),
+    }
+}
+
+/// Failure modes for [`fetch_deployment`].
+#[derive(Debug, thiserror::Error, CtxError)]
+enum FetchDeploymentError {
+    #[error("{id:?} is not a valid ID; expected a UUID [{location:?}]")]
+    InvalidId { id: String, location: Location },
+
+    #[error(
+        "Pass the app ID or run from a linked checkout when using --this-is-a-ci-machine. [{location:?}]"
+    )]
+    CiNeedsApp { location: Location },
+
+    #[error("Deployment {id} was not found in app {app}. Pass the right app ID. [{location:?}]")]
+    NotInApp {
+        id: String,
+        app: String,
+        location: Location,
+    },
+
+    #[error(
+        "Deployment {id} belongs to app {actual}, not {app}. Pass the right app ID. [{location:?}]"
+    )]
+    AppMismatch {
+        id: String,
+        app: String,
+        actual: String,
+        location: Location,
+    },
+
+    #[error("The platform answered with deployment {returned:?} for {requested} [{location:?}]")]
+    WrongDeployment {
+        requested: String,
+        returned: String,
+        location: Location,
+    },
+
+    #[error("failed to fetch deployment {id} [{location:?}]")]
+    Get {
+        #[context(borrow = str)]
+        id: String,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// The one deployment `deployment`, whatever the checkout is linked to
+/// (`-d` selects any deployment, and with it the app). A session caller asks
+/// by deployment ID alone; an explicit `app` must then be the deployment's
+/// app. SSH-signed CI requests are authorized by the app in the path, so a CI
+/// caller reads the app-scoped path of `app`, else of the linked checkout's
+/// app. The answer must be the deployment asked for: its ID names the trust
+/// state file, so it is never taken from the platform's answer.
+async fn fetch_deployment(
+    client: &ApiClient,
+    app: Option<String>,
+    deployment: &str,
+    allow_ci_ssh: bool,
+) -> Result<DeploymentView, FetchDeploymentError> {
+    use FetchDeploymentErrorCtx as Ctx;
+
+    let invalid = |id: &str| FetchDeploymentError::InvalidId {
+        id: id.to_string(),
+        location: std::panic::Location::caller(),
+    };
+    let deployment_id = canonical_id(deployment).ok_or_else(|| invalid(deployment))?;
+    let mut app_id = app
+        .as_deref()
+        .map(|app| canonical_id(app).ok_or_else(|| invalid(app)))
+        .transpose()?;
+    let path = if allow_ci_ssh {
+        if app_id.is_none() {
+            app_id = client
+                .load_deployment()
+                .ok()
+                .and_then(|link| canonical_id(&link.resource_id));
+        }
+        let Some(app_id) = &app_id else {
+            return Err(FetchDeploymentError::CiNeedsApp {
+                location: std::panic::Location::caller(),
+            });
+        };
+        format!("/api/resources/{app_id}/deployments/{deployment_id}")
+    } else {
+        format!("/api/deployments/{deployment_id}")
+    };
+
+    let mut view: DeploymentView = match get_json(client, &path, allow_ci_ssh).await {
+        Err(GetJsonError::Api {
+            status: reqwest::StatusCode::NOT_FOUND,
+            ..
+        }) if allow_ci_ssh => {
+            return Err(FetchDeploymentError::NotInApp {
+                id: deployment_id,
+                app: app_id.unwrap_or_default(),
+                location: std::panic::Location::caller(),
+            });
+        }
+        found => found.with_context(Ctx::get(&deployment_id))?,
+    };
+
+    if canonical_id(&view.id).as_deref() != Some(deployment_id.as_str()) {
+        return Err(FetchDeploymentError::WrongDeployment {
+            requested: deployment_id,
+            returned: view.id,
+            location: std::panic::Location::caller(),
+        });
+    }
+    let actual_app = canonical_id(&view.app_id).ok_or_else(|| invalid(&view.app_id))?;
+    if let Some(app_id) = app_id
+        && app_id != actual_app
+    {
+        return Err(FetchDeploymentError::AppMismatch {
+            id: deployment_id,
+            app: app_id,
+            actual: actual_app,
+            location: std::panic::Location::caller(),
+        });
+    }
+    view.id = deployment_id;
+    view.app_id = actual_app;
+    Ok(view)
+}
+
+/// Failure modes for [`list_deployments`].
+#[derive(Debug, thiserror::Error, CtxError)]
+enum ListDeploymentsError {
+    #[error("failed to list the deployments of app {app_id} [{location:?}]")]
+    Get {
+        #[context(borrow = str)]
+        app_id: String,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+}
+
+async fn list_deployments(
+    client: &ApiClient,
+    app_id: &str,
+    allow_ci_ssh: bool,
+) -> Result<Vec<DeploymentView>, ListDeploymentsError> {
+    get_json(
+        client,
+        &format!("/api/resources/{app_id}/deployments"),
+        allow_ci_ssh,
+    )
+    .await
+    .with_context(ListDeploymentsErrorCtx::get(app_id))
+}
+
+fn short_sha(sha: &str) -> &str {
+    sha.get(..7).unwrap_or(sha)
+}
+
+/// The live deployment first, then the API's order (newest first).
+fn print_deployments(app: &App, mut deployments: Vec<DeploymentView>) {
+    output::status("  Lifecycle: deployments");
+    output::status(format!(
+        "  Live deployment: {}",
+        app.live_deployment_id.as_deref().unwrap_or("none")
+    ));
+    if deployments.is_empty() {
+        output::status("  No deployments yet.");
+        return;
+    }
+    deployments.sort_by_key(|deployment| deployment.role != "live");
+    output::data_header("Deployments:");
+    for deployment in &deployments {
+        output::status(format!(
+            "  {}  {:<9}  {:<12}  {:<7}  {}  {}",
+            deployment.id,
+            deployment.role,
+            deployment.status,
+            deployment.commit_sha.as_deref().map_or("-", short_sha),
+            deployment.pushed_ref.as_deref().unwrap_or("-"),
+            deployment.public_ip.as_deref().unwrap_or("-"),
+        ));
+    }
+    output::status(format!(
+        "Inspect one: caution apps get {} -d <deployment>",
+        app.id
+    ));
+}
+
+/// Failure modes for [`get_deployment`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum GetDeploymentError {
+    #[error("failed to fetch the deployment [{location:?}]")]
+    Fetch {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// `apps get -d`: one deployment, one field per line.
+pub(crate) async fn get_deployment(
+    client: &ApiClient,
+    app: Option<String>,
+    deployment: &str,
+    allow_ci_ssh: bool,
+) -> Result<(), GetDeploymentError> {
+    use GetDeploymentErrorCtx as Ctx;
+
+    let deployment = fetch_deployment(client, app, deployment, allow_ci_ssh)
+        .await
+        .with_context(Ctx::fetch())?;
+
+    output::data_header("Deployment Details:");
+    output::status(format!("  ID: {}", deployment.id));
+    output::status(format!("  Role: {}", deployment.role));
+    match &deployment.failure_kind {
+        Some(kind) => output::status(format!("  Status: {} ({})", deployment.status, kind)),
+        None => output::status(format!("  Status: {}", deployment.status)),
+    }
+    for (label, value) in [
+        ("Commit", &deployment.commit_sha),
+        ("Subject", &deployment.commit_subject),
+        ("Pushed ref", &deployment.pushed_ref),
+        ("Public IP", &deployment.public_ip),
+        ("Instance type", &deployment.instance_type),
+    ] {
+        if let Some(value) = value {
+            output::status(format!("  {label}: {value}"));
+        }
+    }
+    output::status(format!("  Created: {}", deployment.created_at));
+    if let Some(error) = &deployment.error {
+        output::status(format!("  Error: {error}"));
+    }
+    Ok(())
+}
+
+/// Failure modes for [`git_head`].
+#[derive(Debug, thiserror::Error, CtxError)]
+enum GitHeadError {
+    #[error("failed to run git [{location:?}]")]
+    Run {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("`git rev-parse HEAD` failed: {stderr} [{location:?}]")]
+    Failed { stderr: String, location: Location },
+}
+
+fn git_head() -> Result<String, GitHeadError> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .with_context(GitHeadErrorCtx::run())?;
+    if !output.status.success() {
+        return Err(GitHeadError::Failed {
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            location: std::panic::Location::caller(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Why a deployment cannot be verified from this checkout. Neither failure
+/// has an underlying cause.
+#[derive(Debug, thiserror::Error, CtxError)]
+enum VerifyTargetError {
+    #[error("Deployment {id} has no reachable endpoint (status: {status}) [{location:?}]")]
+    NoEndpoint {
+        id: String,
+        status: String,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        #[context(option)]
+        source: Option<BoxError>,
+    },
+
+    #[error(
+        "This checkout is at {head}, but deployment {id} was built from {commit_sha}. Check out that commit and retry. [{location:?}]"
+    )]
+    CheckoutMismatch {
+        head: String,
+        id: String,
+        commit_sha: String,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        #[context(option)]
+        source: Option<BoxError>,
+    },
+}
+
+pub(crate) struct DeploymentVerifyTarget {
+    pub(crate) attestation_url: String,
+    pub(crate) trust_path: PathBuf,
+    /// Not the live deployment: the app's domain points at the live one.
+    pub(crate) candidate: bool,
+}
+
+/// Where to verify `deployment` and where to keep its trust. `head` is the
+/// checkout's commit when the verification rebuilds from it: the rebuild only
+/// matches the deployment's measurements at the commit it was built from. The
+/// trust file is named by `deployment.id`, which [`fetch_deployment`] makes the
+/// ID that was asked for.
+fn verify_target(
+    deployment: &DeploymentView,
+    head: Option<&str>,
+) -> Result<DeploymentVerifyTarget, VerifyTargetError> {
+    let Some(ip) = deployment.public_ip.as_deref().filter(|ip| !ip.is_empty()) else {
+        return Err(VerifyTargetError::NoEndpoint {
+            id: deployment.id.clone(),
+            status: deployment.status.clone(),
+            location: std::panic::Location::caller(),
+            source: None,
+        });
+    };
+    if let (Some(head), Some(commit_sha)) = (head, deployment.commit_sha.as_deref())
+        && !head.eq_ignore_ascii_case(commit_sha)
+    {
+        return Err(VerifyTargetError::CheckoutMismatch {
+            head: head.to_string(),
+            id: deployment.id.clone(),
+            commit_sha: commit_sha.to_string(),
+            location: std::panic::Location::caller(),
+            source: None,
+        });
+    }
+    Ok(DeploymentVerifyTarget {
+        attestation_url: format!("http://{ip}/attestation"),
+        trust_path: PathBuf::from(format!(
+            ".caution/deployments/{}/trusted_hashes.json",
+            deployment.id
+        )),
+        candidate: deployment.role != "live",
+    })
+}
+
+/// Failure modes for [`prepare_deployment_verify`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum PrepareDeploymentVerifyError {
+    #[error("failed to fetch the deployment [{location:?}]")]
+    Fetch {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to read the checkout's commit [{location:?}]")]
+    GitHead {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("deployment cannot be verified [{location:?}]")]
+    Target {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// `verify -d`: resolves the deployment's current endpoint (a candidate's IP
+/// changes on stop/start, so it is read now) and checks the checkout.
+pub(crate) async fn prepare_deployment_verify(
+    client: &ApiClient,
+    deployment: &str,
+    rebuilds_checkout: bool,
+) -> Result<DeploymentVerifyTarget, PrepareDeploymentVerifyError> {
+    use PrepareDeploymentVerifyErrorCtx as Ctx;
+
+    let deployment = fetch_deployment(client, None, deployment, false)
+        .await
+        .with_context(Ctx::fetch())?;
+    let head = if rebuilds_checkout {
+        Some(git_head().with_context(Ctx::git_head())?)
+    } else {
+        None
+    };
+    let target = verify_target(&deployment, head.as_deref()).with_context(Ctx::target())?;
+    output::status(format!(
+        "Verifying deployment {} ({}) at {}",
+        deployment.id,
+        deployment.role,
+        deployment.public_ip.as_deref().unwrap_or_default()
+    ));
+    Ok(target)
+}
+
+/// Failure modes for [`switch`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum SwitchError {
+    #[error("failed to fetch the deployment [{location:?}]")]
+    FetchDeployment {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to fetch app [{location:?}]")]
+    FetchApp {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to confirm the switch [{location:?}]")]
+    Confirm {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to ensure authentication [{location:?}]")]
+    EnsureAuthenticated {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to send the signed switch request [{location:?}]")]
+    SignedPost {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to read the switch response [{location:?}]")]
+    ReadBody {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to switch deployment (status {status}): {message} [{location:?}]")]
+    Api {
+        status: reqwest::StatusCode,
+
+        message: String,
+
+        location: Location,
+    },
+
+    #[error("failed to parse the switch response [{location:?}]")]
+    ParseResponse {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct SwitchResponse {
+    live_deployment_id: String,
+    stable_ip: String,
+}
+
+/// `apps switch -d`: moves the app's stable IP to the deployment, signed with
+/// a passkey. The deployment and the app's live deployment are read afresh on
+/// every run: the request names the live deployment it was confirmed against,
+/// and the API refuses it if that changed.
+pub(crate) async fn switch(
+    client: &ApiClient,
+    app: Option<String>,
+    deployment: &str,
+    force: bool,
+) -> Result<(), SwitchError> {
+    use SwitchErrorCtx as Ctx;
+
+    let target = fetch_deployment(client, app, deployment, false)
+        .await
+        .with_context(Ctx::fetch_deployment())?;
+    let app = client
+        .fetch_app(&target.app_id)
+        .await
+        .with_context(Ctx::fetch_app())?;
+
+    if !force {
+        output::status("About to make a deployment live:");
+        output::status(format!(
+            "  App: {} ({})",
+            app.id,
+            app.resource_name.as_deref().unwrap_or("unnamed")
+        ));
+        output::status(format!(
+            "  Current live deployment: {}",
+            app.live_deployment_id.as_deref().unwrap_or("none")
+        ));
+        output::status(format!("  Target deployment: {}", target.id));
+        if let Some(commit_sha) = &target.commit_sha {
+            match &target.commit_subject {
+                Some(subject) => output::status(format!("  Commit: {commit_sha} {subject}")),
+                None => output::status(format!("  Commit: {commit_sha}")),
+            }
+        }
+        output::status(format!(
+            "  Stable IP: {}",
+            app.public_ip.as_deref().unwrap_or("none yet")
+        ));
+        output::status("  The previous deployment stays running and billable.");
+        output::status("");
+        let confirmed = prompt::confirm("Confirm you verified and tested this deployment [y/N] ")
+            .with_context(Ctx::confirm())?;
+        if !confirmed {
+            output::status("Aborted.");
+            return Ok(());
+        }
+    }
+
+    let config = client
+        .ensure_authenticated()
+        .await
+        .with_context(Ctx::ensure_authenticated())?;
+    // The `/api` prefix is part of the request path; the signing challenge
+    // strips it.
+    let response = client
+        .signed_post(
+            &config.session_id,
+            &format!(
+                "/api/resources/{}/deployments/{}/switch",
+                target.app_id, target.id
+            ),
+            &serde_json::json!({
+                "expected_live_deployment_id": app.live_deployment_id,
+                "acknowledged_verification": true,
+            }),
+        )
+        .await
+        .with_context(Ctx::signed_post())?;
+    let status = response.status();
+    let body = response.text().await.with_context(Ctx::read_body())?;
+    if !status.is_success() {
+        return Err(SwitchError::Api {
+            status,
+            message: api_error_text(&client.format_api_error(status, &body)),
+            location: std::panic::Location::caller(),
+        });
+    }
+    let switched: SwitchResponse =
+        serde_json::from_str(&body).with_context(Ctx::parse_response())?;
+
+    output::success(format!(
+        "Deployment {} is now live",
+        switched.live_deployment_id
+    ));
+    output::status(format!("Stable IP: {}", switched.stable_ip));
+    Ok(())
+}
+
+/// Failure modes for [`destroy_deployment`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum DestroyDeploymentError {
+    #[error("failed to fetch the deployment [{location:?}]")]
+    FetchDeployment {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to list deployments [{location:?}]")]
+    ListDeployments {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to confirm destruction [{location:?}]")]
+    Confirm {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to send SSH-signed delete request [{location:?}]")]
+    SshRequest {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to ensure authentication [{location:?}]")]
+    EnsureAuthenticated {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to send delete request [{location:?}]")]
+    SendDeleteRequest {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to destroy deployment (status {status}): {message} [{location:?}]")]
+    Api {
+        status: reqwest::StatusCode,
+
+        message: String,
+
+        location: Location,
+    },
+}
+
+/// `apps destroy -d`: destroys one non-live deployment; the API refuses the
+/// live one whatever the flags.
+pub(crate) async fn destroy_deployment(
+    client: &ApiClient,
+    app: Option<String>,
+    deployment: &str,
+    force: bool,
+    allow_ci_ssh: bool,
+) -> Result<(), DestroyDeploymentError> {
+    use DestroyDeploymentErrorCtx as Ctx;
+
+    let target = fetch_deployment(client, app, deployment, allow_ci_ssh)
+        .await
+        .with_context(Ctx::fetch_deployment())?;
+
+    if !force {
+        let deployments = list_deployments(client, &target.app_id, allow_ci_ssh)
+            .await
+            .with_context(Ctx::list_deployments())?;
+        output::status("About to destroy deployment:");
+        output::status(format!("  ID: {}", target.id));
+        output::status(format!("  App: {}", target.app_id));
+        output::status(format!("  Status: {}", target.status));
+        if let Some(commit_sha) = &target.commit_sha {
+            output::status(format!("  Commit: {commit_sha}"));
+        }
+        match deployments
+            .iter()
+            .find(|candidate| candidate.role == "live")
+        {
+            Some(live) if live.id == target.id => output::warning(
+                "  WARNING: This is the live deployment; the platform refuses to destroy it.",
+            ),
+            Some(live) => {
+                output::status(format!("  The live deployment {} keeps serving.", live.id))
+            }
+            None => output::status("  No deployment is live."),
+        }
+        output::status("");
+        let confirmed = prompt::confirm("Are you sure you want to destroy this deployment? [y/N] ")
+            .with_context(Ctx::confirm())?;
+        if !confirmed {
+            output::status("Aborted.");
+            return Ok(());
+        }
+    }
+
+    let loader = Spinner::new(
+        &format!("Destroying deployment {}", target.id),
+        SpinnerStyle::Processing,
+    );
+    let path = format!("/api/resources/{}/deployments/{}", target.app_id, target.id);
+    let signed = if allow_ci_ssh {
+        client
+            .ssh_signed_request(reqwest::Method::DELETE, &path, None)
+            .await
+            .with_context(Ctx::ssh_request())?
+    } else {
+        None
+    };
+    let response = match signed {
+        Some(response) => response,
+        None => {
+            let config = client
+                .ensure_authenticated()
+                .await
+                .with_context(Ctx::ensure_authenticated())?;
+            client
+                .client
+                .delete(format!("{}{}", client.base_url, path))
+                .header("X-Session-ID", config.session_id)
+                .send()
+                .await
+                .with_context(Ctx::send_delete_request())?
+        }
+    };
+    let status = response.status();
+    if status.is_success() {
+        loader.finish();
+        output::success(format!("Deployment {} destroyed", target.id));
+        return Ok(());
+    }
+    let message = api_error_text(&client.api_error_message(response).await);
+    loader.finish();
+    Err(DestroyDeploymentError::Api {
+        status,
+        message,
+        location: std::panic::Location::caller(),
+    })
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
@@ -1064,7 +1976,115 @@ pub(crate) async fn try_relink(
 
 #[cfg(test)]
 mod tests {
-    use super::extract_resource_id_from_git_url;
+    use super::{
+        DeploymentView, VerifyTargetError, api_error_text, canonical_id, destroy_deployment,
+        extract_resource_id_from_git_url, fetch_deployment, prepare_deployment_verify, short_sha,
+        switch, verify_target,
+    };
+    use crate::ApiClient;
+    use sha2::{Digest, Sha256};
+    use std::error::Error;
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+    use tempfile::tempdir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const DEPLOYMENT: &str = "550e8400-e29b-41d4-a716-446655440000";
+    const APP: &str = "660e8400-e29b-41d4-a716-446655440000";
+    const OTHER_APP: &str = "770e8400-e29b-41d4-a716-446655440000";
+    const LIVE: &str = "880e8400-e29b-41d4-a716-446655440000";
+
+    fn deployment(public_ip: Option<&str>, commit_sha: Option<&str>) -> DeploymentView {
+        serde_json::from_value(serde_json::json!({
+            "id": DEPLOYMENT,
+            "app_id": APP,
+            "role": "candidate",
+            "status": "running",
+            "commit_sha": commit_sha,
+            "public_ip": public_ip,
+            "created_at": "2026-10-12T00:00:00Z",
+            // Fields the CLI does not read are ignored.
+            "instance_id": "i-0123",
+            "running_at": null,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn api_errors_show_their_error_text() {
+        assert_eq!(
+            api_error_text(r#"{"error":"The live deployment changed; review and confirm again."}"#),
+            "The live deployment changed; review and confirm again."
+        );
+        assert_eq!(
+            api_error_text("HTTP 502 Bad Gateway"),
+            "HTTP 502 Bad Gateway"
+        );
+        assert_eq!(api_error_text(r#"{"detail":"x"}"#), r#"{"detail":"x"}"#);
+    }
+
+    #[test]
+    fn only_uuids_are_deployment_ids() {
+        assert_eq!(canonical_id(DEPLOYMENT).as_deref(), Some(DEPLOYMENT));
+        assert_eq!(
+            canonical_id(&DEPLOYMENT.to_uppercase()).as_deref(),
+            Some(DEPLOYMENT)
+        );
+        for id in [
+            "d2",
+            "",
+            "../x",
+            "550e8400-e29b-41d4-a716-446655440000/switch",
+        ] {
+            assert_eq!(canonical_id(id), None, "{id:?}");
+        }
+    }
+
+    #[test]
+    fn short_commits_are_seven_characters() {
+        assert_eq!(short_sha("ff43fef1234567890"), "ff43fef");
+        assert_eq!(short_sha("abc"), "abc");
+    }
+
+    #[test]
+    fn verification_targets_the_deployments_current_endpoint_and_own_trust() {
+        let target = verify_target(&deployment(Some("203.0.113.9"), Some("abc123")), None).unwrap();
+        assert_eq!(target.attestation_url, "http://203.0.113.9/attestation");
+        assert_eq!(
+            target.trust_path.to_str().unwrap(),
+            format!(".caution/deployments/{DEPLOYMENT}/trusted_hashes.json")
+        );
+    }
+
+    #[test]
+    fn verification_needs_an_endpoint() {
+        for ip in [None, Some("")] {
+            let error = verify_target(&deployment(ip, Some("abc123")), None)
+                .err()
+                .unwrap();
+            assert!(matches!(error, VerifyTargetError::NoEndpoint { .. }));
+            assert!(error.to_string().starts_with(&format!(
+                "Deployment {DEPLOYMENT} has no reachable endpoint (status: running)"
+            )));
+        }
+    }
+
+    #[test]
+    fn rebuilding_verification_needs_the_deployments_commit_checked_out() {
+        let deployment = deployment(Some("203.0.113.9"), Some("abc123"));
+        assert!(verify_target(&deployment, Some("abc123")).is_ok());
+        assert!(verify_target(&deployment, Some("ABC123")).is_ok());
+        let error = verify_target(&deployment, Some("def456")).err().unwrap();
+        assert!(error.to_string().starts_with(&format!(
+            "This checkout is at def456, but deployment {DEPLOYMENT} was built from abc123. \
+             Check out that commit and retry."
+        )));
+        // No rebuild from the checkout, or no recorded commit: nothing to compare.
+        assert!(verify_target(&deployment, None).is_ok());
+        assert!(
+            verify_target(&self::deployment(Some("203.0.113.9"), None), Some("def456")).is_ok()
+        );
+    }
 
     #[test]
     fn extract_resource_id_from_git_url_parses_ssh_format() {
@@ -1122,5 +2142,385 @@ mod tests {
             extract_resource_id_from_git_url(&format!("git@codeberg.org:{}", uuid)),
             None
         );
+    }
+
+    /// Whether `request` holds the whole head and the body its head announces.
+    fn request_complete(request: &[u8]) -> bool {
+        let text = String::from_utf8_lossy(request);
+        let Some((head, body)) = text.split_once("\r\n\r\n") else {
+            return false;
+        };
+        let length = head
+            .lines()
+            .find_map(|line| {
+                line.to_lowercase()
+                    .strip_prefix("content-length:")
+                    .map(|length| length.trim().parse::<usize>().unwrap_or(0))
+            })
+            .unwrap_or(0);
+        body.len() >= length
+    }
+
+    /// Answers each request with `respond(method, path)` and records the raw requests.
+    async fn serve(
+        respond: impl Fn(&str, &str) -> (u16, String) + Send + 'static,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut buffer = [0_u8; 4096];
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    request.extend_from_slice(&buffer[..read]);
+                    if read == 0 || request_complete(&request) {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&request).to_string();
+                let mut line = request.split(' ');
+                let (method, path) = (line.next().unwrap(), line.next().unwrap());
+                let (status, body) = respond(method, path);
+                seen.lock().unwrap().push(request.clone());
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (url, requests)
+    }
+
+    /// A logged-in client for the server at `url`, linked to `linked_app`.
+    fn client(url: &str, dir: &Path, linked_app: Option<&str>) -> ApiClient {
+        let config_path = dir.join("config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::json!({
+                "session_id": "test-session",
+                "expires_at": "2099-01-01T00:00:00Z",
+                "server_url": url,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let deployment_path = linked_app.map(|app| {
+            let path = dir.join("deployment.json");
+            std::fs::write(&path, format!(r#"{{"resource_id":"{app}"}}"#)).unwrap();
+            path
+        });
+        ApiClient {
+            base_url: url.to_string(),
+            client: reqwest::Client::new(),
+            config_path,
+            deployment_path,
+            verbose: false,
+            qr: false,
+            workdir: None,
+        }
+    }
+
+    /// The platform's answer for a deployment of `app`.
+    fn view_json(id: &str, app: &str, role: &str) -> String {
+        serde_json::json!({
+            "id": id,
+            "app_id": app,
+            "role": role,
+            "status": "running",
+            "public_ip": "203.0.113.9",
+            "created_at": "2026-10-12T00:00:00Z",
+        })
+        .to_string()
+    }
+
+    fn view_body() -> String {
+        view_json(DEPLOYMENT, APP, "candidate")
+    }
+
+    fn request_lines(requests: &Mutex<Vec<String>>) -> Vec<String> {
+        let requests = requests.lock().unwrap();
+        requests
+            .iter()
+            .map(|request| request.lines().next().unwrap().to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_deployment_is_read_by_id_whatever_the_checkout_is_linked_to() {
+        let dir = tempdir().unwrap();
+        let (url, requests) = serve(|_, _| (200, view_body())).await;
+
+        let unlinked = client(&url, dir.path(), None);
+        let found = fetch_deployment(&unlinked, None, DEPLOYMENT, false)
+            .await
+            .unwrap();
+        assert_eq!(found.app_id, APP);
+        // Another app's checkout does not matter: the deployment names its app.
+        let linked = client(&url, dir.path(), Some(OTHER_APP));
+        let found = fetch_deployment(&linked, None, &DEPLOYMENT.to_uppercase(), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            (found.id.as_str(), found.app_id.as_str()),
+            (DEPLOYMENT, APP)
+        );
+        // An explicit app is checked against it.
+        fetch_deployment(&linked, Some(APP.to_string()), DEPLOYMENT, false)
+            .await
+            .unwrap();
+        let error = fetch_deployment(&linked, Some(OTHER_APP.to_string()), DEPLOYMENT, false)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().starts_with(&format!(
+            "Deployment {DEPLOYMENT} belongs to app {APP}, not {OTHER_APP}. Pass the right app ID."
+        )));
+
+        assert_eq!(
+            request_lines(&requests),
+            vec![format!("GET /api/deployments/{DEPLOYMENT} HTTP/1.1"); 4]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_ci_machine_reads_through_an_app_and_a_miss_names_it() {
+        let dir = tempdir().unwrap();
+        let (url, requests) =
+            serve(|_, _| (404, r#"{"error":"Deployment not found."}"#.to_string())).await;
+
+        // The explicit app, else the linked checkout's.
+        let unlinked = client(&url, dir.path(), None);
+        let linked = client(&url, dir.path(), Some(APP));
+        for (client, app) in [(&unlinked, Some(APP.to_string())), (&linked, None)] {
+            let error = fetch_deployment(client, app, DEPLOYMENT, true)
+                .await
+                .err()
+                .unwrap();
+            assert!(error.to_string().starts_with(&format!(
+                "Deployment {DEPLOYMENT} was not found in app {APP}. Pass the right app ID."
+            )));
+        }
+        // Without an app there is nothing to authorize the key against.
+        let error = fetch_deployment(&unlinked, None, DEPLOYMENT, true)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().starts_with(
+            "Pass the app ID or run from a linked checkout when using --this-is-a-ci-machine."
+        ));
+        assert_eq!(
+            request_lines(&requests),
+            vec![format!("GET /api/resources/{APP}/deployments/{DEPLOYMENT} HTTP/1.1"); 2]
+        );
+    }
+
+    #[tokio::test]
+    async fn read_failures_show_the_apis_error_text() {
+        let dir = tempdir().unwrap();
+        let (url, _) =
+            serve(|_, _| (404, r#"{"error":"Deployment not found."}"#.to_string())).await;
+        let client = client(&url, dir.path(), None);
+
+        let error = fetch_deployment(&client, None, DEPLOYMENT, false)
+            .await
+            .err()
+            .unwrap();
+        let cause = error.source().unwrap().to_string();
+        assert!(
+            cause.contains("(status 404 Not Found): Deployment not found. ["),
+            "{cause}"
+        );
+    }
+
+    #[tokio::test]
+    async fn deployment_ids_are_uuids_and_the_platform_cannot_rename_one() {
+        let dir = tempdir().unwrap();
+        let (url, requests) = serve(|_, path| match path {
+            // Valid UUIDs the platform might substitute, and a path escape.
+            p if p.ends_with(DEPLOYMENT) => (200, view_json(LIVE, APP, "candidate")),
+            _ => (200, view_json("..", APP, "candidate")),
+        })
+        .await;
+        let client = client(&url, dir.path(), None);
+
+        for id in ["d2", "../x"] {
+            assert!(
+                fetch_deployment(&client, None, id, false).await.is_err(),
+                "{id}"
+            );
+        }
+        assert!(
+            fetch_deployment(&client, Some("../x".to_string()), DEPLOYMENT, false)
+                .await
+                .is_err()
+        );
+        assert!(request_lines(&requests).is_empty());
+
+        // A different valid UUID would file this deployment's trust under another's.
+        let error = fetch_deployment(&client, None, DEPLOYMENT, false)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().starts_with(&format!(
+            "The platform answered with deployment \"{LIVE}\" for {DEPLOYMENT}"
+        )));
+        // `..` would write the app's own trust file.
+        let other = "990e8400-e29b-41d4-a716-446655440000";
+        let error = fetch_deployment(&client, None, other, false)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().starts_with(&format!(
+            "The platform answered with deployment \"..\" for {other}"
+        )));
+        assert!(
+            prepare_deployment_verify(&client, DEPLOYMENT, false)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn verification_keeps_trust_under_the_requested_deployment() {
+        let dir = tempdir().unwrap();
+        let (url, _) = serve(|_, path| {
+            let role = if path.ends_with("live") {
+                "live"
+            } else {
+                "candidate"
+            };
+            (200, view_json(DEPLOYMENT, APP, role))
+        })
+        .await;
+        let client = client(&url, dir.path(), None);
+
+        let target = prepare_deployment_verify(&client, &DEPLOYMENT.to_uppercase(), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            target.trust_path.to_str().unwrap(),
+            format!(".caution/deployments/{DEPLOYMENT}/trusted_hashes.json")
+        );
+        assert_eq!(target.attestation_url, "http://203.0.113.9/attestation");
+        assert!(target.candidate);
+    }
+
+    #[tokio::test]
+    async fn switching_asks_for_a_signature_over_the_fresh_live_expectation() {
+        let dir = tempdir().unwrap();
+        let (url, requests) = serve(|method, path| match (method, path) {
+            ("GET", p) if p.starts_with("/api/deployments/") => (200, view_body()),
+            ("GET", _) => (
+                200,
+                serde_json::json!({
+                    "id": APP,
+                    "state": "running",
+                    "provider_resource_id": "i-0123",
+                    "public_ip": "198.51.100.42",
+                    "live_deployment_id": LIVE,
+                })
+                .to_string(),
+            ),
+            // The signature itself needs a security key: refuse the challenge.
+            _ => (400, r#"{"error":"no authenticator in tests"}"#.to_string()),
+        })
+        .await;
+        let client = client(&url, dir.path(), Some(OTHER_APP));
+
+        let error = switch(&client, None, DEPLOYMENT, true).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("failed to send the signed switch request")
+        );
+
+        assert_eq!(
+            request_lines(&requests),
+            [
+                format!("GET /api/deployments/{DEPLOYMENT} HTTP/1.1"),
+                format!("GET /api/resources/{APP} HTTP/1.1"),
+                "POST /auth/sign-request HTTP/1.1".to_string(),
+            ]
+        );
+        let challenge = requests.lock().unwrap()[2].clone();
+        assert!(
+            challenge
+                .to_lowercase()
+                .contains("x-session-id: test-session")
+        );
+        let body: serde_json::Value =
+            serde_json::from_str(challenge.split_once("\r\n\r\n").unwrap().1).unwrap();
+        // The `/api` prefix is stripped from the signed path, and the signed
+        // body names the live deployment the app has now.
+        let switch_body = serde_json::to_vec(&serde_json::json!({
+            "expected_live_deployment_id": LIVE,
+            "acknowledged_verification": true,
+        }))
+        .unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "method": "POST",
+                "path": format!("/resources/{APP}/deployments/{DEPLOYMENT}/switch"),
+                "body_hash": hex::encode(Sha256::digest(&switch_body)),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn destroying_a_deployment_shows_the_apis_refusal() {
+        let dir = tempdir().unwrap();
+        let (url, requests) = serve(|method, _| match method {
+            "GET" => (200, view_body()),
+            _ => (
+                409,
+                r#"{"error":"The live deployment cannot be destroyed; switch to another deployment first."}"#
+                    .to_string(),
+            ),
+        })
+        .await;
+        let client = client(&url, dir.path(), None);
+
+        let error = destroy_deployment(&client, Some(APP.to_string()), DEPLOYMENT, true, false)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().starts_with(
+            "failed to destroy deployment (status 409 Conflict): The live deployment cannot be destroyed; switch to another deployment first."
+        ));
+        assert_eq!(
+            request_lines(&requests),
+            [
+                format!("GET /api/deployments/{DEPLOYMENT} HTTP/1.1"),
+                format!("DELETE /api/resources/{APP}/deployments/{DEPLOYMENT} HTTP/1.1"),
+            ],
+            "the deployment is read, then destroyed through its app"
+        );
+        assert!(
+            requests.lock().unwrap()[1]
+                .to_lowercase()
+                .contains("x-session-id: test-session")
+        );
+    }
+
+    #[tokio::test]
+    async fn destroying_a_deployment_succeeds_on_no_content() {
+        let dir = tempdir().unwrap();
+        let (url, requests) = serve(|method, _| match method {
+            "GET" => (200, view_body()),
+            _ => (204, String::new()),
+        })
+        .await;
+        // The checkout's link to another app does not stop it.
+        let client = client(&url, dir.path(), Some(OTHER_APP));
+
+        destroy_deployment(&client, None, DEPLOYMENT, true, false)
+            .await
+            .unwrap();
+        assert_eq!(request_lines(&requests).len(), 2);
     }
 }

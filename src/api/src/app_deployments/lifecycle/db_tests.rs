@@ -1766,6 +1766,187 @@ async fn eif_build_is_found_by_key(pool: &PgPool) {
     );
 }
 
+#[tokio::test]
+#[ignore = "run bash tests/e2e/test_app_deployments_db.sh (isolated PostgreSQL)"]
+async fn deployment_reads() {
+    let pool = test_pool().await;
+    let state = test_state(&pool, "/nonexistent");
+
+    reads_are_scoped_to_the_callers_deployments_apps(&pool).await;
+    app_views_carry_the_lifecycle_and_live_pointer(&state).await;
+    pool.close().await;
+}
+
+/// Every app read the CLI uses answers with the lifecycle and the live pointer.
+async fn app_views_carry_the_lifecycle_and_live_pointer(state: &Arc<AppState>) {
+    use crate::resources::{get_resource, list_resources, rename_resource};
+    use crate::validated_types::{RenameResourceRequest, Validated};
+    use axum::extract::{Path, State};
+
+    let pool = &state.db;
+    let org = organization(pool).await;
+    let app = deployments_app(pool, org).await;
+    let user = member(pool, org).await;
+    let live = deployment(pool, org, app, "running", Some("i-live")).await;
+    set_live(pool, app, live).await;
+    let legacy = deployments_app(pool, org).await;
+    sqlx::query("UPDATE compute_resources SET lifecycle = 'legacy' WHERE id = $1")
+        .bind(legacy)
+        .execute(pool)
+        .await
+        .unwrap();
+    let auth = || axum::Extension(crate::AuthContext { user_id: user });
+
+    let view = get_resource(State(state.clone()), auth(), Path(app))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(view["lifecycle"], "deployments");
+    assert_eq!(view["live_deployment_id"], live.to_string());
+    let view = get_resource(State(state.clone()), auth(), Path(legacy))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(view["lifecycle"], "legacy");
+    assert!(view["live_deployment_id"].is_null());
+
+    let listed = list_resources(State(state.clone()), auth())
+        .await
+        .unwrap()
+        .0;
+    let listed = |id: Uuid| {
+        listed
+            .iter()
+            .find(|view| view["id"] == id.to_string())
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(listed(app)["lifecycle"], "deployments");
+    assert_eq!(listed(app)["live_deployment_id"], live.to_string());
+    assert_eq!(listed(legacy)["lifecycle"], "legacy");
+
+    let renamed = rename_resource(
+        State(state.clone()),
+        auth(),
+        Path(app),
+        Validated(RenameResourceRequest {
+            name: format!("renamed-{}", app.simple()),
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(renamed.lifecycle, "deployments");
+    assert_eq!(renamed.live_deployment_id, Some(live));
+}
+
+/// The list and get queries only serve the caller's own deployments-lifecycle
+/// apps, whatever app or deployment ID is asked for.
+async fn reads_are_scoped_to_the_callers_deployments_apps(pool: &PgPool) {
+    use crate::app_deployments::handlers::{DeploymentRow, query_rows};
+
+    fn ids(rows: Vec<DeploymentRow>) -> Vec<Uuid> {
+        rows.into_iter().map(|row| row.id).collect()
+    }
+
+    let org = organization(pool).await;
+    let app = deployments_app(pool, org).await;
+    let user = member(pool, org).await;
+    let live = deployment(pool, org, app, "running", Some("i-live")).await;
+    let candidate = deployment(pool, org, app, "running", Some("i-candidate")).await;
+    serve(pool, app, live).await;
+
+    // The same organization's Legacy and destroyed apps are not served.
+    let legacy = deployments_app(pool, org).await;
+    sqlx::query("UPDATE compute_resources SET lifecycle = 'legacy' WHERE id = $1")
+        .bind(legacy)
+        .execute(pool)
+        .await
+        .unwrap();
+    deployment(pool, org, legacy, "running", Some("i-legacy")).await;
+    let destroyed = deployments_app(pool, org).await;
+    deployment(pool, org, destroyed, "destroyed", None).await;
+    sqlx::query("UPDATE compute_resources SET destroyed_at = NOW() WHERE id = $1")
+        .bind(destroyed)
+        .execute(pool)
+        .await
+        .unwrap();
+
+    let other_org = organization(pool).await;
+    let other_app = deployments_app(pool, other_org).await;
+    let other_user = member(pool, other_org).await;
+    let foreign = deployment(pool, other_org, other_app, "running", Some("i-foreign")).await;
+
+    // Newest first.
+    assert_eq!(
+        ids(query_rows(pool, user, None, None).await.unwrap()),
+        [candidate, live]
+    );
+    assert_eq!(
+        ids(query_rows(pool, user, Some(app), None).await.unwrap()),
+        [candidate, live]
+    );
+    assert_eq!(
+        ids(query_rows(pool, user, Some(app), Some(live)).await.unwrap()),
+        [live]
+    );
+    assert_eq!(
+        ids(query_rows(pool, user, None, Some(candidate)).await.unwrap()),
+        [candidate]
+    );
+    for (app_filter, deployment_filter) in [
+        (Some(legacy), None),
+        (Some(destroyed), None),
+        // Another tenant's app and deployment, by app, by deployment and by both.
+        (Some(other_app), None),
+        (None, Some(foreign)),
+        (Some(other_app), Some(foreign)),
+        // A deployment of another app than the requested one.
+        (Some(app), Some(foreign)),
+    ] {
+        assert!(
+            query_rows(pool, user, app_filter, deployment_filter)
+                .await
+                .unwrap()
+                .is_empty(),
+            "{app_filter:?} {deployment_filter:?}"
+        );
+    }
+    assert_eq!(
+        ids(query_rows(pool, other_user, None, Some(foreign))
+            .await
+            .unwrap()),
+        [foreign]
+    );
+    assert!(
+        query_rows(pool, other_user, Some(app), Some(live))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // A user who belongs to no organization sees nothing.
+    assert!(
+        query_rows(pool, Uuid::new_v4(), None, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Roles follow the pointer; only the live deployment answers with the app IP.
+    for row in query_rows(pool, user, Some(app), None).await.unwrap() {
+        let id = row.id;
+        let view = serde_json::to_value(row.into_view(None)).unwrap();
+        if id == live {
+            assert_eq!(view["role"], "live");
+            assert_eq!(view["public_ip"], EIP);
+        } else {
+            assert_eq!(view["role"], "candidate");
+            assert!(view["public_ip"].is_null());
+        }
+        assert_eq!(view["app_id"], app.to_string());
+    }
+}
+
 fn test_state(pool: &PgPool, data_dir: &str) -> std::sync::Arc<AppState> {
     Arc::new(AppState {
         db: pool.clone(),

@@ -37,6 +37,8 @@ pub struct ComputeResource {
     pub dns_error: Option<String>,
     pub billing_tag: Option<String>,
     pub configuration: Option<serde_json::Value>,
+    pub lifecycle: String,
+    pub live_deployment_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -294,7 +296,8 @@ pub async fn list_resources(
         "SELECT id, organization_id, provider_account_id, resource_type_id,
                 provider_resource_id, resource_name, state::text as state,
                 region, public_ip, configuration->>'domain' as domain,
-                dns_status, dns_error, billing_tag, configuration, created_at, updated_at
+                dns_status, dns_error, billing_tag, configuration, lifecycle, live_deployment_id,
+                created_at, updated_at
          FROM compute_resources
          WHERE organization_id = $1",
     )
@@ -378,7 +381,7 @@ pub async fn get_resource(
                 cr.provider_resource_id, cr.resource_name, cr.state::text as state,
                 cr.region, cr.public_ip, cr.configuration->>'domain' as domain,
                 cr.dns_status, cr.dns_error, cr.billing_tag, cr.configuration,
-                cr.created_at, cr.updated_at
+                cr.lifecycle, cr.live_deployment_id, cr.created_at, cr.updated_at
          FROM compute_resources cr
          INNER JOIN organization_members om ON cr.organization_id = om.organization_id
          WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL",
@@ -674,7 +677,8 @@ pub async fn rename_resource(
          RETURNING id, organization_id, provider_account_id, resource_type_id,
                    provider_resource_id, resource_name, state::text as state,
                    region, public_ip, configuration->>'domain' as domain,
-                   dns_status, dns_error, billing_tag, configuration, created_at, updated_at",
+                   dns_status, dns_error, billing_tag, configuration, lifecycle,
+                   live_deployment_id, created_at, updated_at",
     )
     .bind(&payload.name)
     .bind(resource_id)

@@ -36,10 +36,6 @@ pub(crate) fn activates_on_running(live_deployment_id: Option<Uuid>) -> bool {
 }
 
 /// Display role: only the deployment the live pointer names is live.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "first caller lands with the deployments listing")
-)]
 pub(crate) fn role_for(live_deployment_id: Option<Uuid>, deployment_id: Uuid) -> Role {
     if live_deployment_id == Some(deployment_id) {
         Role::Live

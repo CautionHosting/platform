@@ -5806,8 +5806,17 @@ async fn main() -> Result<(), MainError> {
         .route("/resources/{id}", patch(resources::rename_resource))
         .route("/resources/{id}", delete(resources::delete_resource))
         .route(
+            "/resources/{id}/deployments",
+            get(app_deployments::handlers::list_handler),
+        )
+        .route(
             "/resources/{id}/deployments/{deployment_id}",
-            delete(app_deployments::destroy::destroy_handler),
+            get(app_deployments::handlers::get_in_app_handler)
+                .delete(app_deployments::destroy::destroy_handler),
+        )
+        .route(
+            "/deployments/{id}",
+            get(app_deployments::handlers::get_handler),
         )
         .route(
             "/resources/{id}/deployments/{deployment_id}/switch",

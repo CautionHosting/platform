@@ -93,6 +93,23 @@ caution apps get <app-id> --this-is-a-ci-machine
 caution apps destroy <app-id> --force --this-is-a-ci-machine
 ```
 
+For apps on the deployments lifecycle, `apps get` and `apps destroy` also take
+`-d <deployment-id>` to read or destroy one deployment (the live deployment is
+never destroyed). In CI the gateway authorizes the SSH key against the app in
+the request path, so pass the app ID (or run from a linked checkout) with `-d`:
+
+```sh
+caution apps get <app-id> -d <deployment-id> --this-is-a-ci-machine
+caution apps destroy <app-id> -d <deployment-id> --force --this-is-a-ci-machine
+```
+
+Without `--this-is-a-ci-machine`, `-d` needs only the deployment ID: the app is
+derived from it, whatever app the checkout is linked to, and an explicit app ID
+must match. `caution verify -d <deployment-id>` stores that deployment's trust
+in `.caution/deployments/<deployment-id>/trusted_hashes.json`. `caution apps
+switch -d <deployment-id>` makes a deployment live and always needs a passkey,
+so it has no CI form.
+
 `--this-is-a-ci-machine` is intentionally explicit. Local development should use
 the normal login flow. If `CAUTION_SSH_SIGNING_KEY` is unset, the CLI checks
 `GIT_SSH_COMMAND`, `git config core.sshCommand`, and then default `~/.ssh/id_*`

@@ -596,6 +596,73 @@ pub(crate) fn persist_trusted_hashes(
         .with_context(Ctx::failure())
 }
 
+/// Failure modes for [`ensure_state_dirs`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum EnsureStateDirsError {
+    #[error("Trusted-state directory {path} is not a plain directory [{location:?}]")]
+    NotADirectory { path: String, location: Location },
+
+    #[error("failed to inspect the trusted-state directory {path} [{location:?}]")]
+    Inspect {
+        #[context(borrow = str)]
+        path: String,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to create the trusted-state directory {path} [{location:?}]")]
+    Create {
+        #[context(borrow = str)]
+        path: String,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Creates the directories above the directory of the relative state file
+/// `path`, as `root`-relative plain directories that are never reached through
+/// a symlink, like [`persist_trusted_hashes`] treats the directory of the file
+/// itself. A per-deployment state file (`.caution/deployments/<id>/`) lies
+/// two levels deeper than the bare one, which needs nothing created here.
+pub(crate) fn ensure_state_dirs(root: &Path, path: &Path) -> Result<(), EnsureStateDirsError> {
+    use EnsureStateDirsErrorCtx as Ctx;
+
+    let mut missing: Vec<_> = path
+        .ancestors()
+        .skip(2)
+        .filter(|ancestor| !ancestor.as_os_str().is_empty())
+        .collect();
+    missing.reverse();
+    for ancestor in missing {
+        let dir = root.join(ancestor);
+        let shown = dir.display().to_string();
+        let metadata = match fs::symlink_metadata(&dir) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error).with_context(Ctx::inspect(&shown)),
+        };
+        match metadata {
+            None => fs::create_dir(&dir).with_context(Ctx::create(&shown))?,
+            Some(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Some(_) => {
+                return Err(EnsureStateDirsError::NotADirectory {
+                    path: shown,
+                    location: std::panic::Location::caller(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, FromContext)]
 pub(crate) enum PersistTrustedHashesWithBackupErrorKind {
     NoParent,
@@ -2294,6 +2361,15 @@ pub(crate) enum VerifyError {
         source: BoxError,
     },
 
+    #[error("failed to prepare the trusted state directories [{location:?}]")]
+    EnsureStateDirs {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
     #[error("failed to persist trusted hashes [{location:?}]")]
     PersistTrustedHashes {
         #[location]
@@ -2331,6 +2407,8 @@ pub(crate) async fn verify(
     no_cache: bool,
     save_pcrs: bool,
     inspect_attestation: bool,
+    trust_path: PathBuf,
+    candidate: bool,
 ) -> Result<(), VerifyError> {
     use VerifyErrorCtx as Ctx;
     if let Some(image) = verify_result(
@@ -2344,6 +2422,7 @@ pub(crate) async fn verify(
         save_pcrs,
         inspect_attestation,
         false,
+        candidate,
     )
     .await?
     {
@@ -2354,7 +2433,8 @@ pub(crate) async fn verify(
             verified_at: image.verified_at,
             tls: image.tls,
         };
-        let path = PathBuf::from(".caution/trusted_hashes.json");
+        let path = trust_path;
+        ensure_state_dirs(Path::new(""), &path).with_context(Ctx::ensure_state_dirs())?;
         let backup =
             persist_trusted_hashes(&path, &trusted).with_context(Ctx::persist_trusted_hashes())?;
         output::status(format_args!("Trusted state: {}", path.display()));
@@ -2383,6 +2463,7 @@ pub(crate) async fn verify_service(
         false,
         false,
         true,
+        false,
     )
     .await?;
     Ok(image.expect("verification without inspection returns verified measurements"))
@@ -2400,6 +2481,7 @@ async fn verify_result(
     save_pcrs: bool,
     inspect_attestation: bool,
     hosted: bool,
+    candidate: bool,
 ) -> Result<Option<VerifiedImage>, VerifyError> {
     use VerifyErrorCtx as Ctx;
 
@@ -2823,6 +2905,10 @@ async fn verify_result(
                 TlsVerification::PcrOnly => {
                     output::status("TLS certificate binding: not performed (--pcrs)")
                 }
+                // A candidate is reached by its own IP; the domain points at the live one.
+                TlsVerification::SkippedNoDns if candidate => output::warning(
+                    "PCRs verified; application TLS verification pending (the domain points at the live deployment; check TLS after switching)",
+                ),
                 TlsVerification::SkippedNoDns => output::warning(
                     "TLS certificate binding: skipped because the configured domain has no DNS answer",
                 ),
