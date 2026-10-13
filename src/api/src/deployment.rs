@@ -520,7 +520,7 @@ pub async fn deploy_nitro_enclave(
         })?;
 
     let config = TerraformConfig {
-        module_path: PathBuf::from("terraform/modules/aws/nitro-enclave"),
+        module_path: nitro_module_path(),
         s3_bucket: std::env::var("TERRAFORM_STATE_BUCKET")
             .unwrap_or_else(|_| "caution-terraform-state".to_string()),
     };
@@ -1057,6 +1057,68 @@ mod tests {
         }
     }
 
+    #[test]
+    fn deployment_state_key_nests_under_the_app_key() {
+        let org = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let app = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+        let dep = Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap();
+        assert_eq!(
+            deployment_state_key(org, app, dep),
+            "organizations/00000000-0000-0000-0000-000000000001/resources/00000000-0000-0000-0000-000000000002/deployments/00000000-0000-0000-0000-000000000003/terraform.tfstate"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_lifecycle_backends_enable_lockfile_and_legacy_does_not() {
+        let dir = TempDir::new().unwrap();
+        generate_backend_config_for_key(dir.path(), "a/b/terraform.tfstate", "bucket", true)
+            .await
+            .unwrap();
+        assert!(
+            norm(&std::fs::read_to_string(dir.path().join("backend.tf")).unwrap())
+                .contains("use_lockfile = true")
+        );
+
+        let legacy = TempDir::new().unwrap();
+        generate_backend_config(legacy.path(), Uuid::nil(), Uuid::nil(), "bucket")
+            .await
+            .unwrap();
+        assert!(
+            !std::fs::read_to_string(legacy.path().join("backend.tf"))
+                .unwrap()
+                .contains("use_lockfile")
+        );
+    }
+
+    #[tokio::test]
+    async fn deployment_backend_uses_the_deployment_key_and_a_lockfile() {
+        let org = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let app = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+        let dep = Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap();
+        let dir = TempDir::new().unwrap();
+        deployment_backend(dir.path(), org, app, dep).await.unwrap();
+        let backend = norm(&std::fs::read_to_string(dir.path().join("backend.tf")).unwrap());
+        assert!(backend.contains(&format!(
+            r#"key = "{}""#,
+            deployment_state_key(org, app, dep)
+        )));
+        assert!(backend.contains("use_lockfile = true"));
+    }
+
+    #[test]
+    fn app_network_outputs_parse_from_tofu_json() {
+        let outputs = serde_json::json!({
+            "vpc_id": {"value": "vpc-0abc"}, "subnet_id": {"value": "subnet-0abc"},
+            "availability_zone": {"value": "us-west-2a"},
+            "instance_profile_name": {"value": "enclave-profile"},
+            "eip_allocation_id": {"value": "eipalloc-0abc"}, "eip_public_ip": {"value": "198.51.100.42"}
+        });
+        let network = parse_app_network_outputs(&outputs, "us-west-2").unwrap();
+        assert_eq!(network.eip_public_ip, "198.51.100.42");
+        assert_eq!(network.region, "us-west-2");
+        assert!(parse_app_network_outputs(&serde_json::json!({}), "us-west-2").is_err());
+    }
+
     #[tokio::test]
     async fn test_fully_managed_tf_opens_steve_port_when_e2e_enabled() {
         let mut request = deployment_request("/tmp/enclave.eif", None);
@@ -1467,6 +1529,24 @@ struct TerraformConfig {
     s3_bucket: String,
 }
 
+/// The nitro-enclave module directory, which holds the `user-data.sh` template.
+fn nitro_module_path() -> PathBuf {
+    PathBuf::from("terraform/modules/aws/nitro-enclave")
+}
+
+/// The platform's OpenTofu state bucket (always in `us-west-2`).
+fn terraform_state_bucket() -> String {
+    std::env::var("TERRAFORM_STATE_BUCKET")
+        .unwrap_or_else(|_| "caution-terraform-state".to_string())
+}
+
+/// The cached provider lock under `CAUTION_DATA_DIR`, generated on first use.
+async fn provider_lockfile() -> Option<PathBuf> {
+    let data_dir =
+        std::env::var("CAUTION_DATA_DIR").unwrap_or_else(|_| "/var/cache/caution".to_string());
+    get_or_generate_lockfile(&data_dir).await
+}
+
 impl Default for TerraformConfig {
     fn default() -> Self {
         Self {
@@ -1662,25 +1742,67 @@ async fn generate_backend_config(
     resource_id: Uuid,
     s3_bucket: &str,
 ) -> std::result::Result<(), GenerateBackendConfigError> {
+    generate_backend_config_for_key(
+        work_dir,
+        &app_state_key(org_id, resource_id),
+        s3_bucket,
+        false,
+    )
+    .await
+}
+
+/// The state key of one deployment, nested under its app's key.
+pub(crate) fn deployment_state_key(org_id: Uuid, resource_id: Uuid, deployment_id: Uuid) -> String {
+    format!(
+        "organizations/{org_id}/resources/{resource_id}/deployments/{deployment_id}/terraform.tfstate"
+    )
+}
+
+fn app_state_key(org_id: Uuid, resource_id: Uuid) -> String {
+    // The deployments lifecycle's app state reuses the per-app key.
+    format!("organizations/{org_id}/resources/{resource_id}/terraform.tfstate")
+}
+
+/// The backend of one deployment's state, locked with `<key>.tflock`.
+async fn deployment_backend(
+    work_dir: &Path,
+    org_id: Uuid,
+    resource_id: Uuid,
+    deployment_id: Uuid,
+) -> std::result::Result<(), GenerateBackendConfigError> {
+    generate_backend_config_for_key(
+        work_dir,
+        &deployment_state_key(org_id, resource_id, deployment_id),
+        &terraform_state_bucket(),
+        true,
+    )
+    .await
+}
+
+/// Writes the S3 backend for `key`. `use_lockfile` enables OpenTofu's S3 lock
+/// (`<key>.tflock`), which [`clear_state_lock`] removes after a crash.
+#[tracing::instrument(skip_all, err)]
+async fn generate_backend_config_for_key(
+    work_dir: &Path,
+    key: &str,
+    s3_bucket: &str,
+    use_lockfile: bool,
+) -> std::result::Result<(), GenerateBackendConfigError> {
     use GenerateBackendConfigErrorCtx as Ctx;
 
-    let key = format!(
-        "organizations/{}/resources/{}/terraform.tfstate",
-        org_id, resource_id
-    );
-
+    let mut backend = hcl::Block::builder("backend")
+        .add_label("s3")
+        .add_attribute(("bucket", s3_bucket))
+        .add_attribute(("key", key))
+        .add_attribute(("region", "us-west-2"))
+        .add_attribute(("encrypt", true));
+    if use_lockfile {
+        backend = backend.add_attribute(("use_lockfile", true));
+    }
     let body = hcl::Body::builder()
         .add_block(
             hcl::Block::builder("terraform")
-                .add_block(
-                    hcl::Block::builder("backend")
-                        .add_label("s3")
-                        .add_attribute(("bucket", s3_bucket))
-                        .add_attribute(("key", key.as_str()))
-                        .add_attribute(("region", "us-west-2"))
-                        .add_attribute(("encrypt", true))
-                        .build(),
-                )
+                .add_block(backend.build())
                 .build(),
         )
         .build();
@@ -1759,8 +1881,6 @@ fn run_tofu_apply_with_provider_creds(
     http_port: Option<u16>,
     credentials: Option<&AwsCredentials>,
 ) -> std::result::Result<(), TofuApplyError> {
-    use TofuApplyErrorCtx as Ctx;
-
     let public_ports = ports
         .iter()
         .copied()
@@ -1797,8 +1917,30 @@ fn run_tofu_apply_with_provider_creds(
         cmd.env("TF_VAR_provider_region", &creds.region);
     }
 
+    run_tofu_apply_command(&mut cmd)
+}
+
+/// `tofu apply` for a configuration that declares no variables and uses the
+/// platform's environment credentials.
+#[tracing::instrument(skip_all, err)]
+fn run_tofu_apply_plain(work_dir: &Path) -> std::result::Result<(), TofuApplyError> {
+    tracing::info!("Running tofu apply in {}...", work_dir.display());
+
+    let mut cmd = Command::new("tofu");
+    cmd.arg("apply")
+        .arg("-auto-approve")
+        .arg("-no-color")
+        .current_dir(work_dir);
+
+    run_tofu_apply_command(&mut cmd)
+}
+
+/// Runs a prepared `tofu apply` command under the tofu timeout and logs its failure.
+fn run_tofu_apply_command(cmd: &mut Command) -> std::result::Result<(), TofuApplyError> {
+    use TofuApplyErrorCtx as Ctx;
+
     let output = dterror::ResultExt::with_context(
-        run_with_timeout(&mut cmd, TOFU_TIMEOUT_SECS),
+        run_with_timeout(cmd, TOFU_TIMEOUT_SECS),
         Ctx::run_command(),
     )?;
 
@@ -1821,8 +1963,9 @@ fn run_tofu_apply_with_provider_creds(
     Ok(())
 }
 
+/// Failure modes for `tofu output -json`.
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum GetTofuOutputsError {
+pub(crate) enum TofuOutputError {
     #[error("could not run tofu output command [{location}]")]
     RunCommand {
         #[location]
@@ -1842,13 +1985,14 @@ pub(crate) enum GetTofuOutputsError {
         #[source]
         source: BoxError,
     },
-    #[error("tofu output missing required field '{field}' [{location}]")]
-    MissingField { field: String, location: Location },
 }
 
+/// Runs `tofu output -json` and returns the parsed outputs object.
 #[tracing::instrument(skip_all, err)]
-fn get_tofu_outputs(work_dir: &Path) -> std::result::Result<DeploymentResult, GetTofuOutputsError> {
-    use GetTofuOutputsErrorCtx as Ctx;
+fn run_tofu_output_json(
+    work_dir: &Path,
+) -> std::result::Result<serde_json::Value, TofuOutputError> {
+    use TofuOutputErrorCtx as Ctx;
 
     tracing::info!("Retrieving tofu outputs...");
 
@@ -1865,15 +2009,34 @@ fn get_tofu_outputs(work_dir: &Path) -> std::result::Result<DeploymentResult, Ge
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         tracing::error!("Tofu output failed: {}", stderr);
-        return Err(GetTofuOutputsError::NonZeroExit {
+        return Err(TofuOutputError::NonZeroExit {
             exit_code: output.status.code(),
             location: std::panic::Location::caller(),
         });
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let outputs: serde_json::Value =
-        dterror::ResultExt::with_context(serde_json::from_str(&stdout), Ctx::json_parse())?;
+    dterror::ResultExt::with_context(serde_json::from_str(&stdout), Ctx::json_parse())
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum GetTofuOutputsError {
+    #[error("could not read tofu outputs [{location}]")]
+    Output {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("tofu output missing required field '{field}' [{location}]")]
+    MissingField { field: String, location: Location },
+}
+
+#[tracing::instrument(skip_all, err)]
+fn get_tofu_outputs(work_dir: &Path) -> std::result::Result<DeploymentResult, GetTofuOutputsError> {
+    use GetTofuOutputsErrorCtx as Ctx;
+
+    let outputs = dterror::ResultExt::with_context(run_tofu_output_json(work_dir), Ctx::output())?;
 
     let instance_id = outputs["instance_id"]["value"]
         .as_str()
@@ -2966,6 +3129,373 @@ async fn provision_managed_onprem(
     );
 
     Ok(result)
+}
+
+// `CtxError` needs a variant with a source; this enum has none.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ParseAppNetworkOutputsError {
+    #[error("tofu output missing '{field}' [{location}]")]
+    MissingField { field: String, location: Location },
+}
+
+/// Reads the app network state's `tofu output -json` object.
+pub(crate) fn parse_app_network_outputs(
+    outputs: &serde_json::Value,
+    region: &str,
+) -> std::result::Result<AppNetwork, ParseAppNetworkOutputsError> {
+    let field = |name: &str| {
+        outputs[name]["value"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| ParseAppNetworkOutputsError::MissingField {
+                field: name.to_string(),
+                location: std::panic::Location::caller(),
+            })
+    };
+    Ok(AppNetwork {
+        region: region.to_string(),
+        vpc_id: field("vpc_id")?,
+        subnet_id: field("subnet_id")?,
+        availability_zone: field("availability_zone")?,
+        instance_profile_name: field("instance_profile_name")?,
+        eip_allocation_id: field("eip_allocation_id")?,
+        eip_public_ip: field("eip_public_ip")?,
+    })
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum ProvisionAppNetworkError {
+    #[error("could not create temporary directory [{location}]")]
+    TempDir {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not generate backend config [{location}]")]
+    Backend {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not generate main.tf [{location}]")]
+    GenerateMainTf {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not run tofu init [{location}]")]
+    TofuInit {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not run tofu apply [{location}]")]
+    TofuApply {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not get tofu outputs [{location}]")]
+    Outputs {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Applies the app network state (VPC, IAM, unassociated EIP) on the per-app key with
+/// platform credentials. Idempotent: a re-apply leaves an existing network unchanged.
+#[expect(
+    dead_code,
+    reason = "first caller lands with the deployments push flow"
+)]
+#[tracing::instrument(skip_all, err)]
+pub(crate) async fn provision_app_network(
+    request: &AppNetworkRequest,
+) -> std::result::Result<AppNetwork, ProvisionAppNetworkError> {
+    use ProvisionAppNetworkErrorCtx as Ctx;
+
+    tracing::info!(
+        "Provisioning app network for resource {} in {}",
+        request.resource_id,
+        request.region
+    );
+
+    let temp_dir = TempDir::new().with_context(Ctx::temp_dir())?;
+    let work_dir = temp_dir.path();
+
+    // No lock file: the app state is applied only inside the app's single active
+    // operation, like the Legacy state on the same key, and a crash would leave a
+    // lock that blocks every later push.
+    generate_backend_config_for_key(
+        work_dir,
+        &app_state_key(request.org_id, request.resource_id),
+        &terraform_state_bucket(),
+        false,
+    )
+    .await
+    .with_context(Ctx::backend())?;
+
+    generate_app_network_main_tf(work_dir, request)
+        .await
+        .with_context(Ctx::generate_main_tf())?;
+
+    run_tofu_init(work_dir, provider_lockfile().await.as_deref(), None)
+        .await
+        .with_context(Ctx::tofu_init())?;
+
+    run_tofu_apply_plain(work_dir).with_context(Ctx::tofu_apply())?;
+
+    let outputs = run_tofu_output_json(work_dir).with_context(Ctx::outputs())?;
+    let network =
+        parse_app_network_outputs(&outputs, &request.region).with_context(Ctx::outputs())?;
+
+    tracing::info!(
+        "App network for resource {} ready: vpc {}, EIP {}",
+        request.resource_id,
+        network.vpc_id,
+        network.eip_public_ip
+    );
+
+    Ok(network)
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum ProvisionDeploymentError {
+    #[error("could not create temporary directory [{location}]")]
+    TempDir {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not generate backend config [{location}]")]
+    Backend {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not generate main.tf [{location}]")]
+    GenerateMainTf {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not copy user-data.sh [{location}]")]
+    WriteUserData {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not run tofu init [{location}]")]
+    TofuInit {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not run tofu apply [{location}]")]
+    TofuApply {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not get tofu outputs [{location}]")]
+    Outputs {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Applies one deployment's state (security group and instance) inside the app network.
+/// The result's `public_ip` is the instance's own temporary IP, not the app's EIP.
+#[expect(
+    dead_code,
+    reason = "first caller lands with the deployments push flow"
+)]
+#[tracing::instrument(skip_all, err)]
+pub(crate) async fn provision_deployment(
+    request: &NitroDeploymentRequest,
+    deployment_id: Uuid,
+    network: &AppNetwork,
+    eif_s3_path: &str,
+) -> std::result::Result<DeploymentResult, ProvisionDeploymentError> {
+    use ProvisionDeploymentErrorCtx as Ctx;
+
+    tracing::info!(
+        "Provisioning deployment {} for resource {} ({})",
+        deployment_id,
+        request.resource_id,
+        request.resource_name
+    );
+
+    let temp_dir = TempDir::new().with_context(Ctx::temp_dir())?;
+    let work_dir = temp_dir.path();
+
+    deployment_backend(work_dir, request.org_id, request.resource_id, deployment_id)
+        .await
+        .with_context(Ctx::backend())?;
+
+    generate_deployment_main_tf(work_dir, request, deployment_id, network, eif_s3_path)
+        .await
+        .with_context(Ctx::generate_main_tf())?;
+
+    fs::copy(
+        nitro_module_path().join("user-data.sh"),
+        work_dir.join("user-data.sh"),
+    )
+    .await
+    .with_context(Ctx::write_user_data())?;
+
+    run_tofu_init(work_dir, provider_lockfile().await.as_deref(), None)
+        .await
+        .with_context(Ctx::tofu_init())?;
+
+    run_tofu_apply_with_provider_creds(
+        work_dir,
+        &request.resource_name,
+        &request.ports,
+        request.http_port,
+        None,
+    )
+    .with_context(Ctx::tofu_apply())?;
+
+    let result = get_tofu_outputs(work_dir).with_context(Ctx::outputs())?;
+
+    tracing::info!(
+        "Provisioned deployment {} as instance {} at {}",
+        deployment_id,
+        result.instance_id,
+        result.public_ip
+    );
+
+    Ok(result)
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum DestroyDeploymentStateError {
+    #[error("could not create temporary directory [{location}]")]
+    TempDir {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not generate backend config [{location}]")]
+    Backend {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not generate main.tf [{location}]")]
+    GenerateMainTf {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not run tofu init [{location}]")]
+    TofuInit {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not run tofu destroy [{location}]")]
+    TofuDestroy {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Destroys one deployment's state. Re-runnable: an empty or missing state destroys
+/// nothing and succeeds.
+#[expect(dead_code, reason = "first caller lands with deployment destruction")]
+#[tracing::instrument(skip_all, err)]
+pub(crate) async fn destroy_deployment_state(
+    org_id: Uuid,
+    resource_id: Uuid,
+    deployment_id: Uuid,
+    region: &str,
+) -> std::result::Result<(), DestroyDeploymentStateError> {
+    use DestroyDeploymentStateErrorCtx as Ctx;
+
+    tracing::info!(
+        "Destroying deployment {} of resource {}",
+        deployment_id,
+        resource_id
+    );
+
+    let temp_dir = TempDir::new().with_context(Ctx::temp_dir())?;
+    let work_dir = temp_dir.path();
+
+    deployment_backend(work_dir, org_id, resource_id, deployment_id)
+        .await
+        .with_context(Ctx::backend())?;
+
+    write_main_tf(work_dir, build_destroy_tf_body(false, region))
+        .await
+        .with_context(Ctx::generate_main_tf())?;
+
+    run_tofu_init(work_dir, provider_lockfile().await.as_deref(), None)
+        .await
+        .with_context(Ctx::tofu_init())?;
+
+    run_tofu_destroy(work_dir, &format!("deployment {deployment_id}"), None)
+        .with_context(Ctx::tofu_destroy())?;
+
+    Ok(())
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum ClearStateLockError {
+    #[error("could not delete the state lock of '{state_key}' [{location}]")]
+    DeleteLock {
+        #[context(borrow = str)]
+        state_key: String,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Deletes `<state_key>.tflock` from the state bucket. Only for reconciling work whose
+/// owning process is dead. Deleting an absent lock succeeds.
+#[expect(dead_code, reason = "first caller lands with reconciliation")]
+#[tracing::instrument(skip_all, err)]
+pub(crate) async fn clear_state_lock(
+    state_key: &str,
+) -> std::result::Result<(), ClearStateLockError> {
+    use ClearStateLockErrorCtx as Ctx;
+
+    let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(aws_config::Region::new("us-west-2"))
+        .load()
+        .await;
+    aws_sdk_s3::Client::new(&config)
+        .delete_object()
+        .bucket(terraform_state_bucket())
+        .key(format!("{state_key}.tflock"))
+        .send()
+        .await
+        .map(|_| ())
+        .with_context(Ctx::delete_lock(state_key))
 }
 
 const PARENT_VCPU_RESERVE: u32 = 2;
@@ -4371,10 +4901,6 @@ pub(crate) struct AppNetworkRequest {
 
 /// Generates the app network state: network, IAM and an unassociated EIP, with their IDs
 /// as outputs.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "first caller lands with app network provisioning")
-)]
 #[tracing::instrument(skip_all, err)]
 async fn generate_app_network_main_tf(
     work_dir: &Path,
@@ -4435,10 +4961,6 @@ async fn generate_app_network_main_tf(
 
 /// Generates one deployment's state: security group and instance, placed in the app
 /// network by literal ID.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "first caller lands with app network provisioning")
-)]
 #[tracing::instrument(skip_all, err)]
 async fn generate_deployment_main_tf(
     work_dir: &Path,
