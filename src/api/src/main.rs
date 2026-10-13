@@ -4497,6 +4497,7 @@ async fn deploy_logic(
             auth.user_id,
             resource_id,
             &deployment_requirements,
+            None,
         )
         .await;
         if reservation.is_err()

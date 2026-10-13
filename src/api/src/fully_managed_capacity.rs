@@ -47,6 +47,22 @@ impl DeploymentRequirements {
             eips: 1,
         })
     }
+
+    /// A candidate deployment reuses its app's regional VPC and Elastic IP, so
+    /// it reserves host vCPUs only.
+    // Task 9 adds the first non-test caller.
+    #[cfg_attr(not(test), expect(dead_code))]
+    #[tracing::instrument(skip_all, err)]
+    pub(crate) fn for_candidate(
+        cpus: u32,
+        memory_mb: u32,
+    ) -> Result<Self, deployment::EnclaveSizingError> {
+        Ok(Self {
+            vpcs: 0,
+            eips: 0,
+            ..Self::for_enclave(cpus, memory_mb)?
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +150,18 @@ async fn candidate_regions() -> Result<Vec<String>, CandidateRegionsError> {
     Ok(regions)
 }
 
+/// Restricts discovered regions to the app's region when pinned. A pinned region
+/// that is no longer enabled yields no candidates, never another region.
+pub(crate) fn candidate_regions_for(pin: Option<&str>, discovered: Vec<String>) -> Vec<String> {
+    match pin {
+        Some(region) => discovered
+            .into_iter()
+            .filter(|candidate| candidate == region)
+            .collect(),
+        None => discovered,
+    }
+}
+
 #[derive(Debug, Error, CtxError)]
 pub(crate) enum CapacityError {
     #[error("No fully managed deployment regions are available. [{location}]")]
@@ -142,6 +170,15 @@ pub(crate) enum CapacityError {
     #[error("invalid enclave vCPU request [{location}]")]
     NoCapacity {
         message: &'static str,
+        location: Location,
+    },
+
+    #[error(
+        "No fully managed capacity is available in this app's region ({region}) for a new candidate. Destroy a candidate or retry later. [{location}]"
+    )]
+    RegionFull {
+        region: String,
+        #[location]
         location: Location,
     },
 
@@ -172,12 +209,16 @@ pub(crate) async fn reserve_capacity(
     user_id: Uuid,
     resource_id: Uuid,
     requirements: &DeploymentRequirements,
+    region_pin: Option<&str>,
 ) -> Result<CapacityReservation, CapacityError> {
     use CapacityErrorCtx as Ctx;
 
-    let candidates = candidate_regions()
-        .await
-        .with_context(Ctx::check_failed())?;
+    let candidates = candidate_regions_for(
+        region_pin,
+        candidate_regions()
+            .await
+            .with_context(Ctx::check_failed())?,
+    );
 
     if candidates.is_empty() {
         return Err(CapacityError::NoRegionsAvailable {
@@ -277,7 +318,14 @@ pub(crate) async fn reserve_capacity(
         }
     }
 
-    if checked_any_region {
+    if checked_any_region && let Some(region) = region_pin {
+        // Pinned candidates never join the waitlist: the region is full, not the platform.
+        tx.rollback().await.with_context(Ctx::database())?;
+        Err(CapacityError::RegionFull {
+            region: region.to_string(),
+            location: std::panic::Location::caller(),
+        })
+    } else if checked_any_region {
         let already_waitlisted = user_has_waitlist_entry(&mut tx, org_id, user_id)
             .await
             .with_context(Ctx::database())?;
@@ -819,5 +867,24 @@ mod tests {
         assert_eq!(payload["data"]["required_host_vcpus"], 8);
 
         server.abort();
+    }
+
+    #[test]
+    fn pinned_region_never_falls_back() {
+        let discovered = vec!["eu-west-1".to_string(), "us-west-2".to_string()];
+        assert_eq!(
+            candidate_regions_for(Some("us-west-2"), discovered.clone()),
+            vec!["us-west-2"]
+        );
+        // A pinned region that is no longer enabled yields nothing, not another region.
+        assert!(candidate_regions_for(Some("ap-south-1"), discovered.clone()).is_empty());
+        assert_eq!(candidate_regions_for(None, discovered.clone()), discovered);
+    }
+
+    #[test]
+    fn candidate_requirements_reserve_no_vpc_or_eip() {
+        let requirements = DeploymentRequirements::for_candidate(2, 512).unwrap();
+        assert_eq!((requirements.vpcs, requirements.eips), (0, 0));
+        assert!(requirements.host_vcpus > 0);
     }
 }
