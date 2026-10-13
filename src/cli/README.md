@@ -106,7 +106,8 @@ caution apps destroy <app-id> -d <deployment-id> --force --this-is-a-ci-machine
 Without `--this-is-a-ci-machine`, `-d` needs only the deployment ID: the app is
 derived from it, whatever app the checkout is linked to, and an explicit app ID
 must match. `caution verify -d <deployment-id>` stores that deployment's trust
-in `.caution/deployments/<deployment-id>/trusted_hashes.json`. `caution apps
+in `.caution/deployments/<deployment-id>/trusted_hashes.json`. When several
+deployments run, bare `caution verify` requires `-d`. `caution apps
 switch -d <deployment-id>` makes a deployment live and always needs a passkey,
 so it has no CI form.
 

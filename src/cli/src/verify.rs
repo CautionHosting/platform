@@ -200,7 +200,47 @@ enum TlsVerification {
     NotApplicable,
     PcrOnly,
     SkippedNoDns,
+    /// The binding cannot be checked yet; the policy allows reporting it pending.
+    Pending,
     Verified(TrustedTls),
+}
+
+/// Trust from `caution verify`: one file per deployment, so verifying B never
+/// replaces A's trust. `deployment` is the canonical ID `fetch_deployment`
+/// checked, so it cannot shape the path. Bare verification keeps the
+/// checkout-level file.
+pub(crate) fn trusted_hashes_path(deployment: Option<&str>) -> PathBuf {
+    match deployment {
+        Some(id) => PathBuf::from(format!(".caution/deployments/{id}/trusted_hashes.json")),
+        None => PathBuf::from(".caution/trusted_hashes.json"),
+    }
+}
+
+/// When an unverifiable TLS binding is reported pending instead of failing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TlsPending {
+    /// Builds without the manifest flag (Legacy, host mode, older builds): unchanged failures.
+    Never,
+    /// A live await-address build: the domain must resolve to it, but its
+    /// certificate may not be issued yet. Becoming live does not mean ready.
+    Issuance,
+    /// A candidate await-address build: the domain points at the live one, so a
+    /// domain that does not resolve to it is pending only while the attested user
+    /// data carries no certificate. With a certificate it fails like `Issuance`.
+    Cutover,
+}
+
+/// `await_app_address` comes from the reproduced manifest (bound by PCR0), never
+/// from an API field, so a platform cannot downgrade a failure to "pending".
+/// `candidate` (an API role) only widens the allowance to a domain that does not
+/// resolve to the deployment, and then only while the attested data holds no
+/// certificate (see [`TlsPending::Cutover`]).
+pub(crate) fn tls_pending_policy(await_app_address: bool, candidate: bool) -> TlsPending {
+    match (await_app_address, candidate) {
+        (false, _) => TlsPending::Never,
+        (true, false) => TlsPending::Issuance,
+        (true, true) => TlsPending::Cutover,
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2056,19 +2096,24 @@ async fn verify_tls_binding(
     payload: &serde_cbor::Value,
     attestation_url: &reqwest::Url,
     attestation_leaf: Option<&[u8]>,
+    pending: TlsPending,
 ) -> Result<TlsVerification, VerifyTlsBindingError> {
     use VerifyTlsBindingErrorCtx as Ctx;
 
-    let user_data = attestation_user_data(payload)
-        .with_context(Ctx::user_data())?
-        .ok_or(VerifyTlsBindingError::MissingUserData {
-            location: std::panic::Location::caller(),
-        })?;
+    let missing_user_data = || VerifyTlsBindingError::MissingUserData {
+        location: std::panic::Location::caller(),
+    };
+    let user_data = attestation_user_data(payload).with_context(Ctx::user_data())?;
+    // Bare and Legacy verification fail first on missing TLS data, as before.
+    if user_data.is_none() && pending == TlsPending::Never {
+        return Err(missing_user_data());
+    }
 
     let deployment_ip = match tls_connection(attestation_url, &expected.domain)
         .with_context(Ctx::tls_connection())?
     {
         TlsConnection::AttestationResponse => {
+            let user_data = user_data.ok_or_else(missing_user_data)?;
             let leaf = attestation_leaf.ok_or(VerifyTlsBindingError::MissingLeaf {
                 location: std::panic::Location::caller(),
             })?;
@@ -2092,11 +2137,23 @@ async fn verify_tls_binding(
             });
         }
     };
-    if !dns_contains_deployment_ip(&expected.domain, deployment_ip, &addresses)
-        .with_context(Ctx::dns_check())?
-    {
-        return Ok(TlsVerification::SkippedNoDns);
+    match dns_contains_deployment_ip(&expected.domain, deployment_ip, &addresses) {
+        Ok(true) => {}
+        Ok(false) => return Ok(TlsVerification::SkippedNoDns),
+        // The domain serves the live deployment and this build, which never held
+        // the app address, has no certificate yet. The attested data decides, not
+        // the API's role: with a certificate, an unresolved domain fails.
+        Err(DnsContainsDeploymentIpError::NotResolved { .. })
+            if pending == TlsPending::Cutover && user_data.is_none() =>
+        {
+            return Ok(TlsVerification::Pending);
+        }
+        Err(error) => return Err(error).with_context(Ctx::dns_check()),
     }
+    // An await-address build publishes its certificate only once it holds the app address.
+    let Some(user_data) = user_data else {
+        return Ok(TlsVerification::Pending);
+    };
 
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(30))
@@ -2132,7 +2189,12 @@ async fn verify_tls_binding(
 /// A hosted service that declares TLS must prove its certificate binding. Without TLS
 /// mode there is no binding to check: shares rely on attestation-bound encryption.
 fn check_hosted_tls(hosted: bool, tls: &TlsVerification) -> Result<(), VerifyError> {
-    if hosted && matches!(tls, TlsVerification::SkippedNoDns | TlsVerification::PcrOnly) {
+    if hosted
+        && matches!(
+            tls,
+            TlsVerification::SkippedNoDns | TlsVerification::PcrOnly | TlsVerification::Pending
+        )
+    {
         return Err(VerifyError::HostedService {
             location: std::panic::Location::caller(),
             source: Box::new(std::io::Error::other(
@@ -2891,6 +2953,10 @@ async fn verify_result(
                     &payload,
                     &attestation_url,
                     attestation_leaf.as_deref(),
+                    tls_pending_policy(
+                        manifest.as_ref().is_some_and(|m| m.tls_await_app_address),
+                        candidate,
+                    ),
                 )
                 .await
                 .with_context(Ctx::verify_tls_binding())?
@@ -2905,9 +2971,8 @@ async fn verify_result(
                 TlsVerification::PcrOnly => {
                     output::status("TLS certificate binding: not performed (--pcrs)")
                 }
-                // A candidate is reached by its own IP; the domain points at the live one.
-                TlsVerification::SkippedNoDns if candidate => output::warning(
-                    "PCRs verified; application TLS verification pending (the domain points at the live deployment; check TLS after switching)",
+                TlsVerification::Pending => output::warning(
+                    "PCRs verified; application TLS verification pending: this deployment's certificate exists only once it is live and issued. Verify it again after switching.",
                 ),
                 TlsVerification::SkippedNoDns => output::warning(
                     "TLS certificate binding: skipped because the configured domain has no DNS answer",
@@ -4501,6 +4566,89 @@ mod tests {
     }
 
     #[test]
+    fn trust_is_stored_per_deployment() {
+        let id = "2b7d4f6e-8a40-4c3e-9f1a-5d6c7b8a9e01";
+        assert_eq!(
+            trusted_hashes_path(None),
+            PathBuf::from(".caution/trusted_hashes.json")
+        );
+        assert_eq!(
+            trusted_hashes_path(Some(id)),
+            PathBuf::from(format!(".caution/deployments/{id}/trusted_hashes.json"))
+        );
+    }
+
+    #[test]
+    fn tls_may_be_pending_only_for_await_address_builds() {
+        // Legacy and every build without the manifest flag: unchanged failures.
+        assert_eq!(tls_pending_policy(false, false), TlsPending::Never);
+        assert_eq!(tls_pending_policy(false, true), TlsPending::Never);
+        // A candidate: the domain points at the live deployment and it has no certificate.
+        assert_eq!(tls_pending_policy(true, true), TlsPending::Cutover);
+        // Live (or bare): the domain must resolve to it; only issuance may still be pending.
+        assert_eq!(tls_pending_policy(true, false), TlsPending::Issuance);
+    }
+
+    #[tokio::test]
+    async fn pending_tls_is_reported_only_where_allowed() {
+        // `localhost` resolves to 127.0.0.1 (and ::1) without network access.
+        let expected = TlsExpectation {
+            domain: "localhost".to_string(),
+        };
+        // No certificate published yet: no TLS user data.
+        let payload = serde_cbor::Value::Map(Default::default());
+        let elsewhere = reqwest::Url::parse("http://127.0.0.2/attestation").unwrap();
+        let resolved = reqwest::Url::parse("http://127.0.0.1/attestation").unwrap();
+        // Bare and Legacy verification fail exactly as before.
+        assert!(
+            verify_tls_binding(&expected, &payload, &elsewhere, None, TlsPending::Never)
+                .await
+                .is_err()
+        );
+        assert!(
+            verify_tls_binding(&expected, &payload, &resolved, None, TlsPending::Never)
+                .await
+                .is_err()
+        );
+        // A candidate before its switch.
+        assert_eq!(
+            verify_tls_binding(&expected, &payload, &elsewhere, None, TlsPending::Cutover)
+                .await
+                .unwrap(),
+            TlsVerification::Pending
+        );
+        // Live before issuance is pending; live where the domain does not resolve still fails.
+        assert_eq!(
+            verify_tls_binding(&expected, &payload, &resolved, None, TlsPending::Issuance)
+                .await
+                .unwrap(),
+            TlsVerification::Pending
+        );
+        assert!(
+            verify_tls_binding(&expected, &payload, &elsewhere, None, TlsPending::Issuance)
+                .await
+                .is_err()
+        );
+        // A candidate whose attested data carries a certificate is not pending:
+        // the domain not resolving to it fails, whatever role the API reports.
+        let attested = serde_cbor::Value::Map(
+            [(
+                serde_cbor::Value::Text("user_data".to_string()),
+                serde_cbor::Value::Bytes(b"{}".to_vec()),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let error = verify_tls_binding(&expected, &attested, &elsewhere, None, TlsPending::Cutover)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, VerifyTlsBindingError::DnsCheck { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
     fn hosted_service_rejects_expected_tls_binding_that_was_not_verified() {
         let verified = TlsVerification::Verified(TrustedTls {
             domain: "service.example".to_owned(),
@@ -4510,7 +4658,11 @@ mod tests {
             assert!(check_hosted_tls(hosted, &verified).is_ok());
             // No TLS mode means no binding to check, hosted or not.
             assert!(check_hosted_tls(hosted, &TlsVerification::NotApplicable).is_ok());
-            for skipped in [TlsVerification::SkippedNoDns, TlsVerification::PcrOnly] {
+            for skipped in [
+                TlsVerification::SkippedNoDns,
+                TlsVerification::PcrOnly,
+                TlsVerification::Pending,
+            ] {
                 assert_eq!(check_hosted_tls(hosted, &skipped).is_err(), hosted);
             }
         }

@@ -1979,6 +1979,14 @@ pub(crate) enum GetAttestationUrlError {
         source: BoxError,
     },
 
+    #[error("failed to check the bare target [{location:?}]")]
+    BareTarget {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
     #[error(
         "no public IP available. Run 'caution app get <id/null>' to check deployment status, or provide --url explicitly [{location:?}]"
     )]
@@ -3431,6 +3439,9 @@ enclave "default" {{
             .get_current_app()
             .await
             .with_context(Ctx::get_current_app())?;
+        crate::apps::crud::ensure_bare_target(self, &app)
+            .await
+            .with_context(Ctx::bare_target())?;
 
         match app.public_ip {
             Some(ref ip) if !ip.is_empty() => Ok(format!("http://{}/attestation", ip)),
@@ -3769,7 +3780,7 @@ pub async fn run() -> Result<(), RunError> {
                     }
                     None => (
                         attestation_url,
-                        PathBuf::from(".caution/trusted_hashes.json"),
+                        verify::trusted_hashes_path(None),
                         false,
                     ),
                 };

@@ -834,6 +834,12 @@ pub(crate) struct DeploymentView {
     public_ip: Option<String>,
     created_at: String,
     error: Option<String>,
+    /// Not read yet: `send-shard -d` checks the release bundle against it.
+    #[allow(dead_code)]
+    #[serde(default)]
+    pub(crate) bundle_hash: Option<String>,
+    #[serde(default)]
+    pub(crate) tls_after_switch: bool,
 }
 
 /// The `error` text of an API error body, or the whole body when it has none.
@@ -1115,6 +1121,59 @@ enum ListDeploymentsError {
     },
 }
 
+/// Failure modes for [`ensure_bare_target`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum BareTargetError {
+    #[error(
+        "app {app_id} has {running} running deployments; name one with -d <deployment> [{location:?}]"
+    )]
+    SeveralDeployments {
+        app_id: String,
+        running: usize,
+        #[location]
+        location: Location,
+    },
+
+    #[error("failed to list the app's deployments [{location:?}]")]
+    ListDeployments {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+}
+
+/// Bare `verify` and `secret send-shard` target the app's address. That is
+/// unambiguous for Legacy apps and while at most one deployment runs.
+pub(crate) fn bare_target_allowed(lifecycle: Option<&str>, running: usize) -> bool {
+    lifecycle != Some("deployments") || running <= 1
+}
+
+pub(crate) async fn ensure_bare_target(
+    client: &ApiClient,
+    app: &App,
+) -> Result<(), BareTargetError> {
+    if app.lifecycle.as_deref() != Some("deployments") {
+        return Ok(());
+    }
+    let running = list_deployments(client, &app.id, false)
+        .await
+        .with_context(BareTargetErrorCtx::list_deployments())?
+        .iter()
+        .filter(|deployment| deployment.status == "running")
+        .count();
+    if bare_target_allowed(app.lifecycle.as_deref(), running) {
+        Ok(())
+    } else {
+        Err(BareTargetError::SeveralDeployments {
+            app_id: app.id.clone(),
+            running,
+            location: std::panic::Location::caller(),
+        })
+    }
+}
+
 async fn list_deployments(
     client: &ApiClient,
     app_id: &str,
@@ -1315,10 +1374,7 @@ fn verify_target(
     }
     Ok(DeploymentVerifyTarget {
         attestation_url: format!("http://{ip}/attestation"),
-        trust_path: PathBuf::from(format!(
-            ".caution/deployments/{}/trusted_hashes.json",
-            deployment.id
-        )),
+        trust_path: crate::verify::trusted_hashes_path(Some(&deployment.id)),
         candidate: deployment.role != "live",
     })
 }
@@ -1461,6 +1517,8 @@ pub(crate) enum SwitchError {
 struct SwitchResponse {
     live_deployment_id: String,
     stable_ip: String,
+    #[serde(default)]
+    tls_after_switch: bool,
 }
 
 /// `apps switch -d`: moves the app's stable IP to the deployment, signed with
@@ -1506,6 +1564,14 @@ pub(crate) async fn switch(
             app.public_ip.as_deref().unwrap_or("none yet")
         ));
         output::status("  The previous deployment stays running and billable.");
+        if target.tls_after_switch {
+            output::status(
+                "  Application TLS verification pending: this deployment gets its certificate only after this switch.",
+            );
+            output::status(
+                "  Existing connections may close and HTTPS can be unavailable while it is issued.",
+            );
+        }
         output::status("");
         let confirmed = prompt::confirm("Confirm you verified and tested this deployment [y/N] ")
             .with_context(Ctx::confirm())?;
@@ -1519,6 +1585,15 @@ pub(crate) async fn switch(
         .ensure_authenticated()
         .await
         .with_context(Ctx::ensure_authenticated())?;
+    // Only a TLS-after-switch target signs the acknowledgement, so every other
+    // switch body stays unchanged.
+    let mut switch_body = serde_json::json!({
+        "expected_live_deployment_id": app.live_deployment_id,
+        "acknowledged_verification": true,
+    });
+    if target.tls_after_switch {
+        switch_body["acknowledged_tls_pending"] = true.into();
+    }
     // The `/api` prefix is part of the request path; the signing challenge
     // strips it.
     let response = client
@@ -1528,10 +1603,7 @@ pub(crate) async fn switch(
                 "/api/resources/{}/deployments/{}/switch",
                 target.app_id, target.id
             ),
-            &serde_json::json!({
-                "expected_live_deployment_id": app.live_deployment_id,
-                "acknowledged_verification": true,
-            }),
+            &switch_body,
         )
         .await
         .with_context(Ctx::signed_post())?;
@@ -1552,6 +1624,12 @@ pub(crate) async fn switch(
         switched.live_deployment_id
     ));
     output::status(format!("Stable IP: {}", switched.stable_ip));
+    if switched.tls_after_switch {
+        output::status(format!(
+            "Complete TLS checks once issued: caution verify -d {}",
+            switched.live_deployment_id
+        ));
+    }
     Ok(())
 }
 
@@ -1977,9 +2055,9 @@ pub(crate) async fn try_relink(
 #[cfg(test)]
 mod tests {
     use super::{
-        DeploymentView, VerifyTargetError, api_error_text, canonical_id, destroy_deployment,
-        extract_resource_id_from_git_url, fetch_deployment, prepare_deployment_verify, short_sha,
-        switch, verify_target,
+        DeploymentView, VerifyTargetError, api_error_text, bare_target_allowed, canonical_id,
+        destroy_deployment, extract_resource_id_from_git_url, fetch_deployment,
+        prepare_deployment_verify, short_sha, switch, verify_target,
     };
     use crate::ApiClient;
     use sha2::{Digest, Sha256};
@@ -2038,6 +2116,15 @@ mod tests {
         ] {
             assert_eq!(canonical_id(id), None, "{id:?}");
         }
+    }
+
+    #[test]
+    fn bare_target_requires_a_deployment_when_several_run() {
+        assert!(bare_target_allowed(Some("legacy"), 3));
+        assert!(bare_target_allowed(None, 3)); // older API: Legacy behavior
+        assert!(bare_target_allowed(Some("deployments"), 0));
+        assert!(bare_target_allowed(Some("deployments"), 1));
+        assert!(!bare_target_allowed(Some("deployments"), 2));
     }
 
     #[test]
@@ -2408,6 +2495,53 @@ mod tests {
         );
         assert_eq!(target.attestation_url, "http://203.0.113.9/attestation");
         assert!(target.candidate);
+    }
+
+    #[tokio::test]
+    async fn switching_to_a_tls_after_switch_target_signs_the_acknowledgement() {
+        let dir = tempdir().unwrap();
+        let (url, requests) = serve(|method, path| match (method, path) {
+            ("GET", p) if p.starts_with("/api/deployments/") => (
+                200,
+                serde_json::json!({
+                    "id": DEPLOYMENT,
+                    "app_id": APP,
+                    "role": "candidate",
+                    "status": "running",
+                    "public_ip": "203.0.113.9",
+                    "created_at": "2026-10-12T00:00:00Z",
+                    "tls_after_switch": true,
+                })
+                .to_string(),
+            ),
+            ("GET", _) => (
+                200,
+                serde_json::json!({
+                    "id": APP,
+                    "state": "running",
+                    "provider_resource_id": "i-0123",
+                    "public_ip": "198.51.100.42",
+                    "live_deployment_id": LIVE,
+                })
+                .to_string(),
+            ),
+            _ => (400, r#"{"error":"no authenticator in tests"}"#.to_string()),
+        })
+        .await;
+        let client = client(&url, dir.path(), Some(OTHER_APP));
+
+        switch(&client, None, DEPLOYMENT, true).await.unwrap_err();
+
+        let challenge = requests.lock().unwrap()[2].clone();
+        let body: serde_json::Value =
+            serde_json::from_str(challenge.split_once("\r\n\r\n").unwrap().1).unwrap();
+        let switch_body = serde_json::to_vec(&serde_json::json!({
+            "expected_live_deployment_id": LIVE,
+            "acknowledged_verification": true,
+            "acknowledged_tls_pending": true,
+        }))
+        .unwrap();
+        assert_eq!(body["body_hash"], hex::encode(Sha256::digest(&switch_body)));
     }
 
     #[tokio::test]

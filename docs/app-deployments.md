@@ -31,7 +31,12 @@ Set both in `~/.config/caution/.env`, then restart the API (`env.example` lists 
   (a candidate's IP changes on stop/start) from a checkout at its commit, and keeps
   its trust in `.caution/deployments/<deployment>/trusted_hashes.json`, apart from
   the app's `.caution/trusted_hashes.json`. `caution apps get [APP] -d <deployment>`
-  shows one deployment.
+  shows one deployment. With several running deployments, bare `caution verify`
+  refuses and asks for `-d`. For a `mode = "tls"` build whose reproduced manifest
+  records `tls_await_app_address` (bound by PCR0, never read from the API),
+  `verify -d` reports "PCRs verified; application TLS verification pending" while
+  its certificate does not exist yet (a candidate before its switch, a live
+  deployment before issuance); verify again once issued. Other builds fail as before.
 - **Switch.** `caution apps switch -d <deployment>` needs a passkey tap; a session
   or SSH-signed request gets 403 `This operation requires signature verification`
   (no CI form). It names the live deployment it was confirmed against: if that
@@ -39,7 +44,8 @@ Set both in `~/.config/caution/.env`, then restart the API (`env.example` lists 
   re-read the app and confirm again. The target must be Running and pass the
   platform health check. A `mode = "tls"` candidate gets its certificate only after
   it holds the app address, so switching to one that never held it needs a signed
-  `acknowledged_tls_pending: true` (else 422). Rolling back to a deployment that was
+  `acknowledged_tls_pending: true` (else 422); the CLI prints a warning and sends it
+  only for such a target. Rolling back to a deployment that was
   live needs none. The deployment view carries `bundle_hash` and `tls_after_switch`;
   the switch and `/deploy` answers carry `tls_after_switch` when it applies, and the
   push output says so. The push output also names the deployment right after the
