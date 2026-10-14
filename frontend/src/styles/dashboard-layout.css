@@ -738,26 +738,37 @@
   width: 36px;
 }
 
-.apps-terminated-filter {
+.apps-activity-filter {
   display: inline-flex;
-  align-items: center;
-  gap: 8px;
+  border: 1px solid var(--theme-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.apps-activity-filter button {
+  padding: 6px 12px;
+  border: 0;
+  background: transparent;
   color: var(--theme-text-muted);
+  font: inherit;
   font-size: 0.9rem;
   white-space: nowrap;
   cursor: pointer;
 }
 
-.apps-terminated-filter input {
-  width: 16px;
-  height: 16px;
-  margin: 0;
-  accent-color: var(--theme-focus);
+.apps-activity-filter button + button {
+  border-left: 1px solid var(--theme-border);
 }
 
-.apps-terminated-filter input:focus-visible {
+.apps-activity-filter button[aria-pressed="true"] {
+  background: var(--theme-surface-subtle);
+  color: var(--theme-text-primary);
+  font-weight: 600;
+}
+
+.apps-activity-filter button:focus-visible {
   outline: 2px solid var(--theme-focus);
-  outline-offset: 2px;
+  outline-offset: -2px;
 }
 
 /* Apps Search */
@@ -1638,6 +1649,14 @@
   width: 7.5rem;
 }
 
+.app-id-cell,
+.app-hostname-cell {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+
 .apps-table-row {
   border-bottom: 1px solid var(--theme-border);
   transition: background-color 0.15s ease;
@@ -1865,19 +1884,28 @@
 }
 
 .app-status-badge.status-pending,
-.app-status-badge.status-terminating {
+.app-status-badge.status-terminating,
+.app-status-badge.status-building,
+.app-status-badge.status-starting,
+.app-status-badge.status-cleanup_pending,
+.app-status-badge.status-reserved,
+.app-status-badge.status-provisioning,
+.app-status-badge.status-destroying {
   background: var(--theme-warning-bg);
   color: var(--theme-warning);
 }
 
 .app-status-badge.status-initialized,
-.app-status-badge.status-stopped {
+.app-status-badge.status-stopped,
+.app-status-badge.status-unavailable,
+.app-status-badge.status-unknown {
   background: var(--theme-surface-muted);
   color: var(--theme-text-muted);
 }
 
 .app-status-badge.status-terminated,
-.app-status-badge.status-failed {
+.app-status-badge.status-failed,
+.app-status-badge.status-destroyed {
   background: var(--theme-danger-bg);
   color: var(--theme-danger);
 }
@@ -2526,6 +2554,15 @@
 }
 
 @media (max-width: 960px) {
+  .apps-list-table th:nth-child(2),
+  .apps-list-table td:nth-child(2),
+  .apps-list-table th:nth-child(4),
+  .apps-list-table td:nth-child(4),
+  .apps-list-table th:nth-child(6),
+  .apps-list-table td:nth-child(6) {
+    display: none;
+  }
+
   .header-actions {
     min-width: auto;
     gap: 14px;

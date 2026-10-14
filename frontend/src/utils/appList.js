@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 import { getDeploymentLabel } from './appDetails.js'
+import { isActiveApp } from './deployments.js'
 
 export const APP_LIST_PREFERENCES_STORAGE_KEY = 'caution-apps-list-preferences'
 
 export const DEFAULT_APP_LIST_PREFERENCES = Object.freeze({
-  hideTerminated: false,
+  hideTerminated: true,
   sortColumn: 'status',
   sortDirection: 'asc',
 })
@@ -156,8 +157,7 @@ export const getNextAppListPreferences = (preferences, sortColumn) => {
   return { ...current, sortColumn, sortDirection }
 }
 
-export const countTerminatedApps = (apps) =>
-  apps.filter((app) => normalizeText(app?.state) === 'terminated').length
+export const countInactiveApps = (apps) => apps.filter((app) => !isActiveApp(app)).length
 
 export const sortApps = (apps, preferences) => {
   const resolved = resolveAppListPreferences(preferences)
@@ -190,9 +190,7 @@ export const sortApps = (apps, preferences) => {
 export const filterAndSortApps = (apps, query, preferences) => {
   const resolved = resolveAppListPreferences(preferences)
   const normalizedQuery = normalizeText(query)
-  const visibleApps = resolved.hideTerminated
-    ? apps.filter((app) => normalizeText(app?.state) !== 'terminated')
-    : apps
+  const visibleApps = resolved.hideTerminated ? apps.filter(isActiveApp) : apps
 
   const matchingApps = normalizedQuery
     ? visibleApps.filter((app) => [

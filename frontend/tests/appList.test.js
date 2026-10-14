@@ -6,7 +6,7 @@ import test from 'node:test'
 import {
   APP_LIST_PREFERENCES_STORAGE_KEY,
   DEFAULT_APP_LIST_PREFERENCES,
-  countTerminatedApps,
+  countInactiveApps,
   filterAndSortApps,
   getAppListPreferencesFromStorageEvent,
   getNextAppListPreferences,
@@ -213,7 +213,7 @@ test('terminated filtering happens before search and does not hide failed apps',
     { id: 'terminated', resource_name: 'payments-old', state: 'terminated', configuration: {} },
   ]
 
-  assert.equal(countTerminatedApps(apps), 1)
+  assert.equal(countInactiveApps(apps), 1)
   assert.deepEqual(
     ids(filterAndSortApps(apps, 'payments', preferences({ hideTerminated: true }))),
     ['running', 'failed'],
@@ -222,4 +222,15 @@ test('terminated filtering happens before search and does not hide failed apps',
     ids(filterAndSortApps(apps, 'terminated', preferences({ hideTerminated: true }))),
     [],
   )
+})
+
+test('Active shows server-derived active apps; All includes terminal history', () => {
+  const apps = [
+    { id: '1', resource_name: 'live', state: 'running', active: true },
+    { id: '2', resource_name: 'failed', state: 'initialized', active: false, summary_state: 'failed' },
+    { id: '3', resource_name: 'legacy-gone', state: 'terminated' },
+  ]
+  assert.deepEqual(filterAndSortApps(apps, '', preferences({ hideTerminated: true })).map((app) => app.id), ['1'])
+  assert.equal(filterAndSortApps(apps, '', preferences({ hideTerminated: false })).length, 3)
+  assert.equal(countInactiveApps(apps), 2)
 })

@@ -321,14 +321,10 @@
             />
           </div>
           <div class="apps-list-controls">
-            <label class="apps-terminated-filter">
-              <input
-                type="checkbox"
-                :checked="!hideTerminatedApps"
-                @change="setHideTerminatedApps(!$event.target.checked)"
-              />
-              <span>Show terminated ({{ terminatedAppsCount }})</span>
-            </label>
+            <div class="apps-activity-filter" role="group" aria-label="Show applications">
+              <button type="button" :aria-pressed="hideTerminatedApps" @click="setHideTerminatedApps(true)">Active</button>
+              <button type="button" :aria-pressed="!hideTerminatedApps" @click="setHideTerminatedApps(false)">All ({{ apps.length }})</button>
+            </div>
             <div class="apps-sort-controls">
               <label class="apps-sort-label">
                 Sort by
@@ -353,25 +349,29 @@
           </div>
         </div>
         <div class="apps-table-container">
-          <table class="apps-table" aria-label="Applications">
+          <table class="apps-table apps-list-table" aria-label="Applications">
             <thead>
               <tr>
                 <th scope="col">Name</th>
-                <th scope="col" class="col-status">Status</th>
+                <th scope="col">ID</th>
+                <th scope="col" class="col-status">State</th>
+                <th scope="col">Live commit</th>
+                <th scope="col">Candidates</th>
+                <th scope="col">Hostname</th>
                 <th scope="col" class="col-attestation">Attestation</th>
               </tr>
             </thead>
             <tbody>
               <tr v-if="filteredApps.length === 0">
-                <td colspan="3" class="apps-table-empty">
+                <td colspan="7" class="apps-table-empty">
                   <span>No applications match the current search and filter.</span>
                   <button
-                    v-if="hideTerminatedApps && !appSearchQuery.trim() && terminatedAppsCount"
+                    v-if="hideTerminatedApps && !appSearchQuery.trim() && inactiveAppsCount"
                     type="button"
                     class="apps-table-empty-action"
                     @click="setHideTerminatedApps(false)"
                   >
-                    Show terminated
+                    Show all ({{ inactiveAppsCount }} inactive)
                   </button>
                 </td>
               </tr>
@@ -391,11 +391,15 @@
                     <span v-if="app.region" class="region-code">{{ app.region }}</span>
                   </div>
                 </td>
+                <td class="app-id-cell"><code>{{ shortId(app.id) }}</code></td>
                 <td class="app-status-cell">
-                  <span :class="['app-status-badge', `status-${app.state.toLowerCase()}`]">
-                    {{ formatStatusLabel(app.state) }}
+                  <span :class="['app-status-badge', `status-${(app.summary_state || app.state).toLowerCase()}`]">
+                    {{ appStateLabel(app) }}
                   </span>
                 </td>
+                <td><code v-if="app.live_commit_sha">{{ shortSha(app.live_commit_sha) }}</code><span v-else aria-label="No live commit">—</span></td>
+                <td>{{ candidateCountLabel(app) }}</td>
+                <td class="app-hostname-cell">{{ appHostname(app) }}</td>
                 <td class="app-attestation-cell">
                   <button
                     v-if="app.state === 'running' && app.public_ip"
@@ -2056,7 +2060,11 @@ import {
   getDnsGuidance,
 } from "../utils/appDetails.js";
 import {
-  countTerminatedApps,
+  shortId, shortSha, appStateLabel, candidateCountLabel, appHostname,
+  isDeploymentsApp, orderDeployments, deploymentsUrl,
+} from "../utils/deployments.js";
+import {
+  countInactiveApps,
   filterAndSortApps,
   getAppListPreferencesFromStorageEvent,
   getNextAppListPreferences,
@@ -2185,7 +2193,7 @@ export default {
     const hideTerminatedApps = computed(() => appListPreferences.value.hideTerminated);
     const appSortColumn = computed(() => appListPreferences.value.sortColumn);
     const appSortDirection = computed(() => appListPreferences.value.sortDirection);
-    const terminatedAppsCount = computed(() => countTerminatedApps(apps.value));
+    const inactiveAppsCount = computed(() => countInactiveApps(apps.value));
     const builderConfig = ref({ builder_size: 'small', options: [] });
     const dnsTooltipRoot = ref(null);
     const dnsTooltipPinned = ref(false);
@@ -5252,7 +5260,9 @@ export default {
       filteredApps,
       appSearchQuery,
       hideTerminatedApps,
-      terminatedAppsCount,
+      inactiveAppsCount,
+      shortId, shortSha, appStateLabel, candidateCountLabel, appHostname,
+      isDeploymentsApp, orderDeployments, deploymentsUrl,
       appSortColumn,
       appSortDirection,
       setHideTerminatedApps,
