@@ -410,7 +410,7 @@ pub(crate) enum ListError {
     },
 }
 
-pub(crate) async fn list(client: &ApiClient) -> Result<(), ListError> {
+pub(crate) async fn list(client: &ApiClient, all: bool) -> Result<(), ListError> {
     use ListErrorCtx as Ctx;
 
     let config = client
@@ -423,35 +423,108 @@ pub(crate) async fn list(client: &ApiClient) -> Result<(), ListError> {
         .await
         .with_context(Ctx::list_apps())?;
 
-    if apps.is_empty() {
-        output::status("No deployed apps found.");
+    let rows: Vec<Vec<String>> = apps
+        .iter()
+        .filter(|app| all || app_is_active(app))
+        .map(|app| app_list_row(app).to_vec())
+        .collect();
+
+    if rows.is_empty() {
+        output::status(if apps.is_empty() {
+            "No apps found."
+        } else {
+            "No active apps. Use --all to include inactive apps."
+        });
     } else {
-        output::data_header("Apps:");
-        for app in apps {
-            let name = app.resource_name.as_deref().unwrap_or("unnamed");
-            let mut details = vec![app.state.clone()];
-
-            if let Some(config) = &app.configuration
-                && let Some(enclave_config) = config.get("enclave_config")
-                && let (Some(mem), Some(cpus)) = (
-                    enclave_config.get("memory_mb").and_then(|v| v.as_u64()),
-                    enclave_config.get("cpus").and_then(|v| v.as_u64()),
-                )
-            {
-                details.push(format!("{}MB/{}cpu", mem, cpus));
-            }
-
-            if let Some(ip) = &app.public_ip {
-                details.push(ip.clone());
-            }
-            if let Some(dns_status) = &app.dns_status {
-                details.push(["dns:", dns_status].concat());
-            }
-
-            output::status(format!("  {} - {} ({})", app.id, name, details.join(", ")));
-        }
+        output::status(render_table(
+            &[
+                "APP",
+                "ID",
+                "STATE",
+                "LIVE COMMIT",
+                "CANDIDATES",
+                "HOSTNAME",
+            ],
+            &rows,
+        ));
     }
     Ok(())
+}
+
+#[expect(dead_code, reason = "app IDs stay full in `apps list`; no caller yet")]
+pub(crate) fn short_id(id: &str) -> String {
+    id.chars().take(8).collect()
+}
+
+pub(crate) fn state_label(state: &str) -> String {
+    let words = state.replace('_', " ");
+    let mut chars = words.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+/// Servers before M3 send no `active`: only destroyed apps are inactive there.
+pub(crate) fn app_is_active(app: &App) -> bool {
+    app.active.unwrap_or(app.state != "terminated")
+}
+
+pub(crate) fn app_list_row(app: &App) -> [String; 6] {
+    let deployments = app.lifecycle.as_deref() == Some("deployments");
+    [
+        app.resource_name
+            .clone()
+            .unwrap_or_else(|| "unnamed".into()),
+        app.id.clone(),
+        state_label(app.summary_state.as_deref().unwrap_or(&app.state)),
+        app.live_commit_sha
+            .as_deref()
+            .map(|sha| short_sha(sha).to_string())
+            .unwrap_or_else(|| "—".into()),
+        match (deployments, app.candidates, app.candidate_limit) {
+            (false, _, _) => "Legacy".into(),
+            (true, Some(used), Some(limit)) => format!("{used} / {limit}"),
+            (true, _, _) => "—".into(),
+        },
+        app.domain
+            .clone()
+            .or_else(|| app.public_ip.as_ref().and(app.managed_hostname.clone()))
+            .unwrap_or_else(|| "—".into()),
+    ]
+}
+
+pub(crate) fn render_table(header: &[&str], rows: &[Vec<String>]) -> String {
+    let widths: Vec<usize> = (0..header.len())
+        .map(|i| {
+            rows.iter()
+                .map(|row| row[i].chars().count())
+                .chain([header[i].chars().count()])
+                .max()
+                .unwrap_or(0)
+        })
+        .collect();
+    let line = |cells: Vec<&str>| {
+        cells
+            .iter()
+            .enumerate()
+            .map(|(i, cell)| {
+                if i + 1 == cells.len() {
+                    cell.to_string()
+                } else {
+                    format!("{cell:<width$}", width = widths[i])
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("  ")
+    };
+    std::iter::once(line(header.to_vec()))
+        .chain(
+            rows.iter()
+                .map(|row| line(row.iter().map(String::as_str).collect())),
+        )
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
@@ -2061,13 +2134,81 @@ mod tests {
         destroy_deployment, extract_resource_id_from_git_url, fetch_deployment,
         prepare_deployment_verify, short_sha, switch, verify_target,
     };
-    use crate::ApiClient;
+    use super::{app_is_active, app_list_row, render_table, state_label};
+    use crate::{ApiClient, App};
     use sha2::{Digest, Sha256};
     use std::error::Error;
     use std::path::Path;
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn app(value: serde_json::Value) -> App {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn app_list_rows_follow_the_spec_columns() {
+        let live = app(serde_json::json!({
+            "id": "a1b2c3d4-0000-4000-8000-000000000001", "resource_name": "key-service", "state": "running",
+            "provider_resource_id": "i-1", "public_ip": "198.51.100.42", "domain": "key-service.example.com",
+            "lifecycle": "deployments", "summary_state": "running", "active": true,
+            "live_commit_sha": "ff43fef0123", "candidates": 1, "candidate_limit": 3}));
+        // App IDs stay full: `apps get|switch|destroy <app>` take exact IDs.
+        assert_eq!(
+            app_list_row(&live),
+            [
+                "key-service",
+                "a1b2c3d4-0000-4000-8000-000000000001",
+                "Running",
+                "ff43fef",
+                "1 / 3",
+                "key-service.example.com"
+            ]
+            .map(String::from)
+        );
+        let new = app(serde_json::json!({
+            "id": "a1b2c3d4-0000-4000-8000-000000000003", "resource_name": "new-service", "state": "initialized",
+            "provider_resource_id": "x", "lifecycle": "deployments", "summary_state": "initialized",
+            "active": true, "candidates": 0, "candidate_limit": 3}));
+        assert_eq!(
+            app_list_row(&new),
+            [
+                "new-service",
+                "a1b2c3d4-0000-4000-8000-000000000003",
+                "Initialized",
+                "—",
+                "0 / 3",
+                "—"
+            ]
+            .map(String::from)
+        );
+        let legacy = app(serde_json::json!({
+            "id": "a1b2c3d4-0000-4000-8000-000000000004", "resource_name": "old-service", "state": "running",
+            "provider_resource_id": "i-4", "public_ip": "203.0.113.5", "managed_hostname": "a1b2.apps.caution.sh",
+            "lifecycle": "legacy", "summary_state": "running", "active": true}));
+        assert_eq!(
+            app_list_row(&legacy)[3..],
+            ["—", "Legacy", "a1b2.apps.caution.sh"].map(String::from)
+        );
+        // Responses from older servers: activity falls back to the state.
+        let old =
+            app(serde_json::json!({"id": "x", "state": "terminated", "provider_resource_id": "x"}));
+        assert!(!app_is_active(&old));
+        assert_eq!(state_label("cleanup_pending"), "Cleanup pending");
+    }
+
+    #[test]
+    fn tables_align_columns() {
+        let table = render_table(
+            &["APP", "ID"],
+            &[
+                vec!["key-service".into(), "a1".into()],
+                vec!["k".into(), "a2".into()],
+            ],
+        );
+        assert_eq!(table, "APP          ID\nkey-service  a1\nk            a2");
+    }
 
     const DEPLOYMENT: &str = "550e8400-e29b-41d4-a716-446655440000";
     const APP: &str = "660e8400-e29b-41d4-a716-446655440000";

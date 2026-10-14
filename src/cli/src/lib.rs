@@ -595,8 +595,15 @@ enum AccountCommands {
 enum AppCommands {
     #[command(about = "Create a new Caution-managed application")]
     Create,
-    #[command(about = "List all applications")]
-    List,
+    #[command(about = "List active applications (-a includes inactive ones)")]
+    List {
+        #[arg(
+            short = 'a',
+            long = "all",
+            help = "Include inactive apps (terminal history only)"
+        )]
+        all: bool,
+    },
     #[command(about = "Get details of an application")]
     Get {
         #[arg(help = "App ID (default: from .caution/deployment)")]
@@ -921,6 +928,16 @@ pub struct App {
     pub lifecycle: Option<String>,
     #[serde(default)]
     pub live_deployment_id: Option<String>,
+    #[serde(default)]
+    pub summary_state: Option<String>,
+    #[serde(default)]
+    pub active: Option<bool>,
+    #[serde(default)]
+    pub live_commit_sha: Option<String>,
+    #[serde(default)]
+    pub candidates: Option<i64>,
+    #[serde(default)]
+    pub candidate_limit: Option<i64>,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -3813,8 +3830,8 @@ pub async fn run() -> Result<(), RunError> {
                     .await
                     .with_context(Ctx::command_dispatch())?;
             }
-            AppCommands::List => {
-                apps::crud::list(&client)
+            AppCommands::List { all } => {
+                apps::crud::list(&client, all)
                     .await
                     .with_context(Ctx::command_dispatch())?;
             }
@@ -4215,6 +4232,26 @@ mod tests {
                     ..
                 }
             } if d == "d2"
+        ));
+    }
+
+    #[test]
+    fn apps_list_accepts_all() {
+        assert!(matches!(
+            Cli::try_parse_from(["caution", "apps", "list", "-a"])
+                .unwrap()
+                .command,
+            Commands::Apps {
+                command: AppCommands::List { all: true }
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["caution", "apps", "list"])
+                .unwrap()
+                .command,
+            Commands::Apps {
+                command: AppCommands::List { all: false }
+            }
         ));
     }
 
