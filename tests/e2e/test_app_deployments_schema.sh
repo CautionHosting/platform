@@ -12,6 +12,8 @@
 #   4. Only one reserved/building/provisioning deployment per app
 #   5. One running meter per deployment, and still one per Legacy app
 #   6. Candidate capacity reservations need no VPC or EIP
+#   7. Deployments record their bundle hash
+#   8. deployment_events records requests and appended outcomes
 
 set -euo pipefail
 
@@ -55,6 +57,7 @@ cleanup() {
         docker exec postgres-test psql -U postgres -d caution_test -c "
 DELETE FROM tracked_resources WHERE application_id = '$APP_ID';
 DELETE FROM fully_managed_capacity_reservations WHERE resource_id = '$APP_ID';
+DELETE FROM deployment_events WHERE app_id = '$APP_ID';
 DELETE FROM app_deployments WHERE app_id = '$APP_ID';
 " >/dev/null 2>&1 || true
     fi
@@ -209,3 +212,22 @@ STEP_NUM=7
                  WHERE table_name = 'app_deployments' AND column_name = 'bundle_hash'")" = "1" ] \
     || step_fail "app_deployments.bundle_hash exists"
 step_pass "Deployments record their bundle hash"
+
+# ── Step 8: Deployment events ────────────────────────────────────────
+
+STEP_NUM=8
+OPERATION=$(psql_value "SELECT gen_random_uuid()")
+psql_exec "INSERT INTO deployment_events (operation_id, organization_id, app_id, operation, outcome, auth_method)
+           VALUES ('$OPERATION', '$ORG_ID', '$APP_ID', 'switch', 'requested', 'passkey')" \
+    || step_fail "A switch request is recorded"
+if psql_exec "INSERT INTO deployment_events (operation_id, organization_id, app_id, operation, outcome)
+              VALUES ('$OPERATION', '$ORG_ID', '$APP_ID', 'switch', 'requested')" 2>/dev/null; then
+    step_fail "One request row per operation"
+fi
+psql_exec "INSERT INTO deployment_events (operation_id, organization_id, app_id, operation, outcome)
+           VALUES ('$OPERATION', '$ORG_ID', '$APP_ID', 'switch', 'succeeded')" || step_fail "Outcomes append"
+if psql_exec "INSERT INTO deployment_events (operation_id, organization_id, app_id, operation, outcome)
+              VALUES (gen_random_uuid(), '$ORG_ID', '$APP_ID', 'rename', 'requested')" 2>/dev/null; then
+    step_fail "Unknown operations are rejected"
+fi
+step_pass "deployment_events records requests and appended outcomes"

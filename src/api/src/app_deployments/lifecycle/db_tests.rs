@@ -56,6 +56,53 @@ async fn complete_running_concurrency() {
     pool.close().await;
 }
 
+#[tokio::test]
+#[ignore = "run bash tests/e2e/test_app_deployments_db.sh (isolated PostgreSQL)"]
+async fn an_operation_records_at_most_one_outcome() {
+    use crate::app_deployments::events::{self, NewOperation, Operation, Outcome};
+
+    let pool = test_pool().await;
+    let f = fixture(&pool, "running").await;
+    let actor = crate::AuthContext::session(f.user);
+    let operation_id = events::begin(
+        &pool,
+        NewOperation {
+            org_id: f.org,
+            app_id: f.app,
+            operation: Operation::DeploymentDestroy,
+            actor: &actor,
+            previous_deployment_id: None,
+            target_deployment_id: Some(f.target),
+            signed_request_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    events::finish(&pool, operation_id, Outcome::Succeeded, None).await;
+    events::finish(&pool, operation_id, Outcome::Failed, Some("late")).await;
+    let outcomes: Vec<String> = sqlx::query_scalar(
+        "SELECT outcome FROM deployment_events
+         WHERE operation_id = $1 AND outcome <> 'requested'",
+    )
+    .bind(operation_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(outcomes, ["succeeded"]);
+    // The schema, not only the guard, refuses a second outcome (concurrent writers).
+    let raced = sqlx::query(
+        "INSERT INTO deployment_events (operation_id, organization_id, app_id, operation, outcome)
+         VALUES ($1, $2, $3, 'deployment_destroy', 'failed')",
+    )
+    .bind(operation_id)
+    .bind(f.org)
+    .bind(f.app)
+    .execute(&pool)
+    .await;
+    assert!(raced.is_err());
+    pool.close().await;
+}
+
 /// The EC2 response to the EIP move, controlled by the test.
 #[derive(Clone, Copy, PartialEq)]
 enum Response {
