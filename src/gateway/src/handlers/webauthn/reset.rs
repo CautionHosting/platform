@@ -74,6 +74,12 @@ pub enum ResetRegisterError {
         location: Location,
     },
 
+    #[error("This security key is already registered to another account. [{location}]")]
+    CredentialAlreadyRegistered {
+        #[location]
+        location: Location,
+    },
+
     #[error("Invalid registration request body. [{location}]")]
     InvalidPayload {
         #[location]
@@ -122,6 +128,10 @@ impl IntoResponse for ResetRegisterError {
             Self::TooManyPending { .. } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many pending registrations. Please try again later.".to_string(),
+            ),
+            Self::CredentialAlreadyRegistered { .. } => (
+                StatusCode::CONFLICT,
+                "This security key is already registered to another account.".to_string(),
             ),
             Self::Internal { .. } => {
                 tracing::error!(?self, "Reset registration error");
@@ -274,6 +284,20 @@ pub async fn finish_reset_register_handler(
         .cloned()
         .filter(|value| value.is_array());
     let resident = read_credprops_rk(&reg_response);
+
+    if db::credential_conflicts_with_other_user(&state.db, &credential_id, &passkey_json)
+        .await
+        .with_context(Ctx::internal())?
+    {
+        tracing::warn!(
+            credential_id = %hex::encode(&credential_id),
+            user_id = %pending.user_id,
+            "Reset registration rejected: credential ID already registered to another user with a different key"
+        );
+        return Err(ResetRegisterError::CredentialAlreadyRegistered {
+            location: std::panic::Location::caller(),
+        });
+    }
 
     // Atomic: credential INSERT + token mark-used + session creation in a
     // single transaction. If any step fails the entire operation rolls back.

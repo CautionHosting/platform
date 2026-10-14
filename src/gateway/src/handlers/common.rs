@@ -462,6 +462,12 @@ pub enum RegisterError {
         location: Location,
     },
 
+    #[error("This security key is already registered to another account. [{location}]")]
+    CredentialAlreadyRegistered {
+        #[location]
+        location: Location,
+    },
+
     #[error("registration challenge failed [{location}]")]
     ChallengeFailed {
         #[location]
@@ -520,6 +526,10 @@ impl IntoResponse for RegisterError {
             Self::UsernameTaken { .. } => (
                 StatusCode::CONFLICT,
                 "This username is already taken.".to_string(),
+            ),
+            Self::CredentialAlreadyRegistered { .. } => (
+                StatusCode::CONFLICT,
+                "This security key is already registered to another account.".to_string(),
             ),
             Self::InvalidPayload { .. } => (
                 StatusCode::BAD_REQUEST,

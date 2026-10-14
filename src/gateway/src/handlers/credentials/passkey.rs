@@ -81,6 +81,12 @@ pub enum PasskeyError {
         location: Location,
     },
 
+    #[error("This security key is already registered to another account. [{location}]")]
+    CredentialAlreadyRegistered {
+        #[location]
+        location: Location,
+    },
+
     #[error("invalid passkey request [{location}]")]
     BadRequest {
         #[location]
@@ -156,6 +162,11 @@ impl IntoResponse for PasskeyError {
             Self::LastCredential { .. } => (
                 StatusCode::CONFLICT,
                 "You must keep at least one passkey on your account.",
+            )
+                .into_response(),
+            Self::CredentialAlreadyRegistered { .. } => (
+                StatusCode::CONFLICT,
+                "This security key is already registered to another account.",
             )
                 .into_response(),
             Self::BadRequest { .. } => {
@@ -415,6 +426,20 @@ pub async fn finish_add_passkey_handler(
         .cloned()
         .filter(|value| value.is_array());
     let resident = read_credprops_rk(&reg_response);
+
+    if db::credential_conflicts_with_other_user(&state.db, &credential_id, &passkey_json)
+        .await
+        .with_context(Ctx::internal())?
+    {
+        tracing::warn!(
+            credential_id = %hex::encode(&credential_id),
+            user_id = %user_id,
+            "Passkey registration rejected: credential ID already registered to another user with a different key"
+        );
+        return Err(PasskeyError::CredentialAlreadyRegistered {
+            location: std::panic::Location::caller(),
+        });
+    }
 
     db::save_fido2_credential(
         &state.db,

@@ -232,6 +232,19 @@ pub(crate) async fn finish_register_handler(
     let passkey_json = serde_json::to_vec(&seckey).with_context(Ctx::internal())?;
     let resident = read_credprops_rk(&reg_response);
 
+    if db::credential_conflicts_with_other_user(&state.db, &credential_id, &passkey_json)
+        .await
+        .with_context(Ctx::internal())?
+    {
+        tracing::warn!(
+            credential_id = %hex::encode(&credential_id),
+            "Registration rejected: credential ID already registered to another user with a different key"
+        );
+        return Err(RegisterError::CredentialAlreadyRegistered {
+            location: std::panic::Location::caller(),
+        });
+    }
+
     db::save_fido2_credential(
         &state.db,
         &credential_id,

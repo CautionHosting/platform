@@ -613,6 +613,39 @@ where
     Ok(())
 }
 
+/// Returns `true` if the given `credential_id` is already registered to any user
+/// with a **different** public key than `public_key`. This detects the forged-rawId
+/// attack where a malicious client crafts a registration response reusing another
+/// user's credential ID with their own key pair. A legitimate re-registration of
+/// the same physical authenticator produces an identical serialized SecurityKey,
+/// so the public keys match and no conflict is reported.
+#[tracing::instrument(skip_all, err)]
+pub async fn credential_conflicts_with_other_user<'e, E>(
+    executor: E,
+    credential_id: &[u8],
+    public_key: &[u8],
+) -> Result<bool, DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let conflict: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM fido2_credentials
+            WHERE credential_id = $1 AND public_key != $2
+        )",
+    )
+    .bind(credential_id)
+    .bind(public_key)
+    .fetch_one(executor)
+    .await
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "credential_conflicts_with_other_user",
+    ))?;
+
+    Ok(conflict)
+}
+
 fn registration_uv_verified(bytes: &[u8]) -> bool {
     use webauthn_rs::prelude::{Credential, SecurityKey};
     serde_json::from_slice::<SecurityKey>(bytes)
@@ -2047,5 +2080,89 @@ mod credential_owner_tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires DATABASE_URL pointing to disposable Postgres"]
+    async fn credential_conflict_detects_forged_rawid(pool: PgPool) {
+        // The forged-rawId attack: Mallory registers a NEW key but crafts the
+        // rawId to match Alice's existing credential. The public keys differ,
+        // so credential_conflicts_with_other_user must return true.
+        sqlx::raw_sql(
+            "CREATE TABLE fido2_credentials (
+                user_id UUID NOT NULL, credential_id BYTEA NOT NULL,
+                public_key BYTEA NOT NULL,
+                UNIQUE(user_id, credential_id))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let alice = Uuid::new_v4();
+        let mallory = Uuid::new_v4();
+        let alice_key = b"alice-public-key-json";
+        let mallory_key = b"mallory-public-key-json";
+
+        // Alice registers her key.
+        sqlx::query(
+            "INSERT INTO fido2_credentials (user_id, credential_id, public_key) VALUES ($1, $2, $3)",
+        )
+        .bind(alice)
+        .bind(b"alice-credential-id")
+        .bind(alice_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Mallory attempts to register with Alice's credential ID but her own key.
+        let conflict =
+            credential_conflicts_with_other_user(&pool, b"alice-credential-id", mallory_key)
+                .await
+                .unwrap();
+        assert!(
+            conflict,
+            "forged rawId with different public key must be detected as a conflict"
+        );
+
+        // Same physical key (identical public key) is NOT a conflict — this is
+        // the legitimate multi-account sharing case.
+        let no_conflict =
+            credential_conflicts_with_other_user(&pool, b"alice-credential-id", alice_key)
+                .await
+                .unwrap();
+        assert!(
+            !no_conflict,
+            "same public key (same physical authenticator) must not be flagged as a conflict"
+        );
+
+        // A completely new credential ID has no conflict.
+        let fresh = credential_conflicts_with_other_user(&pool, b"brand-new-id", mallory_key)
+            .await
+            .unwrap();
+        assert!(
+            !fresh,
+            "a new credential ID must not be flagged as a conflict"
+        );
+
+        // After Mallory's key is somehow inserted (e.g., via a race), the
+        // conflict check for Alice's key still detects it.
+        sqlx::query(
+            "INSERT INTO fido2_credentials (user_id, credential_id, public_key) VALUES ($1, $2, $3)",
+        )
+        .bind(mallory)
+        .bind(b"alice-credential-id")
+        .bind(mallory_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let still_conflicts =
+            credential_conflicts_with_other_user(&pool, b"alice-credential-id", alice_key)
+                .await
+                .unwrap();
+        assert!(
+            still_conflicts,
+            "once a conflicting key exists, the original owner's re-registration must also be flagged"
+        );
     }
 }
