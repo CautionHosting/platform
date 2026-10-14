@@ -66,6 +66,7 @@
 
         <AppDeployments v-if="isDeploymentsApp(selectedApp)" :app="selectedApp" :deployments="selectedDeployments" :sign="buildSignedHeaders" :fetch="authFetch" @changed="refreshSelectedApp" />
         <p v-else class="legacy-lifecycle">Legacy · single deployment<span v-if="selectedApp.configuration?.commit_sha"> · <code>{{ shortSha(selectedApp.configuration.commit_sha) }}</code></span><span v-else> · commit unknown</span></p>
+        <AppHistory v-if="isDeploymentsApp(selectedApp)" :app-id="selectedApp.id" :fetch="authFetch" :refresh-key="historyKey" />
 
         <div v-if="appDetailsOpen" id="app-details">
         <section class="deployment-details" aria-labelledby="deployment-details-title">
@@ -193,9 +194,11 @@
         </section>
         </div>
 
+        <h3 class="app-detail-section-title">Settings</h3>
+
         <!-- Builder Configuration -->
         <div class="app-detail-section app-detail-section--fullwidth app-detail-section--borderless">
-          <h3 class="app-detail-section-title">Build instance</h3>
+          <h4 class="app-detail-section-title">Build instance</h4>
           <p class="app-detail-helper-text">Select the dedicated builder size for this app. Larger builders compile faster.</p>
           <div class="builder-size-options">
             <button
@@ -209,6 +212,8 @@
             </button>
           </div>
         </div>
+
+        <RetainedInstances v-if="isDeploymentsApp(selectedApp)" :deployments="selectedDeployments" />
 
         <!-- Deployment Section (full width, outside the two-column layout) -->
         <details v-if="selectedApp.git_url" class="app-detail-section app-detail-section--fullwidth app-detail-section--borderless">
@@ -226,15 +231,16 @@
           <div class="app-detail-danger-content">
             <div class="app-detail-danger-item">
               <div class="app-detail-danger-info">
-                <span class="app-detail-danger-title">Delete app</span>
-                <span class="app-detail-danger-description">This will permanently delete the app and all data.</span>
+                <span class="app-detail-danger-title">Destroy app</span>
+                <span v-if="isDeploymentsApp(selectedApp)" class="app-detail-danger-description">{{ destroyAppText }}</span>
+                <span v-else class="app-detail-danger-description">This will permanently delete the app and all data.</span>
               </div>
               <button @click="destroyApp(selectedApp.id, selectedApp.resource_name)" class="app-detail-action-btn app-detail-action-btn--danger">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <polyline points="3 6 5 6 21 6"/>
                   <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
                 </svg>
-                Delete app
+                Destroy app
               </button>
             </div>
           </div>
@@ -1332,16 +1338,17 @@ make build-cli
 
     <!-- Delete App Confirmation Modal -->
     <div v-if="showDestroyModal" class="modal-overlay" @click="cancelDestroy">
-      <div class="modal-content" @click.stop>
-        <h3 class="modal-title">Delete application</h3>
-        <p class="modal-message">Are you sure you want to delete "{{ appToDestroy?.name }}"? This will stop the enclave and delete all data.</p>
+      <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="destroy-app-title" @click.stop>
+        <h3 id="destroy-app-title" class="modal-title">Destroy app</h3>
+        <p v-if="isDeploymentsApp(selectedApp)" class="modal-message">Destroy "{{ appToDestroy?.name }}"? {{ destroyAppText }}</p>
+        <p v-else class="modal-message">Are you sure you want to delete "{{ appToDestroy?.name }}"? This will stop the enclave and delete all data.</p>
         <p class="modal-message modal-message--subtle modal-message--with-icon">
           <img src="/assets/icons/icons__apps/hourglass.svg" alt="" class="modal-time-icon" />
           This may take a few minutes to complete.
         </p>
         <div class="modal-actions">
           <button @click="cancelDestroy" class="btn-secondary">Cancel</button>
-          <button @click="confirmDestroy" class="btn-danger">Delete</button>
+          <button @click="confirmDestroy" class="btn-danger">Destroy app</button>
         </div>
       </div>
     </div>
@@ -1994,6 +2001,8 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import DashboardLayout from "../components/DashboardLayout.vue";
 import AttestationModal from "../components/AttestationModal.vue";
 import AppDeployments from "../components/AppDeployments.vue";
+import AppHistory from "../components/AppHistory.vue";
+import RetainedInstances from "../components/RetainedInstances.vue";
 import CopyIconButton from "../components/CopyIconButton.vue";
 import QuorumBundleCreate from "../components/QuorumBundleCreate.vue";
 import { createBundleSubmitter } from "../utils/quorumCreation.js";
@@ -2008,7 +2017,7 @@ import {
 } from "../utils/appDetails.js";
 import {
   shortId, shortSha, appStateLabel, candidateCountLabel, appHostname,
-  isDeploymentsApp, orderDeployments, deploymentsUrl,
+  isDeploymentsApp, orderDeployments, deploymentsUrl, destroyAppSentence,
 } from "../utils/deployments.js";
 import {
   countInactiveApps,
@@ -2066,6 +2075,8 @@ export default {
   components: {
     DashboardLayout,
     AppDeployments,
+    AppHistory,
+    RetainedInstances,
     CopyIconButton,
     AttestationModal,
     QuorumBundleCreate,
@@ -2237,12 +2248,21 @@ export default {
       if (!isDeploymentsApp(app)) { selectedDeployments.value = []; return; }
       const response = await authFetch(deploymentsUrl(appId)).catch(() => null);
       if (!response?.ok) {
+        deploymentsLoaded.value = false;
         showToast('Deployments could not be refreshed; the list may be stale.', 'error');
         return;
       }
-      if (selectedApp.value?.id === appId) selectedDeployments.value = await response.json();
+      if (selectedApp.value?.id === appId) {
+        selectedDeployments.value = await response.json();
+        deploymentsLoaded.value = true;
+      }
     };
+    // Whether `selectedDeployments` holds the selected app's fetched list; until then no count is shown.
+    const deploymentsLoaded = ref(false);
+    const destroyAppText = computed(() => destroyAppSentence(deploymentsLoaded.value ? orderDeployments(selectedDeployments.value).length : null));
+    const historyKey = ref(0);
     const refreshSelectedApp = async () => {
+      historyKey.value += 1;
       await loadApps();
       if (selectedApp.value) await loadDeployments(selectedApp.value.id);
     };
@@ -2250,6 +2270,7 @@ export default {
     const openAppDetail = async (app) => {
       selectedApp.value = app;
       selectedDeployments.value = [];
+      deploymentsLoaded.value = false;
       appDetailsOpen.value = false;
       loadBuilderConfig(app.id);
       loadDeployments(app.id);
@@ -2286,6 +2307,7 @@ export default {
     const closeAppDetail = () => {
       selectedApp.value = null;
       selectedDeployments.value = [];
+      deploymentsLoaded.value = false;
       copiedField.value = null;
       closeDnsTooltip();
     };
@@ -5235,7 +5257,7 @@ export default {
       inactiveAppsCount,
       shortId, shortSha, appStateLabel, candidateCountLabel, appHostname,
       isDeploymentsApp, orderDeployments, deploymentsUrl,
-      selectedDeployments, appDetailsOpen, refreshSelectedApp, buildSignedHeaders, authFetch,
+      selectedDeployments, destroyAppText, historyKey, appDetailsOpen, refreshSelectedApp, buildSignedHeaders, authFetch,
       appSortColumn,
       appSortDirection,
       setHideTerminatedApps,

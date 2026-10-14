@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
-  appStateLabel, candidateCountLabel, canDestroy, canSwitch, destroyDeployment, historyRowLabel,
+  appStateLabel, candidateCountLabel, canDestroy, canSwitch, destroyAppSentence, destroyDeployment, historyRowLabel,
   deploymentsUrl, isActiveApp, orderDeployments, retainedInstanceRows, retainedMonthlyTotal, roleLabel,
   switchDeployment, switchRequestBody, verifyCommand,
 } from '../src/utils/deployments.js'
@@ -97,4 +97,10 @@ test('history rows name the operation, outcome and actor', () => {
   assert.equal(historyRowLabel({ kind: 'operation', operation: 'switch', outcome: 'succeeded', previous_deployment_id: 'a0000000-1', target_deployment_id: 'b0000000-1' }), 'Switch a0000000 → b0000000 · Succeeded')
   assert.equal(historyRowLabel({ kind: 'attempt', outcome: 'failed', target_deployment_id: 'c0000000-1', commit_sha: 'b6e8c92aa' }), 'Attempt c0000000 · b6e8c92 · Failed')
   assert.equal(historyRowLabel({ kind: 'operation', operation: 'deployment_destroy', outcome: 'requested', target_deployment_id: 'c0000000-1' }), 'Deployment destroy c0000000 · In progress')
+})
+
+test('the destroy-app sentence never invents a retained count', () => {
+  assert.equal(destroyAppSentence(null), 'Destroys the app and every retained deployment. The service becomes unavailable.')
+  assert.equal(destroyAppSentence(1), 'Destroys the app and its 1 retained deployment. The service becomes unavailable.')
+  assert.equal(destroyAppSentence(3), 'Destroys the app and its 3 retained deployments. The service becomes unavailable.')
 })

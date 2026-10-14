@@ -154,3 +154,7 @@ export const historyRowLabel = (entry) => {
   if (entry?.operation === 'switch') return `Switch ${shortId(entry.previous_deployment_id) || 'none'} → ${target} · ${outcomeLabel(entry.outcome)}`
   return `${sentence(entry?.operation)}${target ? ` ${target}` : ''} · ${outcomeLabel(entry?.outcome)}`
 }
+
+// `count` is null until the deployments list has loaded: never state a number then.
+export const destroyAppSentence = (count) =>
+  `Destroys the app and ${count === null || count === undefined ? 'every retained deployment' : `its ${count} retained deployment${count === 1 ? '' : 's'}`}. The service becomes unavailable.`
