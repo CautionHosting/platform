@@ -872,7 +872,14 @@ pub async fn qr_login_authenticate_finish_handler(
                     }
                 },
                 expected @ (UsernameScope::Scoped { .. } | UsernameScope::Decoy { .. }) => {
-                    let expected_user = expected.expected_user_id();
+                    let Some(expected_user) = expected.expected_user_id() else {
+                        tracing::debug!("QR login finish: credential not found for scope");
+                        return Err(QrLoginFinishError::UnexpectedCredentialOwner {
+                            expected_user_id: None,
+                            actual_user_id: Uuid::nil(),
+                            location: std::panic::Location::caller(),
+                        });
+                    };
                     if owners.contains(&expected_user) {
                         expected_user
                     } else {
@@ -934,7 +941,14 @@ pub async fn qr_login_authenticate_finish_handler(
                     }
                 },
                 expected @ (UsernameScope::Scoped { .. } | UsernameScope::Decoy { .. }) => {
-                    let expected_user = expected.expected_user_id();
+                    let Some(expected_user) = expected.expected_user_id() else {
+                        tracing::debug!("QR login finish: credential not found for scope");
+                        return Err(QrLoginFinishError::UnexpectedCredentialOwner {
+                            expected_user_id: None,
+                            actual_user_id: Uuid::nil(),
+                            location: std::panic::Location::caller(),
+                        });
+                    };
                     if owners.contains(&expected_user) {
                         expected_user
                     } else {

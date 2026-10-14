@@ -267,22 +267,11 @@ pub(crate) enum UsernameScope {
 impl UsernameScope {
     /// The account this challenge was begun for, when one is known. `Scoped`
     /// always has one; `Decoy` may not (unknown username); `Unscoped` never did.
-    pub(crate) fn expected_user_id(&self) -> Uuid {
+    pub(crate) fn expected_user_id(&self) -> Option<Uuid> {
         match self {
-            UsernameScope::Scoped { expected_user_id } => *expected_user_id,
-            UsernameScope::Decoy {
-                expected_user_id: Some(id),
-            } => *id,
-            // `Unscoped` and the unknown-username decoy have no expected account.
-            // This is only ever called behind a scope match that excludes both,
-            // so reaching it would be a logic error — surface it loudly rather
-            // than fabricate a user id.
-            UsernameScope::Unscoped
-            | UsernameScope::Decoy {
-                expected_user_id: None,
-            } => {
-                unreachable!("expected_user_id() called on a scope with no expected user")
-            }
+            UsernameScope::Scoped { expected_user_id } => Some(*expected_user_id),
+            UsernameScope::Decoy { expected_user_id } => *expected_user_id,
+            UsernameScope::Unscoped => None,
         }
     }
 }
@@ -782,14 +771,15 @@ pub async fn finish_login_handler(
                     }
                 },
                 expected @ (UsernameScope::Scoped { .. } | UsernameScope::Decoy { .. }) => {
-                    let expected_user = expected.expected_user_id();
+                    let Some(expected_user) = expected.expected_user_id() else {
+                        return Err(LoginError::CredentialNotFound {
+                            location: std::panic::Location::caller(),
+                            source: Box::new(db::DbError::not_found("get_user_ids_by_credential")),
+                        });
+                    };
                     if owners.contains(&expected_user) {
                         expected_user
                     } else {
-                        // The asserted credential is not registered to the
-                        // account this challenge was begun for (or not at all):
-                        // an authentication outcome, collapsed below into the
-                        // same opaque 401 as every other failure.
                         return Err(LoginError::CredentialNotFound {
                             location: std::panic::Location::caller(),
                             source: Box::new(db::DbError::not_found("get_user_ids_by_credential")),
@@ -863,7 +853,12 @@ pub async fn finish_login_handler(
                     }
                 },
                 expected @ (UsernameScope::Scoped { .. } | UsernameScope::Decoy { .. }) => {
-                    let expected_user = expected.expected_user_id();
+                    let Some(expected_user) = expected.expected_user_id() else {
+                        return Err(LoginError::CredentialNotFound {
+                            location: std::panic::Location::caller(),
+                            source: Box::new(db::DbError::not_found("get_user_ids_by_credential")),
+                        });
+                    };
                     if owners.contains(&expected_user) {
                         expected_user
                     } else {
