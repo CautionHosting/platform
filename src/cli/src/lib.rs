@@ -500,7 +500,7 @@ enum Commands {
             short = 'd',
             long = "deployment",
             conflicts_with = "attestation_url",
-            help = "Verify one deployment of the app (stores its trust separately)"
+            help = "Verify one deployment (ID, or a unique prefix of at least 8 characters); stores its trust separately"
         )]
         deployment: Option<String>,
         #[arg(
@@ -608,7 +608,11 @@ enum AppCommands {
     Get {
         #[arg(help = "App ID (default: from .caution/deployment)")]
         id: Option<String>,
-        #[arg(short = 'd', long = "deployment", help = "Show one deployment")]
+        #[arg(
+            short = 'd',
+            long = "deployment",
+            help = "Show one deployment (ID, or a unique prefix of at least 8 characters)"
+        )]
         deployment: Option<String>,
         #[arg(
             long,
@@ -624,7 +628,7 @@ enum AppCommands {
             short = 'd',
             long = "deployment",
             conflicts_with = "force_delete",
-            help = "Destroy one non-live deployment instead of the app"
+            help = "Destroy one non-live deployment (ID, or a unique prefix of at least 8 characters) instead of the app"
         )]
         deployment: Option<String>,
         #[arg(short, long, help = "Skip confirmation prompt")]
@@ -644,7 +648,11 @@ enum AppCommands {
     Switch {
         #[arg(help = "App ID (default: from .caution/deployment)")]
         id: Option<String>,
-        #[arg(short = 'd', long = "deployment", help = "Deployment ID to make live")]
+        #[arg(
+            short = 'd',
+            long = "deployment",
+            help = "Deployment to make live (ID, or a unique prefix of at least 8 characters)"
+        )]
         deployment: String,
         #[arg(short, long, help = "Skip the confirmation prompt")]
         force: bool,
@@ -847,7 +855,7 @@ enum SecretCommands {
         #[arg(
             short = 'd',
             long = "deployment",
-            help = "Release to one deployment (its endpoint, `verify -d` trust and recorded bundle)"
+            help = "Release to one deployment (ID, or a unique prefix of at least 8 characters; its endpoint, `verify -d` trust and recorded bundle)"
         )]
         deployment: Option<String>,
         #[arg(long, help = "Path to quorum bundle JSON file")]

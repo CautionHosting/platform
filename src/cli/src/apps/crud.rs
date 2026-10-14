@@ -451,7 +451,6 @@ pub(crate) async fn list(client: &ApiClient, all: bool) -> Result<(), ListError>
     Ok(())
 }
 
-#[expect(dead_code, reason = "app IDs stay full in `apps list`; no caller yet")]
 pub(crate) fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
 }
@@ -600,6 +599,29 @@ pub(crate) async fn get(
             .await
             .with_context(Ctx::fetch_app())?
     };
+    if app.lifecycle.as_deref() == Some("deployments") {
+        let deployments = list_deployments(client, &app.id, true, allow_ci_ssh)
+            .await
+            .with_context(Ctx::list_deployments())?;
+        // A failed history fetch never fails the command.
+        let history = if allow_ci_ssh {
+            RecentHistory::Skipped
+        } else {
+            match get_json::<HistoryPage>(
+                client,
+                &format!("/api/resources/{}/history?limit=5", app.id),
+                false,
+            )
+            .await
+            {
+                Ok(page) => RecentHistory::Entries(page.entries),
+                Err(_) => RecentHistory::Unavailable,
+            }
+        };
+        print_deployments(&app, &deployments, &history);
+        return Ok(());
+    }
+    output::status("Lifecycle: Legacy · single deployment");
     let name = app.resource_name.as_deref().unwrap_or("unnamed");
 
     output::data_header("App Details:");
@@ -656,13 +678,6 @@ pub(crate) async fn get(
         app.dns_error.as_deref(),
         app.domain.as_deref(),
     );
-
-    if app.lifecycle.as_deref() == Some("deployments") {
-        let deployments = list_deployments(client, &app.id, allow_ci_ssh)
-            .await
-            .with_context(Ctx::list_deployments())?;
-        print_deployments(&app, deployments);
-    }
 
     Ok(())
 }
@@ -899,6 +914,9 @@ pub(crate) struct DeploymentView {
     pub(crate) app_id: String,
     pub(crate) role: String,
     pub(crate) status: String,
+    /// Servers before M3 send none: [`is_retained`] falls back to the status.
+    #[serde(default)]
+    retained: Option<bool>,
     failure_kind: Option<String>,
     pushed_ref: Option<String>,
     pub(crate) commit_sha: Option<String>,
@@ -925,6 +943,79 @@ fn api_error_text(body: &str) -> String {
 /// The canonical form of a UUID, so IDs are safe to put in URLs and file paths.
 fn canonical_id(id: &str) -> Option<String> {
     uuid::Uuid::parse_str(id).ok().map(|id| id.to_string())
+}
+
+/// Failure modes for [`parse_selector`] and [`resolve_prefix`].
+/// (Plain `thiserror`: `CtxError` needs a variant with a source, and these have none.)
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum SelectorError {
+    #[error(
+        "{selector:?} is not a deployment ID; use the full ID or at least its first 8 characters [{location:?}]"
+    )]
+    Invalid {
+        selector: String,
+        location: Location,
+    },
+
+    #[error(
+        "deployment selector {selector:?} matches several deployments: {matches:?} [{location:?}]"
+    )]
+    Ambiguous {
+        selector: String,
+        matches: Vec<String>,
+        location: Location,
+    },
+
+    #[error("no deployment of this app starts with {selector:?} [{location:?}]")]
+    NotFound {
+        selector: String,
+        location: Location,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) enum Selector {
+    Exact(String),
+    Prefix(String),
+}
+
+/// A full deployment ID, or the first 8+ hex characters of one (as tables print
+/// it). Checked before any request, so nothing else reaches a URL.
+pub(crate) fn parse_selector(selector: &str) -> Result<Selector, SelectorError> {
+    if let Some(id) = canonical_id(selector) {
+        return Ok(Selector::Exact(id));
+    }
+    let prefix = selector.to_ascii_lowercase();
+    if (8..36).contains(&prefix.len()) && prefix.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+    {
+        Ok(Selector::Prefix(prefix))
+    } else {
+        Err(SelectorError::Invalid {
+            selector: selector.into(),
+            location: std::panic::Location::caller(),
+        })
+    }
+}
+
+/// Resolves once; every operation then uses the exact ID.
+pub(crate) fn resolve_prefix(prefix: &str, ids: &[String]) -> Result<String, SelectorError> {
+    let matches: Vec<String> = ids
+        .iter()
+        .filter(|id| id.starts_with(prefix))
+        .cloned()
+        .collect();
+    match matches.as_slice() {
+        [id] => Ok(id.clone()),
+        [] => Err(SelectorError::NotFound {
+            selector: prefix.into(),
+            location: std::panic::Location::caller(),
+        }),
+        _ => Err(SelectorError::Ambiguous {
+            selector: prefix.into(),
+            matches,
+            location: std::panic::Location::caller(),
+        }),
+    }
 }
 
 /// Failure modes for [`get_json`].
@@ -1086,6 +1177,20 @@ pub(crate) enum FetchDeploymentError {
         location: Location,
     },
 
+    #[error(
+        "Use the full deployment ID, or pass the app ID / run from a linked checkout to use a short ID. [{location:?}]"
+    )]
+    PrefixNeedsApp { location: Location },
+
+    #[error("invalid deployment selector [{location:?}]")]
+    Selector {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
     #[error("failed to fetch deployment {id} [{location:?}]")]
     Get {
         #[context(borrow = str)]
@@ -1118,7 +1223,29 @@ pub(crate) async fn fetch_deployment(
         id: id.to_string(),
         location: std::panic::Location::caller(),
     };
-    let deployment_id = canonical_id(deployment).ok_or_else(|| invalid(deployment))?;
+    let deployment_id = match parse_selector(deployment).with_context(Ctx::selector())? {
+        Selector::Exact(id) => id,
+        // Resolved over the app's whole list, so IDs printed in history work.
+        Selector::Prefix(prefix) => {
+            let app_id = match app.as_deref() {
+                Some(app) => canonical_id(app).ok_or_else(|| invalid(app))?,
+                None => client
+                    .load_deployment()
+                    .ok()
+                    .and_then(|link| canonical_id(&link.resource_id))
+                    .ok_or(FetchDeploymentError::PrefixNeedsApp {
+                        location: std::panic::Location::caller(),
+                    })?,
+            };
+            let ids: Vec<String> = list_deployments(client, &app_id, false, allow_ci_ssh)
+                .await
+                .with_context(Ctx::get(&prefix))?
+                .into_iter()
+                .map(|deployment| deployment.id)
+                .collect();
+            resolve_prefix(&prefix, &ids).with_context(Ctx::selector())?
+        }
+    };
     let mut app_id = app
         .as_deref()
         .map(|app| canonical_id(app).ok_or_else(|| invalid(app)))
@@ -1229,7 +1356,7 @@ pub(crate) async fn ensure_bare_target(
     if app.lifecycle.as_deref() != Some("deployments") {
         return Ok(());
     }
-    let running = list_deployments(client, &app.id, false)
+    let running = list_deployments(client, &app.id, false, false)
         .await
         .with_context(BareTargetErrorCtx::list_deployments())?
         .iter()
@@ -1246,14 +1373,18 @@ pub(crate) async fn ensure_bare_target(
     }
 }
 
+/// The app's deployments. The route is unfiltered; `retained_only` asks for
+/// the retained rows (older servers ignore it and send all).
 async fn list_deployments(
     client: &ApiClient,
     app_id: &str,
+    retained_only: bool,
     allow_ci_ssh: bool,
 ) -> Result<Vec<DeploymentView>, ListDeploymentsError> {
+    let query = if retained_only { "?retained=1" } else { "" };
     get_json(
         client,
-        &format!("/api/resources/{app_id}/deployments"),
+        &format!("/api/resources/{app_id}/deployments{query}"),
         allow_ci_ssh,
     )
     .await
@@ -1264,34 +1395,240 @@ fn short_sha(sha: &str) -> &str {
     sha.get(..7).unwrap_or(sha)
 }
 
-/// The live deployment first, then the API's order (newest first).
-fn print_deployments(app: &App, mut deployments: Vec<DeploymentView>) {
-    output::status("  Lifecycle: deployments");
-    output::status(format!(
-        "  Live deployment: {}",
-        app.live_deployment_id.as_deref().unwrap_or("none")
-    ));
-    if deployments.is_empty() {
-        output::status("  No deployments yet.");
-        return;
+/// Servers before M3 send no `retained`: fall back to the status.
+fn is_retained(d: &DeploymentView) -> bool {
+    d.retained.unwrap_or(matches!(
+        d.status.as_str(),
+        "reserved" | "building" | "provisioning" | "running" | "destroying"
+    ))
+}
+
+/// Retained deployments, the live one first, then newest first.
+pub(crate) fn deployment_rows(deployments: &[DeploymentView]) -> Vec<Vec<String>> {
+    let mut retained: Vec<&DeploymentView> =
+        deployments.iter().filter(|d| is_retained(d)).collect();
+    retained.sort_by(|a, b| {
+        (b.role == "live")
+            .cmp(&(a.role == "live"))
+            .then(b.created_at.cmp(&a.created_at))
+    });
+    retained
+        .iter()
+        .map(|d| {
+            vec![
+                short_id(&d.id),
+                state_label(&d.role),
+                d.commit_sha
+                    .as_deref()
+                    .map(short_sha)
+                    .unwrap_or("unknown")
+                    .to_string(),
+                d.pushed_ref.clone().unwrap_or_else(|| "unknown".into()),
+                state_label(&deployment_state(d)),
+                d.commit_subject.clone().unwrap_or_default(),
+            ]
+        })
+        .collect()
+}
+
+/// Building / Starting / Running, with failure and cleanup states.
+fn deployment_state(d: &DeploymentView) -> String {
+    match (d.status.as_str(), d.failure_kind.as_deref()) {
+        ("reserved" | "building", _) => "building".into(),
+        ("provisioning", _) => "starting".into(),
+        ("failed", Some("runtime_lost")) => "unavailable".into(),
+        ("destroying", _) => "cleanup_pending".into(),
+        (status, _) => status.into(),
     }
-    deployments.sort_by_key(|deployment| deployment.role != "live");
-    output::data_header("Deployments:");
-    for deployment in &deployments {
-        output::status(format!(
-            "  {}  {:<9}  {:<12}  {:<7}  {}  {}",
-            deployment.id,
-            deployment.role,
-            deployment.status,
-            deployment.commit_sha.as_deref().map_or("-", short_sha),
-            deployment.pushed_ref.as_deref().unwrap_or("-"),
-            deployment.public_ip.as_deref().unwrap_or("-"),
+}
+
+/// One line of the "Recent history" section.
+pub(crate) fn history_line(entry: &HistoryEntry) -> String {
+    let at = entry.at.get(..16).unwrap_or(&entry.at).replace('T', " ");
+    let target = entry
+        .target_deployment_id
+        .as_deref()
+        .map(short_id)
+        .unwrap_or_default();
+    let what = match (entry.kind.as_str(), entry.operation.as_deref()) {
+        ("attempt", _) => format!(
+            "attempt {target} · {}",
+            entry
+                .commit_sha
+                .as_deref()
+                .map(short_sha)
+                .unwrap_or("unknown")
+        ),
+        (_, Some("switch")) => format!(
+            "switch {} → {target}",
+            entry
+                .previous_deployment_id
+                .as_deref()
+                .map(short_id)
+                .unwrap_or_else(|| "none".into())
+        ),
+        (_, Some(operation)) => format!("{} {target}", operation.replace('_', " "))
+            .trim_end()
+            .to_string(),
+        _ => "unknown".into(),
+    };
+    let who = match (&entry.actor, &entry.auth_method) {
+        (Some(actor), Some(method)) => format!("{actor} ({method})"),
+        (None, None) if entry.kind == "operation" => "reconciliation".into(),
+        _ => String::new(),
+    };
+    // A succeeded operation needs no reason; the others keep the API's message.
+    let reason = if entry.outcome == "succeeded" {
+        ""
+    } else {
+        entry.error.as_deref().unwrap_or("")
+    };
+    [
+        at.as_str(),
+        what.as_str(),
+        entry.outcome.as_str(),
+        who.as_str(),
+        reason,
+    ]
+    .into_iter()
+    .filter(|part| !part.is_empty())
+    .collect::<Vec<_>>()
+    .join("  ")
+}
+
+/// A history entry, as `GET /resources/{id}/history` returns it.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct HistoryEntry {
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    at: String,
+    #[serde(default)]
+    operation: Option<String>,
+    #[serde(default)]
+    outcome: String,
+    #[serde(default)]
+    target_deployment_id: Option<String>,
+    #[serde(default)]
+    previous_deployment_id: Option<String>,
+    #[serde(default)]
+    commit_sha: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    actor: Option<String>,
+    #[serde(default)]
+    auth_method: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HistoryPage {
+    #[serde(default)]
+    entries: Vec<HistoryEntry>,
+}
+
+/// The "Recent history" section of `apps get`.
+pub(crate) enum RecentHistory {
+    /// `--this-is-a-ci-machine`: `/history` is not on the SSH allowlist.
+    Skipped,
+    Unavailable,
+    Entries(Vec<HistoryEntry>),
+}
+
+/// `apps get` of a deployments app: summary, retained deployments, history.
+fn print_deployments(app: &App, deployments: &[DeploymentView], history: &RecentHistory) {
+    let dash = || "—".to_string();
+    let live = match (&app.live_deployment_id, &app.live_commit_sha) {
+        (Some(id), Some(sha)) => format!("Live: {} · {}", short_id(id), short_sha(sha)),
+        (Some(id), None) => format!("Live: {}", short_id(id)),
+        (None, _) => "No live deployment".to_string(),
+    };
+    let rows = [
+        (
+            format!(
+                "App: {} ({})",
+                app.resource_name.as_deref().unwrap_or("unnamed"),
+                short_id(&app.id)
+            ),
+            format!(
+                "State: {}",
+                state_label(app.summary_state.as_deref().unwrap_or(&app.state))
+            ),
+        ),
+        (
+            format!(
+                "Hostname: {}",
+                app.managed_hostname.clone().unwrap_or_else(dash)
+            ),
+            format!("Stable IP: {}", app.public_ip.clone().unwrap_or_else(dash)),
+        ),
+        (
+            live,
+            format!(
+                "Candidates: {}",
+                match (app.candidates, app.candidate_limit) {
+                    (Some(used), Some(limit)) => format!("{used} / {limit}"),
+                    _ => dash(),
+                }
+            ),
+        ),
+    ];
+    let width = rows
+        .iter()
+        .map(|(left, _)| left.chars().count())
+        .max()
+        .unwrap_or(0)
+        + 4;
+    for (left, right) in &rows {
+        output::status(format!("{left:<width$}{right}"));
+    }
+
+    output::status("");
+    let table = deployment_rows(deployments);
+    if table.is_empty() {
+        output::status("No deployments yet.");
+    } else {
+        output::status(render_table(
+            &[
+                "DEPLOYMENT",
+                "ROLE",
+                "COMMIT",
+                "PUSHED REF",
+                "STATE",
+                "SUBJECT",
+            ],
+            &table,
         ));
     }
-    output::status(format!(
-        "Inspect one: caution apps get {} -d <deployment>",
-        app.id
-    ));
+
+    match history {
+        RecentHistory::Skipped => {}
+        RecentHistory::Unavailable => {
+            output::status("");
+            output::status("History unavailable");
+        }
+        RecentHistory::Entries(entries) => {
+            output::status("");
+            output::status("Recent history:");
+            for entry in entries.iter().take(5) {
+                output::status(format!("  {}", history_line(entry)));
+            }
+        }
+    }
+
+    if let Some(first) = table.first() {
+        output::status("");
+        output::status(format!(
+            "Inspect one: caution apps get {} -d {}",
+            app.id, first[0]
+        ));
+    }
+    crate::print_managed_dns_details(
+        app.managed_hostname.as_deref(),
+        app.dns_status.as_deref(),
+        app.dns_error.as_deref(),
+        app.domain.as_deref(),
+    );
 }
 
 /// Failure modes for [`get_deployment`].
@@ -1791,7 +2128,7 @@ pub(crate) async fn destroy_deployment(
         .with_context(Ctx::fetch_deployment())?;
 
     if !force {
-        let deployments = list_deployments(client, &target.app_id, allow_ci_ssh)
+        let deployments = list_deployments(client, &target.app_id, false, allow_ci_ssh)
             .await
             .with_context(Ctx::list_deployments())?;
         output::status("About to destroy deployment:");
@@ -2130,9 +2467,10 @@ pub(crate) async fn try_relink(
 #[cfg(test)]
 mod tests {
     use super::{
-        DeploymentView, VerifyTargetError, api_error_text, bare_target_allowed, canonical_id,
-        destroy_deployment, extract_resource_id_from_git_url, fetch_deployment,
-        prepare_deployment_verify, short_sha, switch, verify_target,
+        DeploymentView, HistoryEntry, Selector, SelectorError, VerifyTargetError, api_error_text,
+        bare_target_allowed, canonical_id, deployment_rows, destroy_deployment,
+        extract_resource_id_from_git_url, fetch_deployment, history_line, parse_selector,
+        prepare_deployment_verify, resolve_prefix, short_sha, switch, verify_target,
     };
     use super::{app_is_active, app_list_row, render_table, state_label};
     use crate::{ApiClient, App};
@@ -2208,6 +2546,173 @@ mod tests {
             ],
         );
         assert_eq!(table, "APP          ID\nkey-service  a1\nk            a2");
+    }
+
+    #[test]
+    fn deployment_selectors_resolve_unique_prefixes_only() {
+        let ids = vec![
+            "d1e2f3a4-0000-4000-8000-000000000001".to_string(),
+            "d1e2f3a5-0000-4000-8000-000000000002".to_string(),
+        ];
+        // Validated before any request: a full UUID, or 8+ hex characters.
+        assert!(
+            matches!(parse_selector(&ids[1].to_uppercase()), Ok(Selector::Exact(id)) if id == ids[1])
+        );
+        assert!(
+            matches!(parse_selector("D1E2F3A4"), Ok(Selector::Prefix(prefix)) if prefix == "d1e2f3a4")
+        );
+        for invalid in ["d1e2f3a", "d2", "../x/y/z", "d1e2f3a4/../..", "d1e2f3a4 x"] {
+            assert!(
+                matches!(parse_selector(invalid), Err(SelectorError::Invalid { .. })),
+                "{invalid}"
+            );
+        }
+        assert_eq!(resolve_prefix("d1e2f3a4", &ids).unwrap(), ids[0]);
+        let ambiguous = vec![format!("{}0", &ids[0][..35]), format!("{}1", &ids[0][..35])];
+        assert!(matches!(
+            resolve_prefix(&ids[0][..8], &ambiguous),
+            Err(SelectorError::Ambiguous { .. })
+        ));
+        assert!(matches!(
+            resolve_prefix("ffffffff", &ids),
+            Err(SelectorError::NotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn deployment_rows_put_live_first_and_hide_terminal_attempts() {
+        let deployment = |id: &str,
+                          role: &str,
+                          status: &str,
+                          retained: bool,
+                          created: &str|
+         -> DeploymentView {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "app_id": "a", "role": role, "status": status, "retained": retained,
+                "commit_sha": "b6e8c92aa", "commit_subject": "Fix login", "pushed_ref": "main", "created_at": created}))
+            .unwrap()
+        };
+        let rows = deployment_rows(&[
+            deployment(
+                "c0000000-1",
+                "candidate",
+                "running",
+                true,
+                "2026-10-12T10:00:00Z",
+            ),
+            deployment(
+                "f0000000-1",
+                "candidate",
+                "failed",
+                false,
+                "2026-10-12T11:00:00Z",
+            ),
+            deployment(
+                "a0000000-1",
+                "live",
+                "running",
+                true,
+                "2026-10-11T10:00:00Z",
+            ),
+        ]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0][..5],
+            ["a0000000", "Live", "b6e8c92", "main", "Running"].map(String::from)
+        );
+        assert_eq!(rows[1][1], "Candidate");
+    }
+
+    #[test]
+    fn history_lines_name_the_operation_outcome_and_actor() {
+        let entry: HistoryEntry = serde_json::from_value(serde_json::json!({
+            "kind": "operation", "at": "2026-10-12T10:00:00Z", "operation": "switch", "outcome": "succeeded",
+            "previous_deployment_id": "a0000000-1", "target_deployment_id": "b0000000-1",
+            "actor": "alice", "auth_method": "passkey"}))
+        .unwrap();
+        assert_eq!(
+            history_line(&entry),
+            "2026-10-12 10:00  switch a0000000 → b0000000  succeeded  alice (passkey)"
+        );
+        let attempt: HistoryEntry = serde_json::from_value(serde_json::json!({
+            "kind": "attempt", "at": "2026-10-12T09:00:00Z", "outcome": "failed",
+            "target_deployment_id": "c0000000-1", "commit_sha": "b6e8c92aa", "error": "tofu apply failed"}))
+        .unwrap();
+        assert_eq!(
+            history_line(&attempt),
+            "2026-10-12 09:00  attempt c0000000 · b6e8c92  failed  tofu apply failed"
+        );
+        // A rejected or failed operation keeps its reason after the actor.
+        let rejected: HistoryEntry = serde_json::from_value(serde_json::json!({
+            "kind": "operation", "at": "2026-10-12T11:00:00Z", "operation": "switch", "outcome": "rejected",
+            "previous_deployment_id": "a0000000-1", "target_deployment_id": "b0000000-1",
+            "actor": "alice", "auth_method": "passkey", "error": "The live deployment changed"}))
+        .unwrap();
+        assert_eq!(
+            history_line(&rejected),
+            "2026-10-12 11:00  switch a0000000 → b0000000  rejected  alice (passkey)  The live deployment changed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_short_id_resolves_over_the_unfiltered_list_of_one_app() {
+        let dir = tempdir().unwrap();
+        let (url, requests) = serve(|_, path| {
+            if path.ends_with("/deployments") {
+                (
+                    200,
+                    format!(
+                        "[{},{}]",
+                        view_json(LIVE, APP, "live"),
+                        view_json(DEPLOYMENT, APP, "candidate")
+                    ),
+                )
+            } else {
+                (200, view_body())
+            }
+        })
+        .await;
+
+        let linked = client(&url, dir.path(), Some(APP));
+        let found = fetch_deployment(&linked, None, "550E8400", false)
+            .await
+            .unwrap();
+        assert_eq!(found.id, DEPLOYMENT);
+        // Not filtered to retained rows: history prints IDs of terminal attempts.
+        assert_eq!(
+            request_lines(&requests),
+            vec![
+                format!("GET /api/resources/{APP}/deployments HTTP/1.1"),
+                format!("GET /api/deployments/{DEPLOYMENT} HTTP/1.1"),
+            ]
+        );
+        // A miss names the selector.
+        let error = fetch_deployment(&linked, None, "ffffffff", false)
+            .await
+            .err()
+            .unwrap();
+        let mut chain = error.to_string();
+        let mut source = error.source();
+        while let Some(cause) = source {
+            chain = format!("{chain}: {cause}");
+            source = cause.source();
+        }
+        assert!(
+            chain.contains("no deployment of this app starts with \"ffffffff\""),
+            "{chain}"
+        );
+
+        // Without an app there is nothing to resolve against: no request.
+        let unlinked = client(&url, dir.path(), None);
+        let before = request_lines(&requests).len();
+        let error = fetch_deployment(&unlinked, None, "550e8400", false)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().starts_with(
+            "Use the full deployment ID, or pass the app ID / run from a linked checkout to use a short ID."
+        ));
+        assert_eq!(request_lines(&requests).len(), before);
     }
 
     const DEPLOYMENT: &str = "550e8400-e29b-41d4-a716-446655440000";
