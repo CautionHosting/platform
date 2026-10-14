@@ -333,7 +333,7 @@ CREATE TABLE IF NOT EXISTS auth_sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_credential_id ON auth_sessions(credential_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON auth_sessions(user_id);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON auth_sessions(expires_at);
 
 COMMENT ON TABLE auth_sessions IS 'Active authentication sessions - no updated_at needed';
