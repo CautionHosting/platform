@@ -56,6 +56,10 @@ export const deploymentStateLabel = (deployment) =>
     ? 'Unavailable'
     : STATUS_LABELS[deployment?.status] || 'Unknown'
 
+// `debug_mode` is null until the API records it, and absent from an older API.
+export const isDebugDeployment = (deployment) => deployment?.debug_mode === true
+export const debugSwitchNotice = (deployment) => (isDebugDeployment(deployment) ? 'This deployment runs in debug mode.' : null)
+
 export const verifyCommand = (deployment) => `caution verify -d ${deployment.id}`
 export const switchCommand = (deployment) => `caution apps switch -d ${deployment.id}`
 export const destroyCommand = (deployment) => `caution apps destroy -d ${deployment.id}`

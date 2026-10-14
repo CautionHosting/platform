@@ -72,6 +72,8 @@ pub(crate) struct DeploymentView {
     pub(crate) region: Option<String>,
     pub(crate) enclave_cpus: Option<u64>,
     pub(crate) enclave_memory_mb: Option<u64>,
+    /// Debug build; `None` until the configuration is recorded (when it goes Running).
+    debug_mode: Option<bool>,
     /// Instance price at the configured margin over 730 hours; `None` when unknown
     /// or when no instance is billed.
     pub(crate) estimated_monthly_usd: Option<f64>,
@@ -143,6 +145,10 @@ impl DeploymentRow {
             .configuration
             .get("memory_mb")
             .and_then(serde_json::Value::as_u64);
+        let debug_mode = self
+            .configuration
+            .get("debug")
+            .and_then(serde_json::Value::as_bool);
         DeploymentView {
             public_ip: endpoint_ip(
                 role,
@@ -172,6 +178,7 @@ impl DeploymentRow {
             region: self.region,
             enclave_cpus,
             enclave_memory_mb,
+            debug_mode,
             estimated_monthly_usd,
             cleaned_up_at: self.cleaned_up_at,
             destroyed_at: self.destroyed_at,
@@ -627,5 +634,21 @@ mod tests {
         let view = serde_json::to_value(lost.into_view(None)).unwrap();
         assert_eq!(view["retained"], true, "a lost instance keeps its slot");
         assert!(view["estimated_monthly_usd"].is_null(), "and bills nothing");
+    }
+
+    #[test]
+    fn view_reports_the_recorded_debug_mode() {
+        let id = Uuid::new_v4();
+        let mut debug = row(id, "running", Some(id));
+        debug.configuration = serde_json::json!({ "debug": true });
+        let view = serde_json::to_value(debug.into_view(None)).unwrap();
+        assert_eq!(view["debug_mode"], true);
+        let mut release = row(id, "running", Some(id));
+        release.configuration = serde_json::json!({ "debug": false });
+        let view = serde_json::to_value(release.into_view(None)).unwrap();
+        assert_eq!(view["debug_mode"], false);
+        // Not recorded yet (the deployment has not gone Running).
+        let view = serde_json::to_value(row(id, "pending", None).into_view(None)).unwrap();
+        assert!(view["debug_mode"].is_null());
     }
 }

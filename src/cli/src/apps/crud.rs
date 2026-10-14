@@ -937,6 +937,15 @@ pub(crate) struct DeploymentView {
     /// `done` or `pending` for a failed or destroyed deployment.
     #[serde(default)]
     cleanup: Option<String>,
+    /// Debug build; `None` from older servers and before it is recorded.
+    #[serde(default)]
+    debug_mode: Option<bool>,
+}
+
+impl DeploymentView {
+    fn is_debug(&self) -> bool {
+        self.debug_mode == Some(true)
+    }
 }
 
 /// The `error` text of an API error body, or the whole body when it has none.
@@ -1441,7 +1450,7 @@ pub(crate) fn deployment_rows(deployments: &[DeploymentView]) -> Vec<Vec<String>
                     .unwrap_or("unknown")
                     .to_string(),
                 d.pushed_ref.clone().unwrap_or_else(|| "unknown".into()),
-                state_label(&deployment_state(d)),
+                state_label(&deployment_state(d)) + if d.is_debug() { " (debug)" } else { "" },
                 d.commit_subject.clone().unwrap_or_default(),
             ]
         })
@@ -1710,6 +1719,9 @@ fn deployment_detail_lines(deployment: &DeploymentView) -> Vec<String> {
             lines.push(format!("  {label}: {value}"));
         }
     }
+    if deployment.is_debug() {
+        lines.push("  Debug mode: enabled".to_string());
+    }
     lines.push(format!("  Created: {}", deployment.created_at));
     if let Some(error) = &deployment.error {
         lines.push(format!("  Error: {error}"));
@@ -1965,6 +1977,38 @@ struct SwitchResponse {
     tls_after_switch: bool,
 }
 
+/// What `apps switch -d` shows before it asks for confirmation.
+fn switch_confirmation_lines(app: &App, target: &DeploymentView) -> Vec<String> {
+    let mut lines = vec![
+        "About to make a deployment live:".to_string(),
+        format!(
+            "  App: {} ({})",
+            app.id,
+            app.resource_name.as_deref().unwrap_or("unnamed")
+        ),
+        format!(
+            "  Current live deployment: {}",
+            app.live_deployment_id.as_deref().unwrap_or("none")
+        ),
+        format!("  Target deployment: {}", target.id),
+    ];
+    if let Some(commit_sha) = &target.commit_sha {
+        lines.push(match &target.commit_subject {
+            Some(subject) => format!("  Commit: {commit_sha} {subject}"),
+            None => format!("  Commit: {commit_sha}"),
+        });
+    }
+    if target.is_debug() {
+        lines.push("  Debug mode: enabled on the target".to_string());
+    }
+    lines.push(format!(
+        "  Stable IP: {}",
+        app.public_ip.as_deref().unwrap_or("none yet")
+    ));
+    lines.push("  The previous deployment stays running and billable.".to_string());
+    lines
+}
+
 /// `apps switch -d`: moves the app's stable IP to the deployment, signed with
 /// a passkey. The deployment and the app's live deployment are read afresh on
 /// every run: the request names the live deployment it was confirmed against,
@@ -1986,28 +2030,9 @@ pub(crate) async fn switch(
         .with_context(Ctx::fetch_app())?;
 
     if !force {
-        output::status("About to make a deployment live:");
-        output::status(format!(
-            "  App: {} ({})",
-            app.id,
-            app.resource_name.as_deref().unwrap_or("unnamed")
-        ));
-        output::status(format!(
-            "  Current live deployment: {}",
-            app.live_deployment_id.as_deref().unwrap_or("none")
-        ));
-        output::status(format!("  Target deployment: {}", target.id));
-        if let Some(commit_sha) = &target.commit_sha {
-            match &target.commit_subject {
-                Some(subject) => output::status(format!("  Commit: {commit_sha} {subject}")),
-                None => output::status(format!("  Commit: {commit_sha}")),
-            }
+        for line in switch_confirmation_lines(&app, &target) {
+            output::status(line);
         }
-        output::status(format!(
-            "  Stable IP: {}",
-            app.public_ip.as_deref().unwrap_or("none yet")
-        ));
-        output::status("  The previous deployment stays running and billable.");
     }
     // The acknowledgement is signed below, so disclose it even with --force.
     if target.tls_after_switch {
@@ -2522,7 +2547,8 @@ mod tests {
         VerifyTargetError, api_error_text, bare_target_allowed, canonical_id,
         deployment_detail_lines, deployment_rows, destroy_deployment,
         extract_resource_id_from_git_url, fetch_deployment, history_line, parse_selector,
-        prepare_deployment_verify, resolve_prefix, role_label, short_sha, switch, verify_target,
+        prepare_deployment_verify, resolve_prefix, role_label, short_sha, switch,
+        switch_confirmation_lines, verify_target,
     };
     use super::{app_is_active, app_list_row, render_table, state_label};
     use crate::{ApiClient, App};
@@ -2727,6 +2753,47 @@ mod tests {
         assert!(!other.iter().any(|line| line.contains("Public IP")));
         assert!(!other.iter().any(|line| line.contains("Instance:")));
         assert!(other.contains(&"  Cleanup: done".to_string()));
+    }
+
+    #[test]
+    fn debug_deployments_say_so_in_every_view() {
+        let view = |debug: serde_json::Value| -> DeploymentView {
+            serde_json::from_value(serde_json::json!({
+                "id": DEPLOYMENT, "app_id": APP, "role": "candidate", "status": "running",
+                "retained": true, "created_at": "2026-10-12T00:00:00Z", "debug_mode": debug}))
+            .unwrap()
+        };
+        // The table marks the state, and only a recorded `true`.
+        let rows = deployment_rows(&[view(true.into())]);
+        assert_eq!(rows[0][4], "Running (debug)");
+        for off in [false.into(), serde_json::Value::Null] {
+            assert_eq!(deployment_rows(&[view(off)])[0][4], "Running");
+        }
+        // Older servers send no field at all.
+        let old: DeploymentView = serde_json::from_value(serde_json::json!({
+            "id": DEPLOYMENT, "app_id": APP, "role": "live", "status": "running",
+            "created_at": "2026-10-12T00:00:00Z"}))
+        .unwrap();
+        assert!(
+            !deployment_detail_lines(&old)
+                .iter()
+                .any(|l| l.contains("Debug"))
+        );
+        let lines = deployment_detail_lines(&view(true.into()));
+        assert!(lines.contains(&"  Debug mode: enabled".to_string()));
+        assert!(
+            !deployment_detail_lines(&view(false.into()))
+                .iter()
+                .any(|l| l.contains("Debug"))
+        );
+        // The switch confirmation warns about a debug target only.
+        let app = app(serde_json::json!({
+            "id": APP, "state": "running", "provider_resource_id": "i-1", "live_deployment_id": LIVE}));
+        let warned = switch_confirmation_lines(&app, &view(true.into()));
+        assert!(warned.contains(&"  Debug mode: enabled on the target".to_string()));
+        let plain = switch_confirmation_lines(&app, &view(false.into()));
+        assert!(!plain.iter().any(|l| l.contains("Debug")));
+        assert!(plain.contains(&format!("  Target deployment: {DEPLOYMENT}")));
     }
 
     #[test]

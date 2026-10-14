@@ -3,7 +3,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import CopyIconButton from './CopyIconButton.vue'
-import { appHostname, candidateCountLabel, canDestroy, canSwitch, deploymentStateLabel, destroyCommand, destroyDeployment, orderDeployments, roleLabel, shortId, shortSha, switchCommand, switchDeployment, switchRequestBody, verifyCommand } from '../utils/deployments.js'
+import { appHostname, candidateCountLabel, canDestroy, canSwitch, debugSwitchNotice, deploymentStateLabel, destroyCommand, destroyDeployment, isDebugDeployment, orderDeployments, roleLabel, shortId, shortSha, switchCommand, switchDeployment, switchRequestBody, verifyCommand } from '../utils/deployments.js'
 
 const props = defineProps({
   app: { type: Object, required: true },
@@ -84,7 +84,7 @@ async function confirmDestroy() {
             <td><code>{{ shortSha(deployment.commit_sha) }}</code><span v-if="deployment.commit_subject" class="deployment-subject">{{ deployment.commit_subject }}</span></td>
             <td>{{ deployment.pushed_ref || 'unknown' }}</td>
             <td>{{ roleOf(deployment) }}</td>
-            <td><span :class="['app-status-badge', `status-${deployment.status}`]">{{ deploymentStateLabel(deployment) }}</span></td>
+            <td><span :class="['app-status-badge', `status-${deployment.status}`]">{{ deploymentStateLabel(deployment) }}</span><span v-if="isDebugDeployment(deployment)" class="deployment-debug"> debug</span></td>
             <td>{{ formatTime(deployment.created_at) }}</td>
           </tr>
         </tbody>
@@ -98,6 +98,7 @@ async function confirmDestroy() {
           <dt>Pushed ref</dt><dd>{{ selected.pushed_ref || 'unknown' }}</dd>
           <dt>Role</dt><dd>{{ roleOf(selected) }}</dd>
           <dt>State</dt><dd>{{ deploymentStateLabel(selected) }}</dd>
+          <template v-if="isDebugDeployment(selected)"><dt>Debug mode</dt><dd class="deployment-debug">Enabled</dd></template>
           <dt>Endpoint</dt><dd>{{ endpointOf(selected) }}</dd>
           <dt>Instance</dt><dd>{{ selected.instance_id || '—' }} · {{ selected.instance_type || 'unknown' }}</dd>
           <template v-if="selected.cleanup"><dt>Cleanup</dt><dd>{{ selected.cleanup === 'done' ? 'Done' : 'Pending' }}</dd></template>
@@ -123,6 +124,7 @@ async function confirmDestroy() {
             <li>App: {{ app.resource_name || app.id }} · {{ appHostname(app) }}</li>
             <li>Current live: <template v-if="pinnedLiveId">{{ shortId(pinnedLiveId) }}<template v-if="pinnedLive"> · {{ shortSha(pinnedLive.commit_sha) }}</template></template><template v-else>No live deployment</template></li>
             <li>Target: {{ shortId(selected.id) }} · {{ shortSha(selected.commit_sha) }}</li>
+            <li v-if="debugSwitchNotice(selected)" class="deployment-debug">{{ debugSwitchNotice(selected) }}</li>
             <li>Stable IP: {{ app.public_ip || 'unassigned' }}</li>
             <li>The previous deployment stays running and billable. Connections may close during cutover.</li>
           </ul>
@@ -157,6 +159,7 @@ async function confirmDestroy() {
 .deployment-inspector-grid { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 12px; overflow-wrap: anywhere; }
 .deployment-subject { display: block; color: var(--theme-text-secondary); }
 .deployment-note { color: var(--theme-text-secondary); font-size: 0.875rem; }
+.deployment-debug { color: var(--theme-danger); font-weight: 600; }
 .deployment-error { color: var(--theme-danger, #b42318); }
 /* Without this the narrow column wraps badge text. */
 .deployments-table .app-status-badge { white-space: nowrap; }

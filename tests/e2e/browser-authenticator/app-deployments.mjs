@@ -15,7 +15,7 @@ const state = {
   live: A, switchMode: 'ok', destroyMode: 'ok', switchRequests: 0, events: [], listQueries: [], legacyRequests: [],
   deployments: {
     [A]: { status: 'running', commit_sha: 'ff43fef1', commit_subject: 'Rotate keymaker policy' },
-    [B]: { status: 'running', commit_sha: 'b6e8c921', commit_subject: 'Fix login race' },
+    [B]: { status: 'running', debug_mode: true, commit_sha: 'b6e8c921', commit_subject: 'Fix login race' },
     [C]: { status: 'failed', failure_kind: 'provisioning', commit_sha: '1c2d3e41', commit_subject: 'Bump locksmith', error: 'tofu apply failed' },
   },
 }
@@ -155,6 +155,13 @@ try {
   await openApp(); await liveIs('d1000000')
   assert.deepEqual(await page.$$eval('.deployments-table tbody tr', (rows) => rows.map((row) => row.cells[3].textContent.trim())), ['Live', 'Candidate', 'Candidate'])
   assert.deepEqual([...new Set(state.listQueries)], ['?retained=1']) // the dashboard asks for retained deployments only
+  // Debug mode shows in the list (B only), the inspector and the Switch-live confirmation.
+  assert.deepEqual(await page.$$eval('.deployments-table tbody tr', (rows) => rows.filter((row) => row.cells[4].textContent.includes('debug')).map((row) => row.cells[0].textContent.trim())), ['d2000000'])
+  await page.click('[aria-label="Inspect deployment d2000000"]')
+  await page.waitForFunction(() => [...document.querySelectorAll('.deployment-inspector dt')].some((el) => el.textContent.trim() === 'Debug mode'))
+  await button('Switch live'); await textIncludes('This deployment runs in debug mode.'); await button('Cancel')
+  await page.click('[aria-label="Inspect deployment d1000000"]'); await textIncludes('Deployment d1000000')
+  assert.equal(await page.evaluate(() => [...document.querySelectorAll('.deployment-inspector dt')].some((el) => el.textContent.trim() === 'Debug mode')), false)
   // A → B, signed with the real virtual passkey.
   await switchTo('d2000000'); await textIncludes('d2000000 is live at 198.51.100.42')
   assert.equal(state.live, B)
@@ -179,9 +186,11 @@ try {
   await page.reload(); await openApp(); await liveIs('d2000000')
   // Rollback to A.
   await switchTo('d1000000'); await textIncludes('d1000000 is live'); await liveIs('d1000000'); assert.equal(state.live, A)
-  // The live deployment offers no Destroy; a failed cleanup is reported and retried.
+  // The live deployment offers no Destroy; a destroy answered 5xx reads as unknown, refreshes, and is retried.
   await page.click('[aria-label="Inspect deployment d1000000"]'); assert.equal(await page.$('.deployment-inspector .btn-danger'), null)
-  state.destroyMode = 'fail'; await page.click('[aria-label="Inspect deployment d3000000"]'); await button('Destroy deployment'); await page.click('.deployment-confirm .btn-danger'); await textIncludes('Deployment destroy failed; retry.')
+  state.destroyMode = 'fail'; await page.click('[aria-label="Inspect deployment d3000000"]'); await button('Destroy deployment'); await page.click('.deployment-confirm .btn-danger'); await textIncludes('The destroy outcome is unknown; refresh to check.')
+  // The component refreshes after the unknown outcome: the mock's pending cleanup appears in the inspector.
+  await page.waitForFunction(() => [...document.querySelectorAll('.deployment-inspector dt')].some((el) => el.textContent.trim() === 'Cleanup'))
   state.destroyMode = 'ok'; await page.click('[aria-label="Inspect deployment d3000000"]'); await button('Destroy deployment'); await page.click('.deployment-confirm .btn-danger'); await textIncludes('d3000000 was destroyed')
   // Copy feedback stays in the icon, with an announcement and no toast.
   await page.evaluate(() => { window.copied = []; Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text) => window.copied.push(text) } }) })
@@ -197,5 +206,5 @@ try {
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `${width}: no page overflow`)
   }
   assert.deepEqual(serverErrors, []); assert.deepEqual(browserErrors, [])
-  console.log('PASS: dashboard switch/rollback with virtual-passkey signatures, stale confirmation, cancellation, uncertain outcome, live-destroy guard, cleanup failure, copy feedback, history and layout. Mock API only.')
+  console.log('PASS: dashboard switch/rollback with virtual-passkey signatures, stale confirmation, cancellation, uncertain outcome, live-destroy guard, unknown destroy outcome, debug mode, copy feedback, history and layout. Mock API only.')
 } finally { if (browser) await browser.close(); await new Promise(resolve => server.close(resolve)) }

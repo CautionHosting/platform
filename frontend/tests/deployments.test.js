@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   appStateLabel, candidateCountLabel, canDestroy, canSwitch, destroyAppSentence, destroyDeployment, historyRowLabel,
-  deploymentsUrl, isActiveApp, orderDeployments, retainedInstanceRows, retainedMonthlyTotal, roleLabel,
+  debugSwitchNotice, deploymentsUrl, isActiveApp, isDebugDeployment, orderDeployments, retainedInstanceRows, retainedMonthlyTotal, roleLabel,
   switchDeployment, switchRequestBody, verifyCommand,
 } from '../src/utils/deployments.js'
 
@@ -107,4 +107,11 @@ test('the destroy-app sentence never invents a retained count', () => {
   assert.equal(destroyAppSentence(null), 'Destroys the app and every retained deployment. The service becomes unavailable.')
   assert.equal(destroyAppSentence(1), 'Destroys the app and its 1 retained deployment. The service becomes unavailable.')
   assert.equal(destroyAppSentence(3), 'Destroys the app and its 3 retained deployments. The service becomes unavailable.')
+})
+
+test('debug mode shows only when the API recorded it', () => {
+  assert.equal(isDebugDeployment({ debug_mode: true }), true)
+  for (const deployment of [{ debug_mode: false }, { debug_mode: null }, {}, null]) assert.equal(isDebugDeployment(deployment), false) // an older API sends none
+  assert.equal(debugSwitchNotice({ debug_mode: true }), 'This deployment runs in debug mode.')
+  assert.equal(debugSwitchNotice({ debug_mode: false }), null)
 })

@@ -54,6 +54,13 @@ Set both in `~/.config/caution/.env`, then restart the API (`env.example` lists 
   shows one deployment: its instance, its cleanup state (`done` or `pending`, for a
   failed or destroyed deployment) and its address, which is `unavailable` for a
   live deployment lost to `runtime_lost` (AWS has released the stable IP).
+- **Debug mode.** The deployment view carries `debug_mode` (`true`, `false`, or `null`
+  until the configuration is recorded when the deployment goes Running). A debug
+  deployment is marked in `apps get` (state `Running (debug)`; `-d` prints
+  `Debug mode: enabled`), in the `apps switch` confirmation (`Debug mode: enabled on
+  the target`), and in the dashboard (a `debug` marker in the list, a `Debug mode`
+  row in the inspector, and a line in the Switch live confirmation). Legacy apps keep
+  their existing `Debug Mode` line.
 - **Short deployment IDs.** Every `-d` takes the full ID or its first 8 or more
   hexadecimal characters, as the tables print them. The prefix must be unique among
   all the app's deployments, destroyed and failed ones included, so IDs printed in
