@@ -1877,13 +1877,18 @@ fn verify_destination_attestation(
         .map_err(|source| match &source {
             Error::InvalidAAD(pcr) if matches!(pcr.as_ref(), "pcr 0" | "pcr 1" | "pcr 2") => {
                 SendShardError::DestinationPcrMismatch {
-                    address, pcr: pcr.to_string(), trust_path: trust_path.to_path_buf(),
-                    location: std::panic::Location::caller(), source: Box::new(source),
+                    address,
+                    pcr: pcr.to_string(),
+                    trust_path: trust_path.to_path_buf(),
+                    location: std::panic::Location::caller(),
+                    source: Box::new(source),
                 }
             }
             _ => SendShardError::DestinationVerification {
-                address, trust_path: trust_path.to_path_buf(),
-                location: std::panic::Location::caller(), source: Box::new(source),
+                address,
+                trust_path: trust_path.to_path_buf(),
+                location: std::panic::Location::caller(),
+                source: Box::new(source),
             },
         })
 }
@@ -1902,7 +1907,14 @@ async fn preflight_destination(
         .with_context(Ctx::destination_attestation(address))?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
         .with_context(Ctx::destination_verification(address, trust_path))?;
-    verify_destination_attestation(address, destination.attestation, pcrs.clone(), nonce.as_bytes(), now, trust_path)
+    verify_destination_attestation(
+        address,
+        destination.attestation,
+        pcrs.clone(),
+        nonce.as_bytes(),
+        now,
+        trust_path,
+    )
 }
 
 fn local_quorum_bundle(root: &Path) -> Option<PathBuf> {
@@ -2168,8 +2180,15 @@ pub async fn send_shard(
         .with_context(Ctx::select_holder());
     // Preserve useful offline input errors in scripts, but never prompt before
     // checking the destination. Neither branch accesses a smartcard or passkey.
-    let selected = if std::io::stdin().is_terminal() { None } else { Some(select_holder()?) };
-    output::status(format!("Checking destination attestation at {address} against {}…", hashes_path.display()));
+    let selected = if std::io::stdin().is_terminal() {
+        None
+    } else {
+        Some(select_holder()?)
+    };
+    output::status(format!(
+        "Checking destination attestation at {address} against {}…",
+        hashes_path.display()
+    ));
     preflight_destination(address, &pcrs, hashes_path).await?;
     output::status("Destination attestation verified. Release will verify a fresh connection again.");
     let (holder, webauthn) = match selected { Some(holder) => holder, None => select_holder()? };
@@ -2190,12 +2209,25 @@ pub async fn send_shard(
             (false, _, true) => "Private-key file",
             (false, _, false) => "OpenPGP smartcard",
         },
-        deployment: target.deployment.as_ref().map(|d| crate::share_release::ReleaseDeployment {
-            id: d.id.clone(),
-            commit_sha: d.commit_sha.clone(),
-        }),
+        deployment: target
+            .deployment
+            .as_ref()
+            .map(|d| crate::share_release::ReleaseDeployment {
+                id: d.id.clone(),
+                commit_sha: d.commit_sha.clone(),
+            }),
     };
-    output::verbose(client.verbose, format!("Application ID: {}; bundle identity: {}", crate::share_release::terminal_label(&target.app_info.id), bundle.bundle_id().map(hex::encode).unwrap_or_else(|| "Legacy V0".into())));
+    output::verbose(
+        client.verbose,
+        format!(
+            "Application ID: {}; bundle identity: {}",
+            crate::share_release::terminal_label(&target.app_info.id),
+            bundle
+                .bundle_id()
+                .map(hex::encode)
+                .unwrap_or_else(|| "Legacy V0".into())
+        ),
+    );
     let status: Result<_, BoxError> = if webauthn {
         let proof = serde_json::from_str(&bundle_text).with_context(Ctx::parse_bundle())?;
         let measurements = pcrs.iter().map(|(&i, v)| (i, hex::encode(v))).collect();
@@ -2327,29 +2359,81 @@ mod tests {
         let now = std::time::Duration::from_millis(1766509563435);
         let address = "127.0.0.1:49504".parse().unwrap();
         let trust = std::path::Path::new(".caution/trusted_hashes.json");
-        assert!(super::verify_destination_attestation(address, proof.clone(), pcrs.clone(), &nonce, now, trust).is_ok());
+        assert!(
+            super::verify_destination_attestation(
+                address,
+                proof.clone(),
+                pcrs.clone(),
+                &nonce,
+                now,
+                trust
+            )
+            .is_ok()
+        );
         for pcr in 0..=2 {
             let mut wrong = pcrs.clone();
             wrong.insert(pcr, vec![0xff; 48]);
-            let error = super::verify_destination_attestation(address, proof.clone(), wrong, &nonce, now, trust).unwrap_err();
-            assert!(matches!(&error, super::SendShardError::DestinationPcrMismatch { pcr: name, .. } if name == &format!("pcr {pcr}")));
+            let error = super::verify_destination_attestation(
+                address,
+                proof.clone(),
+                wrong,
+                &nonce,
+                now,
+                trust,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&error, super::SendShardError::DestinationPcrMismatch { pcr: name, .. } if name == &format!("pcr {pcr}"))
+            );
             let message = error.to_string();
             assert!(message.contains(".caution/trusted_hashes.json"));
             assert!(message.contains("No share was sent"));
             assert!(message.contains("caution verify"));
         }
-        let deployment_trust = std::path::Path::new(".caution/deployments/2b7d4f6e-8a40-4c3e-9f1a-5d6c7b8a9e01/trusted_hashes.json");
+        let deployment_trust = std::path::Path::new(
+            ".caution/deployments/2b7d4f6e-8a40-4c3e-9f1a-5d6c7b8a9e01/trusted_hashes.json",
+        );
         let mut wrong = pcrs.clone();
         wrong.insert(0, vec![0xff; 48]);
-        let error = super::verify_destination_attestation(address, proof.clone(), wrong, &nonce, now, deployment_trust).unwrap_err();
+        let error = super::verify_destination_attestation(
+            address,
+            proof.clone(),
+            wrong,
+            &nonce,
+            now,
+            deployment_trust,
+        )
+        .unwrap_err();
         let message = error.to_string();
-        assert!(message.contains("deployments/2b7d4f6e-8a40-4c3e-9f1a-5d6c7b8a9e01/trusted_hashes.json"));
+        assert!(
+            message
+                .contains("deployments/2b7d4f6e-8a40-4c3e-9f1a-5d6c7b8a9e01/trusted_hashes.json")
+        );
         assert!(!message.contains(".caution/trusted_hashes.json"));
-        assert!(message.contains("complete `caution verify -d 2b7d4f6e-8a40-4c3e-9f1a-5d6c7b8a9e01` from"));
-        let wrong_nonce = super::verify_destination_attestation(address, proof, pcrs.clone(), &[1; 32], now, trust).unwrap_err();
-        assert!(matches!(wrong_nonce, super::SendShardError::DestinationVerification { .. }));
-        let malformed = super::verify_destination_attestation(address, vec![0; 64], pcrs, &nonce, now, trust).unwrap_err();
-        assert!(matches!(malformed, super::SendShardError::DestinationVerification { .. }));
+        assert!(
+            message
+                .contains("complete `caution verify -d 2b7d4f6e-8a40-4c3e-9f1a-5d6c7b8a9e01` from")
+        );
+        let wrong_nonce = super::verify_destination_attestation(
+            address,
+            proof,
+            pcrs.clone(),
+            &[1; 32],
+            now,
+            trust,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            wrong_nonce,
+            super::SendShardError::DestinationVerification { .. }
+        ));
+        let malformed =
+            super::verify_destination_attestation(address, vec![0; 64], pcrs, &nonce, now, trust)
+                .unwrap_err();
+        assert!(matches!(
+            malformed,
+            super::SendShardError::DestinationVerification { .. }
+        ));
     }
 
     #[test]
@@ -2383,8 +2467,17 @@ mod tests {
             let mut bytes = [0; 4096];
             assert!(stream.read(&mut bytes).await.unwrap() > 0);
         });
-        let error = super::preflight_destination(address, &Default::default(), std::path::Path::new(".caution/trusted_hashes.json")).await.unwrap_err();
-        assert!(matches!(error, super::SendShardError::DestinationAttestation { .. }));
+        let error = super::preflight_destination(
+            address,
+            &Default::default(),
+            std::path::Path::new(".caution/trusted_hashes.json"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            super::SendShardError::DestinationAttestation { .. }
+        ));
         assert!(error.to_string().contains("No share was sent"));
         receiver.await.unwrap();
     }

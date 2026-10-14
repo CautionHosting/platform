@@ -228,9 +228,11 @@ mod tests {
                           "custody_url": "https://keys.example.com"});
         let without: DisplayContext = serde_json::from_value(base.clone()).unwrap();
         assert_eq!(without.deployment_id, None);
-        assert!(!serde_json::to_string(&without)
-            .unwrap()
-            .contains("deployment_id"));
+        assert!(
+            !serde_json::to_string(&without)
+                .unwrap()
+                .contains("deployment_id")
+        );
         let mut with = base;
         with["deployment_id"] = json!(deployment);
         let with: DisplayContext = serde_json::from_value(with).unwrap();

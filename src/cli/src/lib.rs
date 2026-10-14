@@ -3825,11 +3825,7 @@ pub async fn run() -> Result<(), RunError> {
                             target.candidate,
                         )
                     }
-                    None => (
-                        attestation_url,
-                        verify::trusted_hashes_path(None),
-                        false,
-                    ),
+                    None => (attestation_url, verify::trusted_hashes_path(None), false),
                 };
                 verify::verify(
                     &client,

@@ -204,13 +204,15 @@ fn tags(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         .collect()
 }
 
+/// `(instance, tags, state)`.
+type FakeInstance = (String, HashMap<String, String>, &'static str);
+
 /// The EC2 instances and security groups a leftover sweep sees, controlled by
 /// the test. Lists them whatever their tags (the real calls filter by tag), so
 /// only the sweep's own tag check spares the others.
 #[derive(Default)]
 struct FakeEc2 {
-    /// `(instance, tags, state)`.
-    instances: Mutex<Vec<(String, HashMap<String, String>, &'static str)>>,
+    instances: Mutex<Vec<FakeInstance>>,
     groups: Mutex<Vec<(String, HashMap<String, String>)>>,
     /// Instances passed to terminate, in order.
     terminated: Mutex<Vec<String>>,

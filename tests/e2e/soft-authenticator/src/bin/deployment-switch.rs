@@ -23,13 +23,13 @@
 // session), SWITCH_PATH (e.g. /resources/<app>/deployments/<dep>/switch),
 // SWITCH_BODY (the exact JSON body).
 
-use anyhow::{bail, Context, Result};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::blocking::{Client, Response};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use url::Url;
-use webauthn_authenticator_rs::{softpasskey::SoftPasskey, WebauthnAuthenticator};
+use webauthn_authenticator_rs::{WebauthnAuthenticator, softpasskey::SoftPasskey};
 use webauthn_rs_proto::{PublicKeyCredential, RequestChallengeResponse};
 
 fn required(key: &str) -> Result<String> {
