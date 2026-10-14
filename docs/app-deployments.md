@@ -194,6 +194,10 @@ running deployment meters, so treat the migration as one-way once the flag has b
 
 ## Tests
 
+Every other test stack runs with `APP_DEPLOYMENTS_ENABLED=false`
+(`API_EXTRA_ENV` defaults to it), whatever `~/.config/caution/.env` says, so Legacy E2Es
+test Legacy on a host that enables the flag.
+
 - `make test-app-deployments-db`: concurrency, reconciliation and metering tests on an
   isolated Postgres (anonymous container, random port; safe on a shared host).
 - `make test-e2e-app-deployments-schema`: schema checks against the test stack.

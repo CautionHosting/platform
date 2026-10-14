@@ -671,6 +671,9 @@ TEST_DB_HOST := postgres-test
 TEST_DATABASE_URL := postgresql://postgres:postgres@$(TEST_DB_HOST):5432/$(TEST_DB_NAME)
 PRICES_FILE ?= $(HOME)/.config/caution/prices.json
 KEYMAKER_POLICY_DIR ?= $(HOME)/.config/caution/policies
+# Test stacks run with app deployments off, whatever the operator's .env says;
+# test-e2e-app-deployments turns it on.
+API_EXTRA_ENV ?= -e APP_DEPLOYMENTS_ENABLED=false
 E2E_LOCK_FILE ?= /tmp/caution-platform-e2e.lock
 ONPREM_PROVISIONER_DIR ?= ../bring-your-own-compute-setup
 ONPREM_PROVISIONER_IMAGE ?= codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest
