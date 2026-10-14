@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
@@ -62,7 +70,9 @@ fn canonical_hash(data: &serde_json::Value) -> Option<String> {
         return bundle.content_hash().ok();
     }
     let response: GenerateQuorumResponse = serde_json::from_value(data.clone()).ok()?;
-    deterministic_bundle_hash(&response.data).ok().map(hex::encode)
+    deterministic_bundle_hash(&response.data)
+        .ok()
+        .map(hex::encode)
 }
 
 // -- Quorum Bundles --
@@ -98,7 +108,9 @@ pub async fn list_quorum_bundles(
     .await
     .with_context(Ctx::database(org_id))?;
 
-    for bundle in &mut rows { bundle.bundle_hash = canonical_hash(&bundle.data); }
+    for bundle in &mut rows {
+        bundle.bundle_hash = canonical_hash(&bundle.data);
+    }
     holders::enrich(pool, org_id, &mut rows).await;
     Ok(rows)
 }
@@ -448,7 +460,12 @@ mod identity_tests {
         use keymaker_models::generate_quorum::{GenerateQuorumResponse, deterministic_bundle_hash};
         let data = json!({"data":{"version":"V1","bundle_id":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],"label":{"a":"1","b":"2"},"keyring":[],"threshold":1,"max":1,"shardfile":"shares","public_key":"key"},"necroproof":[]});
         let response: GenerateQuorumResponse = serde_json::from_value(data.clone()).unwrap();
-        assert_eq!(canonical_hash(&data), Some(hex::encode(deterministic_bundle_hash(&response.data).unwrap())));
+        assert_eq!(
+            canonical_hash(&data),
+            Some(hex::encode(
+                deterministic_bundle_hash(&response.data).unwrap()
+            ))
+        );
         let mut reordered = data.clone();
         reordered["data"]["label"] = serde_json::from_str(r#"{"b":"2","a":"1"}"#).unwrap();
         assert_eq!(canonical_hash(&data), canonical_hash(&reordered));

@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 //! The `caution verify` build and attestation domain: local-source staging,
 //! archive preflight reachability checks, build reproducibility, and attested
 //! TLS verification. Extracted from the monolith; see also `secrets`, `cache`,
@@ -2065,7 +2073,12 @@ async fn verify_tls_binding(
 /// A hosted service that declares TLS must prove its certificate binding. Without TLS
 /// mode there is no binding to check: shares rely on attestation-bound encryption.
 fn check_hosted_tls(hosted: bool, tls: &TlsVerification) -> Result<(), VerifyError> {
-    if hosted && matches!(tls, TlsVerification::SkippedNoDns | TlsVerification::PcrOnly) {
+    if hosted
+        && matches!(
+            tls,
+            TlsVerification::SkippedNoDns | TlsVerification::PcrOnly
+        )
+    {
         return Err(VerifyError::HostedService {
             location: std::panic::Location::caller(),
             source: Box::new(std::io::Error::other(

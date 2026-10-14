@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 //! Preserve the transport selected for source retrieval across redirects.
-use reqwest::{Url, redirect::Policy};
+use reqwest::{redirect::Policy, Url};
 
 fn permits_redirect(previous: &[Url], next: &Url) -> bool {
     matches!(next.scheme(), "http" | "https")

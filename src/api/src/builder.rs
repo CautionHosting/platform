@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 //! Dedicated EC2 builder instances for EIF builds.
 //!
 //! Instead of building EIFs inline on the API server, this module launches
@@ -3495,7 +3503,9 @@ mod tests {
         .unwrap();
         assert!(script.contains("EGRESS=\"true\""));
         assert!(script.contains("CAUTION_EGRESS=\"$EGRESS\""));
-        let helper_upload = script.find("aws s3 cp /build/output/enclave.tap-framer").unwrap();
+        let helper_upload = script
+            .find("aws s3 cp /build/output/enclave.tap-framer")
+            .unwrap();
         let eif_upload = script.find("aws s3 cp \"$EIF_PATH\"").unwrap();
         assert!(helper_upload < eif_upload);
         assert!(script.contains("s3://$S3_BUCKET/$EIF_S3_KEY.tap-framer"));

@@ -86,7 +86,9 @@ impl RecoveryApproval {
             })
             .await;
             if !matches!(result, Ok(Ok(_))) {
-                output::warning("Unable to cancel the browser approval link; it may remain active until expiry.");
+                output::warning(
+                    "Unable to cancel the browser approval link; it may remain active until expiry.",
+                );
             }
         }
     }

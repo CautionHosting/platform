@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use locksmith::bundle::RecoverySource;
 use std::collections::HashSet;
 use std::fs;
@@ -214,7 +222,12 @@ fn encrypt_secret_value(
     use EncryptSecretValueErrorCtx as Ctx;
 
     let policy = &OpenPgpPolicy::new();
-    if legacy && matches!(recipient.revocation_status(policy, None), openpgp::types::RevocationStatus::Revoked(_)) {
+    if legacy
+        && matches!(
+            recipient.revocation_status(policy, None),
+            openpgp::types::RevocationStatus::Revoked(_)
+        )
+    {
         return Err(EncryptSecretValueError::NoEncryptionKey {
             location: std::panic::Location::caller(),
         });
@@ -222,7 +235,11 @@ fn encrypt_secret_value(
     // Only an explicitly accepted ImportedV0 artifact may use expired keys.
     // Keep algorithm support, certificate bindings and revocation checks intact.
     let keys = || {
-        let keys = recipient.keys().with_policy(policy, None).supported().revoked(false);
+        let keys = recipient
+            .keys()
+            .with_policy(policy, None)
+            .supported()
+            .revoked(false);
         if legacy { keys } else { keys.alive() }
     };
     let mut recipients: Vec<_> = keys().for_storage_encryption().collect();
@@ -1613,7 +1630,9 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Could not obtain destination attestation from {address}. No share was sent; check that the app is awaiting quorum shares and port 49504 is reachable (30-second connection/response timeout) [{location:?}]")]
+    #[error(
+        "Could not obtain destination attestation from {address}. No share was sent; check that the app is awaiting quorum shares and port 49504 is reachable (30-second connection/response timeout) [{location:?}]"
+    )]
     DestinationAttestation {
         address: std::net::SocketAddr,
         #[location]
@@ -1622,7 +1641,9 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Destination attestation verification failed at {address} against .caution/trusted_hashes.json. No share was sent [{location:?}]")]
+    #[error(
+        "Destination attestation verification failed at {address} against .caution/trusted_hashes.json. No share was sent [{location:?}]"
+    )]
     DestinationVerification {
         address: std::net::SocketAddr,
         #[location]
@@ -1631,7 +1652,9 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Destination PCR mismatch ({pcr}) at {address}: the app does not match .caution/trusted_hashes.json. No share was sent. If you intended to change the deployment, complete `caution verify` from the intended app checkout before retrying. --recryptor-pcr-policy verifies the key service, not this app [{location:?}]")]
+    #[error(
+        "Destination PCR mismatch ({pcr}) at {address}: the app does not match .caution/trusted_hashes.json. No share was sent. If you intended to change the deployment, complete `caution verify` from the intended app checkout before retrying. --recryptor-pcr-policy verifies the key service, not this app [{location:?}]"
+    )]
     DestinationPcrMismatch {
         address: std::net::SocketAddr,
         pcr: String,
@@ -1641,7 +1664,9 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Connection closed during quorum unlocking; share acceptance was not confirmed. The application may already be unlocked; check its status before retrying [{location:?}]")]
+    #[error(
+        "Connection closed during quorum unlocking; share acceptance was not confirmed. The application may already be unlocked; check its status before retrying [{location:?}]"
+    )]
     ConnectionClosed {
         #[location]
         location: Location,
@@ -1684,12 +1709,21 @@ pub enum SendShardError {
 
 fn connection_closed(mut error: &(dyn std::error::Error + 'static)) -> bool {
     loop {
-        if let Some(io) = error.downcast_ref::<std::io::Error>() {
-            if matches!(io.kind(), std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::BrokenPipe) {
-                return true;
-            }
+        if let Some(io) = error.downcast_ref::<std::io::Error>()
+            && matches!(
+                io.kind(),
+                std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+            )
+        {
+            return true;
         }
-        match error.source() { Some(source) => error = source, None => return false }
+        match error.source() {
+            Some(source) => error = source,
+            None => return false,
+        }
     }
 }
 
@@ -1717,12 +1751,16 @@ fn verify_destination_attestation(
         .map_err(|source| match &source {
             Error::InvalidAAD(pcr) if matches!(pcr.as_ref(), "pcr 0" | "pcr 1" | "pcr 2") => {
                 SendShardError::DestinationPcrMismatch {
-                    address, pcr: pcr.to_string(),
-                    location: std::panic::Location::caller(), source: Box::new(source),
+                    address,
+                    pcr: pcr.to_string(),
+                    location: std::panic::Location::caller(),
+                    source: Box::new(source),
                 }
             }
             _ => SendShardError::DestinationVerification {
-                address, location: std::panic::Location::caller(), source: Box::new(source),
+                address,
+                location: std::panic::Location::caller(),
+                source: Box::new(source),
             },
         })
 }
@@ -1736,16 +1774,30 @@ async fn preflight_destination(
     let destination = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         locksmith::release::crypto::Destination::connect(address, nonce.clone()),
-    ).await.with_context(Ctx::destination_attestation(address))?
-        .with_context(Ctx::destination_attestation(address))?;
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+    )
+    .await
+    .with_context(Ctx::destination_attestation(address))?
+    .with_context(Ctx::destination_attestation(address))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .with_context(Ctx::destination_verification(address))?;
-    verify_destination_attestation(address, destination.attestation, pcrs.clone(), nonce.as_bytes(), now)
+    verify_destination_attestation(
+        address,
+        destination.attestation,
+        pcrs.clone(),
+        nonce.as_bytes(),
+        now,
+    )
 }
 
 fn local_quorum_bundle(root: &Path) -> Option<PathBuf> {
-    [".caution/quorum-bundle.json", ".caution/secrets/bundle.json"]
-        .into_iter().map(|path| root.join(path)).find(|path| path.exists())
+    [
+        ".caution/quorum-bundle.json",
+        ".caution/secrets/bundle.json",
+    ]
+    .into_iter()
+    .map(|path| root.join(path))
+    .find(|path| path.exists())
 }
 
 /// Send a shard to a running enclave's locksmith daemon.
@@ -1876,9 +1928,23 @@ pub async fn send_shard(
 
     output::status("Loaded destination policy from .caution/trusted_hashes.json");
     if let Some(verified_at) = hashes["verified_at"].as_str() {
-        output::verbose(client.verbose, format!("Recorded verification time: {} (stored metadata)", crate::share_release::terminal_label(verified_at)));
+        output::verbose(
+            client.verbose,
+            format!(
+                "Recorded verification time: {} (stored metadata)",
+                crate::share_release::terminal_label(verified_at)
+            ),
+        );
     }
-    output::verbose(client.verbose, format!("Destination PCR policy: {:?}", pcrs.iter().map(|(i, value)| (*i, hex::encode(value))).collect::<std::collections::BTreeMap<_, _>>()));
+    output::verbose(
+        client.verbose,
+        format!(
+            "Destination PCR policy: {:?}",
+            pcrs.iter()
+                .map(|(i, value)| (*i, hex::encode(value)))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        ),
+    );
 
     // Parse the quorum bundle
     let bundle_text =
@@ -1900,7 +1966,10 @@ pub async fn send_shard(
     let names = crate::share_release::holder_names(client, &proof).await;
     let view = bundle.recovery();
     if view.legacy {
-        output::status(format!("Legacy V0 — no Keymaker generation proof (--allow-legacy accepted)\nContent hash: {}", bundle.content_hash().with_context(Ctx::parse_bundle())?));
+        output::status(format!(
+            "Legacy V0 — no Keymaker generation proof (--allow-legacy accepted)\nContent hash: {}",
+            bundle.content_hash().with_context(Ctx::parse_bundle())?
+        ));
     }
     let keys = view.keyring;
     let address_str = format!("{}:49504", public_ip);
@@ -1908,15 +1977,33 @@ pub async fn send_shard(
         .parse()
         .with_context(Ctx::invalid_address(&address_str))?;
 
-    let select_holder = || crate::share_release::select_holder(keys, release_options.holder.as_deref(), private_keyring.as_deref(), &names)
-        .with_context(Ctx::select_holder());
+    let select_holder = || {
+        crate::share_release::select_holder(
+            keys,
+            release_options.holder.as_deref(),
+            private_keyring.as_deref(),
+            &names,
+        )
+        .with_context(Ctx::select_holder())
+    };
     // Preserve useful offline input errors in scripts, but never prompt before
     // checking the destination. Neither branch accesses a smartcard or passkey.
-    let selected = if std::io::stdin().is_terminal() { None } else { Some(select_holder()?) };
-    output::status(format!("Checking destination attestation at {address} against .caution/trusted_hashes.json…"));
+    let selected = if std::io::stdin().is_terminal() {
+        None
+    } else {
+        Some(select_holder()?)
+    };
+    output::status(format!(
+        "Checking destination attestation at {address} against .caution/trusted_hashes.json…"
+    ));
     preflight_destination(address, &pcrs).await?;
-    output::status("Destination attestation verified. Release will verify a fresh connection again.");
-    let (holder, webauthn) = match selected { Some(holder) => holder, None => select_holder()? };
+    output::status(
+        "Destination attestation verified. Release will verify a fresh connection again.",
+    );
+    let (holder, webauthn) = match selected {
+        Some(holder) => holder,
+        None => select_holder()?,
+    };
     let holder_display = crate::share_release::holder_label(keys, &holder, webauthn, &names);
     output::verbose(client.verbose, format!("Holder certificate: {holder}"));
 
@@ -1935,23 +2022,56 @@ pub async fn send_shard(
             (false, _, false) => "OpenPGP smartcard",
         },
     };
-    output::verbose(client.verbose, format!("Application ID: {}; bundle identity: {}", crate::share_release::terminal_label(&app_info.id), bundle.bundle_id().map(hex::encode).unwrap_or_else(|| "Legacy V0".into())));
+    output::verbose(
+        client.verbose,
+        format!(
+            "Application ID: {}; bundle identity: {}",
+            crate::share_release::terminal_label(&app_info.id),
+            bundle
+                .bundle_id()
+                .map(hex::encode)
+                .unwrap_or_else(|| "Legacy V0".into())
+        ),
+    );
     let status: Result<_, BoxError> = if webauthn {
         let proof = serde_json::from_str(&bundle_text).with_context(Ctx::parse_bundle())?;
         let measurements = pcrs.iter().map(|(&i, v)| (i, hex::encode(v))).collect();
-        crate::share_release::recover(client, &release_options, proof, holder, summary, measurements, generation_time)
-            .await.map_err(|error| Box::new(error) as BoxError)
+        crate::share_release::recover(
+            client,
+            &release_options,
+            proof,
+            holder,
+            summary,
+            measurements,
+            generation_time,
+        )
+        .await
+        .map_err(|error| Box::new(error) as BoxError)
     } else {
         summary.print(None);
         output::status("Connecting to the destination for attestation and share submission…");
-        locksmith::client::send_selected_shard(address, pcrs, &bundle, private_keyring, Some(holder))
-            .await.map_err(|error| Box::new(error) as BoxError)
+        locksmith::client::send_selected_shard(
+            address,
+            pcrs,
+            &bundle,
+            private_keyring,
+            Some(holder),
+        )
+        .await
+        .map_err(|error| Box::new(error) as BoxError)
     };
     let status = status.map_err(|source| {
         if connection_closed(source.as_ref()) {
-            SendShardError::ConnectionClosed { location: std::panic::Location::caller(), source }
+            SendShardError::ConnectionClosed {
+                location: std::panic::Location::caller(),
+                source,
+            }
         } else {
-            SendShardError::SendShard { address: address_str, location: std::panic::Location::caller(), source }
+            SendShardError::SendShard {
+                address: address_str,
+                location: std::panic::Location::caller(),
+                source,
+            }
         }
     })?;
 
@@ -1980,14 +2100,21 @@ mod tests {
     fn imported_bundle_allows_unchanged_expired_recipient_only_with_opt_in() {
         let public_key = include_str!("../../../tests/fixtures/expired-v0-recipient.asc");
         let recipient = load_recipient_cert(public_key).unwrap();
-        assert!(recipient.with_policy(&super::OpenPgpPolicy::new(), None).unwrap().alive().is_err());
+        assert!(
+            recipient
+                .with_policy(&super::OpenPgpPolicy::new(), None)
+                .unwrap()
+                .alive()
+                .is_err()
+        );
         assert!(encrypt_secret_value(&recipient, "secret", false).is_err());
         assert!(encrypt_secret_value(&recipient, "secret", true).is_ok());
         let work = tempdir().unwrap();
         let env = work.path().join(".env");
         let bundle = work.path().join("bundle.json");
         let output = work.path().join("secrets");
-        let mut imported: serde_json::Value = serde_json::from_str(include_str!("../../../tests/fixtures/imported-v0.json")).unwrap();
+        let mut imported: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/imported-v0.json")).unwrap();
         imported["original"]["public_key"] = serde_json::json!(public_key);
         let original = serde_json::to_vec(&imported).unwrap();
         std::fs::write(&bundle, &original).unwrap();
@@ -2002,8 +2129,11 @@ mod tests {
 
     #[test]
     fn legacy_encryption_still_rejects_revoked_recipients() {
-        let (cert, revocation) = CertBuilder::new().add_userid("revoked recipient")
-            .add_storage_encryption_subkey().generate().unwrap();
+        let (cert, revocation) = CertBuilder::new()
+            .add_userid("revoked recipient")
+            .add_storage_encryption_subkey()
+            .generate()
+            .unwrap();
         let revoked = cert.insert_packets([revocation]).unwrap();
         assert!(encrypt_secret_value(&revoked, "secret", true).is_err());
     }
@@ -2016,8 +2146,15 @@ mod tests {
         std::fs::create_dir_all(source.parent().unwrap()).unwrap();
         assert!(super::local_quorum_bundle(work.path()).is_none());
         std::fs::write(&source, "raw V0").unwrap();
-        assert_eq!(super::local_quorum_bundle(work.path()), Some(source.clone()));
-        std::fs::write(&imported, include_str!("../../../tests/fixtures/imported-v0.json")).unwrap();
+        assert_eq!(
+            super::local_quorum_bundle(work.path()),
+            Some(source.clone())
+        );
+        std::fs::write(
+            &imported,
+            include_str!("../../../tests/fixtures/imported-v0.json"),
+        )
+        .unwrap();
         let selected = super::local_quorum_bundle(work.path()).unwrap();
         assert_eq!(selected, imported);
         assert!(
@@ -2063,24 +2200,48 @@ mod tests {
         let pcr01 = hex::decode("ef093e4c1fd13878956589833c0e396b935cdf5ae45c1cc595e1a19a6da5812850f0ef3e77df918cb2a86d88ddf9cc03").unwrap();
         let pcr2 = hex::decode("21b9efbc184807662e966d34f390821309eeac6802309798826296bf3e8bec7c10edb30948c90ba67310f7b964fc500a").unwrap();
         let pcrs = std::collections::HashMap::from([(0, pcr01.clone()), (1, pcr01), (2, pcr2)]);
-        let nonce = hex::decode("d041b23bce8678bbc7c174bd8494c4f9759386eec963ec69bfd45c1452b10636").unwrap();
+        let nonce = hex::decode("d041b23bce8678bbc7c174bd8494c4f9759386eec963ec69bfd45c1452b10636")
+            .unwrap();
         let now = std::time::Duration::from_millis(1766509563435);
         let address = "127.0.0.1:49504".parse().unwrap();
-        assert!(super::verify_destination_attestation(address, proof.clone(), pcrs.clone(), &nonce, now).is_ok());
+        assert!(
+            super::verify_destination_attestation(
+                address,
+                proof.clone(),
+                pcrs.clone(),
+                &nonce,
+                now
+            )
+            .is_ok()
+        );
         for pcr in 0..=2 {
             let mut wrong = pcrs.clone();
             wrong.insert(pcr, vec![0xff; 48]);
-            let error = super::verify_destination_attestation(address, proof.clone(), wrong, &nonce, now).unwrap_err();
-            assert!(matches!(&error, super::SendShardError::DestinationPcrMismatch { pcr: name, .. } if name == &format!("pcr {pcr}")));
+            let error =
+                super::verify_destination_attestation(address, proof.clone(), wrong, &nonce, now)
+                    .unwrap_err();
+            assert!(
+                matches!(&error, super::SendShardError::DestinationPcrMismatch { pcr: name, .. } if name == &format!("pcr {pcr}"))
+            );
             let message = error.to_string();
             assert!(message.contains(".caution/trusted_hashes.json"));
             assert!(message.contains("No share was sent"));
             assert!(message.contains("caution verify"));
         }
-        let wrong_nonce = super::verify_destination_attestation(address, proof, pcrs.clone(), &[1; 32], now).unwrap_err();
-        assert!(matches!(wrong_nonce, super::SendShardError::DestinationVerification { .. }));
-        let malformed = super::verify_destination_attestation(address, vec![0; 64], pcrs, &nonce, now).unwrap_err();
-        assert!(matches!(malformed, super::SendShardError::DestinationVerification { .. }));
+        let wrong_nonce =
+            super::verify_destination_attestation(address, proof, pcrs.clone(), &[1; 32], now)
+                .unwrap_err();
+        assert!(matches!(
+            wrong_nonce,
+            super::SendShardError::DestinationVerification { .. }
+        ));
+        let malformed =
+            super::verify_destination_attestation(address, vec![0; 64], pcrs, &nonce, now)
+                .unwrap_err();
+        assert!(matches!(
+            malformed,
+            super::SendShardError::DestinationVerification { .. }
+        ));
     }
 
     #[tokio::test]
@@ -2093,30 +2254,52 @@ mod tests {
             let mut bytes = [0; 4096];
             assert!(stream.read(&mut bytes).await.unwrap() > 0);
         });
-        let error = super::preflight_destination(address, &Default::default()).await.unwrap_err();
-        assert!(matches!(error, super::SendShardError::DestinationAttestation { .. }));
+        let error = super::preflight_destination(address, &Default::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            super::SendShardError::DestinationAttestation { .. }
+        ));
         assert!(error.to_string().contains("No share was sent"));
         receiver.await.unwrap();
     }
 
     #[test]
     fn share_results_distinguish_acceptance_from_reconstruction() {
-        assert_eq!(super::share_acceptance_message(0), "Quorum reconstructed successfully.");
-        assert_eq!(super::share_acceptance_message(1), "Share accepted. 1 more share required.");
-        assert_eq!(super::share_acceptance_message(2), "Share accepted. 2 more shares required.");
+        assert_eq!(
+            super::share_acceptance_message(0),
+            "Quorum reconstructed successfully."
+        );
+        assert_eq!(
+            super::share_acceptance_message(1),
+            "Share accepted. 1 more share required."
+        );
+        assert_eq!(
+            super::share_acceptance_message(2),
+            "Share accepted. 2 more shares required."
+        );
         let io = std::io::Error::other("unexpected end of file");
-        assert!(!super::connection_closed(&io), "do not classify errors by their text");
+        assert!(
+            !super::connection_closed(&io),
+            "do not classify errors by their text"
+        );
         let selected = super::SendShardError::SelectHolder {
-            location: std::panic::Location::caller(), source: Box::new(io),
+            location: std::panic::Location::caller(),
+            source: Box::new(io),
         };
-        assert!(selected.to_string().contains("Unable to select share holder"));
+        assert!(
+            selected
+                .to_string()
+                .contains("Unable to select share holder")
+        );
         assert!(!selected.to_string().contains("parse bundle"));
     }
 
     #[tokio::test]
     async fn destination_eof_is_detected_through_real_locksmith_error_chain() {
-        use tokio::io::AsyncReadExt;
         use keymaker_models::generate_quorum::{GenerateQuorumBundle, v1};
+        use tokio::io::AsyncReadExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let receiver = tokio::spawn(async move {
@@ -2135,16 +2318,38 @@ mod tests {
             .generate()
             .unwrap();
         let mut shardfile = Vec::new();
-        OpenPGP.shard_and_encrypt(1, 1, &[7; 32], std::slice::from_ref(&holder), &mut shardfile).unwrap();
+        OpenPGP
+            .shard_and_encrypt(
+                1,
+                1,
+                &[7; 32],
+                std::slice::from_ref(&holder),
+                &mut shardfile,
+            )
+            .unwrap();
         let bundle = GenerateQuorumBundle::V1(v1::GenerateQuorumResponse {
-            bundle_id: [0; 16], label: Default::default(),
-            keyring: vec![v1::Key::OpenPGP { cert: String::from_utf8(holder.armored().to_vec().unwrap()).unwrap() }],
-            threshold: 1, max: 1, shardfile: String::from_utf8(shardfile).unwrap(), public_key: String::new(),
+            bundle_id: [0; 16],
+            label: Default::default(),
+            keyring: vec![v1::Key::OpenPGP {
+                cert: String::from_utf8(holder.armored().to_vec().unwrap()).unwrap(),
+            }],
+            threshold: 1,
+            max: 1,
+            shardfile: String::from_utf8(shardfile).unwrap(),
+            public_key: String::new(),
         });
         let work = tempdir().unwrap();
         let private_key = work.path().join("holder.asc");
         std::fs::write(&private_key, holder.as_tsk().armored().to_vec().unwrap()).unwrap();
-        let error = locksmith::client::send_selected_shard(address, Default::default(), &bundle, Some(private_key), None).await.unwrap_err();
+        let error = locksmith::client::send_selected_shard(
+            address,
+            Default::default(),
+            &bundle,
+            Some(private_key),
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(super::connection_closed(&error), "{error:?}");
         receiver.await.unwrap();
     }

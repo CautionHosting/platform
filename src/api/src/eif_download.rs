@@ -1,3 +1,11 @@
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use axum::{
     body::Body,
     extract::{Extension, Path, State},

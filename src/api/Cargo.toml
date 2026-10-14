@@ -61,9 +61,6 @@ hmac = { workspace = true }
 hex = { workspace = true }
 subtle = { workspace = true }
 
-# Cache directory
-dirs = { workspace = true }
-
 # GPG decryption for managed on-prem
 sequoia-openpgp = { workspace = true }
 caution-config = { version = "0.1.0", path = "../caution-config" }

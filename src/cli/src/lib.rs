@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use base64::{Engine as _, engine::general_purpose};
 use clap::{Parser, Subcommand};
 use dterror::{BoxError, CtxError, FromContext, Location, ResultExt};
@@ -31,12 +39,12 @@ mod credentials;
 mod env_notice;
 mod pgp_keys;
 mod quorum_init;
-mod quorum_legacy;
 mod quorum_inspect;
+mod quorum_legacy;
 mod quorum_upload;
-mod share_release;
 mod secrets;
 mod service_trust;
+mod share_release;
 mod ssh_keys;
 mod verify;
 
@@ -788,7 +796,10 @@ enum SecretCommands {
             help = "Directory for encrypted secret files"
         )]
         secrets_dir: PathBuf,
-        #[arg(long, help = "Accept an imported V0 bundle without a Keymaker generation proof")]
+        #[arg(
+            long,
+            help = "Accept an imported V0 bundle without a Keymaker generation proof"
+        )]
         allow_legacy: bool,
     },
     #[command(about = "Rename a quorum bundle")]
@@ -3581,8 +3592,13 @@ pub async fn run() -> Result<(), RunError> {
 
     env_notice::gate(cli.verbose);
 
-    if !matches!(&cli.command, Commands::Secret { command: SecretCommands::Inspect(_) })
-        && let Err(e) = check_dependencies(cli.verbose) {
+    if !matches!(
+        &cli.command,
+        Commands::Secret {
+            command: SecretCommands::Inspect(_)
+        }
+    ) && let Err(e) = check_dependencies(cli.verbose)
+    {
         output::error(format!("Dependency check failed: {}", e));
         return Err(RunError::DependencyCheck {
             location: std::panic::Location::caller(),
@@ -3892,7 +3908,9 @@ pub async fn run() -> Result<(), RunError> {
                     .with_context(Ctx::command_dispatch())?;
             }
             SecretCommands::ImportLegacy(options) => {
-                quorum_legacy::run(&client, options).await.with_context(Ctx::command_dispatch())?;
+                quorum_legacy::run(&client, options)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
             }
             SecretCommands::Init(options) => {
                 quorum_init::run(&client, options)
@@ -3953,13 +3971,13 @@ mod tests {
     use super::verify::{
         ARCHIVE_PREFLIGHT_ATTEMPTS, ArchivePreflightStatus, MAX_ATTESTATION_RESPONSE_BYTES,
         TlsConnection, TlsExpectation, TrustedHashes, TrustedTls,
-        append_attestation_response_chunk, attestation_inspection_json,
-        attestation_user_data, classify_app_source_refs, classify_archive_preflight,
-        configured_enclave, display_user_data, dns_answer_is_absent, dns_contains_deployment_ip,
-        git_command, measured_build_cache_key, persist_trusted_hashes,
-        persist_trusted_hashes_with_backup, preflight_archive_urls, reproduction_uses_steve,
-        resolve_reproduction_e2e_mode, tls_connection, tls_expectation_from_config,
-        validate_attested_tls, verify_deprecation_warnings,
+        append_attestation_response_chunk, attestation_inspection_json, attestation_user_data,
+        classify_app_source_refs, classify_archive_preflight, configured_enclave,
+        display_user_data, dns_answer_is_absent, dns_contains_deployment_ip, git_command,
+        measured_build_cache_key, persist_trusted_hashes, persist_trusted_hashes_with_backup,
+        preflight_archive_urls, reproduction_uses_steve, resolve_reproduction_e2e_mode,
+        tls_connection, tls_expectation_from_config, validate_attested_tls,
+        verify_deprecation_warnings,
     };
     use super::{
         AccountCommands, ApiClient, Cli, Commands, PgpKeyCommands, RunError,

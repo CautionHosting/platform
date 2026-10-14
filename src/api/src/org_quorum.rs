@@ -176,12 +176,12 @@ fn validate_request(request: &GenerateOrgQuorumBundleRequest) -> Result<(), OrgQ
                     "existing PGP holders require a PGP key ID",
                 ));
             }
-            OrgQuorumKeySource::CautionBackedPgp => {
-                if !request.allow_caution_backed_keys || participant.pgp_key_id.is_some() {
-                    return Err(OrgQuorumError::invalid(
-                        "Caution-backed holders require explicit opt-in and no PGP key ID",
-                    ));
-                }
+            OrgQuorumKeySource::CautionBackedPgp
+                if !request.allow_caution_backed_keys || participant.pgp_key_id.is_some() =>
+            {
+                return Err(OrgQuorumError::invalid(
+                    "Caution-backed holders require explicit opt-in and no PGP key ID",
+                ));
             }
             _ => {}
         }
@@ -189,10 +189,10 @@ fn validate_request(request: &GenerateOrgQuorumBundleRequest) -> Result<(), OrgQ
     if !request.labels.is_null() && !request.labels.is_object() {
         return Err(OrgQuorumError::invalid("labels must be an object"));
     }
-    if let (Some(name), Some(label)) = (&request.name, request.labels.get("name")) {
-        if label.as_str() != Some(name.as_str()) {
-            return Err(OrgQuorumError::invalid("name and label 'name' must match"));
-        }
+    if let (Some(name), Some(label)) = (&request.name, request.labels.get("name"))
+        && label.as_str() != Some(name.as_str())
+    {
+        return Err(OrgQuorumError::invalid("name and label 'name' must match"));
     }
     Ok(())
 }
@@ -290,10 +290,14 @@ fn credential_snapshot(rows: Vec<(Vec<u8>, bool)>) -> Result<Vec<String>, OrgQuo
         ));
     }
     if rows.len() > MAX_HOLDER_CREDENTIALS {
-        return Err(OrgQuorumError::invalid("Caution-backed holder has more than 64 credentials; reduce the credential count before generation"));
+        return Err(OrgQuorumError::invalid(
+            "Caution-backed holder has more than 64 credentials; reduce the credential count before generation",
+        ));
     }
     if !rows.iter().any(|(_, verified)| *verified) {
-        return Err(OrgQuorumError::invalid("Caution-backed holder must verify a passkey with PIN/biometrics in Dashboard Authentication before generation, or use external PGP"));
+        return Err(OrgQuorumError::invalid(
+            "Caution-backed holder must verify a passkey with PIN/biometrics in Dashboard Authentication before generation, or use external PGP",
+        ));
     }
     rows.into_iter()
         .map(|(bytes, _)| {
@@ -648,11 +652,19 @@ pub async fn generate_org_quorum_bundle(
 }
 
 /// Verify V1 proofs or explicitly accepted legacy public structure.
-pub(crate) fn verify_upload(data: &serde_json::Value, allow_legacy: bool) -> Result<(), OrgQuorumError> {
+pub(crate) fn verify_upload(
+    data: &serde_json::Value,
+    allow_legacy: bool,
+) -> Result<(), OrgQuorumError> {
     if data.get("format").is_some() {
-        if !allow_legacy { return Err(OrgQuorumError::invalid("legacy upload requires explicit allow_legacy: true")); }
+        if !allow_legacy {
+            return Err(OrgQuorumError::invalid(
+                "legacy upload requires explicit allow_legacy: true",
+            ));
+        }
         locksmith::legacy::ImportedV0::from_json(&data.to_string()).with_context(Ctx::new(
-            StatusCode::BAD_REQUEST, "invalid imported legacy bundle (public validation only)",
+            StatusCode::BAD_REQUEST,
+            "invalid imported legacy bundle (public validation only)",
         ))?;
         return Ok(());
     }
