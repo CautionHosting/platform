@@ -942,6 +942,16 @@ fn accepted_message(deployment_id: Uuid) -> String {
     )
 }
 
+/// Shown when the `/deploy` stream breaks after the push was accepted.
+fn interrupted_message(deployment_id: Option<Uuid>, error: &dyn std::fmt::Display) -> String {
+    match deployment_id {
+        Some(id) => format!(
+            "remote: error: The API connection was lost during this deploy (it may have restarted); deployment {id} was abandoned and is cleaned up automatically. Push again.\n"
+        ),
+        None => format!("remote: error: Stream error: {error}\n"),
+    }
+}
+
 fn candidate_success_message(
     deployment_id: Uuid,
     live: Option<Uuid>,
@@ -1594,7 +1604,7 @@ async fn handle_git_push(
                 }
                 Err(e) => {
                     tracing::error!("Error reading deployment stream: {}", e);
-                    let error_msg = format!("remote: error: Stream error: {}\n", e);
+                    let error_msg = interrupted_message(reservation, &e);
                     let _ = session_handle
                         .extended_data(channel, 1, Bytes::from(error_msg.into_bytes()))
                         .await;
@@ -2110,6 +2120,21 @@ mod tests {
         )));
         assert!(message.contains(&format!("Follow it with: caution apps get -d {id}")));
         assert!(!super::contains_non_line_terminal_control(&message));
+    }
+
+    #[test]
+    fn interrupted_message_names_the_abandoned_deployment_or_keeps_the_stream_error() {
+        let id = uuid::Uuid::from_u128(7);
+        let message = super::interrupted_message(Some(id), &"connection reset");
+        assert!(message.contains(&format!("deployment {id} was abandoned")));
+        assert!(message.contains("it may have restarted"));
+        assert!(!message.contains("connection reset"));
+        assert!(!super::contains_non_line_terminal_control(&message));
+        // A Legacy push has no reservation to name.
+        assert_eq!(
+            super::interrupted_message(None, &"connection reset"),
+            "remote: error: Stream error: connection reset\n"
+        );
     }
 
     #[tokio::test]

@@ -40,6 +40,12 @@ pub(crate) fn bills_instance(
         && failure_kind != Some("runtime_lost")
 }
 
+/// Whether the resources of a terminal deployment are released: `done` or
+/// `pending` for `failed` and `destroyed`, nothing for the others.
+pub(crate) fn cleanup_state(status: &str, cleaned_up: bool) -> Option<&'static str> {
+    matches!(status, "failed" | "destroyed").then_some(if cleaned_up { "done" } else { "pending" })
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct SummaryInput<'a> {
     pub(crate) app_state: &'a str,
@@ -223,6 +229,24 @@ pub(crate) async fn summaries(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_state_is_only_for_failed_and_destroyed() {
+        assert_eq!(cleanup_state("failed", false), Some("pending"));
+        assert_eq!(cleanup_state("failed", true), Some("done"));
+        assert_eq!(cleanup_state("destroyed", false), Some("pending"));
+        assert_eq!(cleanup_state("destroyed", true), Some("done"));
+        for status in [
+            "reserved",
+            "building",
+            "provisioning",
+            "running",
+            "destroying",
+        ] {
+            assert_eq!(cleanup_state(status, true), None, "{status}");
+            assert_eq!(cleanup_state(status, false), None, "{status}");
+        }
+    }
 
     fn input() -> SummaryInput<'static> {
         SummaryInput {

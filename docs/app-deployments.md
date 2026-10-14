@@ -30,11 +30,15 @@ Set both in `~/.config/caution/.env`, then restart the API (`env.example` lists 
   If a first deployment is running but cannot be made live, the push says so: for a
   transient error the reconciler retries within about a minute; if another instance
   holds the app address it stays a candidate until the address is repaired.
+  While nothing is live, the CLI and dashboard label an attempt that can still go
+  live (reserved, building, provisioning, running) Pending, not Candidate.
 - **Verify.** `caution verify -d <deployment>` checks it at its current address
   (a candidate's IP changes on stop/start) from a checkout at its commit, and keeps
   its trust in `.caution/deployments/<deployment>/trusted_hashes.json`, apart from
   the app's `.caution/trusted_hashes.json`. `caution apps get [APP] -d <deployment>`
-  shows one deployment. With several running deployments, bare `caution verify`
+  shows one deployment: its instance, its cleanup state (`done` or `pending`, for a
+  failed or destroyed deployment) and its address, which is `unavailable` for a
+  live deployment lost to `runtime_lost` (AWS has released the stable IP). With several running deployments, bare `caution verify`
   refuses and asks for `-d`. A `mode = "tls"` build may report TLS pending (see
   [Enclave TLS on candidates](#enclave-tls-on-candidates)); other builds fail as before.
 - **Switch.** `caution apps switch -d <deployment>` needs a passkey tap; a session
@@ -50,10 +54,13 @@ Set both in `~/.config/caution/.env`, then restart the API (`env.example` lists 
   always carries `tls_after_switch` (true when this switch moved the address to a
   deployment that obtains its certificate only now); `/deploy` carries it only when
   true, and the push output says so. The push output also names the deployment right
-  after the push is accepted.
+  after the push is accepted, and if the `/deploy` stream breaks after that (the API
+  may have restarted) it says the deployment was abandoned and is cleaned up
+  automatically. The CLI prints the signed method and path (without `/api`) above
+  the body for every signed POST.
 - **Destroy.** `caution apps destroy [APP] -d <deployment>` destroys one deployment
   (session, or `--this-is-a-ci-machine` with the app ID). The live deployment is
-  never destroyed, whatever the flags, and `-d` returns 409 while the app is being
+  never destroyed, whatever the flags: the CLI refuses it before prompting, and `-d` returns 409 while the app is being
   destroyed. `caution apps destroy` (the app) destroys every deployment and clears
   the live pointer; it returns 409 while a build, provisioning or deployment destroy
   is active.

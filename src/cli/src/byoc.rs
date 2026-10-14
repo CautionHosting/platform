@@ -877,6 +877,7 @@ pub(crate) async fn init(
     ));
 
     print_managed_dns_details(
+        "",
         create_response.managed_hostname.as_deref(),
         create_response.dns_status.as_deref(),
         create_response.dns_error.as_deref(),
@@ -1083,6 +1084,7 @@ async fn init_byoc(client: &ApiClient, config_path: &PathBuf) -> Result<(), Init
     output::status(format!("Git URL: {}", git_url));
     output::status(deployment_target_summary("BYOC", aws_account, aws_region));
     print_managed_dns_details(
+        "",
         create_response["managed_hostname"].as_str(),
         create_response["dns_status"].as_str(),
         create_response["dns_error"].as_str(),
@@ -1522,6 +1524,7 @@ async fn init_byoc_interactive(
         &aws_region,
     ));
     print_managed_dns_details(
+        "",
         registered_app_data["managed_hostname"].as_str(),
         registered_app_data["dns_status"].as_str(),
         registered_app_data["dns_error"].as_str(),

@@ -31,13 +31,16 @@ pub(crate) const TLS_AFTER_SWITCH_SQL: &str = "(COALESCE((d.configuration->>'tls
 /// The address an operator reaches a deployment at: the app's stable IP for
 /// the live deployment, the instance's current IP otherwise. A candidate's IP
 /// changes on stop/start and after a switch away from it, so it is never read
-/// from a stored column.
+/// from a stored column. A lost live deployment has no address: AWS has
+/// already released the stable IP.
 pub(crate) fn endpoint_ip(
     role: Role,
+    runtime_lost: bool,
     stable_ip: Option<&str>,
     current_instance_ip: Option<&str>,
 ) -> Option<String> {
     match role {
+        Role::Live if runtime_lost => None,
         Role::Live => stable_ip.map(str::to_string),
         Role::Candidate => current_instance_ip.map(str::to_string),
     }
@@ -74,6 +77,8 @@ pub(crate) struct DeploymentView {
     pub(crate) estimated_monthly_usd: Option<f64>,
     pub(crate) cleaned_up_at: Option<DateTime<Utc>>,
     pub(crate) destroyed_at: Option<DateTime<Utc>>,
+    /// `done` or `pending` for a failed or destroyed deployment (`summary::cleanup_state`).
+    cleanup: Option<&'static str>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -139,7 +144,13 @@ impl DeploymentRow {
             .get("memory_mb")
             .and_then(serde_json::Value::as_u64);
         DeploymentView {
-            public_ip: endpoint_ip(role, self.stable_ip.as_deref(), current_instance_ip),
+            public_ip: endpoint_ip(
+                role,
+                self.status == "failed" && self.failure_kind.as_deref() == Some("runtime_lost"),
+                self.stable_ip.as_deref(),
+                current_instance_ip,
+            ),
+            cleanup: summary::cleanup_state(&self.status, cleaned_up),
             role: role.as_str(),
             id: self.id,
             app_id: self.app_id,
@@ -507,16 +518,33 @@ mod tests {
     #[test]
     fn deployment_endpoint_prefers_current_instance_ip() {
         assert_eq!(
-            endpoint_ip(Role::Live, Some("198.51.100.42"), Some("203.0.113.9")).as_deref(),
+            endpoint_ip(
+                Role::Live,
+                false,
+                Some("198.51.100.42"),
+                Some("203.0.113.9")
+            )
+            .as_deref(),
             Some("198.51.100.42")
+        );
+        // AWS has already released the stable IP of a lost live deployment.
+        assert_eq!(
+            endpoint_ip(Role::Live, true, Some("198.51.100.42"), None),
+            None
         );
         // A candidate's IP changes on stop/start and after a switch away from it.
         assert_eq!(
-            endpoint_ip(Role::Candidate, Some("198.51.100.42"), Some("203.0.113.9")).as_deref(),
+            endpoint_ip(
+                Role::Candidate,
+                false,
+                Some("198.51.100.42"),
+                Some("203.0.113.9")
+            )
+            .as_deref(),
             Some("203.0.113.9")
         );
         assert_eq!(
-            endpoint_ip(Role::Candidate, Some("198.51.100.42"), None),
+            endpoint_ip(Role::Candidate, false, Some("198.51.100.42"), None),
             None
         );
     }
@@ -557,6 +585,23 @@ mod tests {
         let view = serde_json::to_value(row(other, "failed", None).into_view(None)).unwrap();
         assert_eq!(view["role"], "candidate");
         assert!(view["public_ip"].is_null());
+    }
+
+    #[test]
+    fn view_of_a_lost_live_deployment_has_no_address_and_reports_cleanup() {
+        let live = Uuid::new_v4();
+        let mut lost = row(live, "failed", Some(live));
+        lost.failure_kind = Some("runtime_lost".to_string());
+        let view = serde_json::to_value(lost.into_view(None)).unwrap();
+        assert_eq!(view["role"], "live");
+        assert!(view["public_ip"].is_null());
+        assert_eq!(view["cleanup"], "pending");
+        let mut cleaned = row(Uuid::new_v4(), "destroyed", Some(live));
+        cleaned.cleaned_up_at = Some(Utc::now());
+        let view = serde_json::to_value(cleaned.into_view(None)).unwrap();
+        assert_eq!(view["cleanup"], "done");
+        let view = serde_json::to_value(row(live, "running", Some(live)).into_view(None)).unwrap();
+        assert!(view["cleanup"].is_null());
     }
 
     #[test]

@@ -362,6 +362,7 @@ pub(crate) async fn create(client: &ApiClient) -> Result<(), CreateError> {
         "pending",
     ));
     crate::print_managed_dns_details(
+        "",
         create_response.managed_hostname.as_deref(),
         create_response.dns_status.as_deref(),
         create_response.dns_error.as_deref(),
@@ -673,6 +674,7 @@ pub(crate) async fn get(
     }
 
     crate::print_managed_dns_details(
+        "  ",
         app.managed_hostname.as_deref(),
         app.dns_status.as_deref(),
         app.dns_error.as_deref(),
@@ -921,6 +923,8 @@ pub(crate) struct DeploymentView {
     pushed_ref: Option<String>,
     pub(crate) commit_sha: Option<String>,
     commit_subject: Option<String>,
+    #[serde(default)]
+    instance_id: Option<String>,
     instance_type: Option<String>,
     pub(crate) public_ip: Option<String>,
     created_at: String,
@@ -930,6 +934,9 @@ pub(crate) struct DeploymentView {
     pub(crate) bundle_hash: Option<String>,
     #[serde(default)]
     pub(crate) tls_after_switch: bool,
+    /// `done` or `pending` for a failed or destroyed deployment.
+    #[serde(default)]
+    cleanup: Option<String>,
 }
 
 /// The `error` text of an API error body, or the whole body when it has none.
@@ -1403,6 +1410,15 @@ fn is_retained(d: &DeploymentView) -> bool {
     ))
 }
 
+/// Nothing live: an attempt that can still go live is Pending, not a Candidate.
+fn role_label(d: &DeploymentView, has_live: bool) -> String {
+    match (d.role.as_str(), has_live, d.status.as_str()) {
+        ("live", _, _) => "Live".into(),
+        (_, false, "reserved" | "building" | "provisioning" | "running") => "Pending".into(),
+        _ => "Candidate".into(),
+    }
+}
+
 /// Retained deployments, the live one first, then newest first.
 pub(crate) fn deployment_rows(deployments: &[DeploymentView]) -> Vec<Vec<String>> {
     let mut retained: Vec<&DeploymentView> =
@@ -1412,12 +1428,13 @@ pub(crate) fn deployment_rows(deployments: &[DeploymentView]) -> Vec<Vec<String>
             .cmp(&(a.role == "live"))
             .then(b.created_at.cmp(&a.created_at))
     });
+    let has_live = deployments.iter().any(|d| d.role == "live");
     retained
         .iter()
         .map(|d| {
             vec![
                 short_id(&d.id),
-                state_label(&d.role),
+                role_label(d, has_live),
                 d.commit_sha
                     .as_deref()
                     .map(short_sha)
@@ -1624,6 +1641,7 @@ fn print_deployments(app: &App, deployments: &[DeploymentView], history: &Recent
         ));
     }
     crate::print_managed_dns_details(
+        "",
         app.managed_hostname.as_deref(),
         app.dns_status.as_deref(),
         app.dns_error.as_deref(),
@@ -1658,28 +1676,45 @@ pub(crate) async fn get_deployment(
         .with_context(Ctx::fetch())?;
 
     output::data_header("Deployment Details:");
-    output::status(format!("  ID: {}", deployment.id));
-    output::status(format!("  Role: {}", deployment.role));
-    match &deployment.failure_kind {
-        Some(kind) => output::status(format!("  Status: {} ({})", deployment.status, kind)),
-        None => output::status(format!("  Status: {}", deployment.status)),
+    for line in deployment_detail_lines(&deployment) {
+        output::status(line);
     }
+    Ok(())
+}
+
+/// The lines of `apps get -d` under its header.
+fn deployment_detail_lines(deployment: &DeploymentView) -> Vec<String> {
+    let mut lines = vec![
+        format!("  ID: {}", deployment.id),
+        format!("  Role: {}", deployment.role),
+    ];
+    lines.push(match &deployment.failure_kind {
+        Some(kind) => format!("  Status: {} ({})", deployment.status, kind),
+        None => format!("  Status: {}", deployment.status),
+    });
+    // AWS has already released the address of a lost deployment.
+    let public_ip = match (&deployment.public_ip, deployment.failure_kind.as_deref()) {
+        (None, Some("runtime_lost")) => Some("unavailable".to_string()),
+        (ip, _) => ip.clone(),
+    };
     for (label, value) in [
         ("Commit", &deployment.commit_sha),
         ("Subject", &deployment.commit_subject),
         ("Pushed ref", &deployment.pushed_ref),
-        ("Public IP", &deployment.public_ip),
+        ("Public IP", &public_ip),
+        ("Instance", &deployment.instance_id),
         ("Instance type", &deployment.instance_type),
+        ("Cleanup", &deployment.cleanup),
     ] {
         if let Some(value) = value {
-            output::status(format!("  {label}: {value}"));
+            lines.push(format!("  {label}: {value}"));
         }
     }
-    output::status(format!("  Created: {}", deployment.created_at));
+    lines.push(format!("  Created: {}", deployment.created_at));
     if let Some(error) = &deployment.error {
-        output::status(format!("  Error: {error}"));
+        lines.push(format!("  Error: {error}"));
     }
-    Ok(())
+    lines
 }
 
 /// Failure modes for [`git_head`].
@@ -2066,6 +2101,14 @@ pub(crate) enum DestroyDeploymentError {
         source: BoxError,
     },
 
+    #[error(
+        "The live deployment cannot be destroyed; switch to another deployment first. [{location:?}]"
+    )]
+    Live {
+        #[location]
+        location: Location,
+    },
+
     #[error("failed to confirm destruction [{location:?}]")]
     Confirm {
         #[location]
@@ -2112,6 +2155,16 @@ pub(crate) enum DestroyDeploymentError {
     },
 }
 
+/// The API refuses the live deployment whatever the flags; say so before prompting.
+fn refuse_live(target: &DeploymentView) -> Result<(), DestroyDeploymentError> {
+    if target.role == "live" {
+        return Err(DestroyDeploymentError::Live {
+            location: std::panic::Location::caller(),
+        });
+    }
+    Ok(())
+}
+
 /// `apps destroy -d`: destroys one non-live deployment; the API refuses the
 /// live one whatever the flags.
 pub(crate) async fn destroy_deployment(
@@ -2126,6 +2179,7 @@ pub(crate) async fn destroy_deployment(
     let target = fetch_deployment(client, app, deployment, allow_ci_ssh)
         .await
         .with_context(Ctx::fetch_deployment())?;
+    refuse_live(&target)?;
 
     if !force {
         let deployments = list_deployments(client, &target.app_id, false, allow_ci_ssh)
@@ -2142,9 +2196,6 @@ pub(crate) async fn destroy_deployment(
             .iter()
             .find(|candidate| candidate.role == "live")
         {
-            Some(live) if live.id == target.id => output::warning(
-                "  WARNING: This is the live deployment; the platform refuses to destroy it.",
-            ),
             Some(live) => {
                 output::status(format!("  The live deployment {} keeps serving.", live.id))
             }
@@ -2467,10 +2518,11 @@ pub(crate) async fn try_relink(
 #[cfg(test)]
 mod tests {
     use super::{
-        DeploymentView, HistoryEntry, Selector, SelectorError, VerifyTargetError, api_error_text,
-        bare_target_allowed, canonical_id, deployment_rows, destroy_deployment,
+        DeploymentView, DestroyDeploymentError, HistoryEntry, Selector, SelectorError,
+        VerifyTargetError, api_error_text, bare_target_allowed, canonical_id,
+        deployment_detail_lines, deployment_rows, destroy_deployment,
         extract_resource_id_from_git_url, fetch_deployment, history_line, parse_selector,
-        prepare_deployment_verify, resolve_prefix, short_sha, switch, verify_target,
+        prepare_deployment_verify, resolve_prefix, role_label, short_sha, switch, verify_target,
     };
     use super::{app_is_active, app_list_row, render_table, state_label};
     use crate::{ApiClient, App};
@@ -2621,6 +2673,60 @@ mod tests {
             ["a0000000", "Live", "b6e8c92", "main", "Running"].map(String::from)
         );
         assert_eq!(rows[1][1], "Candidate");
+    }
+
+    #[test]
+    fn nothing_live_labels_an_attempt_that_can_still_go_live_pending() {
+        let deployment = |role: &str, status: &str| -> DeploymentView {
+            serde_json::from_value(serde_json::json!({
+                "id": "c0000000-1", "app_id": "a", "role": role, "status": status,
+                "created_at": "2026-10-12T10:00:00Z"}))
+            .unwrap()
+        };
+        for status in ["reserved", "building", "provisioning", "running"] {
+            assert_eq!(
+                role_label(&deployment("candidate", status), false),
+                "Pending"
+            );
+            assert_eq!(
+                role_label(&deployment("candidate", status), true),
+                "Candidate"
+            );
+        }
+        // A failed attempt will never go live.
+        assert_eq!(
+            role_label(&deployment("candidate", "failed"), false),
+            "Candidate"
+        );
+        assert_eq!(role_label(&deployment("live", "running"), true), "Live");
+
+        let rows = deployment_rows(&[deployment("candidate", "building")]);
+        assert_eq!(rows[0][1], "Pending");
+    }
+
+    #[test]
+    fn deployment_details_show_instance_cleanup_and_a_lost_address() {
+        let view = |extra: serde_json::Value| -> DeploymentView {
+            let mut view = serde_json::json!({
+                "id": DEPLOYMENT, "app_id": APP, "role": "live", "status": "failed",
+                "created_at": "2026-10-12T00:00:00Z"});
+            view.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(view).unwrap()
+        };
+        let lost = deployment_detail_lines(&view(serde_json::json!({
+            "failure_kind": "runtime_lost", "public_ip": null,
+            "instance_id": "i-0123", "cleanup": "pending"})));
+        assert!(lost.contains(&"  Public IP: unavailable".to_string()));
+        assert!(lost.contains(&"  Instance: i-0123".to_string()));
+        assert!(lost.contains(&"  Cleanup: pending".to_string()));
+        // No address otherwise prints nothing, as before.
+        let other = deployment_detail_lines(&view(serde_json::json!({
+            "failure_kind": "build_failed", "cleanup": "done"})));
+        assert!(!other.iter().any(|line| line.contains("Public IP")));
+        assert!(!other.iter().any(|line| line.contains("Instance:")));
+        assert!(other.contains(&"  Cleanup: done".to_string()));
     }
 
     #[test]
@@ -3286,6 +3392,27 @@ mod tests {
             requests.lock().unwrap()[1]
                 .to_lowercase()
                 .contains("x-session-id: test-session")
+        );
+    }
+
+    #[tokio::test]
+    async fn destroying_the_live_deployment_is_refused_before_any_request_or_prompt() {
+        let dir = tempdir().unwrap();
+        let (url, requests) = serve(|_, _| (200, view_json(DEPLOYMENT, APP, "live"))).await;
+        let client = client(&url, dir.path(), None);
+
+        // Without `--force` there is no prompt either: this would block on stdin.
+        for force in [true, false] {
+            let error =
+                destroy_deployment(&client, Some(APP.to_string()), DEPLOYMENT, force, false)
+                    .await
+                    .unwrap_err();
+            assert!(matches!(error, DestroyDeploymentError::Live { .. }));
+        }
+        assert_eq!(
+            request_lines(&requests),
+            vec![format!("GET /api/deployments/{DEPLOYMENT} HTTP/1.1"); 2],
+            "only the deployment is read"
         );
     }
 

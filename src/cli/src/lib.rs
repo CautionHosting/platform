@@ -962,7 +962,13 @@ pub struct CreateAppResponse {
     pub dns_error: Option<String>,
 }
 
+/// What is signed besides the body: the method and the path without `/api`.
+fn signed_request_line(method: &str, path: &str) -> String {
+    format!("{method} {}", path.strip_prefix("/api").unwrap_or(path))
+}
+
 fn print_managed_dns_details(
+    indent: &str,
     hostname: Option<&str>,
     status: Option<&str>,
     error: Option<&str>,
@@ -971,15 +977,24 @@ fn print_managed_dns_details(
     let Some(hostname) = hostname else {
         return;
     };
-    output::status(["DNS target: ", hostname].concat());
+    output::status([indent, "DNS target: ", hostname].concat());
     if let Some(status) = status {
-        output::status(["Managed DNS: ", status].concat());
+        output::status([indent, "Managed DNS: ", status].concat());
     }
     if let Some(error) = error {
-        output::warning(["Managed DNS retry error: ", error].concat());
+        output::warning([indent, "Managed DNS retry error: ", error].concat());
     }
     if let Some(domain) = domain {
-        output::status(["Create a CNAME for ", domain, " pointing to ", hostname].concat());
+        output::status(
+            [
+                indent,
+                "Create a CNAME for ",
+                domain,
+                " pointing to ",
+                hostname,
+            ]
+            .concat(),
+        );
     }
 }
 
@@ -3218,6 +3233,7 @@ enclave "default" {{
         let body_json = serde_json::to_vec(body).with_context(Ctx::serialize_body())?;
 
         if !self.qr {
+            output::status(signed_request_line("POST", path));
             output::status("\nData to be signed:");
             output::status(
                 serde_json::to_string_pretty(body)
@@ -4100,7 +4116,7 @@ mod tests {
         AccountCommands, ApiClient, AppCommands, Cli, Commands, PgpKeyCommands, RunError,
         deployment_target_summary, inspect_checkout_link, linked_checkout_error,
         prepare_pgp_public_key_for_upload, resolve_local_build_command_from_dir,
-        resolve_procfile_build_command, validate_global_qr,
+        resolve_procfile_build_command, signed_request_line, validate_global_qr,
     };
     use caution_config::{ConfigurationFile, E2eEncryption, E2eMode};
     use clap::Parser;
@@ -4113,6 +4129,15 @@ mod tests {
     use std::path::{Path, PathBuf};
     use tempfile::tempdir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn the_signed_request_line_names_the_method_and_the_path_without_api() {
+        assert_eq!(
+            signed_request_line("POST", "/api/resources/a/deployments/b/switch"),
+            "POST /resources/a/deployments/b/switch"
+        );
+        assert_eq!(signed_request_line("POST", "/other"), "POST /other");
+    }
 
     #[test]
     fn reproduction_e2e_mode_preserves_explicit_config_and_manifest_fallback() {
