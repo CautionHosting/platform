@@ -35,12 +35,43 @@ Set both in `~/.config/caution/.env`, then restart the API (`env.example` lists 
 - **Verify.** `caution verify -d <deployment>` checks it at its current address
   (a candidate's IP changes on stop/start) from a checkout at its commit, and keeps
   its trust in `.caution/deployments/<deployment>/trusted_hashes.json`, apart from
-  the app's `.caution/trusted_hashes.json`. `caution apps get [APP] -d <deployment>`
+  the app's `.caution/trusted_hashes.json`. With several running deployments, bare
+  `caution verify` refuses and asks for `-d`. A `mode = "tls"` build may report TLS
+  pending (see [Enclave TLS on candidates](#enclave-tls-on-candidates)); other builds
+  fail as before.
+- **List and inspect.** `caution apps list` shows the active apps (`-a` adds the
+  inactive ones: destroyed or failed) with the columns APP, ID, STATE, LIVE COMMIT,
+  CANDIDATES (`used / limit`, or `Legacy`) and HOSTNAME. `caution apps get [APP]` of a
+  deployments app prints a summary (app, state, hostname, stable IP, live deployment
+  and commit, candidates), the table of retained deployments (live first, then newest;
+  DEPLOYMENT, ROLE, COMMIT, PUSHED REF, STATE, SUBJECT) and the five most recent
+  [history](#history) lines. The table comes from `GET /resources/{id}/deployments?retained=1`
+  (a server without the filter sends every row and the CLI filters by status). History
+  is session-only: `--this-is-a-ci-machine` skips it, and a failed history read prints
+  "History unavailable" without failing the command. A Legacy app prints
+  `Lifecycle: Legacy · single deployment` and its usual details. The tables go to
+  stderr, like the rest of the CLI's status output. `caution apps get [APP] -d <deployment>`
   shows one deployment: its instance, its cleanup state (`done` or `pending`, for a
   failed or destroyed deployment) and its address, which is `unavailable` for a
-  live deployment lost to `runtime_lost` (AWS has released the stable IP). With several running deployments, bare `caution verify`
-  refuses and asks for `-d`. A `mode = "tls"` build may report TLS pending (see
-  [Enclave TLS on candidates](#enclave-tls-on-candidates)); other builds fail as before.
+  live deployment lost to `runtime_lost` (AWS has released the stable IP).
+- **Short deployment IDs.** Every `-d` takes the full ID or its first 8 or more
+  hexadecimal characters, as the tables print them. The prefix must be unique among
+  all the app's deployments, destroyed and failed ones included, so IDs printed in
+  history resolve; it is resolved once, then every request uses the exact ID. The app
+  is the explicit one (`apps get APP -d ...`), else the linked checkout's. So
+  `verify -d` and `secret send-shard -d` without `--app` take a short ID only from a
+  linked checkout; a full ID works anywhere. Anything shorter than 8 characters is
+  refused before any request ("use the full ID or at least its first 8 characters").
+- **Dashboard.** The app header is compact, with an App details disclosure for the
+  rest. Deployments list the live one first; selecting one opens the inspector with its
+  verification command, **Switch live** (a passkey prompt; offered for a running
+  non-live deployment) and **Destroy deployment** (not offered for the live one, one
+  still building, or for Legacy apps). Settings shows the retained instances and their
+  estimated cost. History is a collapsible list below the deployments. A Legacy app
+  shows `Legacy · single deployment` and no deployment actions.
+- **Known limits.** A candidate is metered only from its health check on, as Legacy
+  is. Rolling back keeps the configuration keys the newer deployment added (the
+  `project_live` merge): they are not removed again.
 - **Switch.** `caution apps switch -d <deployment>` needs a passkey tap; a session
   or SSH-signed request gets 403 `This operation requires signature verification`
   (no CI form). It names the live deployment it was confirmed against: if that
@@ -64,6 +95,34 @@ Set both in `~/.config/caution/.env`, then restart the API (`env.example` lists 
   destroyed. `caution apps destroy` (the app) destroys every deployment and clears
   the live pointer; it returns 409 while a build, provisioning or deployment destroy
   is active.
+
+## History
+
+`deployment_events` records the switch, deployment destroy and app destroy of
+deployments-lifecycle apps (Legacy apps get none). Each operation writes a `requested`
+row before it executes (who, `auth_method` of `passkey`, `session` or `ssh_signed`,
+the target and previous deployment), then one outcome row with the same
+`operation_id`: `succeeded`, `rejected` (the request was refused, e.g. a stale switch
+409), `failed`, or `observed` (an interrupted operation settled by
+[reconciliation](#recovery)). A switch counts as `succeeded` only when the API
+confirmed the address association and the live pointer; an HTTP status alone is never
+shown as success. No request bodies, shares, secrets, assertions or credential material
+are stored, and errors are the API's client messages.
+
+A refused app destroy (for example a 409 while a deployment builds) is recorded as
+`rejected`; a refused deployment destroy (live, building or holding the address)
+records nothing, because it is refused before the operation starts.
+
+- **Read.** `GET /resources/{id}/history?limit=N` (session only; default 20, at most
+  50) returns `{entries, next}`: the operations and the failed push attempts, newest
+  first. It is scoped to the caller's organizations (404 otherwise), and a deployment
+  is named only through its own app.
+- **Signed switches.** A passkey-signed switch links its `signed_request_audit` row:
+  `signed_request_id` is the proof, and `signed_request_status` is the response status
+  the gateway records after it has answered, so it can lag the switch by a moment. A
+  rejected switch keeps the link too.
+- **Retention.** The proof follows the audit retention policy: deleting the user
+  removes the audit row, and the event keeps its row with the link and actor cleared.
 
 ## Releasing shares to a deployment
 
@@ -156,13 +215,20 @@ The reconciler runs at startup and every 60 s. It:
 - marks a Running deployment `failed` with `failure_kind = 'runtime_lost'` once EC2
   confirms its instance gone, keeping the live pointer and its state: switch to a
   healthy deployment, then `destroy -d` it;
+- settles history requests an API restart left unanswered from what it observes:
+  a switch whose Elastic IP holder it finds live (the pointer repair above), or a
+  destroy it finds finished, is recorded `observed`, with the request's passkey proof
+  still linked;
 - only logs two states for an operator: `app Elastic IP is unassociated` (the live
   deployment is unreachable until a switch) and `app Elastic IP is held by an
   instance of no Running deployment` (switches answer 409 until repaired).
 
 An unsuspend that finds the live deployment `runtime_lost` does not re-attach the app
 address or restart its meter: the app returns to running, as before the suspension,
-with the live deployment unreachable until you switch to a healthy one.
+with the live deployment unreachable until you switch to a healthy one. Known limit:
+an unsuspend within the roughly 60 s window of an interrupted switch (before the
+reconciler has repaired the pointer) re-attaches the address to the recorded live
+deployment.
 
 Every cleanup (failed attempt, `destroy -d`, app destroy, reconciliation) also
 sweeps what the deployment's state may have missed: OpenTofu saves state on an
@@ -193,8 +259,11 @@ one active operation per app, so there is nothing to unlock.
 
 ## Rollout and rollback
 
-Deploy the API (migrations 056, 057) before the gateway, whose push check selects
-`compute_resources.lifecycle`, and the gateway before the CLI (its display context
+On a first install deploy the API (migrations 056 to 058) before the gateway, whose
+push check selects `compute_resources.lifecycle`. A host that already runs the M1/M2
+migrations deploys the gateway before the API instead: the API refuses switches (403)
+until the gateway forwards `X-Caution-Signed-Request-Id`, while an older API ignores
+the new headers. The gateway comes before the CLI either way (its display context
 accepts `deployment_id`). Migration 030 no longer creates the one-meter-per-app
 index: rolling back to a release with the old 030 fails startup once an app has two
 running deployment meters, so treat the migration as one-way once the flag has been on.
@@ -219,4 +288,11 @@ test Legacy on a host that enables the flag.
   The `caution verify -d` step fails on any `verify -d` failure and requires the
   per-deployment trust file (strict passed on caution-dev, 2026-10-13).
   `E2E_STRICT_VERIFY=0` tolerates the environmental failures `test_happy_path.sh`
-  tolerates and prints `ACCEPTANCE OPEN` instead.
+  tolerates and prints `ACCEPTANCE OPEN` instead. It also covers `apps list` (and
+  `-a`), `apps get` (table, SSH-signed `--this-is-a-ci-machine` read without history),
+  the history entries of the switches and destroys (passkey, `ssh_signed`, rejected),
+  and short `-d` IDs.
+- To run a Legacy target with the flag on, override the default:
+  `make test-e2e API_EXTRA_ENV="-e APP_DEPLOYMENTS_ENABLED=true"` (also
+  `test-e2e-ssh-units`, `test-e2e-byoc`); Legacy apps must behave the same and get no
+  `deployment_events`.

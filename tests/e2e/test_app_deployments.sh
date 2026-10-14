@@ -16,17 +16,20 @@
 # Flow (docs/app-deployments.md describes the lifecycle):
 #    1-4  Harness, as test_happy_path.sh: e2e login, SSH key, demo app
 #    5    caution apps create: lifecycle is "deployments"
-#    6    Push A: goes live (nothing was live)
+#    6    Push A: goes live (nothing was live); apps list and apps get show it
 #    7    A push interrupted mid-transfer releases its reservation
 #    8    Push B (background): busy push refused, app destroy 409, B candidate
 #    8a   B's view carries bundle/TLS fields, bare verify needs -d
 #    9    A stays live, stable IP unchanged, health 200
 #   10    Push C: candidate limit reached, no new deployment
-#   11    caution verify -d B, apps get -d B (SSH-signed CI read)
-#   12    Switch to B: session-only 403, passkey-signed 200
-#   13    Rollback to A, a stale switch is 409
-#   14    destroy -d A refused (live), destroy -d B ok, unchanged push skipped
-#   15    caution apps destroy: every deployment destroyed, nothing metered
+#   11    caution verify -d B, apps get -d B and apps get (SSH-signed CI reads)
+#   12    Switch to B: session-only 403 (history unchanged), passkey-signed 200
+#         (history: passkey proof, signed request completed)
+#   13    Rollback to A, a stale switch is 409 (history: rejected, proof linked)
+#   14    short -d IDs; destroy -d A refused (live); SSH-signed destroy -d B by
+#         short ID (history: ssh_signed); unchanged push skipped
+#   15    caution apps destroy: every deployment destroyed, nothing metered,
+#         apps list / -a and the history
 #   16    Unchanged push rebuilds HEAD and goes live (nothing is live)
 #   17    Final destroy
 #
@@ -173,6 +176,18 @@ log() {
 # Literal substring test (no pipe, so `pipefail` cannot turn a match into a failure).
 contains() {
     [[ "$1" == *"$2"* ]]
+}
+
+# The first line of $1 that contains $2 (no pipe, so `pipefail` is not involved).
+line_with() {
+    local line
+    while IFS= read -r line; do
+        if [[ "$line" == *"$2"* ]]; then
+            echo "$line"
+            return 0
+        fi
+    done <<<"$1"
+    return 1
 }
 
 db() {
@@ -547,6 +562,7 @@ timeout "$PUSH_TIMEOUT" git push caution main </dev/null >"$A_LOG" 2>&1 || {
 }
 A_OUT=$(cat "$A_LOG")
 echo "$A_OUT"
+A_SHA=$(git rev-parse HEAD)
 
 A_ID=$(grep -o 'Deployment: [0-9a-f-]\{36\} (live)' <<<"$A_OUT" | tail -1 | cut -d' ' -f2 || true)
 if [ -z "$A_ID" ]; then
@@ -570,7 +586,25 @@ if [ "$(jq -r '.provider_resource_id' <<<"$RES_JSON")" != "$A_INSTANCE" ] \
     step_fail "App does not describe A as live (projection of provider_resource_id/live_deployment_id)"
 fi
 log "  A: $A_ID instance $A_INSTANCE, stable IP $STABLE_IP"
-step_pass "Push A: live and running (deployment $A_ID)"
+
+log "caution apps list and apps get show A live..."
+LIST_OUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" apps list </dev/null 2>&1) || {
+    echo "$LIST_OUT"
+    step_fail "caution apps list"
+}
+echo "$LIST_OUT"
+LIST_LINE=$(line_with "$LIST_OUT" "$RESOURCE_ID") || step_fail "apps list has no line for $RESOURCE_ID"
+for want in Running "${A_SHA:0:7}" "0 / 1"; do
+    contains "$LIST_LINE" "$want" || step_fail "apps list line '$LIST_LINE' lacks '$want'"
+done
+GET_A_OUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" apps get </dev/null 2>&1) || {
+    echo "$GET_A_OUT"
+    step_fail "caution apps get (checkout link)"
+}
+echo "$GET_A_OUT"
+contains "$GET_A_OUT" "Live: ${A_ID:0:8}" || step_fail "apps get does not print 'Live: ${A_ID:0:8}'"
+line_with "$GET_A_OUT" "${A_ID:0:8}  " >/dev/null || step_fail "apps get has no deployments table row for ${A_ID:0:8}"
+step_pass "Push A: live and running (deployment $A_ID), apps list and apps get agree"
 
 # ── Step 7: Push interrupted mid-transfer (Task 3) ───────────────────
 
@@ -758,19 +792,37 @@ set +e
 GET_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" apps get "$RESOURCE_ID" -d "$B_ID" --this-is-a-ci-machine 2>&1)
 GET_STATUS=$?
 set -e
-cp "$CONFIG_BACKUP" "$CONFIG_DIR/config.json"
 echo "$GET_OUTPUT"
 if [ "$GET_STATUS" -ne 0 ] || ! contains "$GET_OUTPUT" "ID: $B_ID" || ! contains "$GET_OUTPUT" "Role: candidate"; then
+    cp "$CONFIG_BACKUP" "$CONFIG_DIR/config.json"
     step_fail "caution apps get -d $B_ID --this-is-a-ci-machine"
 fi
+
+log "Running caution apps get $RESOURCE_ID --this-is-a-ci-machine (deployments table over SSH-signed ?retained=1, no history)..."
+set +e
+GET_APP_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" apps get "$RESOURCE_ID" --this-is-a-ci-machine </dev/null 2>&1)
+GET_APP_STATUS=$?
+set -e
+cp "$CONFIG_BACKUP" "$CONFIG_DIR/config.json"
+echo "$GET_APP_OUTPUT"
+if [ "$GET_APP_STATUS" -ne 0 ] \
+    || ! contains "$GET_APP_OUTPUT" "Live: ${A_ID:0:8}" \
+    || ! line_with "$GET_APP_OUTPUT" "${B_ID:0:8}  " >/dev/null; then
+    step_fail "caution apps get $RESOURCE_ID --this-is-a-ci-machine does not show A live and B's row"
+fi
+if contains "$GET_APP_OUTPUT" "Recent history:"; then
+    step_fail "apps get --this-is-a-ci-machine printed Recent history (CI never calls /history)"
+fi
 case "$VERIFY_RESULT" in
-    WARN*) step_warn "verify -d / apps get -d (B): $VERIFY_RESULT" ;;
-    *) step_pass "verify -d B ($VERIFY_RESULT), SSH-signed apps get -d B" ;;
+    WARN*) step_warn "verify -d / apps get (B): $VERIFY_RESULT" ;;
+    *) step_pass "verify -d B ($VERIFY_RESULT), SSH-signed apps get -d B and apps get" ;;
 esac
 
 # ── Step 12: Switch to B, signed (brief step 7) ──────────────────────
 
 STEP_NUM=12
+history_first() { api_get "/resources/$RESOURCE_ID/history?limit=5" | jq -c '.entries[0]'; }
+HISTORY_BEFORE=$(api_get "/resources/$RESOURCE_ID/history?limit=10" | jq '.entries | length')
 log "Switching to B with the session alone (must be refused)..."
 SWITCH_PLAIN=$(jq -nc --arg a "$A_ID" '{expected_live_deployment_id: $a, acknowledged_verification: true}')
 SESSION_SWITCH_CODE=$(http_code -X POST -H "X-Session-ID: $SESSION_ID" -H 'Content-Type: application/json' \
@@ -781,6 +833,13 @@ if [ "$SESSION_SWITCH_CODE" != "403" ] || ! contains "$SESSION_SWITCH_BODY" "Thi
 fi
 if [ "$(api_get "/resources/$RESOURCE_ID" | jq -r '.live_deployment_id')" != "$A_ID" ]; then
     step_fail "The refused switch changed the live deployment"
+fi
+# The 403 never reaches the API, so it records nothing (earlier steps may already have
+# recorded a refused app destroy).
+HISTORY_NOW=$(api_get "/resources/$RESOURCE_ID/history?limit=10")
+if [ "$(jq '.entries | length' <<<"$HISTORY_NOW")" != "$HISTORY_BEFORE" ] \
+    || ! jq -e '[.entries[] | select(.operation == "switch")] | length == 0' <<<"$HISTORY_NOW" >/dev/null; then
+    step_fail "The refused session-only switch changed the history (was $HISTORY_BEFORE entries): $HISTORY_NOW"
 fi
 
 log "Switching to B with a passkey signature..."
@@ -803,7 +862,12 @@ fi
 if ! assert_health "$STABLE_IP"; then
     step_fail "http://$STABLE_IP/.well-known/caution/health is not 200 after the switch"
 fi
-step_pass "Switch to B: session-only 403, passkey-signed 200, same stable IP"
+# The gateway completes the audit row after it answers.
+switch_audited() { [ "$(history_first | jq -r '.signed_request_status')" = "200" ]; }
+wait_for 30 1 switch_audited || step_fail "switch's signed request was not completed in the audit"
+history_first | jq -e '.operation == "switch" and .outcome == "succeeded" and .auth_method == "passkey" and .signed_request_id != null' >/dev/null \
+    || step_fail "history's first entry is not the passkey-signed switch"
+step_pass "Switch to B: session-only 403, passkey-signed 200 recorded in history, same stable IP"
 
 # ── Step 13: Rollback and stale switch (brief step 8) ────────────────
 
@@ -829,7 +893,9 @@ fi
 if [ "$(api_get "/resources/$RESOURCE_ID" | jq -r '.live_deployment_id')" != "$A_ID" ]; then
     step_fail "The stale switch changed the live deployment"
 fi
-step_pass "Rollback to A, stale switch is 409"
+history_first | jq -e '.outcome == "rejected" and .signed_request_id != null' >/dev/null \
+    || step_fail "history's first entry is not the rejected stale switch with its signed request"
+step_pass "Rollback to A, stale switch is 409 (rejected in history)"
 
 # ── Step 14: Destroy deployments, unchanged push (brief step 9) ──────
 
@@ -847,8 +913,27 @@ if [ "$(api_get "/resources/$RESOURCE_ID" | jq -r '.live_deployment_id')" != "$A
     step_fail "Destroying the live deployment changed the live pointer"
 fi
 
-log "Destroying the candidate B..."
-"$CAUTION_BIN" -u "$GATEWAY_URL" apps destroy -d "$B_ID" -f || step_fail "caution apps destroy -d B"
+log "Short deployment IDs: -d with the first 8 characters resolves in the linked checkout; a 2-character one is refused..."
+SHORT_OUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" apps get -d "${A_ID:0:8}" </dev/null 2>&1) || {
+    echo "$SHORT_OUT"
+    step_fail "caution apps get -d ${A_ID:0:8} (linked checkout, session)"
+}
+echo "$SHORT_OUT"
+contains "$SHORT_OUT" "ID: $A_ID" || step_fail "apps get -d ${A_ID:0:8} did not resolve to A ($A_ID)"
+set +e
+TOO_SHORT_OUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" apps get -d d2 </dev/null 2>&1)
+TOO_SHORT_STATUS=$?
+set -e
+echo "$TOO_SHORT_OUT"
+if [ "$TOO_SHORT_STATUS" -eq 0 ] || ! contains "$TOO_SHORT_OUT" "use the full ID or at least its first 8 characters"; then
+    step_fail "apps get -d d2 was not refused with the short-ID message"
+fi
+
+log "Destroying the candidate B by its short ID, SSH-signed (--this-is-a-ci-machine, explicit app)..."
+"$CAUTION_BIN" -u "$GATEWAY_URL" apps destroy "$RESOURCE_ID" -d "${B_ID:0:8}" -f --this-is-a-ci-machine </dev/null \
+    || step_fail "caution apps destroy -d B (SSH-signed, short ID)"
+history_first | jq -e '.operation == "deployment_destroy" and .outcome == "succeeded" and .auth_method == "ssh_signed"' >/dev/null \
+    || step_fail "history's first entry is not the SSH-signed deployment destroy"
 B_STATUS=$(api_get "/resources/$RESOURCE_ID/deployments" | jq -r --arg d "$B_ID" '.[] | select(.id == $d) | .status')
 if [ "$B_STATUS" != "destroyed" ]; then
     step_fail "B status is '$B_STATUS' after destroy, want 'destroyed'"
@@ -873,7 +958,7 @@ fi
 if [ "$(rows_total)" != "$ROWS_BEFORE" ] || [ "$(rows_reserved)" != "0" ]; then
     step_fail "Unchanged push created or left a deployment row"
 fi
-step_pass "destroy -d A refused, destroy -d B ok, unchanged push skipped with no row left"
+step_pass "short -d IDs, destroy -d A refused, SSH-signed destroy -d B ok (in history), unchanged push skipped with no row left"
 
 # ── Step 15: caution apps destroy (brief step 10) ────────────────────
 
@@ -892,7 +977,33 @@ METERED=$(db "SELECT COUNT(*) FROM tracked_resources WHERE application_id = '$RE
 if [ "$METERED" != "0" ]; then
     step_fail "$METERED meter(s) of the destroyed app are still running"
 fi
-step_pass "App destroyed: terminated, every deployment destroyed, no live pointer, no running meter"
+
+# History and the lists, right after the destroy (step 16 revives the app).
+LIST_OUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" apps list </dev/null 2>&1) || {
+    echo "$LIST_OUT"
+    step_fail "caution apps list after the destroy"
+}
+echo "$LIST_OUT"
+if line_with "$LIST_OUT" "$RESOURCE_ID" >/dev/null; then
+    step_fail "apps list still shows the destroyed app $RESOURCE_ID"
+fi
+LIST_ALL_OUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" apps list -a </dev/null 2>&1) || {
+    echo "$LIST_ALL_OUT"
+    step_fail "caution apps list -a"
+}
+echo "$LIST_ALL_OUT"
+LIST_ALL_LINE=$(line_with "$LIST_ALL_OUT" "$RESOURCE_ID") || step_fail "apps list -a has no line for the destroyed app"
+contains "$LIST_ALL_LINE" "Destroyed" || step_fail "apps list -a line '$LIST_ALL_LINE' lacks 'Destroyed'"
+history_first | jq -e '.operation == "app_destroy" and .outcome == "succeeded"' >/dev/null \
+    || step_fail "history's first entry is not the succeeded app destroy"
+if ! api_get "/resources/$RESOURCE_ID/history?limit=50" | jq -e '
+    [.entries[] | select(.operation == "switch" and .outcome == "succeeded")] as $ok
+    | [.entries[] | select(.operation == "switch" and .outcome == "rejected")] as $rejected
+    | ($ok | length) == 2 and ($rejected | length) == 1
+      and ([.entries[] | select(.operation == "deployment_destroy")] | length) == 1' >/dev/null; then
+    step_fail "history lacks the two succeeded switches, the rejected one and the deployment destroy"
+fi
+step_pass "App destroyed: terminated, every deployment destroyed, no live pointer, no running meter, lists and history agree"
 
 # ── Step 16: Unchanged push rebuilds HEAD and goes live (brief step 11) ──
 
