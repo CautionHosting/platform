@@ -613,10 +613,16 @@ async fn failed_destroy_of_a_lost_runtime_is_retried(state: &AppState) {
 
     let aws = FakeAws::default().address(f.app, Some("i-live"));
     aws.fail_destroy.store(true, Ordering::SeqCst);
-    let target = begin_destroy(pool, &aws, f.user, f.app, f.target)
-        .await
-        .unwrap()
-        .unwrap();
+    let (target, _) = begin_destroy(
+        pool,
+        &aws,
+        &crate::AuthContext::session(f.user),
+        f.app,
+        f.target,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     complete_destroy_with(state, &aws, &target)
         .await
         .unwrap_err();

@@ -5,6 +5,7 @@
 //! deployment switch, destruction and reconciliation: run
 //! `bash tests/e2e/test_app_deployments_db.sh` (isolated PostgreSQL).
 
+mod history;
 mod reconciliation;
 
 use super::*;
@@ -628,10 +629,16 @@ async fn run_rival(pool: PgPool, f: Fixture, other: Uuid, kind: Rival) {
         // The locked phase of deployment destruction.
         Rival::DestroyTarget => {
             let backend = FakeBackend::holding(None);
-            begin_destroy(&pool, &backend, f.user, f.app, f.target)
-                .await
-                .unwrap()
-                .unwrap();
+            begin_destroy(
+                &pool,
+                &backend,
+                &crate::AuthContext::session(f.user),
+                f.app,
+                f.target,
+            )
+            .await
+            .unwrap()
+            .unwrap();
         }
         // The real switch, which takes the app lock itself.
         Rival::Switch => {
@@ -813,7 +820,14 @@ async fn deployment_destruction_waits_and_sees_the_live_target(pool: &PgPool) {
         let pool = pool.clone();
         tokio::spawn(async move {
             let backend = FakeBackend::holding(None);
-            begin_destroy(&pool, &backend, f.user, f.app, f.target).await
+            begin_destroy(
+                &pool,
+                &backend,
+                &crate::AuthContext::session(f.user),
+                f.app,
+                f.target,
+            )
+            .await
         })
     };
     wait_for_lock_waiters(pool, 1).await;
@@ -1144,7 +1158,7 @@ async fn lost_live_runtime_switches_from_an_unassigned_address(pool: &PgPool) {
         .await
         .unwrap()
         .unwrap_err();
-    assert!(matches!(error, SwitchError::AssociationMismatch { .. }));
+    assert!(matches!(error, SwitchError::HolderMismatch { .. }));
     assert_eq!(app_row(pool, f.app).await.live, Some(live));
 
     sqlx::query(
@@ -1260,7 +1274,14 @@ async fn live_deployment_is_never_destroyed(state: &Arc<AppState>) {
             .execute(pool)
             .await
             .unwrap();
-        let result = begin_destroy(pool, &backend, f.user, f.app, f.target).await;
+        let result = begin_destroy(
+            pool,
+            &backend,
+            &crate::AuthContext::session(f.user),
+            f.app,
+            f.target,
+        )
+        .await;
         assert!(
             matches!(
                 result,
@@ -1281,9 +1302,15 @@ async fn live_deployment_is_never_destroyed(state: &Arc<AppState>) {
     let holder = deployment(pool, f.org, f.app, "running", None).await;
     let holder_instance = set_instance(pool, holder).await;
     let backend = FakeBackend::holding(Some(&holder_instance));
-    let error = begin_destroy(pool, &backend, f.user, f.app, holder)
-        .await
-        .unwrap_err();
+    let error = begin_destroy(
+        pool,
+        &backend,
+        &crate::AuthContext::session(f.user),
+        f.app,
+        holder,
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(error, DestroyError::HoldsAddress { .. }));
     assert_eq!(error.into_response().status(), StatusCode::CONFLICT);
 
@@ -1297,7 +1324,14 @@ async fn active_operations_are_not_destroyed(pool: &PgPool) {
     for busy in ["reserved", "building", "provisioning", "destroying"] {
         let f = fixture(pool, busy).await;
         let backend = FakeBackend::holding(None);
-        let result = begin_destroy(pool, &backend, f.user, f.app, f.target).await;
+        let result = begin_destroy(
+            pool,
+            &backend,
+            &crate::AuthContext::session(f.user),
+            f.app,
+            f.target,
+        )
+        .await;
         assert!(
             matches!(
                 result,
@@ -1326,9 +1360,15 @@ async fn destroy_is_refused_while_the_app_terminates(pool: &PgPool) {
     managed_dns::begin_termination(pool, f.app).await.unwrap();
     let backend = FakeBackend::holding(None);
 
-    let error = begin_destroy(pool, &backend, f.user, f.app, f.target)
-        .await
-        .unwrap_err();
+    let error = begin_destroy(
+        pool,
+        &backend,
+        &crate::AuthContext::session(f.user),
+        f.app,
+        f.target,
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(
         error,
         DestroyError::Rejected {
@@ -1342,10 +1382,16 @@ async fn destroy_is_refused_while_the_app_terminates(pool: &PgPool) {
 
     // Still idempotent for a deployment that is already destroyed.
     assert!(
-        begin_destroy(pool, &backend, f.user, f.app, destroyed)
-            .await
-            .unwrap()
-            .is_none()
+        begin_destroy(
+            pool,
+            &backend,
+            &crate::AuthContext::session(f.user),
+            f.app,
+            destroyed
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
 }
 
@@ -1359,16 +1405,28 @@ async fn failed_destroy_stays_metered_until_a_retry_succeeds(state: &AppState) {
     let backend = FakeBackend::holding(Some("i-live"));
 
     let outsider = member(pool, organization(pool).await).await;
-    let error = begin_destroy(pool, &backend, outsider, f.app, f.target)
-        .await
-        .unwrap_err();
+    let error = begin_destroy(
+        pool,
+        &backend,
+        &crate::AuthContext::session(outsider),
+        f.app,
+        f.target,
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(error, DestroyError::NotFound { .. }));
 
     backend.fail.store(true, Ordering::SeqCst);
-    let target = begin_destroy(pool, &backend, f.user, f.app, f.target)
-        .await
-        .unwrap()
-        .unwrap();
+    let (target, _) = begin_destroy(
+        pool,
+        &backend,
+        &crate::AuthContext::session(f.user),
+        f.app,
+        f.target,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(status(pool, f.target).await.as_deref(), Some("destroying"));
     assert_eq!(target.instance_id.as_deref(), Some(instance_id.as_str()));
     complete_destroy_with(state, &backend, &target)
@@ -1382,10 +1440,16 @@ async fn failed_destroy_stays_metered_until_a_retry_succeeds(state: &AppState) {
     assert!(metered(pool, &instance_id).await);
 
     backend.fail.store(false, Ordering::SeqCst);
-    let target = begin_destroy(pool, &backend, f.user, f.app, f.target)
-        .await
-        .unwrap()
-        .unwrap();
+    let (target, _) = begin_destroy(
+        pool,
+        &backend,
+        &crate::AuthContext::session(f.user),
+        f.app,
+        f.target,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     complete_destroy_with(state, &backend, &target)
         .await
         .unwrap();
@@ -1397,10 +1461,16 @@ async fn failed_destroy_stays_metered_until_a_retry_succeeds(state: &AppState) {
 
     // Idempotent: nothing left to destroy.
     assert!(
-        begin_destroy(pool, &backend, f.user, f.app, f.target)
-            .await
-            .unwrap()
-            .is_none()
+        begin_destroy(
+            pool,
+            &backend,
+            &crate::AuthContext::session(f.user),
+            f.app,
+            f.target
+        )
+        .await
+        .unwrap()
+        .is_none()
     );
     assert_eq!(backend.destroyed(), vec![f.target, f.target]);
     assert_eq!(app_row(pool, f.app).await.live, Some(live));
@@ -1450,10 +1520,16 @@ async fn destroy_sweeps_only_its_own_leftovers(state: &AppState) {
     );
 
     // The leftover is terminating: not destroyed yet, still counted and billed.
-    let row = begin_destroy(pool, &backend, f.user, f.app, f.target)
-        .await
-        .unwrap()
-        .unwrap();
+    let (row, _) = begin_destroy(
+        pool,
+        &backend,
+        &crate::AuthContext::session(f.user),
+        f.app,
+        f.target,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let error = complete_destroy_with(state, &backend, &row)
         .await
         .unwrap_err();
@@ -1472,10 +1548,16 @@ async fn destroy_sweeps_only_its_own_leftovers(state: &AppState) {
 
     // Terminated: the retry deletes its group and completes.
     ec2.finish_terminations();
-    let row = begin_destroy(pool, &backend, f.user, f.app, f.target)
-        .await
-        .unwrap()
-        .unwrap();
+    let (row, _) = begin_destroy(
+        pool,
+        &backend,
+        &crate::AuthContext::session(f.user),
+        f.app,
+        f.target,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     complete_destroy_with(state, &backend, &row).await.unwrap();
     assert_eq!(ec2.terminated(), vec!["i-leftover".to_string()]);
     assert_eq!(ec2.deleted_groups(), vec!["sg-leftover".to_string()]);
@@ -1505,6 +1587,16 @@ async fn app_destroy_waits_for_deployment_operations(state: &Arc<AppState>) {
         assert_eq!(response.status(), StatusCode::CONFLICT, "force={force}");
     }
     assert_eq!(app_row(pool, f.app).await.state, "running");
+    // Each request is recorded, then answered.
+    let outcomes: Vec<String> = sqlx::query_scalar(
+        "SELECT outcome FROM deployment_events
+         WHERE app_id = $1 AND operation = 'app_destroy' AND outcome <> 'requested'",
+    )
+    .bind(f.app)
+    .fetch_all(pool)
+    .await
+    .unwrap();
+    assert_eq!(outcomes, ["rejected", "rejected"]);
 
     // A finished attempt no longer blocks.
     sqlx::query(

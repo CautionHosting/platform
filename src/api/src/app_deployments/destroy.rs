@@ -5,6 +5,7 @@
 //! and the deployment half of app destruction. Deployment destruction never
 //! touches the live deployment; only app destruction destroys it.
 
+use super::events;
 use super::lifecycle::stop_meter;
 use super::{LIFECYCLE_DEPLOYMENTS, PROCESS_ID, admission, lock_app_operations};
 use crate::{AppState, AuthContext, deployment, ec2, fully_managed_capacity};
@@ -559,12 +560,11 @@ pub(crate) async fn destroy_handler(
     use DestroyErrorCtx as Ctx;
 
     // Its own task from the first write: a dropped request must not strand
-    // the row in `destroying`.
+    // the row in `destroying` nor leave its operation unanswered.
     let task_state = state.clone();
-    let user_id = auth.user_id;
     let task = tokio::spawn(async move {
-        let Some(target) =
-            begin_destroy(&task_state.db, &Platform, user_id, app_id, deployment_id).await?
+        let Some((target, operation_id)) =
+            begin_destroy(&task_state.db, &Platform, &auth, app_id, deployment_id).await?
         else {
             return Ok(());
         };
@@ -572,6 +572,14 @@ pub(crate) async fn destroy_handler(
         if destroyed.as_ref().is_err_and(leaves_row_destroying) {
             fail_destroying(&task_state.db, deployment_id).await;
         }
+        let (outcome, error) = match &destroyed {
+            Ok(()) => (events::Outcome::Succeeded, None),
+            Err(_) => (
+                events::Outcome::Failed,
+                Some("Deployment destroy failed; cleanup is retried automatically."),
+            ),
+        };
+        events::finish(&task_state.db, operation_id, outcome, error).await;
         destroyed.with_context(Ctx::destroy_failed())
     });
     match task.await {
@@ -611,15 +619,16 @@ async fn fail_destroying(db: &PgPool, deployment_id: Uuid) {
 }
 
 /// Under the app lock: refuses the live deployment, an active operation and
-/// the Elastic IP holder, then marks the target `destroying` for this process.
-/// `None`: already destroyed.
+/// the Elastic IP holder, then marks the target `destroying` for this process
+/// and records the operation in the same transaction. `None`: already
+/// destroyed (nothing recorded).
 pub(super) async fn begin_destroy(
     db: &PgPool,
     backend: &impl DestroyBackend,
-    user_id: Uuid,
+    actor: &AuthContext,
     app_id: Uuid,
     deployment_id: Uuid,
-) -> Result<Option<DestroyTarget>, DestroyError> {
+) -> Result<Option<(DestroyTarget, Uuid)>, DestroyError> {
     use DestroyErrorCtx as Ctx;
 
     let mut tx = db.begin().await.with_context(Ctx::database())?;
@@ -638,7 +647,7 @@ pub(super) async fn begin_destroy(
     )
     .bind(app_id)
     .bind(deployment_id)
-    .bind(user_id)
+    .bind(actor.user_id)
     .bind(LIFECYCLE_DEPLOYMENTS)
     .fetch_optional(&mut *tx)
     .await
@@ -694,8 +703,22 @@ pub(super) async fn begin_destroy(
     .fetch_one(&mut *tx)
     .await
     .with_context(Ctx::database())?;
+    let operation_id = events::begin(
+        &mut *tx,
+        events::NewOperation {
+            org_id: target.org_id,
+            app_id,
+            operation: events::Operation::DeploymentDestroy,
+            actor,
+            previous_deployment_id: None,
+            target_deployment_id: Some(deployment_id),
+            signed_request_id: None,
+        },
+    )
+    .await
+    .with_context(Ctx::database())?;
     tx.commit().await.with_context(Ctx::database())?;
-    Ok(Some(target))
+    Ok(Some((target, operation_id)))
 }
 
 /// Failure modes for [`destroy_all_for_app`].

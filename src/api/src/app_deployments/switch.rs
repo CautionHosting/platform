@@ -4,6 +4,7 @@
 //! Passkey-signed switch: moves the app Elastic IP to a Running deployment
 //! and records it live. The gateway refuses session-only and SSH-signed calls.
 
+use super::events;
 use super::handlers::TLS_AFTER_SWITCH_SQL;
 use super::lifecycle::{AppAddressMover, project_live};
 use super::{LIFECYCLE_DEPLOYMENTS, lock_app_operations};
@@ -139,11 +140,24 @@ pub(crate) enum SwitchError {
         #[source]
         source: BoxError,
     },
+    #[error("switch request carries no valid passkey signature [{location}]")]
+    Unsigned { location: Location },
+    #[error(
+        "Elastic IP is unassigned or held by an unexpected instance before the move [{location}]"
+    )]
+    HolderMismatch { location: Location },
+    #[error("the switch task failed [{location}]")]
+    Task {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
-impl IntoResponse for SwitchError {
-    fn into_response(self) -> Response {
-        let (status, message) = match &self {
+impl SwitchError {
+    fn response_parts(&self) -> (StatusCode, &'static str) {
+        match self {
             Self::NotFound { .. } => (StatusCode::NOT_FOUND, "Deployment not found."),
             Self::Rejected {
                 rejection: SwitchRejection::NotAcknowledged,
@@ -184,14 +198,44 @@ impl IntoResponse for SwitchError {
                 StatusCode::CONFLICT,
                 "The deployment failed the platform health check.",
             ),
-            Self::AssociationMismatch { .. } => (
+            Self::AssociationMismatch { .. } | Self::HolderMismatch { .. } => (
                 StatusCode::CONFLICT,
                 "The app address is unassigned or held by an unexpected instance; switching is blocked until it is repaired.",
             ),
             Self::Aws { .. } | Self::Database { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Switch failed.")
             }
-        };
+            Self::Unsigned { .. } => (
+                StatusCode::FORBIDDEN,
+                "This operation requires signature verification",
+            ),
+            Self::Task { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "Switch failed."),
+        }
+    }
+
+    pub(crate) fn client_message(&self) -> &'static str {
+        self.response_parts().1
+    }
+
+    /// Refused before the address could move. `AssociationMismatch` is not:
+    /// it is raised after a move, when the (retried) association check still
+    /// disagrees. `HolderMismatch` is the pre-move case, so it settles at once
+    /// instead of waiting for a live repair that skips an unexpected holder.
+    pub(crate) fn moved_nothing(&self) -> bool {
+        matches!(
+            self,
+            Self::NotFound { .. }
+                | Self::Rejected { .. }
+                | Self::Unhealthy { .. }
+                | Self::Unsigned { .. }
+                | Self::HolderMismatch { .. }
+        )
+    }
+}
+
+impl IntoResponse for SwitchError {
+    fn into_response(self) -> Response {
+        let (status, message) = self.response_parts();
         tracing::warn!(error = %self, "deployment switch failed");
         (status, Json(serde_json::json!({ "error": message }))).into_response()
     }
@@ -199,6 +243,7 @@ impl IntoResponse for SwitchError {
 
 #[derive(sqlx::FromRow)]
 struct SwitchRow {
+    organization_id: Uuid,
     app_state: String,
     live_deployment_id: Option<Uuid>,
     region: Option<String>,
@@ -215,7 +260,7 @@ struct SwitchRow {
 /// deployments lifecycle.
 fn switch_row_sql(suffix: &str) -> String {
     format!(
-        "SELECT cr.state::text AS app_state, cr.live_deployment_id, cr.region,
+        "SELECT cr.organization_id, cr.state::text AS app_state, cr.live_deployment_id, cr.region,
         d.status AS target_status, d.instance_id AS target_instance_id,
         {TLS_AFTER_SWITCH_SQL} AS target_tls_after_switch,
         l.instance_id AS live_instance_id, l.status AS live_status,
@@ -258,14 +303,59 @@ fn check(
     Ok((plan, region, instance_id))
 }
 
+/// The gateway requires a passkey for switch and forwards its audit ID. The API
+/// accepts only the caller's own pending signed POST of exactly this path:
+/// never a caller-provided claim, never another request's proof.
+pub(crate) async fn signed_switch_request(
+    db: &PgPool,
+    auth: &AuthContext,
+    app_id: Uuid,
+    deployment_id: Uuid,
+) -> Result<Uuid, SwitchError> {
+    let unsigned = || SwitchError::Unsigned {
+        location: std::panic::Location::caller(),
+    };
+    let id = auth.signed_request_id.ok_or_else(unsigned)?;
+    let bound: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM signed_request_audit
+             WHERE id = $1 AND user_id = $2 AND request_method = 'POST'
+               AND lower(request_path) = lower($3) AND completed_at IS NULL)",
+    )
+    .bind(id)
+    .bind(auth.user_id)
+    .bind(format!(
+        "/resources/{app_id}/deployments/{deployment_id}/switch"
+    ))
+    .fetch_one(db)
+    .await
+    .with_context(SwitchErrorCtx::database())?;
+    if bound { Ok(id) } else { Err(unsigned()) }
+}
+
 pub(crate) async fn switch_handler(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path((app_id, deployment_id)): Path<(Uuid, Uuid)>,
     Json(request): Json<SwitchRequest>,
 ) -> Result<Json<SwitchResponse>, SwitchError> {
-    use SwitchErrorCtx as Ctx;
+    // Its own task: a dropped request neither cancels a switch between the
+    // address move and the commit, nor leaves its operation unanswered.
+    tokio::spawn(async move { switch(&state, &auth, app_id, deployment_id, &request).await })
+        .await
+        .with_context(SwitchErrorCtx::task())?
+        .map(Json)
+}
 
+/// Records the signed request before it executes and its outcome after. A
+/// failure that may have moved the address is left to live repair.
+async fn switch(
+    state: &AppState,
+    auth: &AuthContext,
+    app_id: Uuid,
+    deployment_id: Uuid,
+    request: &SwitchRequest,
+) -> Result<SwitchResponse, SwitchError> {
     // 1. Validate and health-check without locks: the health wait can take
     //    ~70 s and must not block pushes, destroys or other switches.
     let row: Option<SwitchRow> = sqlx::query_as(&switch_row_sql(""))
@@ -275,13 +365,57 @@ pub(crate) async fn switch_handler(
         .bind(LIFECYCLE_DEPLOYMENTS)
         .fetch_optional(&state.db)
         .await
-        .with_context(Ctx::database())?;
+        .with_context(SwitchErrorCtx::database())?;
     let Some(row) = row else {
         return Err(SwitchError::NotFound {
             location: std::panic::Location::caller(),
         });
     };
-    let (plan, region, instance_id) = check(&row, deployment_id, &request)?;
+    let signed_request_id = signed_switch_request(&state.db, auth, app_id, deployment_id).await?;
+    let operation_id = events::begin(
+        &state.db,
+        events::NewOperation {
+            org_id: row.organization_id,
+            app_id,
+            operation: events::Operation::Switch,
+            actor: auth,
+            previous_deployment_id: row.live_deployment_id,
+            target_deployment_id: Some(deployment_id),
+            signed_request_id: Some(signed_request_id),
+        },
+    )
+    .await
+    .with_context(SwitchErrorCtx::database())?;
+    let result = execute(state, auth, app_id, deployment_id, request, &row).await;
+    match &result {
+        Ok(_) => events::finish(&state.db, operation_id, events::Outcome::Succeeded, None).await,
+        Err(error) if error.moved_nothing() => {
+            events::finish(
+                &state.db,
+                operation_id,
+                events::Outcome::Rejected,
+                Some(error.client_message()),
+            )
+            .await;
+        }
+        // The address may have moved (including `AssociationMismatch` after a move):
+        // the next live repair settles it from the association.
+        Err(_) => events::release(&state.db, operation_id).await,
+    }
+    result
+}
+
+async fn execute(
+    state: &AppState,
+    auth: &AuthContext,
+    app_id: Uuid,
+    deployment_id: Uuid,
+    request: &SwitchRequest,
+    row: &SwitchRow,
+) -> Result<SwitchResponse, SwitchError> {
+    use SwitchErrorCtx as Ctx;
+
+    let (plan, region, instance_id) = check(row, deployment_id, request)?;
     let ec2 = ec2::Ec2Client::new(&fully_managed_capacity::platform_credentials_for_region(
         &region,
     ));
@@ -305,18 +439,17 @@ pub(crate) async fn switch_handler(
     }
 
     // 2. The AWS calls under the lock take seconds, not the health wait.
-    let response = commit_switch(
+    //    A `publishing` DNS state is published by the managed DNS reconciler.
+    commit_switch(
         &state.db,
         state.managed_dns.is_some(),
         &ec2,
         auth.user_id,
         app_id,
         deployment_id,
-        &request,
+        request,
     )
-    .await?;
-    // A `publishing` DNS state is published by the managed DNS reconciler.
-    Ok(Json(response))
+    .await
 }
 
 /// Re-reads after a move while EC2 still shows another holder.
@@ -391,7 +524,7 @@ pub(super) async fn commit_switch(
         {
             Ok(_) => {}
             Err(ec2::MoveAppAddressError::HolderMismatch { .. }) => {
-                return Err(SwitchError::AssociationMismatch {
+                return Err(SwitchError::HolderMismatch {
                     location: std::panic::Location::caller(),
                 });
             }
@@ -417,8 +550,12 @@ pub(super) async fn commit_switch(
     .await
     .with_context(Ctx::aws())?;
     if observed.instance_id.as_deref() != Some(instance_id.as_str()) {
-        return Err(SwitchError::AssociationMismatch {
-            location: std::panic::Location::caller(),
+        // With no move (`AlreadyLive`), nothing moved: a pre-move mismatch.
+        let location = std::panic::Location::caller();
+        return Err(if matches!(plan, SwitchPlan::Move) {
+            SwitchError::AssociationMismatch { location }
+        } else {
+            SwitchError::HolderMismatch { location }
         });
     }
     if let SwitchPlan::Move = plan {
@@ -537,6 +674,66 @@ mod tests {
             Some("i-live".to_string())
         );
         assert_eq!(expected_holder(None, None, None), None);
+    }
+
+    #[test]
+    fn moved_nothing_is_true_only_before_the_address_moves() {
+        let location = std::panic::Location::caller();
+        let source = || -> BoxError { "boom".into() };
+        let rejected = |rejection| SwitchError::Rejected {
+            rejection,
+            location,
+        };
+        for error in [
+            SwitchError::NotFound { location },
+            rejected(SwitchRejection::Stale),
+            rejected(SwitchRejection::NotRunning),
+            rejected(SwitchRejection::TlsNotAcknowledged),
+            SwitchError::Unhealthy {
+                location,
+                source: source(),
+            },
+            SwitchError::Unsigned { location },
+            SwitchError::HolderMismatch { location },
+        ] {
+            assert!(error.moved_nothing(), "{error}");
+        }
+        for error in [
+            SwitchError::AssociationMismatch { location },
+            SwitchError::Aws {
+                location,
+                source: source(),
+            },
+            SwitchError::Database {
+                location,
+                source: source(),
+            },
+            SwitchError::Task {
+                location,
+                source: source(),
+            },
+        ] {
+            assert!(!error.moved_nothing(), "{error}");
+        }
+        // Both mismatches read the same to the client.
+        assert_eq!(
+            SwitchError::HolderMismatch { location }.client_message(),
+            SwitchError::AssociationMismatch { location }.client_message()
+        );
+    }
+
+    #[test]
+    fn the_stale_confirmation_message_is_pinned() {
+        let stale = SwitchError::Rejected {
+            rejection: SwitchRejection::Stale,
+            location: std::panic::Location::caller(),
+        };
+        // `frontend/src/utils/deployments.js` matches this exact text to detect
+        // a stale confirmation (409); change both together.
+        assert_eq!(
+            stale.client_message(),
+            "The live deployment changed; review and confirm again."
+        );
     }
 
     /// Serves each scripted holder in turn, then repeats the last.

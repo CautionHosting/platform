@@ -9,6 +9,7 @@
 use super::destroy::{
     DestroyBackend, DestroyTarget, Platform, complete_destroy_with, destroy_and_sweep, ec2_client,
 };
+use super::events;
 use super::lifecycle::{fail_attempt_with, project_live, stop_meter};
 use super::{LIFECYCLE_DEPLOYMENTS, PROCESS_ID, lock_app_operations};
 use crate::{AppState, deployment, ec2};
@@ -120,6 +121,13 @@ pub(super) async fn reconcile_with(state: &AppState, backend: &impl ReconcileBac
     }
     if let Err(error) = reconcile_apps(state, backend).await {
         tracing::error!(error = %error, "failed to list deployments apps to reconcile");
+    }
+    match events::settle_interrupted(&state.db).await {
+        Ok(0) => {}
+        Ok(settled) => tracing::info!(settled, "settled interrupted deployment operations"),
+        Err(error) => {
+            tracing::error!(error = %error, "failed to settle interrupted deployment operations");
+        }
     }
 }
 
@@ -584,13 +592,16 @@ pub(super) async fn repair_live(
             .with_context(Ctx::database(app.id))?;
             if holder.is_none() {
                 // Reported for operator repair; switches refuse it meanwhile
-                // (`AssociationMismatch`).
+                // (`HolderMismatch`).
                 tracing::error!(app_id = %app.id, instance_id, "app Elastic IP is held by an instance of no Running deployment");
                 return Ok(());
             }
             holder
         }
     };
+    // The holder is confirmed: settle this app's interrupted switches from it.
+    // An unreadable or unknown association returned above, so those stay open.
+    events::settle_switches(&state.db, app.id, holder).await;
     let running_ids: Vec<Uuid> = running.iter().map(|(id, _)| *id).collect();
     let (deployment_id, activate) = match live_repair(app.live_deployment_id, holder, &running_ids)
     {

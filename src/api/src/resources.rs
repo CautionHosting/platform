@@ -824,8 +824,8 @@ pub async fn delete_resource(
         auth.user_id,
         resource_id
     );
-    let resource: Option<(Uuid, bool)> = sqlx::query_as(
-        "SELECT cr.id, cr.destroyed_at IS NOT NULL
+    let resource: Option<(Uuid, bool, Uuid, String)> = sqlx::query_as(
+        "SELECT cr.id, cr.destroyed_at IS NOT NULL, cr.organization_id, cr.lifecycle
          FROM compute_resources cr
          INNER JOIN organization_members om ON cr.organization_id = om.organization_id
          WHERE cr.id = $1 AND om.user_id = $2",
@@ -836,7 +836,7 @@ pub async fn delete_resource(
     .await
     .with_context(Ctx::access_query(resource_id))?;
 
-    let Some((resource_id, destroyed)) = resource else {
+    let Some((resource_id, destroyed, org_id, lifecycle)) = resource else {
         tracing::warn!(
             "Resource {} not found or user {} has no access",
             resource_id,
@@ -862,21 +862,57 @@ pub async fn delete_resource(
     .await
     .with_context(Ctx::claim_update(resource_id))?;
 
-    let destroy_result = destroy_resource_by_id(&state, resource_id, query.force).await;
-    if let Err(ref error) = destroy_result {
-        let destroyed: bool = sqlx::query_scalar(
-            "SELECT EXISTS(
-                 SELECT 1 FROM compute_resources cr
-                 INNER JOIN organization_members om ON cr.organization_id = om.organization_id
-                 WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NOT NULL
-             )",
-        )
-        .bind(resource_id)
-        .bind(auth.user_id)
-        .fetch_one(&state.db)
+    let (destroy_result, completed) = if lifecycle == crate::app_deployments::LIFECYCLE_DEPLOYMENTS
+    {
+        use crate::app_deployments::events::{self, Outcome};
+        // Its own task from the request write: a dropped request still
+        // records the outcome.
+        let (task_state, actor, force) = (state.clone(), auth.clone(), query.force);
+        tokio::spawn(async move {
+            let operation_id = events::begin(
+                &task_state.db,
+                events::NewOperation {
+                    org_id,
+                    app_id: resource_id,
+                    operation: events::Operation::AppDestroy,
+                    actor: &actor,
+                    previous_deployment_id: None,
+                    target_deployment_id: None,
+                    signed_request_id: None,
+                },
+            )
+            .await?;
+            let result = destroy_resource_by_id(&task_state, resource_id, force).await;
+            let completed =
+                result.is_ok() || app_destroyed(&task_state.db, resource_id, actor.user_id).await;
+            let (outcome, error) = match &result {
+                _ if completed => (Outcome::Succeeded, None),
+                Err(error) if matches!(error.kind, DestroyResourceByIdErrorKind::Deploying) => (
+                    Outcome::Rejected,
+                    Some("A deployment is building or provisioning; retry shortly."),
+                ),
+                Err(error) if matches!(error.kind, DestroyResourceByIdErrorKind::Gone) => (
+                    Outcome::Rejected,
+                    Some("The app is already destroyed or being destroyed."),
+                ),
+                _ => (
+                    Outcome::Failed,
+                    Some("App destroy did not complete; it is retried automatically."),
+                ),
+            };
+            events::finish(&task_state.db, operation_id, outcome, error).await;
+            Ok::<_, events::BeginOperationError>((result, completed))
+        })
         .await
-        .unwrap_or(false);
-        if destroyed {
+        .with_context(Ctx::destroy_failed(resource_id))?
+        .with_context(Ctx::destroy_failed(resource_id))?
+    } else {
+        let result = destroy_resource_by_id(&state, resource_id, query.force).await;
+        let completed = result.is_ok() || app_destroyed(&state.db, resource_id, auth.user_id).await;
+        (result, completed)
+    };
+    if let Err(ref error) = destroy_result {
+        if completed {
             return Ok(StatusCode::NO_CONTENT);
         }
 
@@ -911,6 +947,22 @@ pub async fn delete_resource(
     );
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// A failed request can still find the app destroyed by a concurrent teardown.
+async fn app_destroyed(db: &sqlx::PgPool, resource_id: Uuid, user_id: Uuid) -> bool {
+    sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM compute_resources cr
+             INNER JOIN organization_members om ON cr.organization_id = om.organization_id
+             WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NOT NULL
+         )",
+    )
+    .bind(resource_id)
+    .bind(user_id)
+    .fetch_one(db)
+    .await
+    .unwrap_or(false)
 }
 
 /// Categories of failure surfaced by [`destroy_resource_by_id`].

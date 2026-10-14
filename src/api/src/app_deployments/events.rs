@@ -5,10 +5,6 @@
 //! `requested` row is written before it executes; its outcome is appended.
 //! What a crash leaves unanswered, reconciliation settles from AWS-derived state.
 
-// Everything here is reachable only from Task 3's callers (a lint expectation
-// covers what those callers make live; Task 3 Step 6 removes it).
-#![expect(dead_code, reason = "callers land in Task 3")]
-
 use super::PROCESS_ID;
 use crate::AuthContext;
 use dterror::{BoxError, CtxError, Location, ResultExt};
