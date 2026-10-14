@@ -555,7 +555,9 @@ async fn release_config_at(
         return Ok((service_url(&url)?, policy));
     }
     if let Some(url) = &explicit_url
-        && saved.as_ref().is_none_or(|r| service_url(url).ok().as_ref() != Some(&r.endpoint))
+        && saved
+            .as_ref()
+            .is_none_or(|r| service_url(url).ok().as_ref() != Some(&r.endpoint))
     {
         return Err(Error::invalid(
             "explicit recryptor URL has no matching saved trust; supply --recryptor-pcr-policy",
