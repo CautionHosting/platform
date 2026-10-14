@@ -193,6 +193,23 @@ pub(crate) struct AppState {
 #[derive(Clone)]
 pub(crate) struct AuthContext {
     pub(crate) user_id: Uuid,
+    /// How the gateway authenticated the caller; `None` when not reported
+    /// (an older gateway, internal routes).
+    #[expect(dead_code, reason = "read by the operation recorder (Tasks 2-3)")]
+    pub(crate) auth_method: Option<&'static str>,
+    /// `signed_request_audit.id` of a passkey-signed request (gateway-verified).
+    #[expect(dead_code, reason = "read by the operation recorder (Tasks 2-3)")]
+    pub(crate) signed_request_id: Option<Uuid>,
+}
+
+impl AuthContext {
+    pub(crate) fn session(user_id: Uuid) -> Self {
+        Self {
+            user_id,
+            auth_method: Some("session"),
+            signed_request_id: None,
+        }
+    }
 }
 
 use validated_types::{DeployRequest, DeployResponse};

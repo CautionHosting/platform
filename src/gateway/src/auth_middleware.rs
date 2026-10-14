@@ -18,7 +18,7 @@ use uuid::Uuid;
 use webauthn_rs::prelude::*;
 
 use crate::db;
-use crate::types::{AppState, AuthenticatedUserId, VerifiedSignedRequestId};
+use crate::types::{AppState, AuthMethod, AuthenticatedUserId, VerifiedSignedRequestId};
 
 const SSH_SIGNING_NAMESPACE: &str = "caution-api";
 const SSH_SIGNATURE_WINDOW_SECS: i64 = 300;
@@ -605,6 +605,7 @@ pub async fn fido2_auth_middleware(
         HeaderValue::from_str(&user_id.to_string()).unwrap(),
     );
     req.extensions_mut().insert(AuthenticatedUserId(user_id));
+    req.extensions_mut().insert(AuthMethod::Session);
 
     tracing::debug!("Authenticated request - user_id: {}", user_id);
 
@@ -959,6 +960,7 @@ async fn verify_ssh_signed_request(
     req.headers_mut()
         .insert(SSH_AUTHENTICATED_HEADER, HeaderValue::from_static("true"));
     req.extensions_mut().insert(AuthenticatedUserId(user_id));
+    req.extensions_mut().insert(AuthMethod::SshSigned);
 
     tracing::info!(
         "SSH-signed request verified - user: {}, resource: {}, path: {}",
@@ -1463,6 +1465,7 @@ async fn fido2_sign_flow(
         .insert("X-Fido2-Signed", HeaderValue::from_static("true"));
     req.extensions_mut()
         .insert(AuthenticatedUserId(pending.user_id));
+    req.extensions_mut().insert(AuthMethod::Passkey);
     req.extensions_mut()
         .insert(VerifiedSignedRequestId(audit_id));
 

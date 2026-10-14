@@ -1197,7 +1197,7 @@ async fn live_deployment_is_never_destroyed(state: &Arc<AppState>) {
     // The real handler refuses before any AWS or OpenTofu call.
     let response = destroy::destroy_handler(
         axum::extract::State(state.clone()),
-        axum::Extension(crate::AuthContext { user_id: f.user }),
+        axum::Extension(crate::AuthContext::session(f.user)),
         axum::extract::Path((f.app, f.target)),
     )
     .await
@@ -1449,7 +1449,7 @@ async fn app_destroy_waits_for_deployment_operations(state: &Arc<AppState>) {
     for force in [false, true] {
         let response = crate::resources::delete_resource(
             axum::extract::State(state.clone()),
-            axum::Extension(crate::AuthContext { user_id: f.user }),
+            axum::Extension(crate::AuthContext::session(f.user)),
             axum::extract::Path(f.app),
             axum::extract::Query(crate::resources::DeleteResourceQuery { force }),
         )
@@ -2286,7 +2286,7 @@ async fn app_views_carry_the_lifecycle_and_live_pointer(state: &Arc<AppState>) {
         .execute(pool)
         .await
         .unwrap();
-    let auth = || axum::Extension(crate::AuthContext { user_id: user });
+    let auth = || axum::Extension(crate::AuthContext::session(user));
 
     let view = get_resource(State(state.clone()), auth(), Path(app))
         .await
@@ -2568,7 +2568,7 @@ async fn deploy(
 ) -> String {
     let response = crate::deploy_handler(
         axum::extract::State(state.clone()),
-        axum::Extension(crate::AuthContext { user_id: user }),
+        axum::Extension(crate::AuthContext::session(user)),
         crate::validated_types::Validated(crate::validated_types::DeployRequest {
             org_id: org,
             app_id: app,

@@ -17,6 +17,13 @@ use uuid::Uuid;
 
 use crate::{AppState, AuthContext};
 
+/// Maps a gateway-reported auth method to a known static value.
+pub(crate) fn parse_auth_method(value: &str) -> Option<&'static str> {
+    ["passkey", "session", "ssh_signed"]
+        .into_iter()
+        .find(|method| *method == value)
+}
+
 /// Failure modes for [`auth_middleware`].
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum AuthMiddlewareError {
@@ -138,7 +145,20 @@ pub async fn auth_middleware(
             "Auth middleware: internal service auth for user_id={}",
             user_id
         );
-        request.extensions_mut().insert(AuthContext { user_id });
+        // Trusted only here: the internal secret proves the gateway set them.
+        let auth_method = headers
+            .get("x-caution-auth-method")
+            .and_then(|h| h.to_str().ok())
+            .and_then(parse_auth_method);
+        let signed_request_id = headers
+            .get("x-caution-signed-request-id")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|value| Uuid::parse_str(value).ok());
+        request.extensions_mut().insert(AuthContext {
+            user_id,
+            auth_method,
+            signed_request_id,
+        });
         return Ok(next.run(request).await);
     }
 
@@ -155,7 +175,9 @@ pub async fn auth_middleware(
         }
         let user_id = session.with_context(Ctx::session_failed())?;
         tracing::debug!("Session validated: user_id={}", user_id);
-        request.extensions_mut().insert(AuthContext { user_id });
+        request
+            .extensions_mut()
+            .insert(AuthContext::session(user_id));
         return Ok(next.run(request).await);
     }
 
@@ -483,8 +505,26 @@ pub async fn internal_auth_middleware(
         .and_then(|h| h.to_str().ok())
         && let Ok(user_id) = Uuid::parse_str(user_id_str)
     {
-        request.extensions_mut().insert(AuthContext { user_id });
+        request.extensions_mut().insert(AuthContext {
+            user_id,
+            auth_method: None,
+            signed_request_id: None,
+        });
     }
 
     Ok(next.run(request).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_auth_method;
+
+    #[test]
+    fn only_known_auth_methods_are_accepted() {
+        assert_eq!(parse_auth_method("passkey"), Some("passkey"));
+        assert_eq!(parse_auth_method("session"), Some("session"));
+        assert_eq!(parse_auth_method("ssh_signed"), Some("ssh_signed"));
+        assert_eq!(parse_auth_method("admin"), None);
+        assert_eq!(parse_auth_method(""), None);
+    }
 }

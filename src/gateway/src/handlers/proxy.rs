@@ -10,7 +10,7 @@ use axum::{
 use std::net::SocketAddr;
 
 use crate::request_id::RequestId;
-use crate::types::{AppState, AuthenticatedUserId};
+use crate::types::{AppState, AuthMethod, AuthenticatedUserId, VerifiedSignedRequestId};
 
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB
 
@@ -155,6 +155,22 @@ pub async fn metering_proxy_handler(
     })
 }
 
+/// Identity headers for the API: read from middleware extensions only, never
+/// from the caller's request, and sent only with the internal secret.
+fn trusted_identity_headers(extensions: &axum::http::Extensions) -> Vec<(&'static str, String)> {
+    let Some(AuthenticatedUserId(user_id)) = extensions.get::<AuthenticatedUserId>() else {
+        return Vec::new();
+    };
+    let mut headers = vec![("X-Authenticated-User-ID", user_id.to_string())];
+    if let Some(method) = extensions.get::<AuthMethod>() {
+        headers.push(("X-Caution-Auth-Method", method.as_str().to_string()));
+    }
+    if let Some(VerifiedSignedRequestId(id)) = extensions.get::<VerifiedSignedRequestId>() {
+        headers.push(("X-Caution-Signed-Request-Id", id.to_string()));
+    }
+    headers
+}
+
 #[tracing::instrument(skip_all, err(Debug))]
 #[allow(clippy::result_large_err)]
 pub async fn proxy_handler(
@@ -173,6 +189,7 @@ pub async fn proxy_handler(
     // Read authenticated user from middleware extension, not from headers.
     // This prevents spoofing on routes where auth middleware doesn't run.
     let authenticated_user = req.extensions().get::<AuthenticatedUserId>().cloned();
+    let identity = trusted_identity_headers(req.extensions());
     let request_id = req.extensions().get::<RequestId>().cloned();
 
     let method = req.method().clone();
@@ -208,8 +225,10 @@ pub async fn proxy_handler(
         proxy_req = proxy_req.header("X-Session-ID", session_id);
     }
 
-    if let Some(AuthenticatedUserId(user_id)) = authenticated_user {
-        proxy_req = proxy_req.header("X-Authenticated-User-ID", user_id.to_string());
+    if !identity.is_empty() {
+        for (name, value) in identity {
+            proxy_req = proxy_req.header(name, value);
+        }
         // Include internal service secret for authenticated requests
         if let Some(ref secret) = state.internal_service_secret {
             proxy_req = proxy_req.header("X-Internal-Service-Secret", secret.clone());
@@ -282,7 +301,9 @@ pub async fn proxy_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_api_target_url, is_internal_api_target};
+    use super::{build_api_target_url, is_internal_api_target, trusted_identity_headers};
+    use crate::types::{AuthMethod, AuthenticatedUserId, VerifiedSignedRequestId};
+    use uuid::Uuid;
 
     const API_SERVICE_URL: &str = "http://api:8080";
 
@@ -396,5 +417,34 @@ mod tests {
 
         assert_eq!(target_url.path(), "/user/status");
         assert!(!is_internal_api_target(&target_url));
+    }
+
+    #[test]
+    fn identity_headers_come_only_from_middleware_extensions() {
+        // Caller-supplied copies are never read: headers without extensions forward nothing.
+        let forged = axum::http::Request::builder()
+            .header("X-Authenticated-User-ID", Uuid::new_v4().to_string())
+            .header("X-Caution-Auth-Method", "passkey")
+            .header("X-Caution-Signed-Request-Id", Uuid::new_v4().to_string())
+            .body(())
+            .unwrap();
+        assert!(trusted_identity_headers(forged.extensions()).is_empty());
+        let mut extensions = axum::http::Extensions::new();
+        assert!(trusted_identity_headers(&extensions).is_empty());
+        // Nothing is forwarded without an authenticated user.
+        extensions.insert(VerifiedSignedRequestId(Uuid::nil()));
+        extensions.insert(AuthMethod::Passkey);
+        assert!(trusted_identity_headers(&extensions).is_empty());
+        let (user, audit) = (Uuid::new_v4(), Uuid::new_v4());
+        extensions.insert(AuthenticatedUserId(user));
+        extensions.insert(VerifiedSignedRequestId(audit));
+        assert_eq!(
+            trusted_identity_headers(&extensions),
+            vec![
+                ("X-Authenticated-User-ID", user.to_string()),
+                ("X-Caution-Auth-Method", "passkey".to_string()),
+                ("X-Caution-Signed-Request-Id", audit.to_string()),
+            ]
+        );
     }
 }

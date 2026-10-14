@@ -26,6 +26,24 @@ pub enum PendingRegistrationKind {
     },
 }
 
+/// How the gateway authenticated a request. Forwarded to the API for history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthMethod {
+    Passkey,
+    Session,
+    SshSigned,
+}
+
+impl AuthMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Passkey => "passkey",
+            Self::Session => "session",
+            Self::SshSigned => "ssh_signed",
+        }
+    }
+}
+
 /// Audit record created by the signing middleware for the verified request.
 /// Downstream handlers use this extension to link the resulting state change
 /// to the exact WebAuthn authorization that permitted it.
