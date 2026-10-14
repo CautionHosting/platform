@@ -243,6 +243,16 @@ pub async fn create_resource(
     }))
 }
 
+/// A Legacy app's summary: its own state and any recorded commit.
+fn legacy_summary(resource: &ComputeResource) -> crate::app_deployments::summary::AppSummary {
+    let commit = resource
+        .configuration
+        .as_ref()
+        .and_then(|configuration| configuration.get("commit_sha"))
+        .and_then(serde_json::Value::as_str);
+    crate::app_deployments::summary::legacy(&resource.state, commit)
+}
+
 fn initial_resource_configuration() -> serde_json::Value {
     serde_json::json!({})
 }
@@ -266,6 +276,15 @@ pub enum ListResourcesError {
         #[source]
         source: BoxError,
     },
+
+    #[error("failed to summarise the apps of organization {org_id} [{location}]")]
+    Summaries {
+        org_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
 impl IntoResponse for ListResourcesError {
@@ -275,6 +294,9 @@ impl IntoResponse for ListResourcesError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
             ListResourcesError::Query { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            ListResourcesError::Summaries { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
@@ -315,6 +337,15 @@ pub async fn list_resources(
 
     tracing::info!("Found {} resources", resources.len());
 
+    let deployment_apps: Vec<Uuid> = resources
+        .iter()
+        .filter(|resource| resource.lifecycle == crate::app_deployments::LIFECYCLE_DEPLOYMENTS)
+        .map(|resource| resource.id)
+        .collect();
+    let summaries = crate::app_deployments::summary::summaries(&state.db, &deployment_apps)
+        .await
+        .with_context(Ctx::summaries(org_id))?;
+
     let resources_with_git_url: Vec<serde_json::Value> = resources
         .into_iter()
         .map(|resource| {
@@ -332,6 +363,13 @@ pub async fn list_resources(
                     "managed_hostname".to_string(),
                     serde_json::json!(crate::managed_dns::managed_hostname(resource.id)),
                 );
+                let summary = summaries
+                    .get(&resource.id)
+                    .cloned()
+                    .unwrap_or_else(|| legacy_summary(&resource));
+                if let Ok(serde_json::Value::Object(fields)) = serde_json::to_value(summary) {
+                    obj.extend(fields);
+                }
             }
             value
         })
@@ -364,12 +402,24 @@ pub enum GetResourceError {
         #[source]
         source: BoxError,
     },
+
+    #[error("failed to summarise resource {resource_id} [{location}]")]
+    Summaries {
+        resource_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
 impl IntoResponse for GetResourceError {
     fn into_response(self) -> Response {
         let (status, body) = match &self {
             GetResourceError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found"),
+            GetResourceError::Summaries { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
         };
         (status, body).into_response()
     }
@@ -407,6 +457,16 @@ pub async fn get_resource(
         None => format!("git@{}:{}.git", state.git_hostname, resource_id),
     };
 
+    let summary = if resource.lifecycle == crate::app_deployments::LIFECYCLE_DEPLOYMENTS {
+        crate::app_deployments::summary::summaries(&state.db, &[resource_id])
+            .await
+            .with_context(Ctx::summaries(resource_id))?
+            .remove(&resource_id)
+    } else {
+        None
+    }
+    .unwrap_or_else(|| legacy_summary(&resource));
+
     let mut response = serde_json::to_value(&resource).unwrap_or_default();
     if let Some(obj) = response.as_object_mut() {
         obj.insert("git_url".to_string(), serde_json::json!(git_url));
@@ -414,6 +474,9 @@ pub async fn get_resource(
             "managed_hostname".to_string(),
             serde_json::json!(crate::managed_dns::managed_hostname(resource_id)),
         );
+        if let Ok(serde_json::Value::Object(fields)) = serde_json::to_value(summary) {
+            obj.extend(fields);
+        }
     }
 
     Ok(Json(response))

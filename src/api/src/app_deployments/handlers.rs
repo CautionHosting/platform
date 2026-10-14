@@ -8,10 +8,11 @@
 
 use super::LIFECYCLE_DEPLOYMENTS;
 use super::lifecycle::{Role, role_for};
+use super::summary;
 use crate::{AppState, AuthContext, ec2, fully_managed_capacity};
 use axum::{
     Extension, Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -44,7 +45,7 @@ pub(crate) fn endpoint_ip(
 
 #[derive(Debug, serde::Serialize)]
 pub(crate) struct DeploymentView {
-    id: Uuid,
+    pub(crate) id: Uuid,
     app_id: Uuid,
     role: &'static str,
     status: String,
@@ -63,6 +64,16 @@ pub(crate) struct DeploymentView {
     bundle_hash: Option<String>,
     /// An await-address build that has never held the app address.
     tls_after_switch: bool,
+    /// Holds resources or a candidate slot (`summary::is_retained`).
+    pub(crate) retained: bool,
+    pub(crate) region: Option<String>,
+    pub(crate) enclave_cpus: Option<u64>,
+    pub(crate) enclave_memory_mb: Option<u64>,
+    /// Instance price at the configured margin over 730 hours; `None` when unknown
+    /// or when no instance is billed.
+    pub(crate) estimated_monthly_usd: Option<f64>,
+    pub(crate) cleaned_up_at: Option<DateTime<Utc>>,
+    pub(crate) destroyed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -84,9 +95,15 @@ pub(super) struct DeploymentRow {
     error: Option<String>,
     bundle_hash: Option<String>,
     tls_after_switch: bool,
+    cleaned_up_at: Option<DateTime<Utc>>,
+    destroyed_at: Option<DateTime<Utc>>,
+    configuration: serde_json::Value,
     pub(super) live_deployment_id: Option<Uuid>,
     /// The app Elastic IP.
     pub(super) stable_ip: Option<String>,
+    /// Hourly price at the configured margin; set by `load_views`, not a column.
+    #[sqlx(skip)]
+    pub(super) hourly_usd: Option<f64>,
 }
 
 impl DeploymentRow {
@@ -102,6 +119,25 @@ impl DeploymentRow {
 
     pub(super) fn into_view(self, current_instance_ip: Option<&str>) -> DeploymentView {
         let role = self.role();
+        let cleaned_up = self.cleaned_up_at.is_some();
+        let retained = summary::is_retained(&self.status, cleaned_up);
+        let billed = summary::bills_instance(
+            &self.status,
+            cleaned_up,
+            self.instance_id.as_deref(),
+            self.failure_kind.as_deref(),
+        );
+        let estimated_monthly_usd = billed
+            .then(|| summary::monthly_estimate(self.hourly_usd))
+            .flatten();
+        let enclave_cpus = self
+            .configuration
+            .get("cpus")
+            .and_then(serde_json::Value::as_u64);
+        let enclave_memory_mb = self
+            .configuration
+            .get("memory_mb")
+            .and_then(serde_json::Value::as_u64);
         DeploymentView {
             public_ip: endpoint_ip(role, self.stable_ip.as_deref(), current_instance_ip),
             role: role.as_str(),
@@ -121,11 +157,18 @@ impl DeploymentRow {
             error: self.error,
             bundle_hash: self.bundle_hash,
             tls_after_switch: self.tls_after_switch,
+            retained,
+            region: self.region,
+            enclave_cpus,
+            enclave_memory_mb,
+            estimated_monthly_usd,
+            cleaned_up_at: self.cleaned_up_at,
+            destroyed_at: self.destroyed_at,
         }
     }
 }
 
-/// Failure modes for [`query_rows`].
+/// Failure modes for [`query_rows_with`].
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(super) enum QueryRowsError {
     #[error("database error while reading deployments [{location}]")]
@@ -139,11 +182,24 @@ pub(super) enum QueryRowsError {
 
 /// The deployments of the deployments-lifecycle apps of the caller's
 /// organizations, optionally narrowed to one app and/or one deployment.
+/// Every row; the handlers use [`query_rows_with`], so this is for tests.
+#[cfg(test)]
 pub(super) async fn query_rows(
     db: &PgPool,
     user_id: Uuid,
     app_id: Option<Uuid>,
     deployment_id: Option<Uuid>,
+) -> Result<Vec<DeploymentRow>, QueryRowsError> {
+    query_rows_with(db, user_id, app_id, deployment_id, false).await
+}
+
+/// [`query_rows`], optionally only the retained rows (`summary::is_retained`).
+pub(super) async fn query_rows_with(
+    db: &PgPool,
+    user_id: Uuid,
+    app_id: Option<Uuid>,
+    deployment_id: Option<Uuid>,
+    retained_only: bool,
 ) -> Result<Vec<DeploymentRow>, QueryRowsError> {
     sqlx::query_as(&format!(
         "SELECT d.id, d.app_id, d.status, d.failure_kind, d.pushed_ref, d.commit_sha,
@@ -151,6 +207,7 @@ pub(super) async fn query_rows(
                 COALESCE(d.region, cr.region) AS region, d.created_at, d.running_at,
                 d.activated_at, d.failed_at, d.error, d.bundle_hash,
                 {TLS_AFTER_SWITCH_SQL} AS tls_after_switch,
+                d.cleaned_up_at, d.destroyed_at, d.configuration,
                 cr.live_deployment_id, cr.public_ip AS stable_ip
          FROM app_deployments d
          JOIN compute_resources cr ON cr.id = d.app_id
@@ -159,12 +216,16 @@ pub(super) async fn query_rows(
          WHERE cr.lifecycle = $4 AND cr.destroyed_at IS NULL
            AND ($2::uuid IS NULL OR d.app_id = $2)
            AND ($3::uuid IS NULL OR d.id = $3)
+           AND (NOT $5::boolean
+                OR d.status IN ('reserved', 'building', 'provisioning', 'running', 'destroying')
+                OR (d.status = 'failed' AND d.cleaned_up_at IS NULL))
          ORDER BY d.created_at DESC, d.id"
     ))
     .bind(user_id)
     .bind(app_id)
     .bind(deployment_id)
     .bind(LIFECYCLE_DEPLOYMENTS)
+    .bind(retained_only)
     .fetch_all(db)
     .await
     .with_context(QueryRowsErrorCtx::database())
@@ -211,11 +272,13 @@ async fn current_instance_ip(row: &DeploymentRow) -> Option<String> {
 
 async fn load_views(
     db: &PgPool,
+    pricing: &crate::PricingConfig,
     user_id: Uuid,
     app_id: Option<Uuid>,
     deployment_id: Option<Uuid>,
+    retained_only: bool,
 ) -> Result<Vec<DeploymentView>, QueryRowsError> {
-    let rows = query_rows(db, user_id, app_id, deployment_id).await?;
+    let rows = query_rows_with(db, user_id, app_id, deployment_id, retained_only).await?;
     let addresses = futures::future::join_all(rows.iter().map(|row| async {
         if row.needs_instance_ip() {
             current_instance_ip(row).await
@@ -227,7 +290,14 @@ async fn load_views(
     Ok(rows
         .into_iter()
         .zip(addresses)
-        .map(|(row, ip)| row.into_view(ip.as_deref()))
+        .map(|(mut row, ip)| {
+            row.hourly_usd = row
+                .instance_type
+                .as_deref()
+                .and_then(|instance_type| pricing.instance_pricing(instance_type))
+                .map(|pricing| pricing.unit_cost_usd());
+            row.into_view(ip.as_deref())
+        })
         .collect())
 }
 
@@ -256,15 +326,29 @@ impl IntoResponse for ListDeploymentsError {
     }
 }
 
+/// `?retained=1` returns only retained deployments; the default is every row.
+#[derive(serde::Deserialize)]
+pub(crate) struct ListQuery {
+    pub(crate) retained: Option<u8>,
+}
+
 pub(crate) async fn list_handler(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(app_id): Path<Uuid>,
+    Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<DeploymentView>>, ListDeploymentsError> {
-    load_views(&state.db, auth.user_id, Some(app_id), None)
-        .await
-        .map(Json)
-        .with_context(ListDeploymentsErrorCtx::new(app_id))
+    load_views(
+        &state.db,
+        &state.pricing,
+        auth.user_id,
+        Some(app_id),
+        None,
+        query.retained == Some(1),
+    )
+    .await
+    .map(Json)
+    .with_context(ListDeploymentsErrorCtx::new(app_id))
 }
 
 /// Failure modes for [`get_in_app_handler`].
@@ -310,16 +394,23 @@ pub(crate) async fn get_in_app_handler(
 ) -> Result<Json<DeploymentView>, GetDeploymentInAppError> {
     use GetDeploymentInAppErrorCtx as Ctx;
 
-    load_views(&state.db, auth.user_id, Some(app_id), Some(deployment_id))
-        .await
-        .with_context(Ctx::load(app_id, deployment_id))?
-        .pop()
-        .map(Json)
-        .ok_or_else(|| GetDeploymentInAppError::NotFound {
-            app_id,
-            deployment_id,
-            location: std::panic::Location::caller(),
-        })
+    load_views(
+        &state.db,
+        &state.pricing,
+        auth.user_id,
+        Some(app_id),
+        Some(deployment_id),
+        false,
+    )
+    .await
+    .with_context(Ctx::load(app_id, deployment_id))?
+    .pop()
+    .map(Json)
+    .ok_or_else(|| GetDeploymentInAppError::NotFound {
+        app_id,
+        deployment_id,
+        location: std::panic::Location::caller(),
+    })
 }
 
 /// Failure modes for [`get_handler`].
@@ -363,15 +454,22 @@ pub(crate) async fn get_handler(
 ) -> Result<Json<DeploymentView>, GetDeploymentError> {
     use GetDeploymentErrorCtx as Ctx;
 
-    load_views(&state.db, auth.user_id, None, Some(deployment_id))
-        .await
-        .with_context(Ctx::load(deployment_id))?
-        .pop()
-        .map(Json)
-        .ok_or_else(|| GetDeploymentError::NotFound {
-            deployment_id,
-            location: std::panic::Location::caller(),
-        })
+    load_views(
+        &state.db,
+        &state.pricing,
+        auth.user_id,
+        None,
+        Some(deployment_id),
+        false,
+    )
+    .await
+    .with_context(Ctx::load(deployment_id))?
+    .pop()
+    .map(Json)
+    .ok_or_else(|| GetDeploymentError::NotFound {
+        deployment_id,
+        location: std::panic::Location::caller(),
+    })
 }
 
 #[cfg(test)]
@@ -397,8 +495,12 @@ mod tests {
             error: None,
             bundle_hash: None,
             tls_after_switch: false,
+            cleaned_up_at: None,
+            destroyed_at: None,
+            configuration: serde_json::json!({}),
             live_deployment_id,
             stable_ip: Some("198.51.100.42".to_string()),
+            hourly_usd: None,
         }
     }
 
@@ -455,5 +557,30 @@ mod tests {
         let view = serde_json::to_value(row(other, "failed", None).into_view(None)).unwrap();
         assert_eq!(view["role"], "candidate");
         assert!(view["public_ip"].is_null());
+    }
+
+    #[test]
+    fn view_carries_retained_cost_and_enclave_size() {
+        let id = Uuid::new_v4();
+        let mut running = row(id, "running", Some(id));
+        running.hourly_usd = Some(0.192);
+        running.configuration = serde_json::json!({ "cpus": 2, "memory_mb": 4096 });
+        let view = serde_json::to_value(running.into_view(None)).unwrap();
+        assert_eq!(view["retained"], true);
+        assert_eq!(view["region"], "us-east-1");
+        assert_eq!(view["estimated_monthly_usd"], 140.16);
+        assert_eq!(
+            (
+                view["enclave_cpus"].as_u64(),
+                view["enclave_memory_mb"].as_u64()
+            ),
+            (Some(2), Some(4096))
+        );
+        let mut lost = row(Uuid::new_v4(), "failed", Some(id));
+        lost.failure_kind = Some("runtime_lost".to_string());
+        lost.hourly_usd = Some(0.192);
+        let view = serde_json::to_value(lost.into_view(None)).unwrap();
+        assert_eq!(view["retained"], true, "a lost instance keeps its slot");
+        assert!(view["estimated_monthly_usd"].is_null(), "and bills nothing");
     }
 }

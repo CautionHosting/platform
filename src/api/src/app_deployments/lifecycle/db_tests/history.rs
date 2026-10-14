@@ -11,11 +11,15 @@ use crate::app_deployments::switch::signed_switch_request;
 #[ignore = "run bash tests/e2e/test_app_deployments_db.sh (isolated PostgreSQL)"]
 async fn history() {
     let pool = test_pool().await;
+    let state = test_state(&pool, "/nonexistent");
     switch_requires_the_callers_pending_signed_request(&pool).await;
     rejected_switches_keep_their_signed_request_link(&pool).await;
     the_switch_handler_records_only_signed_switches(&pool).await;
     interrupted_operations_are_settled_by_reconciliation(&pool).await;
     destroy_records_the_operation_with_its_claim(&pool).await;
+    summaries_count_candidates_like_admission(&pool).await;
+    app_responses_carry_the_summary(&state).await;
+    deployment_views_carry_retained_and_cost(&state).await;
     pool.close().await;
 }
 
@@ -283,4 +287,201 @@ async fn destroy_records_the_operation_with_its_claim(pool: &PgPool) {
         .await
         .unwrap();
     assert_eq!(before, after);
+}
+
+async fn summaries_count_candidates_like_admission(pool: &PgPool) {
+    let f = fixture(pool, "running").await; // target = live
+    let live = f.target;
+    set_live(pool, f.app, live).await;
+    sqlx::query("UPDATE compute_resources SET state = 'running' WHERE id = $1")
+        .bind(f.app)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE app_deployments SET commit_sha = 'ff43fef0' WHERE id = $1")
+        .bind(live)
+        .execute(pool)
+        .await
+        .unwrap();
+    deployment(pool, f.org, f.app, "running", Some("i-b")).await;
+    let cleaned = deployment(pool, f.org, f.app, "failed", None).await;
+    set_outcome(pool, cleaned, Some("provisioning"), true).await;
+    let uncleaned = deployment(pool, f.org, f.app, "failed", Some("i-c")).await;
+    set_outcome(pool, uncleaned, Some("provisioning"), false).await;
+    let summaries = crate::app_deployments::summary::summaries(pool, &[f.app])
+        .await
+        .unwrap();
+    let summary = &summaries[&f.app];
+    assert_eq!(summary.summary_state, "running");
+    assert!(summary.active);
+    assert_eq!(summary.live_commit_sha.as_deref(), Some("ff43fef0"));
+    // Same predicate as admission::reserve: running B and uncleaned C count; the cleaned failure does not.
+    assert_eq!(summary.candidates, Some(2));
+
+    // No live deployment: one unselected Running deployment is `starting` (the reconciler
+    // activates it); two are never guessed between and are `unavailable`.
+    let app = deployments_app(pool, f.org).await;
+    assert_eq!(summary_of(pool, app).await, "initialized");
+    deployment(pool, f.org, app, "running", Some("i-one")).await;
+    assert_eq!(summary_of(pool, app).await, "starting");
+    deployment(pool, f.org, app, "running", Some("i-two")).await;
+    assert_eq!(summary_of(pool, app).await, "unavailable");
+}
+
+async fn summary_of(pool: &PgPool, app: Uuid) -> String {
+    crate::app_deployments::summary::summaries(pool, &[app])
+        .await
+        .unwrap()[&app]
+        .summary_state
+        .clone()
+}
+
+/// The summary fields reach `GET /resources` and `GET /resources/{id}`; a Legacy app keeps its state.
+async fn app_responses_carry_the_summary(state: &Arc<AppState>) {
+    use crate::resources::{get_resource, list_resources};
+    use axum::extract::{Path, State};
+
+    let pool = &state.db;
+    let f = fixture(pool, "running").await;
+    set_live(pool, f.app, f.target).await;
+    sqlx::query("UPDATE app_deployments SET commit_sha = 'ff43fef0' WHERE id = $1")
+        .bind(f.target)
+        .execute(pool)
+        .await
+        .unwrap();
+    deployment(pool, f.org, f.app, "running", Some("i-b")).await;
+    let legacy = deployments_app(pool, f.org).await;
+    sqlx::query(
+        "UPDATE compute_resources
+         SET lifecycle = 'legacy', configuration = '{\"commit_sha\": \"04fa2381\"}' WHERE id = $1",
+    )
+    .bind(legacy)
+    .execute(pool)
+    .await
+    .unwrap();
+    let auth = || axum::Extension(crate::AuthContext::session(f.user));
+
+    let limit = crate::app_deployments::max_candidates_per_app();
+    let check = |view: &serde_json::Value| {
+        assert_eq!(view["summary_state"], "running");
+        assert_eq!(view["active"], true);
+        assert_eq!(view["live_commit_sha"], "ff43fef0");
+        assert_eq!(view["candidates"], 1);
+        assert_eq!(view["candidate_limit"], limit);
+    };
+    check(
+        &get_resource(State(state.clone()), auth(), Path(f.app))
+            .await
+            .unwrap()
+            .0,
+    );
+    let listed = list_resources(State(state.clone()), auth())
+        .await
+        .unwrap()
+        .0;
+    check(
+        listed
+            .iter()
+            .find(|view| view["id"] == f.app.to_string())
+            .unwrap(),
+    );
+    for view in [
+        get_resource(State(state.clone()), auth(), Path(legacy))
+            .await
+            .unwrap()
+            .0,
+        listed
+            .iter()
+            .find(|view| view["id"] == legacy.to_string())
+            .unwrap()
+            .clone(),
+    ] {
+        assert_eq!(
+            view["summary_state"], "initialized",
+            "Legacy keeps its state"
+        );
+        assert_eq!(view["active"], true);
+        assert_eq!(view["live_commit_sha"], "04fa2381");
+        assert!(view["candidates"].is_null() && view["candidate_limit"].is_null());
+    }
+}
+
+/// `DeploymentView` carries retained, region, enclave size, cost and cleanup/destroy times;
+/// `?retained=1` returns only retained rows, and the default list stays unfiltered.
+async fn deployment_views_carry_retained_and_cost(state: &Arc<AppState>) {
+    use crate::app_deployments::handlers::{ListQuery, list_handler, query_rows};
+    use axum::extract::{Path, Query, State};
+
+    let pool = &state.db;
+    let f = fixture(pool, "running").await;
+    sqlx::query(
+        "UPDATE app_deployments SET instance_id = 'i-live', instance_type = 'm5.xlarge',
+         configuration = '{\"cpus\": 2, \"memory_mb\": 4096}' WHERE id = $1",
+    )
+    .bind(f.target)
+    .execute(pool)
+    .await
+    .unwrap();
+    set_live(pool, f.app, f.target).await;
+    let lost = deployment(pool, f.org, f.app, "failed", Some("i-lost")).await;
+    set_outcome(pool, lost, Some("runtime_lost"), false).await;
+    let gone = deployment(pool, f.org, f.app, "failed", None).await;
+    set_outcome(pool, gone, Some("provisioning"), true).await;
+
+    let views: HashMap<Uuid, serde_json::Value> = query_rows(pool, f.user, Some(f.app), None)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|mut row| {
+            row.hourly_usd = Some(0.192); // as `load_views` derives it from the pricing config
+            (row.id, serde_json::to_value(row.into_view(None)).unwrap())
+        })
+        .collect();
+    let live = &views[&f.target];
+    assert_eq!(live["retained"], true);
+    assert_eq!(live["region"], "us-east-1");
+    assert_eq!(
+        (
+            live["enclave_cpus"].as_u64(),
+            live["enclave_memory_mb"].as_u64()
+        ),
+        (Some(2), Some(4096))
+    );
+    assert_eq!(live["estimated_monthly_usd"], 140.16);
+    assert!(live["cleaned_up_at"].is_null() && live["destroyed_at"].is_null());
+    // Lost: keeps its slot, bills nothing. Cleaned up: not retained.
+    assert_eq!(views[&lost]["retained"], true);
+    assert!(views[&lost]["estimated_monthly_usd"].is_null());
+    assert_eq!(views[&gone]["retained"], false);
+    assert!(views[&gone]["estimated_monthly_usd"].is_null());
+    assert!(!views[&gone]["cleaned_up_at"].is_null());
+
+    let ids = |retained: Option<u8>| {
+        let (state, auth) = (
+            state.clone(),
+            axum::Extension(crate::AuthContext::session(f.user)),
+        );
+        async move {
+            let mut ids: Vec<Uuid> = list_handler(
+                State(state),
+                auth,
+                Path(f.app),
+                Query(ListQuery { retained }),
+            )
+            .await
+            .unwrap()
+            .0
+            .iter()
+            .map(|view| view.id)
+            .collect();
+            ids.sort();
+            ids
+        }
+    };
+    let mut every = vec![f.target, lost, gone];
+    every.sort();
+    let mut kept = vec![f.target, lost];
+    kept.sort();
+    assert_eq!(ids(None).await, every, "unfiltered by default");
+    assert_eq!(ids(Some(1)).await, kept);
 }
