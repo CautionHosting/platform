@@ -111,16 +111,20 @@ export async function switchDeployment({ sign, fetch, appId, deploymentId, body,
   return { outcome: 'rejected', message: data?.error || `Switch failed (HTTP ${response.status}).` }
 }
 
+const DESTROY_UNKNOWN = 'The destroy outcome is unknown; refresh to check.'
+
 export async function destroyDeployment({ fetch, appId, deploymentId }) {
   let response
   try {
     response = await fetch(`/api/resources/${appId}/deployments/${deploymentId}`, { method: 'DELETE' })
   } catch {
-    return { outcome: 'unknown', message: 'The destroy outcome is unknown. Refresh before trying again.' }
+    return { outcome: 'unknown', message: DESTROY_UNKNOWN }
   }
   if (response.ok) return { outcome: 'destroyed' }
+  // A 5xx (or a proxy 504) can leave the spawned destroy running: never call it failed.
+  if (response.status >= 500) return { outcome: 'unknown', message: DESTROY_UNKNOWN }
   const data = await response.json().catch(() => null)
-  return { outcome: response.status >= 500 ? 'failed' : 'rejected', message: data?.error || `Destroy failed (HTTP ${response.status}).` }
+  return { outcome: 'rejected', message: data?.error || `Destroy failed (HTTP ${response.status}).` }
 }
 
 // One row per retained instance, including cleanup pending; unknown estimates stay null.

@@ -1151,6 +1151,9 @@ pub(crate) fn switch_ids(method: &str, path: &str) -> Option<(Uuid, Uuid)> {
     }
 }
 
+/// The longest commit subject shown on the phone.
+const COMMIT_SUBJECT_MAX: usize = 72;
+
 /// `records` are the API's app and target-deployment answers for a switch path.
 /// A record that does not name the path's app and deployment gives no summary.
 pub(crate) fn details_for(
@@ -1173,6 +1176,12 @@ pub(crate) fn details_for(
             target["commit_subject"].as_str(),
         ) {
             (Some(sha), Some(subject)) => {
+                let subject = if subject.chars().count() > COMMIT_SUBJECT_MAX {
+                    let head: String = subject.chars().take(COMMIT_SUBJECT_MAX).collect();
+                    format!("{head}…")
+                } else {
+                    subject.to_string()
+                };
                 format!(
                     " ({} \"{subject}\")",
                     sha.chars().take(7).collect::<String>()
@@ -1387,6 +1396,27 @@ mod tests {
         );
         assert_eq!(switch_ids("POST", &format!("{}?x=1", switch_path())), None);
         assert_eq!(switch_ids("POST", "/pgp-keys"), None);
+    }
+
+    #[test]
+    fn details_for_caps_a_long_commit_subject() {
+        let (app, mut target) = records();
+        target["commit_subject"] = json!("é".repeat(100));
+        let summary = details_for("POST", &switch_path(), Some((&app, &target)))
+            .summary
+            .unwrap();
+        assert!(
+            summary.contains(&format!("(a3c3ac4 \"{}…\")", "é".repeat(72))),
+            "{summary}"
+        );
+        target["commit_subject"] = json!("é".repeat(72));
+        let summary = details_for("POST", &switch_path(), Some((&app, &target)))
+            .summary
+            .unwrap();
+        assert!(
+            summary.contains(&"é".repeat(72)) && !summary.contains('…'),
+            "{summary}"
+        );
     }
 
     #[test]

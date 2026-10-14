@@ -1565,7 +1565,7 @@ fn print_deployments(app: &App, deployments: &[DeploymentView], history: &Recent
             format!(
                 "App: {} ({})",
                 app.resource_name.as_deref().unwrap_or("unnamed"),
-                short_id(&app.id)
+                app.id
             ),
             format!(
                 "State: {}",

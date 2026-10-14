@@ -83,7 +83,11 @@ test('deployment destroy reports cleanup failures', async () => {
   const run = (status, body) => destroyDeployment({ fetch: async () => ({ ok: status < 300, status, json: async () => body }), appId: 'app-1', deploymentId: 'b' })
   assert.equal((await run(204)).outcome, 'destroyed')
   assert.deepEqual(await run(409, { error: 'The live deployment cannot be destroyed; switch to another deployment first.' }), { outcome: 'rejected', message: 'The live deployment cannot be destroyed; switch to another deployment first.' })
-  assert.equal((await run(500, { error: 'Deployment destroy failed; retry.' })).outcome, 'failed')
+  // A 5xx or a network error may leave the destroy running: unknown, not failed.
+  assert.deepEqual(await run(500, { error: 'Deployment destroy failed; retry.' }), { outcome: 'unknown', message: 'The destroy outcome is unknown; refresh to check.' })
+  assert.equal((await run(504, null)).outcome, 'unknown')
+  const down = await destroyDeployment({ fetch: async () => { throw new Error('offline') }, appId: 'app-1', deploymentId: 'b' })
+  assert.equal(down.outcome, 'unknown')
 })
 
 test('retained instances list every billed instance and an honest total', () => {

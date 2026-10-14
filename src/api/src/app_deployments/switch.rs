@@ -133,6 +133,13 @@ pub(crate) enum SwitchError {
         #[source]
         source: BoxError,
     },
+    #[error("AWS error inspecting the target before the move [{location}]")]
+    Inspect {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
     #[error("database error while switching [{location}]")]
     Database {
         #[location]
@@ -202,7 +209,7 @@ impl SwitchError {
                 StatusCode::CONFLICT,
                 "The app address is unassigned or held by an unexpected instance; switching is blocked until it is repaired.",
             ),
-            Self::Aws { .. } | Self::Database { .. } => {
+            Self::Aws { .. } | Self::Inspect { .. } | Self::Database { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Switch failed.")
             }
             Self::Unsigned { .. } => (
@@ -221,6 +228,8 @@ impl SwitchError {
     /// it is raised after a move, when the (retried) association check still
     /// disagrees. `HolderMismatch` is the pre-move case, so it settles at once
     /// instead of waiting for a live repair that skips an unexpected holder.
+    /// `Inspect` is the failed pre-move AWS read: nothing moved, so a retry
+    /// cannot double-settle it.
     pub(crate) fn moved_nothing(&self) -> bool {
         matches!(
             self,
@@ -229,6 +238,7 @@ impl SwitchError {
                 | Self::Unhealthy { .. }
                 | Self::Unsigned { .. }
                 | Self::HolderMismatch { .. }
+                | Self::Inspect { .. }
         )
     }
 }
@@ -390,10 +400,14 @@ async fn switch(
     match &result {
         Ok(_) => events::finish(&state.db, operation_id, events::Outcome::Succeeded, None).await,
         Err(error) if error.moved_nothing() => {
+            let outcome = match error {
+                SwitchError::Inspect { .. } => events::Outcome::Failed,
+                _ => events::Outcome::Rejected,
+            };
             events::finish(
                 &state.db,
                 operation_id,
-                events::Outcome::Rejected,
+                outcome,
                 Some(error.client_message()),
             )
             .await;
@@ -423,7 +437,7 @@ async fn execute(
         let runtime = ec2
             .describe_instance_runtime(&instance_id)
             .await
-            .with_context(Ctx::aws())?;
+            .with_context(Ctx::inspect())?;
         let Some(public_ip) = runtime
             .filter(|runtime| runtime.state == "running")
             .and_then(|runtime| runtime.public_ip)
@@ -695,6 +709,10 @@ mod tests {
             },
             SwitchError::Unsigned { location },
             SwitchError::HolderMismatch { location },
+            SwitchError::Inspect {
+                location,
+                source: source(),
+            },
         ] {
             assert!(error.moved_nothing(), "{error}");
         }
@@ -715,6 +733,18 @@ mod tests {
         ] {
             assert!(!error.moved_nothing(), "{error}");
         }
+        assert_eq!(
+            SwitchError::Inspect {
+                location,
+                source: source(),
+            }
+            .client_message(),
+            SwitchError::Aws {
+                location,
+                source: source(),
+            }
+            .client_message()
+        );
         // Both mismatches read the same to the client.
         assert_eq!(
             SwitchError::HolderMismatch { location }.client_message(),
