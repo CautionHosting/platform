@@ -84,7 +84,7 @@ caution --qr secret new /tmp/test-keyring.asc
 6. A QR code is rendered in the terminal
 7. CLI shows "Waiting for approval..." with a spinner
 8. **On your phone:** scan the QR code or open the URL
-9. The browser shows the operation details (method, path, body hash)
+9. The browser loads `GET /auth/qr-sign/details?token=...` ("Loading operation details..." meanwhile) and shows the method and path (`POST /quorum-bundles`); for a deployment switch it also shows a one-line summary. If the details cannot be loaded it shows "Operation details unavailable" and approval is still possible
 10. Tap "Approve" and complete the FIDO2 ceremony
 11. The phone shows "Signature submitted"
 12. CLI detects completion, sends the signed request with `X-Fido2-Challenge-Id` and `X-Fido2-Response` headers
@@ -143,6 +143,9 @@ CLI                          Gateway                       Phone Browser
  | [render QR code]             |                              |
  |                              |                              |
  |                              |<---- user scans QR --------- |
+ |                              |                              |
+ |                              |<- GET /auth/qr-sign/details  |
+ |                              |-> { method, path, summary? } |
  |                              |                              |
  |                              |<- POST /auth/qr-sign/authenticate
  |                              |-> { publicKey challenge }    |

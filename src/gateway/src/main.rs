@@ -473,6 +473,10 @@ async fn main() -> Result<(), MainError> {
             get(handlers::qr_sign_status_handler),
         )
         .route(
+            "/auth/qr-sign/details",
+            get(handlers::qr_sign_details_handler),
+        )
+        .route(
             "/auth/qr-sign/authenticate",
             post(handlers::qr_sign_authenticate_handler),
         )

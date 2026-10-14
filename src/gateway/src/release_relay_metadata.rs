@@ -32,7 +32,7 @@ impl DisplayContext {
     }
 }
 
-async fn get(state: &AppState, user: Uuid, path: &str) -> Option<Value> {
+pub(crate) async fn get(state: &AppState, user: Uuid, path: &str) -> Option<Value> {
     let mut request = state
         .http_client
         .get(format!(

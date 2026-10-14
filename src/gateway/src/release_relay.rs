@@ -17,7 +17,7 @@ use std::{
 use uuid::Uuid;
 
 #[path = "release_relay_metadata.rs"]
-mod metadata;
+pub(crate) mod metadata;
 
 struct Pending {
     user: Uuid,

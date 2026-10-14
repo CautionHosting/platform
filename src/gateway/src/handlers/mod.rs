@@ -32,7 +32,7 @@ pub(crate) use qr_auth::{
     authenticate_session, begin_sign_request_handler, get_rp_origin,
     qr_login_authenticate_finish_handler, qr_login_authenticate_handler, qr_login_begin_handler,
     qr_login_status_handler, qr_sign_authenticate_finish_handler, qr_sign_authenticate_handler,
-    qr_sign_begin_handler, qr_sign_status_handler,
+    qr_sign_begin_handler, qr_sign_details_handler, qr_sign_status_handler,
 };
 
 pub(crate) use common::{

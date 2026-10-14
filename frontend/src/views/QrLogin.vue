@@ -15,6 +15,16 @@
           <p class="qr-description">
             {{ description }}
           </p>
+          <template v-if="isSign">
+            <p v-if="detailsLoading" class="qr-operation-unavailable">
+              Loading operation details…
+            </p>
+            <template v-else-if="operation">
+              <p class="qr-operation">{{ operation }}</p>
+              <p v-if="summary" class="qr-operation">{{ summary }}</p>
+            </template>
+            <p v-else class="qr-operation-unavailable">Operation details unavailable</p>
+          </template>
           <button class="btn-dark btn qr-btn" @click="authenticate">
             Authenticate with security key
           </button>
@@ -59,6 +69,9 @@ export default {
     const state = ref('ready')
     const errorMessage = ref('')
     const token = ref('')
+    const operation = ref('')
+    const summary = ref('')
+    const detailsLoading = ref(window.location.pathname === '/qr-sign')
 
     // Detect mode from URL path
     const isSign = window.location.pathname === '/qr-sign'
@@ -75,6 +88,24 @@ export default {
       ? 'Invalid or expired signing request. Please generate a new QR code from the CLI.'
       : 'Invalid or expired login request. Please generate a new QR code from the CLI.'
 
+    // Sign mode: show what is being approved. Failure never blocks approval.
+    async function loadDetails() {
+      detailsLoading.value = true
+      try {
+        const response = await fetch(
+          `/auth/qr-sign/details?token=${encodeURIComponent(token.value)}`
+        )
+        if (!response.ok) throw new Error('details unavailable')
+        const details = await response.json()
+        operation.value = `${details.method} ${details.path}`
+        summary.value = details.summary || ''
+      } catch {
+        operation.value = ''
+      } finally {
+        detailsLoading.value = false
+      }
+    }
+
     onMounted(() => {
       const params = new URLSearchParams(window.location.search)
       token.value = params.get('token') || ''
@@ -83,6 +114,8 @@ export default {
       } else if (!window.PublicKeyCredential) {
         errorMessage.value = 'Your browser does not support WebAuthn. Please use a modern browser.'
         state.value = 'error'
+      } else if (isSign) {
+        loadDetails()
       }
     })
 
@@ -203,6 +236,9 @@ export default {
       title,
       description,
       isSign,
+      operation,
+      summary,
+      detailsLoading,
       successMessage,
       invalidMessage,
       authenticate,
@@ -249,6 +285,21 @@ export default {
   color: var(--theme-text-muted);
   margin-bottom: var(--spacing4);
   line-height: var(--body-line-height);
+}
+
+.qr-operation {
+  font-size: var(--body-font-size);
+  font-weight: 600;
+  color: var(--theme-text-primary);
+  margin-bottom: var(--spacing4);
+  line-height: var(--body-line-height);
+  overflow-wrap: anywhere;
+}
+
+.qr-operation-unavailable {
+  font-size: var(--body-font-size);
+  color: var(--theme-text-muted);
+  margin-bottom: var(--spacing4);
 }
 
 .qr-warning {

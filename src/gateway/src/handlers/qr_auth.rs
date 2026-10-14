@@ -1130,6 +1130,130 @@ pub async fn qr_sign_status_handler(
     }))
 }
 
+/// What the phone shows before approving: the signed method and path, plus a
+/// server-resolved one-line summary for the deployment switch.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct QrSignDetails {
+    pub(crate) method: String,
+    pub(crate) path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) summary: Option<String>,
+}
+
+/// `POST /resources/{app}/deployments/{dep}/switch` with two UUIDs, nothing else.
+pub(crate) fn switch_ids(method: &str, path: &str) -> Option<(Uuid, Uuid)> {
+    let parts: Vec<&str> = path.split('/').collect();
+    match (method, parts.as_slice()) {
+        ("POST", ["", "resources", app, "deployments", dep, "switch"]) => {
+            Some((Uuid::parse_str(app).ok()?, Uuid::parse_str(dep).ok()?))
+        }
+        _ => None,
+    }
+}
+
+/// `records` are the API's app and target-deployment answers for a switch path.
+/// A record that does not name the path's app and deployment gives no summary.
+pub(crate) fn details_for(
+    method: &str,
+    path: &str,
+    records: Option<(&serde_json::Value, &serde_json::Value)>,
+) -> QrSignDetails {
+    let summary = (|| {
+        let (app_id, dep_id) = switch_ids(method, path)?;
+        let (app, target) = records?;
+        if app["id"].as_str()? != app_id.to_string()
+            || target["id"].as_str()? != dep_id.to_string()
+            || target["app_id"].as_str()? != app_id.to_string()
+        {
+            return None;
+        }
+        let short = |id: &str| id.chars().take(8).collect::<String>();
+        let commit = match (
+            target["commit_sha"].as_str(),
+            target["commit_subject"].as_str(),
+        ) {
+            (Some(sha), Some(subject)) => {
+                format!(
+                    " ({} \"{subject}\")",
+                    sha.chars().take(7).collect::<String>()
+                )
+            }
+            (Some(sha), None) => format!(" ({})", sha.chars().take(7).collect::<String>()),
+            _ => String::new(),
+        };
+        let live = app["live_deployment_id"]
+            .as_str()
+            .map(short)
+            .unwrap_or_else(|| "none".into());
+        let name = app["resource_name"]
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| short(&app_id.to_string()));
+        Some(format!(
+            "Switch {name} live to {}{commit}; live now: {live}",
+            short(&dep_id.to_string())
+        ))
+    })();
+    QrSignDetails {
+        method: method.into(),
+        path: path.into(),
+        summary,
+    }
+}
+
+/// Read-only: shows the phone what it is about to sign. Never claims the token
+/// (`qr_sign_authenticate_handler` is the only claimer). Unknown, expired and
+/// completed tokens are all a 404.
+#[tracing::instrument(skip_all, err)]
+pub async fn qr_sign_details_handler(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<QrSignStatusQuery>,
+) -> Result<Json<QrSignDetails>, QrSignError> {
+    use QrSignErrorCtx as SignCtx;
+    let not_found = || QrSignError::TokenNotFound {
+        location: std::panic::Location::caller(),
+    };
+
+    let row = db::get_qr_sign_token(&state.db, &query.token)
+        .await
+        .with_context(SignCtx::internal())?
+        .ok_or_else(not_found)?;
+    if time::OffsetDateTime::now_utc() > row.expires_at
+        || !matches!(
+            QrStatus::from_db(&row.status),
+            Some(QrStatus::Pending | QrStatus::Authenticated)
+        )
+    {
+        return Err(not_found());
+    }
+
+    // The token row has no user; the requester is on the in-memory challenge.
+    // A failed or slow lookup (or a missing challenge) gives no summary.
+    let user = state
+        .sign_challenges
+        .read()
+        .await
+        .get(&row.challenge_id)
+        .map(|pending| pending.user_id);
+    let records = match (user, switch_ids(&row.method, &row.path)) {
+        (Some(user), Some((app, dep))) => {
+            let app_path = format!("/resources/{app}");
+            let dep_path = format!("/resources/{app}/deployments/{dep}");
+            let (app_record, target) = tokio::join!(
+                crate::release_relay::metadata::get(&state, user, &app_path),
+                crate::release_relay::metadata::get(&state, user, &dep_path),
+            );
+            app_record.zip(target)
+        }
+        _ => None,
+    };
+    Ok(Json(details_for(
+        &row.method,
+        &row.path,
+        records.as_ref().map(|(app, target)| (app, target)),
+    )))
+}
+
 #[tracing::instrument(skip_all, err)]
 pub async fn qr_sign_authenticate_handler(
     State(state): State<AppState>,
@@ -1229,7 +1353,87 @@ pub async fn qr_sign_authenticate_finish_handler(
 
 #[cfg(test)]
 mod tests {
-    use super::qr_login_url_for_origin;
+    use super::{details_for, qr_login_url_for_origin, switch_ids};
+    use serde_json::json;
+    use uuid::Uuid;
+
+    const APP: &str = "ffa0267d-1111-4222-8333-444455556666";
+    const DEP: &str = "99c8d645-1111-4222-8333-444455556666";
+    const LIVE: &str = "d4d71302-1111-4222-8333-444455556666";
+
+    fn switch_path() -> String {
+        format!("/resources/{APP}/deployments/{DEP}/switch")
+    }
+
+    fn records() -> (serde_json::Value, serde_json::Value) {
+        (
+            json!({"id": APP, "resource_name": "app-ffa0267d", "live_deployment_id": LIVE}),
+            json!({"id": DEP, "app_id": APP, "commit_sha": "a3c3ac4f00d", "commit_subject": "C: visible change"}),
+        )
+    }
+
+    #[test]
+    fn switch_ids_accepts_only_post_and_the_exact_switch_path() {
+        let expected = (Uuid::parse_str(APP).unwrap(), Uuid::parse_str(DEP).unwrap());
+        assert_eq!(switch_ids("POST", &switch_path()), Some(expected));
+        assert_eq!(switch_ids("GET", &switch_path()), None);
+        assert_eq!(
+            switch_ids("POST", &format!("/resources/nope/deployments/{DEP}/switch")),
+            None
+        );
+        assert_eq!(
+            switch_ids("POST", &format!("{}/extra", switch_path())),
+            None
+        );
+        assert_eq!(switch_ids("POST", &format!("{}?x=1", switch_path())), None);
+        assert_eq!(switch_ids("POST", "/pgp-keys"), None);
+    }
+
+    #[test]
+    fn details_for_summarizes_a_switch_with_matching_records() {
+        let (app, target) = records();
+        let details = details_for("POST", &switch_path(), Some((&app, &target)));
+        assert_eq!(
+            details.summary.as_deref(),
+            Some(
+                "Switch app-ffa0267d live to 99c8d645 (a3c3ac4 \"C: visible change\"); live now: d4d71302"
+            )
+        );
+        assert_eq!(details.method, "POST");
+        assert_eq!(details.path, switch_path());
+    }
+
+    #[test]
+    fn details_for_handles_missing_commit_and_live_deployment() {
+        let app = json!({"id": APP});
+        let target = json!({"id": DEP, "app_id": APP});
+        let details = details_for("POST", &switch_path(), Some((&app, &target)));
+        assert_eq!(
+            details.summary.as_deref(),
+            Some("Switch ffa0267d live to 99c8d645; live now: none")
+        );
+    }
+
+    #[test]
+    fn details_for_gives_method_and_path_only_without_trustworthy_records() {
+        let (app, target) = records();
+        let path = switch_path();
+        let other = "11111111-1111-4222-8333-444455556666";
+        let other_app = json!({"id": other, "resource_name": "x"});
+        let other_target = json!({"id": other, "app_id": APP});
+        let foreign_target = json!({"id": DEP, "app_id": other});
+        for details in [
+            details_for("POST", &path, None),
+            details_for("POST", &path, Some((&other_app, &target))),
+            details_for("POST", &path, Some((&app, &other_target))),
+            details_for("POST", &path, Some((&app, &foreign_target))),
+            details_for("POST", "/pgp-keys", Some((&app, &target))),
+        ] {
+            assert_eq!(details.summary, None);
+        }
+        let json = serde_json::to_value(details_for("POST", "/pgp-keys", None)).unwrap();
+        assert_eq!(json, json!({"method": "POST", "path": "/pgp-keys"}));
+    }
 
     #[test]
     fn qr_login_url_uses_requestee_token_only() {
