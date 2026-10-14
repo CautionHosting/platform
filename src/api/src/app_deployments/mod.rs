@@ -7,6 +7,7 @@ pub(crate) mod admission;
 pub(crate) mod destroy;
 pub(crate) mod events;
 pub(crate) mod handlers;
+pub(crate) mod history;
 pub(crate) mod internal;
 pub(crate) mod lifecycle;
 pub(crate) mod reconcile;

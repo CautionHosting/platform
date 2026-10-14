@@ -5945,6 +5945,10 @@ async fn main() -> Result<(), MainError> {
                 .delete(app_deployments::destroy::destroy_handler),
         )
         .route(
+            "/resources/{id}/history",
+            get(app_deployments::history::history_handler),
+        )
+        .route(
             "/deployments/{id}",
             get(app_deployments::handlers::get_handler),
         )

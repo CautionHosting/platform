@@ -20,6 +20,8 @@ async fn history() {
     summaries_count_candidates_like_admission(&pool).await;
     app_responses_carry_the_summary(&state).await;
     deployment_views_carry_retained_and_cost(&state).await;
+    history_is_tenant_scoped_and_paged(&pool).await;
+    history_never_shows_another_apps_deployment(&pool).await;
     pool.close().await;
 }
 
@@ -484,4 +486,120 @@ async fn deployment_views_carry_retained_and_cost(state: &Arc<AppState>) {
     kept.sort();
     assert_eq!(ids(None).await, every, "unfiltered by default");
     assert_eq!(ids(Some(1)).await, kept);
+}
+
+async fn history_is_tenant_scoped_and_paged(pool: &PgPool) {
+    let f = fixture(pool, "running").await;
+    let failed = deployment(pool, f.org, f.app, "failed", None).await;
+    sqlx::query(
+        "UPDATE app_deployments SET failed_at = NOW() - INTERVAL '1 hour',
+             error = 'tofu apply failed', commit_sha = 'b6e8c92' WHERE id = $1",
+    )
+    .bind(failed)
+    .execute(pool)
+    .await
+    .unwrap();
+    let auth = crate::AuthContext::session(f.user);
+    for _ in 0..3 {
+        let operation = events::begin(
+            pool,
+            NewOperation {
+                org_id: f.org,
+                app_id: f.app,
+                operation: Operation::DeploymentDestroy,
+                actor: &auth,
+                previous_deployment_id: None,
+                target_deployment_id: Some(f.target),
+                signed_request_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        events::finish(pool, operation, Outcome::Succeeded, None).await;
+    }
+    let page =
+        |cursor| crate::app_deployments::history::history_page(pool, f.user, f.app, cursor, 2);
+    let first = page(None).await.unwrap().unwrap();
+    assert_eq!(first.entries.len(), 2);
+    assert!(first.entries.iter().all(|entry| entry.kind == "operation"
+        && entry.outcome == "succeeded"
+        && entry.auth_method.as_deref() == Some("session")
+        && entry.completed_at.is_some()));
+    assert!(first.next.is_some());
+    let second = page(first.next).await.unwrap().unwrap();
+    assert_eq!(second.entries.len(), 2);
+    let all: std::collections::HashSet<Uuid> = first
+        .entries
+        .iter()
+        .chain(&second.entries)
+        .map(|entry| entry.id)
+        .collect();
+    assert_eq!(all.len(), 4, "pages neither overlap nor skip");
+    assert_eq!(second.entries[1].kind, "attempt");
+    assert_eq!(
+        second.entries[1].error.as_deref(),
+        Some("tofu apply failed")
+    );
+    assert!(second.next.is_none());
+    // A non-member sees nothing, not even that the app exists.
+    let stranger = member(pool, organization(pool).await).await;
+    assert!(
+        crate::app_deployments::history::history_page(pool, stranger, f.app, None, 20)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+async fn history_never_shows_another_apps_deployment(pool: &PgPool) {
+    let f = fixture(pool, "running").await;
+    let other = fixture(pool, "running").await;
+    sqlx::query(
+        "UPDATE app_deployments SET commit_sha = 'secret0', commit_subject = 'other tenant' WHERE id = $1",
+    )
+    .bind(other.target)
+    .execute(pool)
+    .await
+    .unwrap();
+    // Even a row naming a foreign deployment (none is written today) reveals nothing about it:
+    // neither its commit nor its ID.
+    let auth = crate::AuthContext::session(f.user);
+    let foreign = events::begin(
+        pool,
+        NewOperation {
+            org_id: f.org,
+            app_id: f.app,
+            operation: Operation::Switch,
+            actor: &auth,
+            previous_deployment_id: Some(other.target),
+            target_deployment_id: Some(other.target),
+            signed_request_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    let own = events::begin(
+        pool,
+        NewOperation {
+            org_id: f.org,
+            app_id: f.app,
+            operation: Operation::DeploymentDestroy,
+            actor: &auth,
+            previous_deployment_id: None,
+            target_deployment_id: Some(f.target),
+            signed_request_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    let page = crate::app_deployments::history::history_page(pool, f.user, f.app, None, 20)
+        .await
+        .unwrap()
+        .unwrap();
+    let entry = |id: Uuid| page.entries.iter().find(|entry| entry.id == id).unwrap();
+    let foreign = entry(foreign);
+    assert!(foreign.target_deployment_id.is_none() && foreign.previous_deployment_id.is_none());
+    assert!(foreign.commit_sha.is_none() && foreign.commit_subject.is_none());
+    // The join is not simply dropped: an own-app target is named.
+    assert_eq!(entry(own).target_deployment_id, Some(f.target));
 }
