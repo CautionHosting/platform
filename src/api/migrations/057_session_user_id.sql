@@ -3,25 +3,34 @@
 -- ambiguous once a single physical key can be registered to multiple
 -- accounts).
 --
--- Backfill: join through fido2_credentials to recover the owner. Sessions
--- whose credential no longer exists (orphaned by a user/credential delete)
--- or that resolve to more than one owner are deleted rather than left
--- with a NULL user_id.
+-- Idempotent: every statement is safe to re-run. The backfill and the
+-- NOT NULL promotion are wrapped in a DO block that no-ops when the column
+-- already carries values, so a partial or repeated run never deletes live
+-- sessions.
 
 ALTER TABLE auth_sessions
     ADD COLUMN IF NOT EXISTS user_id UUID;
 
-UPDATE auth_sessions s
-SET user_id = c.user_id
-FROM fido2_credentials c
-WHERE s.credential_id = c.credential_id
-  AND s.user_id IS NULL;
+DO
+$$BEGIN
+    -- Backfill: join through fido2_credentials to recover the owner. Only
+    -- sessions that still have no owner (user_id IS NULL) are touched, so a
+    -- re-run after the column is populated is a no-op.
+    UPDATE auth_sessions s
+    SET user_id = c.user_id
+    FROM fido2_credentials c
+    WHERE s.credential_id = c.credential_id
+      AND s.user_id IS NULL;
 
--- Delete sessions that couldn't be resolved: orphaned credentials or
--- ambiguous (multi-owner) credentials.
-DELETE FROM auth_sessions WHERE user_id IS NULL;
+    -- Delete sessions that couldn't be resolved: orphaned credentials or
+    -- ambiguous (multi-owner) credentials.
+    DELETE FROM auth_sessions WHERE user_id IS NULL;
 
-ALTER TABLE auth_sessions
-    ALTER COLUMN user_id SET NOT NULL;
+    -- Promote to NOT NULL only once every remaining session has an owner.
+    IF NOT EXISTS (SELECT 1 FROM auth_sessions WHERE user_id IS NULL) THEN
+        ALTER TABLE auth_sessions
+            ALTER COLUMN user_id SET NOT NULL;
+    END IF;
+END;$$;
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON auth_sessions(user_id);

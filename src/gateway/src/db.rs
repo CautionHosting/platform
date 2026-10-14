@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use rand::Rng;
@@ -616,17 +624,27 @@ fn registration_uv_verified(bytes: &[u8]) -> bool {
 /// trusting a JSON flag on an otherwise malformed credential. Repeatable and
 /// safe during rolling upgrades; never clears evidence from later assertions.
 pub async fn backfill_credential_uv(pool: &PgPool) -> Result<(), DbError> {
-    let rows: Vec<(Uuid, Vec<u8>)> = sqlx::query_as(
-        "SELECT id, public_key FROM fido2_credentials WHERE uv_verified = false",
-    )
-    .fetch_all(pool)
-    .await
-    .with_context(DbErrorCtx::new(DbErrorKind::QueryFailed, "load registration UV evidence"))?;
+    let rows: Vec<(Uuid, Vec<u8>)> =
+        sqlx::query_as("SELECT id, public_key FROM fido2_credentials WHERE uv_verified = false")
+            .fetch_all(pool)
+            .await
+            .with_context(DbErrorCtx::new(
+                DbErrorKind::QueryFailed,
+                "load registration UV evidence",
+            ))?;
     for (id, bytes) in rows {
         if registration_uv_verified(&bytes) {
-            sqlx::query("UPDATE fido2_credentials SET uv_verified = true WHERE id = $1 AND public_key = $2")
-                .bind(id).bind(bytes).execute(pool).await
-                .with_context(DbErrorCtx::new(DbErrorKind::QueryFailed, "backfill registration UV evidence"))?;
+            sqlx::query(
+                "UPDATE fido2_credentials SET uv_verified = true WHERE id = $1 AND public_key = $2",
+            )
+            .bind(id)
+            .bind(bytes)
+            .execute(pool)
+            .await
+            .with_context(DbErrorCtx::new(
+                DbErrorKind::QueryFailed,
+                "backfill registration UV evidence",
+            ))?;
         }
     }
     Ok(())
@@ -1947,11 +1965,22 @@ mod credential_uv_tests {
     use super::*;
     #[test]
     fn registration_evidence_requires_a_valid_credential_and_verified_uv() {
-        let mut value: serde_json::Value = serde_json::from_str(include_str!("../../api/src/org_quorum/test-credential.json")).unwrap();
-        assert!(!registration_uv_verified(&serde_json::to_vec(&value).unwrap()));
+        let mut value: serde_json::Value = serde_json::from_str(include_str!(
+            "../../api/src/org_quorum/test-credential.json"
+        ))
+        .unwrap();
+        assert!(!registration_uv_verified(
+            &serde_json::to_vec(&value).unwrap()
+        ));
         value["cred"]["user_verified"] = serde_json::json!(true);
-        assert!(registration_uv_verified(&serde_json::to_vec(&value).unwrap()));
-        for malformed in [b"invalid".as_slice(), br#"{"cred":{"user_verified":true}}"#, b"{}"] {
+        assert!(registration_uv_verified(
+            &serde_json::to_vec(&value).unwrap()
+        ));
+        for malformed in [
+            b"invalid".as_slice(),
+            br#"{"cred":{"user_verified":true}}"#,
+            b"{}",
+        ] {
             assert!(!registration_uv_verified(malformed));
         }
     }

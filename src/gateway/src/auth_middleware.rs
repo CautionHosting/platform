@@ -1372,9 +1372,10 @@ async fn fido2_sign_flow(
         "Verifying FIDO2 signature with credential: {}",
         hex::encode(&credential_id_bytes)
     );
-    let cred_bytes = db::get_credential_public_key(&state.db, pending.user_id, &credential_id_bytes)
-        .await
-        .with_context(Ctx::credential_lookup())?;
+    let cred_bytes =
+        db::get_credential_public_key(&state.db, pending.user_id, &credential_id_bytes)
+            .await
+            .with_context(Ctx::credential_lookup())?;
 
     // Use SecurityKey for flexible UV policy (Passkey enforces UV=Required)
     let _seckey: SecurityKey =

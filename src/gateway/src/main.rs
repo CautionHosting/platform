@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use axum::{
     middleware,
     routing::{delete, get, post},
@@ -23,9 +31,9 @@ mod csrf;
 mod db;
 mod decoy;
 mod handlers;
-mod release_relay;
 mod pgp;
 mod rate_limit;
+mod release_relay;
 mod request_id;
 mod security_headers;
 mod ssh_server;
@@ -462,9 +470,15 @@ async fn main() -> Result<(), MainError> {
             "/auth/sign-request",
             post(handlers::begin_sign_request_handler),
         )
-        .route("/auth/qr-release/begin", post(release_relay::begin).layer(axum::extract::DefaultBodyLimit::max(65536)))
+        .route(
+            "/auth/qr-release/begin",
+            post(release_relay::begin).layer(axum::extract::DefaultBodyLimit::max(65536)),
+        )
         .route("/auth/qr-release/read", post(release_relay::read))
-        .route("/auth/qr-release/finish", post(release_relay::finish).layer(axum::extract::DefaultBodyLimit::max(16384)))
+        .route(
+            "/auth/qr-release/finish",
+            post(release_relay::finish).layer(axum::extract::DefaultBodyLimit::max(16384)),
+        )
         .route("/auth/qr-release/status", post(release_relay::status))
         .route("/auth/qr-release/cancel", post(release_relay::cancel))
         .route("/auth/qr-sign/begin", post(handlers::qr_sign_begin_handler))
@@ -672,7 +686,10 @@ async fn main() -> Result<(), MainError> {
                 }
             }
 
-            cleanup_state.recovery_verifications.write().await
+            cleanup_state
+                .recovery_verifications
+                .write()
+                .await
                 .retain(|_, pending| pending.expires_at > now);
 
             // Clean up expired authentication states

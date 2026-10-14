@@ -148,7 +148,11 @@ pub async fn begin(
     let (_credential, user) = crate::handlers::authenticate_session(&state, &headers)
         .await
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
-    if approval.display.as_ref().is_some_and(|display| !display.valid()) {
+    if approval
+        .display
+        .as_ref()
+        .is_some_and(|display| !display.valid())
+    {
         return Err(StatusCode::BAD_REQUEST);
     }
     let started = Instant::now();
@@ -183,8 +187,11 @@ pub async fn begin(
         approval.display.as_ref(),
     )
     .await;
-    request["reported"] = serde_json::to_value(&approval.display).map_err(|_| StatusCode::BAD_REQUEST)?;
-    if started.elapsed() >= lifetime { return Err(StatusCode::GONE); }
+    request["reported"] =
+        serde_json::to_value(&approval.display).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if started.elapsed() >= lifetime {
+        return Err(StatusCode::GONE);
+    }
     let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let browser = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let metadata = request.get("metadata").cloned();
@@ -372,12 +379,24 @@ mod tests {
     #[tokio::test]
     async fn requester_cancellation_rejects_late_browser_submission() {
         let (requester, browser) = pending();
-        assert_eq!(cancel(Json(Token { token: requester.clone() })).await, StatusCode::NO_CONTENT);
-        assert!(read(Json(Token { token: browser.clone() })).await.is_err());
+        assert_eq!(
+            cancel(Json(Token {
+                token: requester.clone()
+            }))
+            .await,
+            StatusCode::NO_CONTENT
+        );
+        assert!(read(Json(Token {
+            token: browser.clone()
+        }))
+        .await
+        .is_err());
         assert!(finish(Json(Finish {
             token: browser,
             assertion: Some(json!({"late": "assertion"})),
-        })).await.is_err());
+        }))
+        .await
+        .is_err());
         assert!(status(Json(Token { token: requester })).await.is_err());
     }
 
@@ -476,13 +495,26 @@ mod verification_tests {
         assert_eq!(display["context"]["holder"], "holder");
         assert!(ttl.as_secs() <= 120);
         assert_eq!(display["destination_attestation_hash"], "destination");
-        assert_eq!(display["custody_policy"], serde_json::to_value(&pcrs).unwrap());
+        assert_eq!(
+            display["custody_policy"],
+            serde_json::to_value(&pcrs).unwrap()
+        );
         let (mut descriptive, _) = fixture();
-        descriptive.display = Some(metadata::DisplayContext { application_id: Uuid::new_v4(),
-            destination_address: "203.0.113.42:49504".parse().unwrap(), custody_url: "https://custody.example.test".into() });
-        let original = verified_request(&descriptive, &pcrs, "example.com").unwrap().0;
+        descriptive.display = Some(metadata::DisplayContext {
+            application_id: Uuid::new_v4(),
+            destination_address: "203.0.113.42:49504".parse().unwrap(),
+            custody_url: "https://custody.example.test".into(),
+        });
+        let original = verified_request(&descriptive, &pcrs, "example.com")
+            .unwrap()
+            .0;
         descriptive.display.as_mut().unwrap().application_id = Uuid::new_v4();
-        assert_eq!(verified_request(&descriptive, &pcrs, "example.com").unwrap().0, original);
+        assert_eq!(
+            verified_request(&descriptive, &pcrs, "example.com")
+                .unwrap()
+                .0,
+            original
+        );
         for field in [
             "challenge",
             "holder",
@@ -535,7 +567,10 @@ mod verification_tests {
     #[test]
     fn operator_policy_must_be_one_fixed_production_pcr_set() {
         let set = |pcrs: &[(u8, &str)], expiry: Option<u64>| {
-            let pcrs: HashMap<_, _> = pcrs.iter().map(|(i, v)| (i.to_string(), v.repeat(48))).collect();
+            let pcrs: HashMap<_, _> = pcrs
+                .iter()
+                .map(|(i, v)| (i.to_string(), v.repeat(48)))
+                .collect();
             match expiry {
                 Some(at) => json!({"pcrs": pcrs, "expires_at_unix_seconds": at}),
                 None => json!({"pcrs": pcrs}),
@@ -545,14 +580,25 @@ mod verification_tests {
         let policy = |sets: Vec<Value>| json!({ "sets": sets }).to_string();
         assert_eq!(
             measurements_from_policy(&policy(vec![production.clone()])).unwrap(),
-            [(0, "ab".repeat(48)), (1, "cd".repeat(48)), (2, "ef".repeat(48))].into()
+            [
+                (0, "ab".repeat(48)),
+                (1, "cd".repeat(48)),
+                (2, "ef".repeat(48))
+            ]
+            .into()
         );
         for rejected in [
             policy(vec![]),
             policy(vec![production.clone(), production.clone()]),
-            policy(vec![set(&[(0, "ab"), (1, "cd"), (2, "ef")], Some(4_102_444_800))]),
+            policy(vec![set(
+                &[(0, "ab"), (1, "cd"), (2, "ef")],
+                Some(4_102_444_800),
+            )]),
             policy(vec![set(&[(0, "ab"), (1, "cd")], None)]),
-            policy(vec![set(&[(0, "ab"), (1, "cd"), (2, "ef"), (3, "12")], None)]),
+            policy(vec![set(
+                &[(0, "ab"), (1, "cd"), (2, "ef"), (3, "12")],
+                None,
+            )]),
             policy(vec![set(&[(0, "00"), (1, "cd"), (2, "ef")], None)]),
             "not json".to_owned(),
         ] {

@@ -63,14 +63,7 @@ pub(crate) async fn begin_registration_challenge(
 
     let (mut ccr, reg_state) = state
         .webauthn
-        .start_securitykey_registration(
-            user_unique_id,
-            &username,
-            &username,
-            None,
-            None,
-            None,
-        )
+        .start_securitykey_registration(user_unique_id, &username, &username, None, None, None)
         .with_context(Ctx::challenge_failed())?;
 
     // Override authenticator selection to be maximally compatible:

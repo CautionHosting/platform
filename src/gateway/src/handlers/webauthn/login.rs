@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use axum::{
     extract::{ConnectInfo, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
@@ -804,9 +812,10 @@ pub async fn finish_login_handler(
                 });
             }
 
-            let cred_bytes = db::get_credential_public_key(&state.db, user_id, &credential_id_bytes)
-                .await
-                .with_context(Ctx::db_get_public_key_for_credential(user_id))?;
+            let cred_bytes =
+                db::get_credential_public_key(&state.db, user_id, &credential_id_bytes)
+                    .await
+                    .with_context(Ctx::db_get_public_key_for_credential(user_id))?;
             let seckey: SecurityKey = serde_json::from_slice(&cred_bytes)
                 .with_context(Ctx::parse_security_key(user_id))?;
 
@@ -866,9 +875,10 @@ pub async fn finish_login_handler(
                 }
             };
 
-            let cred_bytes = db::get_credential_public_key(&state.db, user_id, &credential_id_bytes)
-                .await
-                .with_context(Ctx::db_get_public_key_for_credential(user_id))?;
+            let cred_bytes =
+                db::get_credential_public_key(&state.db, user_id, &credential_id_bytes)
+                    .await
+                    .with_context(Ctx::db_get_public_key_for_credential(user_id))?;
             let seckey: SecurityKey = serde_json::from_slice(&cred_bytes)
                 .with_context(Ctx::parse_security_key(user_id))?;
 
@@ -908,7 +918,8 @@ pub async fn finish_login_handler(
             // userHandle, i.e. it's resident. Best-effort — never fail the
             // login over this.
             if let Err(e) =
-                db::mark_credential_resident_if_unknown(&state.db, user_id, &credential_id_bytes).await
+                db::mark_credential_resident_if_unknown(&state.db, user_id, &credential_id_bytes)
+                    .await
             {
                 tracing::warn!("Failed to backfill credential resident flag: {:?}", e);
             }
@@ -963,9 +974,15 @@ pub async fn finish_login_handler(
     let csrf_token = crate::csrf::derive_csrf_token(&session_id, &state.csrf_secret);
     let expires_at = time::OffsetDateTime::now_utc() + Duration::hours(state.session_timeout_hours);
 
-    db::create_auth_session(&state.db, &session_id, &credential_id_bytes, user_id, expires_at)
-        .await
-        .with_context(Ctx::db_create_auth_session(user_id))?;
+    db::create_auth_session(
+        &state.db,
+        &session_id,
+        &credential_id_bytes,
+        user_id,
+        expires_at,
+    )
+    .await
+    .with_context(Ctx::db_create_auth_session(user_id))?;
 
     let credential_id_hex = hex::encode(&credential_id_bytes);
     tracing::debug!(
@@ -1099,9 +1116,19 @@ mod tests {
                 .with_context(db::DbErrorCtx::new(kind, "get_user_ids_by_credential"))
                 .unwrap_err()
         };
-        let status = |kind| credential_lookup_error(lookup(kind)).into_response().status();
-        assert_eq!(status(db::DbErrorKind::CredentialNotFound), StatusCode::UNAUTHORIZED);
-        assert_eq!(status(db::DbErrorKind::QueryFailed), StatusCode::INTERNAL_SERVER_ERROR);
+        let status = |kind| {
+            credential_lookup_error(lookup(kind))
+                .into_response()
+                .status()
+        };
+        assert_eq!(
+            status(db::DbErrorKind::CredentialNotFound),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status(db::DbErrorKind::QueryFailed),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     // --- normalize_login_username -------------------------------------

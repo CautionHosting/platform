@@ -321,9 +321,15 @@ pub async fn finish_reset_register_handler(
     let csrf_token = crate::csrf::derive_csrf_token(&session_id, &state.csrf_secret);
     let expires_at = time::OffsetDateTime::now_utc() + Duration::hours(state.session_timeout_hours);
 
-    db::create_auth_session(&mut *tx, &session_id, &credential_id, pending.user_id, expires_at)
-        .await
-        .with_context(Ctx::internal())?;
+    db::create_auth_session(
+        &mut *tx,
+        &session_id,
+        &credential_id,
+        pending.user_id,
+        expires_at,
+    )
+    .await
+    .with_context(Ctx::internal())?;
 
     tx.commit().await.with_context(Ctx::internal())?;
 

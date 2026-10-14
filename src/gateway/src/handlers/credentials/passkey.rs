@@ -129,7 +129,8 @@ impl IntoResponse for PasskeyError {
             Self::UserVerificationRequired { .. } => (
                 StatusCode::BAD_REQUEST,
                 "This passkey must verify a PIN or biometric for quorum approval.",
-            ).into_response(),
+            )
+                .into_response(),
             error @ Self::Auth { .. } => {
                 tracing::warn!(?error, "Passkey management: authentication failed");
                 generic_auth_failure_response().into_response()

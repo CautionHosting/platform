@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use crate::db;
 use crate::types::*;
 use axum::{
@@ -377,6 +385,7 @@ impl IntoResponse for QrLoginError {
 /// Create a sign challenge for the given credential. Returns (challenge_response, challenge_id).
 /// Stores PendingSignChallenge in state.sign_challenges.
 #[tracing::instrument(skip_all, err)]
+#[allow(clippy::too_many_arguments)]
 async fn create_sign_challenge(
     state: &AppState,
     credential_id: &[u8],
@@ -877,9 +886,10 @@ pub async fn qr_login_authenticate_finish_handler(
                 }
             };
 
-            let cred_bytes = db::get_credential_public_key(&state.db, user_id, &credential_id_bytes)
-                .await
-                .with_context(FinishCtx::db_get_public_key_for_credential(user_id))?;
+            let cred_bytes =
+                db::get_credential_public_key(&state.db, user_id, &credential_id_bytes)
+                    .await
+                    .with_context(FinishCtx::db_get_public_key_for_credential(user_id))?;
             let seckey: webauthn_rs::prelude::SecurityKey = serde_json::from_slice(&cred_bytes)
                 .with_context(FinishCtx::parse_security_key(user_id))?;
 
@@ -938,9 +948,10 @@ pub async fn qr_login_authenticate_finish_handler(
                 }
             };
 
-            let cred_bytes = db::get_credential_public_key(&state.db, user_id, &credential_id_bytes)
-                .await
-                .with_context(FinishCtx::db_get_public_key_for_credential(user_id))?;
+            let cred_bytes =
+                db::get_credential_public_key(&state.db, user_id, &credential_id_bytes)
+                    .await
+                    .with_context(FinishCtx::db_get_public_key_for_credential(user_id))?;
             let seckey: webauthn_rs::prelude::SecurityKey = serde_json::from_slice(&cred_bytes)
                 .with_context(FinishCtx::parse_security_key(user_id))?;
 
@@ -965,7 +976,8 @@ pub async fn qr_login_authenticate_finish_handler(
             }
 
             if let Err(e) =
-                db::mark_credential_resident_if_unknown(&state.db, user_id, &credential_id_bytes).await
+                db::mark_credential_resident_if_unknown(&state.db, user_id, &credential_id_bytes)
+                    .await
             {
                 tracing::warn!("Failed to backfill credential resident flag: {:?}", e);
             }
@@ -1009,9 +1021,15 @@ pub async fn qr_login_authenticate_finish_handler(
     let session_id = db::generate_session_id();
     let expires_at = time::OffsetDateTime::now_utc() + Duration::hours(state.session_timeout_hours);
 
-    db::create_auth_session(&state.db, &session_id, &credential_id_bytes, user_id, expires_at)
-        .await
-        .with_context(FinishCtx::db_create_auth_session(user_id))?;
+    db::create_auth_session(
+        &state.db,
+        &session_id,
+        &credential_id_bytes,
+        user_id,
+        expires_at,
+    )
+    .await
+    .with_context(FinishCtx::db_create_auth_session(user_id))?;
 
     // Mark token completed
     db::complete_qr_login_token(&state.db, &token, &session_id)
