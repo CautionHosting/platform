@@ -1165,6 +1165,11 @@ test-share-release-browser:
 	@npm run build --prefix frontend
 	@node tests/e2e/browser-authenticator/release-approval.mjs
 
+.PHONY: test-app-deployments-browser
+test-app-deployments-browser:
+	@npm run build --prefix frontend
+	@node tests/e2e/browser-authenticator/app-deployments.mjs
+
 .PHONY: test-recovery-verification
 test-recovery-verification:
 	@bash tests/e2e/test_recovery_verification.sh
