@@ -34,3 +34,22 @@ $$BEGIN
 END;$$;
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON auth_sessions(user_id);
+
+-- Composite FK: cascade-delete sessions when their credential row is removed.
+-- The old single-column FK on credential_id alone was dropped in 056 because
+-- credential_id is no longer globally unique; this composite FK restores the
+-- cascade using the new (user_id, credential_id) pair. Idempotent via DO block.
+DO
+$$BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'fk_auth_sessions_user_credential'
+          AND conrelid = 'auth_sessions'::regclass
+    ) THEN
+        ALTER TABLE auth_sessions
+            ADD CONSTRAINT fk_auth_sessions_user_credential
+            FOREIGN KEY (user_id, credential_id)
+            REFERENCES fido2_credentials(user_id, credential_id)
+            ON DELETE CASCADE;
+    END IF;
+END;$$;
