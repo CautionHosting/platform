@@ -2649,3 +2649,46 @@
     padding: 24px 16px;
   }
 }
+
+/* Shared by Dashboard.vue and the app deployment components */
+.app-detail-section-title {
+  font-size: clamp(1.15rem, 2vw, 1.35rem);
+  font-weight: 500;
+  color: var(--theme-text-primary);
+  margin: 24px 0 12px 0;
+}
+
+.app-detail-helper-text {
+  font-size: clamp(1rem, 2vw, 1.05rem);
+  color: var(--theme-text-muted);
+  margin: 0;
+  line-height: 1.4;
+}
+
+.app-detail-command {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--theme-surface-subtle);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-top: 12px;
+}
+
+.app-detail-command code {
+  flex: 1;
+  font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", monospace;
+  font-size: 0.95rem;
+  color: var(--theme-text-secondary);
+  word-break: break-all;
+}
+
+.app-detail-command .copy-inline-btn {
+  flex-shrink: 0;
+  color: var(--theme-text-faint);
+}
+
+.app-detail-command .copy-inline-btn:hover {
+  background: var(--theme-surface-muted);
+  color: var(--theme-text-secondary);
+}

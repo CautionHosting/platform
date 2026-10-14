@@ -59,8 +59,17 @@
           </button>
         </div>
 
+        <p class="app-detail-meta">
+          {{ appStateLabel(selectedApp) }} · {{ appHostname(selectedApp) }} · {{ selectedApp.region || '—' }} · {{ selectedApp.public_ip || '—' }}
+          <button type="button" class="text-button" :aria-expanded="appDetailsOpen" aria-controls="app-details" @click="appDetailsOpen = !appDetailsOpen">App details</button>
+        </p>
+
+        <AppDeployments v-if="isDeploymentsApp(selectedApp)" :app="selectedApp" :deployments="selectedDeployments" :sign="buildSignedHeaders" :fetch="authFetch" @changed="refreshSelectedApp" />
+        <p v-else class="legacy-lifecycle">Legacy · single deployment<span v-if="selectedApp.configuration?.commit_sha"> · <code>{{ shortSha(selectedApp.configuration.commit_sha) }}</code></span><span v-else> · commit unknown</span></p>
+
+        <div v-if="appDetailsOpen" id="app-details">
         <section class="deployment-details" aria-labelledby="deployment-details-title">
-          <h3 id="deployment-details-title" class="app-detail-section-title">Deployment details</h3>
+          <h3 id="deployment-details-title" class="app-detail-section-title">App details</h3>
           <p class="app-detail-helper-text">Runtime and network configuration for this application.</p>
 
           <div class="deployment-details-panel">
@@ -105,20 +114,7 @@
                 <span class="deployment-detail-label">App ID</span>
                 <div class="deployment-detail-value-row">
                   <span class="deployment-detail-value">{{ selectedApp.id }}</span>
-                  <button
-                    class="copy-inline-btn"
-                    @click="copyToClipboard(selectedApp.id, 'appId')"
-                    :title="copiedField === 'appId' ? 'Copied!' : 'Copy to clipboard'"
-                    :aria-label="copiedField === 'appId' ? 'Copied App ID' : 'Copy App ID to clipboard'"
-                  >
-                    <svg v-if="copiedField !== 'appId'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                    </svg>
-                    <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                      <polyline points="20 6 9 17 4 12"></polyline>
-                    </svg>
-                  </button>
+                  <CopyIconButton :value="selectedApp.id" label="App ID" />
                 </div>
               </div>
 
@@ -135,20 +131,7 @@
                 <span class="deployment-detail-label">Public IP</span>
                 <div v-if="selectedApp.state === 'running' && selectedApp.public_ip" class="deployment-detail-value-row">
                   <span class="deployment-detail-value">{{ selectedApp.public_ip }}</span>
-                  <button
-                    class="copy-inline-btn"
-                    @click="copyToClipboard(selectedApp.public_ip, 'publicIp')"
-                    :title="copiedField === 'publicIp' ? 'Copied!' : 'Copy to clipboard'"
-                    :aria-label="copiedField === 'publicIp' ? 'Copied IP address' : 'Copy IP address to clipboard'"
-                  >
-                    <svg v-if="copiedField !== 'publicIp'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                    </svg>
-                    <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                      <polyline points="20 6 9 17 4 12"></polyline>
-                    </svg>
-                  </button>
+                  <CopyIconButton :value="selectedApp.public_ip" label="IP address" />
                 </div>
                 <span v-else class="deployment-detail-value deployment-detail-value--muted">—</span>
               </div>
@@ -157,20 +140,7 @@
                 <span class="deployment-detail-label">Domain</span>
                 <div v-if="selectedApp.configuration?.domain" class="deployment-detail-value-row">
                   <span class="deployment-detail-value">{{ selectedApp.configuration.domain }}</span>
-                  <button
-                    class="copy-inline-btn"
-                    @click="copyToClipboard(selectedApp.configuration.domain, 'domain')"
-                    :title="copiedField === 'domain' ? 'Copied!' : 'Copy to clipboard'"
-                    :aria-label="copiedField === 'domain' ? 'Copied domain' : 'Copy domain to clipboard'"
-                  >
-                    <svg v-if="copiedField !== 'domain'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                    </svg>
-                    <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                      <polyline points="20 6 9 17 4 12"></polyline>
-                    </svg>
-                  </button>
+                  <CopyIconButton :value="selectedApp.configuration.domain" label="domain" />
                 </div>
                 <span v-else class="deployment-detail-value deployment-detail-value--muted">Not set</span>
               </div>
@@ -206,20 +176,7 @@
                 </span>
                 <div v-if="selectedApp.managed_hostname" class="deployment-detail-value-row">
                   <span class="deployment-detail-value">{{ selectedApp.managed_hostname }}</span>
-                  <button
-                    class="copy-inline-btn"
-                    @click="copyToClipboard(selectedApp.managed_hostname, 'managedHostname')"
-                    :title="copiedField === 'managedHostname' ? 'Copied!' : 'Copy to clipboard'"
-                    :aria-label="copiedField === 'managedHostname' ? 'Copied DNS target' : 'Copy DNS target to clipboard'"
-                  >
-                    <svg v-if="copiedField !== 'managedHostname'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                      <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-                    </svg>
-                    <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                      <polyline points="20 6 9 17 4 12"></polyline>
-                    </svg>
-                  </button>
+                  <CopyIconButton :value="selectedApp.managed_hostname" label="DNS target" />
                 </div>
                 <span v-else class="deployment-detail-value deployment-detail-value--muted">Unavailable</span>
               </div>
@@ -234,6 +191,7 @@
             </div>
           </div>
         </section>
+        </div>
 
         <!-- Builder Configuration -->
         <div class="app-detail-section app-detail-section--fullwidth app-detail-section--borderless">
@@ -253,27 +211,14 @@
         </div>
 
         <!-- Deployment Section (full width, outside the two-column layout) -->
-        <div v-if="selectedApp.git_url" class="app-detail-section app-detail-section--fullwidth app-detail-section--borderless">
-          <h3 class="app-detail-section-title">Deploy via Git</h3>
+        <details v-if="selectedApp.git_url" class="app-detail-section app-detail-section--fullwidth app-detail-section--borderless">
+          <summary class="app-detail-section-title">Deploy via Git</summary>
           <p class="app-detail-helper-text">Add this Git remote, then push to deploy.</p>
           <div class="app-detail-command">
             <code>git remote add caution {{ selectedApp.git_url }}</code>
-            <button
-              class="copy-inline-btn"
-              @click="copyToClipboard(`git remote add caution ${selectedApp.git_url}`, 'gitCmd')"
-              :title="copiedField === 'gitCmd' ? 'Copied!' : 'Copy to clipboard'"
-              :aria-label="copiedField === 'gitCmd' ? 'Copied git command' : 'Copy git command to clipboard'"
-            >
-              <svg v-if="copiedField !== 'gitCmd'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-              </svg>
-              <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                <polyline points="20 6 9 17 4 12"></polyline>
-              </svg>
-            </button>
+            <CopyIconButton :value="`git remote add caution ${selectedApp.git_url}`" label="git command" />
           </div>
-        </div>
+        </details>
 
         <!-- Danger zone (outside the content card) -->
         <div class="app-detail-danger-zone app-detail-danger-zone--standalone">
@@ -2048,6 +1993,8 @@ make build-cli
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from "vue";
 import DashboardLayout from "../components/DashboardLayout.vue";
 import AttestationModal from "../components/AttestationModal.vue";
+import AppDeployments from "../components/AppDeployments.vue";
+import CopyIconButton from "../components/CopyIconButton.vue";
 import QuorumBundleCreate from "../components/QuorumBundleCreate.vue";
 import { createBundleSubmitter } from "../utils/quorumCreation.js";
 import { verifyPasskeyRecovery } from "../composables/passkeyRecovery.js";
@@ -2118,6 +2065,8 @@ export default {
   },
   components: {
     DashboardLayout,
+    AppDeployments,
+    CopyIconButton,
     AttestationModal,
     QuorumBundleCreate,
   },
@@ -2279,9 +2228,31 @@ export default {
       if (preferences) appListPreferences.value = preferences;
     };
 
+    const selectedDeployments = ref([]);
+    const appDetailsOpen = ref(false);
+    // A refresh replaces rows in place: clearing them would close the inspector
+    // and drop the action's outcome message.
+    const loadDeployments = async (appId) => {
+      const app = apps.value.find((candidate) => candidate.id === appId);
+      if (!isDeploymentsApp(app)) { selectedDeployments.value = []; return; }
+      const response = await authFetch(deploymentsUrl(appId)).catch(() => null);
+      if (!response?.ok) {
+        showToast('Deployments could not be refreshed; the list may be stale.', 'error');
+        return;
+      }
+      if (selectedApp.value?.id === appId) selectedDeployments.value = await response.json();
+    };
+    const refreshSelectedApp = async () => {
+      await loadApps();
+      if (selectedApp.value) await loadDeployments(selectedApp.value.id);
+    };
+
     const openAppDetail = async (app) => {
       selectedApp.value = app;
+      selectedDeployments.value = [];
+      appDetailsOpen.value = false;
       loadBuilderConfig(app.id);
+      loadDeployments(app.id);
     };
 
     const loadBuilderConfig = async (resourceId) => {
@@ -2314,6 +2285,7 @@ export default {
 
     const closeAppDetail = () => {
       selectedApp.value = null;
+      selectedDeployments.value = [];
       copiedField.value = null;
       closeDnsTooltip();
     };
@@ -5263,6 +5235,7 @@ export default {
       inactiveAppsCount,
       shortId, shortSha, appStateLabel, candidateCountLabel, appHostname,
       isDeploymentsApp, orderDeployments, deploymentsUrl,
+      selectedDeployments, appDetailsOpen, refreshSelectedApp, buildSignedHeaders, authFetch,
       appSortColumn,
       appSortDirection,
       setHideTerminatedApps,
@@ -6470,11 +6443,23 @@ export default {
   box-shadow: none;
 }
 
-.app-detail-section-title {
-  font-size: clamp(1.15rem, 2vw, 1.35rem);
-  font-weight: 500;
-  color: var(--theme-text-primary);
-  margin: 24px 0 12px 0;
+.app-detail-meta {
+  margin: 0 0 16px;
+  color: var(--theme-text-muted);
+}
+
+.legacy-lifecycle {
+  margin: 0 0 16px;
+  color: var(--theme-text-muted);
+}
+
+.text-button {
+  border: 0;
+  background: none;
+  padding: 0;
+  margin-left: 8px;
+  color: var(--theme-accent);
+  cursor: pointer;
 }
 
 .app-detail-section-title:first-child {
@@ -6523,13 +6508,6 @@ export default {
   gap: 4px;
 }
 
-.app-detail-helper-text {
-  font-size: clamp(1rem, 2vw, 1.05rem);
-  color: var(--theme-text-muted);
-  margin: 0;
-  line-height: 1.4;
-}
-
 .app-detail-git-url .app-detail-value-with-copy {
   background: var(--theme-surface-subtle);
   padding: 12px 14px;
@@ -6541,34 +6519,6 @@ export default {
   flex: 1;
   min-width: 0;
   word-break: break-all;
-}
-
-.app-detail-command {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  background: var(--theme-surface-subtle);
-  border-radius: 8px;
-  padding: 12px 16px;
-  margin-top: 12px;
-}
-
-.app-detail-command code {
-  flex: 1;
-  font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", monospace;
-  font-size: 0.95rem;
-  color: var(--theme-text-secondary);
-  word-break: break-all;
-}
-
-.app-detail-command .copy-inline-btn {
-  flex-shrink: 0;
-  color: var(--theme-text-faint);
-}
-
-.app-detail-command .copy-inline-btn:hover {
-  background: var(--theme-surface-muted);
-  color: var(--theme-text-secondary);
 }
 
 /* Provider-neutral deployment details */
@@ -6649,7 +6599,7 @@ export default {
   min-width: 0;
 }
 
-.deployment-detail-value-row .copy-inline-btn {
+.deployment-detail-value-row .copy-icon {
   margin-top: -2px;
 }
 

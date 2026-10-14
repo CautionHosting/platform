@@ -117,7 +117,64 @@ const previewApps = [
     created_at: '2026-08-09T14:30:00Z',
     configuration: { instance_type: 'm5.large' },
   },
+  {
+    id: '7b1d0c2e-5f4a-4e3b-9c8d-1a2b3c4d5e6f', resource_name: 'key-service', state: 'running', lifecycle: 'deployments',
+    summary_state: 'running', active: true, live_deployment_id: 'd1000000-0000-4000-8000-000000000001',
+    live_commit_sha: 'ff43fef1a2b3', candidates: 2, candidate_limit: 3, region: 'us-west-2',
+    public_ip: '198.51.100.42', domain: 'key-service.example.com', managed_hostname: '7b1d0c2e.apps.caution.sh',
+    dns_status: 'ready', git_url: 'git@git.caution.co:7b1d0c2e-5f4a-4e3b-9c8d-1a2b3c4d5e6f.git',
+    created_at: '2026-10-01T09:00:00Z', configuration: { domain: 'key-service.example.com', cpus: 2, memory_mb: 4096, instance_type: 'm5.xlarge' },
+  },
 ]
+
+const deploymentsAppId = '7b1d0c2e-5f4a-4e3b-9c8d-1a2b3c4d5e6f'
+
+const previewDeployments = [
+  {
+    id: 'd1000000-0000-4000-8000-000000000001', app_id: deploymentsAppId, role: 'live', status: 'running',
+    commit_sha: 'ff43fef1a2b3c4d5e6f708192a3b4c5d6e7f8091', commit_subject: 'Rotate keymaker policy', pushed_ref: 'main',
+    instance_id: 'i-0aaa', instance_type: 'm5.xlarge', enclave_cpus: 2, enclave_memory_mb: 4096,
+    public_ip: '198.51.100.42', retained: true, estimated_monthly_usd: 140.16,
+    created_at: '2026-10-01T09:00:00Z', running_at: '2026-10-01T09:12:00Z', activated_at: '2026-10-01T09:20:00Z',
+  },
+  {
+    id: 'd2000000-0000-4000-8000-000000000002', app_id: deploymentsAppId, role: 'candidate', status: 'running',
+    commit_sha: 'b6e8c92a1b2c3d4e5f60718293a4b5c6d7e8f901', commit_subject: 'Fix login race', pushed_ref: 'main',
+    instance_id: 'i-0bbb', instance_type: 'm5.xlarge', enclave_cpus: 2, enclave_memory_mb: 4096,
+    public_ip: '198.51.100.43', tls_after_switch: false, retained: true, estimated_monthly_usd: 140.16,
+    created_at: '2026-10-10T10:00:00Z', running_at: '2026-10-10T10:11:00Z', activated_at: null,
+  },
+  {
+    id: 'd3000000-0000-4000-8000-000000000003', app_id: deploymentsAppId, role: 'candidate', status: 'failed',
+    failed_stage: 'provisioning', commit_sha: '1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d', commit_subject: 'Bump locksmith', pushed_ref: 'release',
+    instance_id: 'i-0ccc', instance_type: 'm5.xlarge', enclave_cpus: 2, enclave_memory_mb: 4096,
+    public_ip: null, cleaned_up_at: null, cleanup: 'pending', retained: true, estimated_monthly_usd: null,
+    error: 'tofu apply failed: InsufficientInstanceCapacity',
+    created_at: '2026-10-12T08:00:00Z', running_at: null, activated_at: null,
+  },
+]
+
+// The API's `HistoryEntry` (src/api/src/app_deployments/history.rs), newest first.
+const previewHistory = {
+  entries: [
+    {
+      kind: 'attempt', id: 'd3000000-0000-4000-8000-000000000003', at: '2026-10-12T08:05:00Z', completed_at: null,
+      operation: null, outcome: 'failed', target_deployment_id: 'd3000000-0000-4000-8000-000000000003', previous_deployment_id: null,
+      commit_sha: '1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d', commit_subject: 'Bump locksmith', pushed_ref: 'release',
+      failure_kind: 'provisioning', error: 'tofu apply failed: InsufficientInstanceCapacity',
+      actor: null, auth_method: null, signed_request_id: null, signed_request_status: null, signed_request_completed_at: null,
+    },
+    {
+      kind: 'operation', id: 'e1000000-0000-4000-8000-000000000001', at: '2026-10-01T09:19:00Z', completed_at: '2026-10-01T09:20:00Z',
+      operation: 'switch', outcome: 'succeeded', target_deployment_id: 'd1000000-0000-4000-8000-000000000001', previous_deployment_id: 'd2000000-0000-4000-8000-000000000002',
+      commit_sha: 'ff43fef1a2b3c4d5e6f708192a3b4c5d6e7f8091', commit_subject: 'Rotate keymaker policy', pushed_ref: 'main',
+      failure_kind: null, error: null,
+      actor: 'preview-operator', auth_method: 'passkey',
+      signed_request_id: 'a1000000-0000-4000-8000-000000000001', signed_request_status: 200, signed_request_completed_at: '2026-10-01T09:20:00Z',
+    },
+  ],
+  next: null,
+}
 
 const previewBuilderConfig = {
   builder_size: 'medium',
@@ -364,6 +421,9 @@ export const resolveDashboardPreviewRequest = (input, rawUrl) => {
     })
   }
   if (path === '/api/resources') return jsonResponse(200, previewApps)
+  // `path` is the pathname, so `?retained=1` matches too.
+  if (path === `/api/resources/${deploymentsAppId}/deployments`) return jsonResponse(200, previewDeployments)
+  if (path === `/api/resources/${deploymentsAppId}/history`) return jsonResponse(200, previewHistory)
   if (previewApps.some((app) => path === `/api/resources/${app.id}/builder-config`)) {
     return jsonResponse(200, previewBuilderConfig)
   }

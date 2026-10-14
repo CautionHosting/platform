@@ -177,3 +177,20 @@ test('creation preview exposes member choices but still blocks generation', () =
   assert.equal(members[2].webauthn_credentials, 0)
   assert.equal(resolveDashboardPreviewRequest('POST', '/api/quorum-bundles/from-org-users').status, 405)
 })
+
+test('the preview serves a deployments app with live and candidate deployments', () => {
+  const apps = JSON.parse(resolveDashboardPreviewRequest('GET', '/api/resources').body)
+  const app = apps.find((candidate) => candidate.lifecycle === 'deployments')
+  assert.ok(app)
+  const deployments = JSON.parse(resolveDashboardPreviewRequest('GET', `/api/resources/${app.id}/deployments`).body)
+  assert.deepEqual(deployments.map((deployment) => deployment.role).sort(), ['candidate', 'candidate', 'live'])
+  const historyResponse = resolveDashboardPreviewRequest('GET', `/api/resources/${app.id}/history`)
+  assert.equal(historyResponse.status, 200)
+  const history = JSON.parse(historyResponse.body)
+  assert.ok('next' in history)
+  // The API's `HistoryEntry`: drift from src/api/src/app_deployments/history.rs must fail here.
+  const entryKeys = ['actor', 'at', 'auth_method', 'commit_sha', 'commit_subject', 'completed_at', 'error', 'failure_kind', 'id', 'kind', 'operation', 'outcome', 'previous_deployment_id', 'pushed_ref', 'signed_request_completed_at', 'signed_request_id', 'signed_request_status', 'target_deployment_id']
+  assert.ok(history.entries.length > 0)
+  for (const entry of history.entries) assert.deepEqual(Object.keys(entry).sort(), entryKeys)
+  assert.deepEqual(history.entries.map((entry) => entry.kind).sort(), ['attempt', 'operation'])
+})
