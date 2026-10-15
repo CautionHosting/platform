@@ -321,7 +321,13 @@ if ! echo "$INIT_OUTPUT" | grep -Eq "Deployment target: capacity=BYOC, aws_accou
     step_fail "caution init --byoc (exact deployment target not reported)"
 fi
 
-if ! echo "$INIT_OUTPUT" | grep -Eq 'DNS target: [^[:space:]]+\.apps\.caution\.sh'; then
+# The API names DNS targets under CAUTION_APPS_DNS_SUFFIX (default apps.caution.sh),
+# which dev boxes override; normalized as managed_dns.rs does.
+APPS_DNS_SUFFIX=$(docker inspect api --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+    | sed -n 's/^CAUTION_APPS_DNS_SUFFIX=//p' | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+APPS_DNS_SUFFIX="${APPS_DNS_SUFFIX%.}"
+APPS_DNS_SUFFIX="${APPS_DNS_SUFFIX:-apps.caution.sh}"
+if ! echo "$INIT_OUTPUT" | grep -Eq "DNS target: [^[:space:]]+\.$(echo "$APPS_DNS_SUFFIX" | sed 's/\./\\./g')"; then
     echo "$INIT_OUTPUT"
     step_fail "caution init --byoc (managed DNS target not reported)"
 fi
