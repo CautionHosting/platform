@@ -698,11 +698,12 @@ echo "$GET_A_OUT"
 contains "$GET_A_OUT" "Live: ${A_ID:0:8}" || step_fail "apps get does not print 'Live: ${A_ID:0:8}'"
 line_with "$GET_A_OUT" "${A_ID:0:8}  " >/dev/null || step_fail "apps get has no deployments table row for ${A_ID:0:8}"
 if [ "$E2E_BYOC" = 1 ]; then
-    # The network was created in the linked environment, and nothing is metered as fully managed.
+    # The network was created in the linked environment, and no deployment instance is metered
+    # as fully managed. Builds keep their builder meter, as for Legacy BYOC.
     if [ "$(db "SELECT app_network->>'scope_tag' FROM compute_resources WHERE id = '$RESOURCE_ID'")" != "$PROVISIONER_DEPLOYMENT_ID" ]; then
         step_fail "App network is not in the linked environment $PROVISIONER_DEPLOYMENT_ID"
     fi
-    if [ "$(db "SELECT COUNT(*) FROM tracked_resources WHERE application_id = '$RESOURCE_ID'")" != "0" ]; then
+    if [ "$(db "SELECT COUNT(*) FROM tracked_resources WHERE application_id = '$RESOURCE_ID' AND COALESCE(metadata->>'resource_type', '') <> 'builder'")" != "0" ]; then
         step_fail "BYOC app has fully managed meters"
     fi
 fi

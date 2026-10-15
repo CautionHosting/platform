@@ -1018,7 +1018,7 @@ test-app-deployments-db:
 	@bash tests/e2e/test_app_deployments_db.sh
 
 test-e2e-org-user-quorum:
-	@flock "$(E2E_LOCK_FILE)" /bin/bash -lc '\
+	@flock -o "$(E2E_LOCK_FILE)" /bin/bash -lc '\
 		set -euo pipefail; \
 		cleanup() { $(MAKE) down-test >/dev/null; }; \
 		trap cleanup EXIT; \
@@ -1049,7 +1049,7 @@ test-e2e-legal:
 	exit $$status
 
 test-e2e-admin:
-	@flock "$(E2E_LOCK_FILE)" /bin/bash -lc '\
+	@flock -o "$(E2E_LOCK_FILE)" /bin/bash -lc '\
 		set -e; \
 		trap '"'"'$(MAKE) down-test'"'"' EXIT; \
 		$(MAKE) migrate-test; \
@@ -1062,7 +1062,7 @@ test-e2e-admin:
 		bash tests/e2e/test_admin.sh'
 
 test-e2e-byoc:
-	@flock "$(E2E_LOCK_FILE)" /bin/bash -lc '\
+	@flock -o "$(E2E_LOCK_FILE)" /bin/bash -lc '\
 		set -e; \
 		status=0; \
 		trap '"'"'$(MAKE) down-test'"'"' EXIT; \
@@ -1099,7 +1099,7 @@ test-e2e-billing-gates:
 	exit $$status
 
 test-e2e-paddle-subscriptions:
-	@flock "$(E2E_LOCK_FILE)" bash -c ' \
+	@flock -o "$(E2E_LOCK_FILE)" bash -c ' \
 		set -euo pipefail; \
 		cleanup() { $(MAKE) down-test-billing >/dev/null; }; \
 		trap cleanup EXIT; \
