@@ -6603,20 +6603,15 @@ export default {
   color: var(--theme-danger);
 }
 
+/* Inline, so a value that wraps (a long DNS target) keeps its copy icon right after its last character. */
 .deployment-detail-value-row {
-  display: flex;
   min-width: 0;
   max-width: 100%;
-  align-items: flex-start;
-  gap: 6px;
-}
-
-.deployment-detail-value-row .deployment-detail-value {
-  min-width: 0;
 }
 
 .deployment-detail-value-row .copy-icon-button {
-  margin-top: -2px;
+  margin-left: 6px;
+  vertical-align: -2px;
 }
 
 .deployment-details-divider {

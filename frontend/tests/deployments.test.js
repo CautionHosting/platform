@@ -102,6 +102,10 @@ test('history rows name the operation and outcome, with a tone', () => {
   assert.equal(historyRowLabel({ kind: 'attempt', outcome: 'failed', target_deployment_id: 'c0000000-1', commit_sha: 'b6e8c92aa' }), 'Deploy c0000000 · Failed')
   assert.equal(historyRowLabel({ kind: 'operation', operation: 'deployment_destroy', outcome: 'requested', target_deployment_id: 'c0000000-1' }), 'Destroy c0000000 · In progress')
   assert.equal(historyRowLabel({ kind: 'operation', operation: 'app_destroy', outcome: 'succeeded', target_deployment_id: null }), 'Destroy app · Succeeded')
+  // A stale switch records the target as previous: no "X → X".
+  assert.equal(historyEvent({ kind: 'operation', operation: 'switch', outcome: 'rejected', previous_deployment_id: 'b0000000-1', target_deployment_id: 'b0000000-1' }).title, 'Switch to b0000000')
+  assert.equal(historyRowLabel({ kind: 'operation', operation: 'switch', outcome: 'rejected', previous_deployment_id: 'b0000000-1', target_deployment_id: 'b0000000-1' }), 'Switch to b0000000 · Rejected')
+  assert.equal(historyEvent({ kind: 'operation', operation: 'switch', outcome: 'succeeded', previous_deployment_id: null, target_deployment_id: 'b0000000-1' }).title, 'Switch none → b0000000')
   assert.deepEqual(['succeeded', 'observed', 'requested', 'failed', 'rejected', 'other'].map((outcome) => historyEvent({ kind: 'operation', operation: 'switch', outcome }).tone), ['success', 'success', 'pending', 'danger', 'danger', 'neutral'])
 })
 

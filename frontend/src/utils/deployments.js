@@ -165,7 +165,13 @@ export const historyEvent = (entry) => {
   const outcome = outcomeLabel(entry?.outcome)
   const tone = OUTCOME_TONES[entry?.outcome] || 'neutral'
   if (entry?.kind === 'attempt') return { kind: 'attempt', title: `Deploy ${target}`, outcome, tone }
-  if (entry?.operation === 'switch') return { kind: 'switch', title: `Switch ${shortId(entry.previous_deployment_id) || 'none'} → ${target}`, outcome, tone }
+  // The API records as previous the deployment live when the request arrived: for a
+  // stale request that is often the target itself, and "X → X" would read as a no-op.
+  if (entry?.operation === 'switch') {
+    const previous = entry.previous_deployment_id
+    const title = previous && previous === entry.target_deployment_id ? `Switch to ${target}` : `Switch ${shortId(previous) || 'none'} → ${target}`
+    return { kind: 'switch', title, outcome, tone }
+  }
   const operation = OPERATION_TITLES[entry?.operation] || sentence(entry?.operation)
   return { kind: 'destroy', title: `${operation}${target ? ` ${target}` : ''}`, outcome, tone }
 }

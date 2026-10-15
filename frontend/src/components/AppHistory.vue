@@ -21,7 +21,14 @@ async function showOlder() {
 }
 const expanded = ref(null)
 const toggle = (id) => { expanded.value = expanded.value === id ? null : id }
-const ICONS = { switch: '⇄', attempt: '↑', destroy: '×' }
+// Line icons (lucide shapes) per operation; the tone colours the circle, so a failed one keeps its icon.
+const ICONS = {
+  switch: ['M8 3 4 7l4 4', 'M4 7h16', 'm16 21 4-4-4-4', 'M20 17H4'], // arrow-left-right
+  attempt: ['M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4', 'm17 8-5-5-5 5', 'M12 3v12'], // upload
+  destroy: ['M3 6h18', 'M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6', 'M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2', 'M10 11v6', 'M14 11v6'], // trash-2
+}
+// Why a rejected or failed entry ended, shown in its row.
+const reasonOf = (entry) => (['rejected', 'failed'].includes(entry.outcome) && entry.error) || ''
 const actorLabel = (entry) => {
   if (entry.actor || entry.auth_method) return `${entry.actor || 'deleted user'} · ${entry.auth_method || 'unknown'}`
   return entry.kind === 'operation' ? 'reconciliation' : ''
@@ -66,12 +73,15 @@ watch(() => [props.appId, props.refreshKey], () => {
     <p v-else-if="loaded && entries.length === 0" class="app-detail-helper-text">No switches, destructions or failed attempts yet.</p>
     <ol v-if="visible.length" class="history-timeline">
       <li v-for="entry in visible" :key="entry.id" :class="['history-event', `history-event--${historyEvent(entry).tone}`]">
-        <span class="history-icon" aria-hidden="true">{{ ICONS[historyEvent(entry).kind] }}</span>
+        <span class="history-icon" aria-hidden="true">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path v-for="d in ICONS[historyEvent(entry).kind]" :key="d" :d="d" /></svg>
+        </span>
         <div class="history-body">
           <button type="button" class="history-row" :aria-expanded="expanded === entry.id ? 'true' : 'false'" @click="toggle(entry.id)">
             <span class="history-title">{{ historyEvent(entry).title }}</span>
             <span :class="['history-outcome', `history-outcome--${historyEvent(entry).tone}`]">{{ historyEvent(entry).outcome }}</span>
             <span v-if="entry.commit_subject" class="history-subject">{{ entry.commit_subject }}</span>
+            <span v-if="reasonOf(entry)" class="history-reason" :title="reasonOf(entry)">{{ reasonOf(entry) }}</span>
             <span class="history-actor">{{ actorLabel(entry) }}</span>
             <time class="history-time" :datetime="entry.at" :title="formatTime(entry.at)">{{ relativeTime(entry.at) }}</time>
           </button>
@@ -95,8 +105,10 @@ watch(() => [props.appId, props.refreshKey], () => {
 .app-history { margin: 28px 0 8px; }
 .history-timeline { position: relative; margin: 10px 0 0; padding: 0; list-style: none; }
 .history-event { position: relative; display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 12px; padding-bottom: 6px; }
-.history-event:not(:last-child)::after { content: ''; position: absolute; top: 30px; bottom: 0; left: 13px; width: 1px; background: var(--theme-border); }
-.history-icon { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; margin-top: 6px; border-radius: 50%; background: var(--theme-surface-muted); color: var(--theme-text-secondary); font-size: 0.9rem; }
+/* The connector runs between circle centres (x = 14px), from 4px under this circle to 4px above the next. */
+.history-event:not(:last-child)::after { content: ''; position: absolute; top: 38px; bottom: -2px; left: 13.5px; width: 1px; background: var(--theme-border); }
+.history-icon { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; margin-top: 6px; border-radius: 50%; background: var(--theme-surface-muted); color: var(--theme-text-secondary); }
+.history-icon svg { display: block; }
 .history-event--success .history-icon { background: var(--theme-success-bg); color: var(--theme-success); }
 .history-event--danger .history-icon { background: var(--theme-danger-bg); color: var(--theme-danger); }
 .history-event--pending .history-icon { background: var(--theme-warning-bg); color: var(--theme-warning); }
@@ -110,6 +122,8 @@ watch(() => [props.appId, props.refreshKey], () => {
 .history-outcome--danger { background: var(--theme-danger-bg); color: var(--theme-danger); }
 .history-outcome--pending { background: var(--theme-warning-bg); color: var(--theme-warning); }
 .history-subject { color: var(--theme-text-muted); }
+/* One line: it takes the room left before the actor and ends in an ellipsis; the full text is its title. */
+.history-reason { flex: 1 1 8rem; min-width: 0; overflow: hidden; color: var(--theme-danger); font-size: 0.85rem; text-overflow: ellipsis; white-space: nowrap; }
 .history-actor { margin-left: auto; color: var(--theme-text-muted); font-size: 0.85rem; }
 .history-time { min-width: 5.5rem; color: var(--theme-text-muted); font-size: 0.85rem; text-align: right; }
 .history-details { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px 20px; margin: 4px 10px 10px; padding: 12px 14px; border-radius: 8px; background: var(--theme-surface-subtle); }

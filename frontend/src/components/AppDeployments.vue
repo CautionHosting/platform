@@ -21,11 +21,18 @@ const roleOf = (deployment) => roleLabel(deployment, live.value !== null)
 const endpointOf = (deployment) => deployment.public_ip || (deployment.failure_kind === 'runtime_lost' ? 'unavailable' : '—')
 watch(rows, (current) => { if (selectedId.value && !current.some((d) => d.id === selectedId.value)) selectedId.value = null })
 const formatTime = (value) => (value ? new Date(value).toLocaleString() : '—')
+const commitLine = (deployment) => [deployment.commit_subject, shortSha(deployment.commit_sha)].filter(Boolean).join(' · ')
+const appLine = computed(() => `${props.app.resource_name || props.app.id} · ${appHostname(props.app)}`)
 
-// The inspector is a drawer over the page: Escape closes it, and opening moves focus into it.
+// The inspector is a drawer over the page: opening moves focus into it. Escape
+// leaves a confirmation first, then closes the drawer; never while a request runs.
 const drawer = ref(null)
 const closeInspector = () => { selectedId.value = null }
-const onKeydown = (event) => { if (event.key === 'Escape' && selectedId.value && !busy.value) closeInspector() }
+const onKeydown = (event) => {
+  if (event.key !== 'Escape' || !selectedId.value || busy.value) return
+  if (confirming.value) cancelConfirm()
+  else closeInspector()
+}
 watch(selectedId, async (id) => {
   if (id) { document.addEventListener('keydown', onKeydown); await nextTick(); drawer.value?.focus() }
   else document.removeEventListener('keydown', onKeydown)
@@ -55,6 +62,11 @@ watch(selectedId, () => { confirming.value = null; acknowledged.value = false; t
 // Every confirmation starts unticked, including after a stale, cancelled or failed attempt.
 function startConfirm(kind) { outcome.value = null; pinnedLiveId.value = props.app.live_deployment_id ?? null; acknowledged.value = false; tlsAcknowledged.value = false; confirming.value = kind }
 function cancelConfirm() { confirming.value = null; acknowledged.value = false; tlsAcknowledged.value = false }
+// A confirmation replaces the drawer's content: it, and the details it returns to, start at the top with focus in the drawer.
+watch(confirming, async () => {
+  await nextTick()
+  if (drawer.value) { drawer.value.scrollTop = 0; drawer.value.focus() }
+})
 
 async function confirmSwitch() {
   const target = selected.value
@@ -89,7 +101,8 @@ async function confirmDestroy() {
       <p class="app-detail-helper-text">{{ candidateCountLabel(app) }} candidates</p>
       <button type="button" class="text-button app-deployments-refresh" @click="emit('changed')">Refresh</button>
     </header>
-    <p v-if="outcome" :class="['deployment-outcome', `deployment-outcome--${outcome.kind}`]" role="status">{{ outcome.message }}</p>
+    <!-- While the drawer is open, the outcome shows at its top instead: the backdrop would hide this one. -->
+    <p v-if="outcome && !selected" :class="['deployment-outcome', `deployment-outcome--${outcome.kind}`]" role="status">{{ outcome.message }}</p>
 
     <p v-if="rows.length === 0" class="deployment-list-empty">No live deployment. Push to deploy.</p>
     <ul v-else class="deployment-list" aria-label="Deployments">
@@ -114,78 +127,131 @@ async function confirmDestroy() {
     </ul>
 
     <div v-if="selected" class="deployment-drawer-backdrop" @click="busy || closeInspector()"></div>
-    <aside v-if="selected" ref="drawer" class="deployment-inspector" tabindex="-1" :aria-label="`Deployment ${shortId(selected.id)}`">
-      <header class="deployment-inspector-header">
+    <aside v-if="selected" ref="drawer" :class="['deployment-inspector', { 'is-confirming': confirming }]" tabindex="-1" :aria-label="`Deployment ${shortId(selected.id)}`">
+      <!-- A confirmation is a step of its own: it replaces the details until approved, cancelled or left with Back. -->
+      <header v-if="confirming" class="deployment-inspector-header deployment-step-header">
+        <button type="button" class="deployment-drawer-icon" aria-label="Back" :disabled="busy" @click="cancelConfirm">←</button>
+        <h4>{{ confirming === 'switch' ? 'Switch live' : 'Destroy deployment' }}</h4>
+        <button type="button" class="deployment-drawer-icon deployment-drawer-close" aria-label="Close" :disabled="busy" @click="closeInspector">×</button>
+      </header>
+      <header v-else class="deployment-inspector-header">
         <div class="deployment-inspector-heading">
           <h4>Deployment <code>{{ shortId(selected.id) }}</code></h4>
           <span :class="['app-status-badge', 'deployment-badge', `status-${selected.status}`]">{{ deploymentStateLabel(selected) }}</span>
           <span :class="['deployment-role', `deployment-role--${roleOf(selected).toLowerCase()}`]">{{ roleOf(selected) }}</span>
         </div>
-        <button type="button" class="deployment-drawer-close" aria-label="Close" :disabled="busy" @click="closeInspector">×</button>
+        <button type="button" class="deployment-drawer-icon deployment-drawer-close" aria-label="Close" :disabled="busy" @click="closeInspector">×</button>
       </header>
-      <p class="deployment-inspector-title">{{ selected.commit_subject || 'No commit subject' }}</p>
-      <p class="deployment-inspector-meta"><code>{{ shortSha(selected.commit_sha) }}</code> · {{ selected.pushed_ref || 'unknown ref' }}</p>
+      <p v-if="outcome" :class="['deployment-outcome', `deployment-outcome--${outcome.kind}`]" role="status">{{ outcome.message }}</p>
 
-      <div v-if="!confirming" class="deployment-actions">
-        <button v-if="canSwitch(app, selected)" type="button" class="btn-primary" :disabled="busy" @click="startConfirm('switch')">Switch live</button>
-        <button v-if="canDestroy(app, selected)" type="button" class="btn-danger" :disabled="busy" @click="startConfirm('destroy')">Destroy deployment</button>
-        <p v-if="selected.role === 'live'" class="deployment-note">The live deployment cannot be destroyed. Switch to another deployment first.</p>
-      </div>
       <form v-if="confirming === 'switch'" class="deployment-confirm" @submit.prevent="confirmSwitch">
-        <h5>Switch live to {{ shortId(selected.id) }}</h5>
-        <ul>
-          <li>App: {{ app.resource_name || app.id }} · {{ appHostname(app) }}</li>
-          <li>Current live: <template v-if="pinnedLiveId">{{ shortId(pinnedLiveId) }}<template v-if="pinnedLive"> · {{ shortSha(pinnedLive.commit_sha) }}</template></template><template v-else>No live deployment</template></li>
-          <li>Target: {{ shortId(selected.id) }} · {{ shortSha(selected.commit_sha) }}</li>
-          <li v-if="debugSwitchNotice(selected)" class="deployment-debug">{{ debugSwitchNotice(selected) }}</li>
-          <li>Stable IP: {{ app.public_ip || 'unassigned' }}</li>
-          <li>The previous deployment stays running and billable. Connections may close during cutover.</li>
-        </ul>
-        <label><input v-model="acknowledged" type="checkbox" /> I verified and tested this deployment.</label>
-        <label v-if="selected.tls_after_switch"><input v-model="tlsAcknowledged" type="checkbox" /> Application TLS verification is pending; I will verify after switching.</label>
-        <p class="deployment-note">CLI: <code>{{ switchCommand(selected) }}</code></p>
-        <div class="modal-actions">
+        <div class="deployment-confirm-body">
+          <div class="deployment-transition">
+            <div class="deployment-card" role="group" aria-label="From">
+              <template v-if="pinnedLiveId">
+                <code class="deployment-card-id">{{ shortId(pinnedLiveId) }}</code>
+                <span v-if="pinnedLive" class="deployment-card-meta" :title="commitLine(pinnedLive)">{{ commitLine(pinnedLive) }}</span>
+                <span class="deployment-card-pills"><span class="deployment-pill deployment-pill--live">Live now</span></span>
+              </template>
+              <span v-else class="deployment-card-empty">No live deployment</span>
+            </div>
+            <span class="deployment-transition-arrow" aria-hidden="true">→</span>
+            <div class="deployment-card deployment-card--target" role="group" aria-label="To">
+              <code class="deployment-card-id">{{ shortId(selected.id) }}</code>
+              <span class="deployment-card-meta" :title="commitLine(selected)">{{ commitLine(selected) }}</span>
+              <span class="deployment-card-pills">
+                <span class="deployment-pill">{{ deploymentStateLabel(selected) }}</span>
+                <span v-if="isDebugDeployment(selected)" class="deployment-pill deployment-pill--debug">Debug mode</span>
+              </span>
+            </div>
+          </div>
+
+          <div class="deployment-confirm-summary">
+            <p>Stable IP <code>{{ app.public_ip || 'unassigned' }}</code> moves to <code>{{ shortId(selected.id) }}</code>.</p>
+            <p class="deployment-confirm-app" :title="appLine">{{ appLine }}</p>
+          </div>
+
+          <p v-if="debugSwitchNotice(selected)" class="deployment-callout deployment-callout--danger" role="note">{{ debugSwitchNotice(selected) }}</p>
+          <p v-if="selected.tls_after_switch" class="deployment-callout deployment-callout--warning" role="note">This deployment obtains its TLS certificate only while it is live. Verify TLS once it is live and the certificate is issued.</p>
+          <p class="deployment-confirm-info"><span aria-hidden="true">ⓘ</span><span><template v-if="pinnedLiveId">{{ shortId(pinnedLiveId) }} keeps running and billing. </template>Open connections may drop during cutover.</span></p>
+
+          <div class="deployment-checks">
+            <label class="deployment-check"><input v-model="acknowledged" type="checkbox" /><span>I verified and tested <code>{{ shortId(selected.id) }}</code>.</span></label>
+            <label v-if="selected.tls_after_switch" class="deployment-check"><input v-model="tlsAcknowledged" type="checkbox" /><span>Application TLS verification is pending; I will verify after switching.</span></label>
+          </div>
+
+          <details class="deployment-cli app-detail-disclosure">
+            <summary>CLI equivalent</summary>
+            <div class="app-detail-command"><code>{{ switchCommand(selected) }}</code><CopyIconButton :value="switchCommand(selected)" label="switch command" /></div>
+          </details>
+        </div>
+        <div class="deployment-confirm-footer">
           <button type="button" class="btn-secondary" :disabled="busy" @click="cancelConfirm">Cancel</button>
           <button type="submit" class="btn-primary" :disabled="busy || !acknowledged || (selected.tls_after_switch && !tlsAcknowledged)">{{ busy ? 'Waiting for passkey…' : 'Approve with passkey' }}</button>
         </div>
       </form>
-      <form v-if="confirming === 'destroy'" class="deployment-confirm" @submit.prevent="confirmDestroy">
-        <h5>Destroy deployment {{ shortId(selected.id) }}</h5>
-        <p>{{ app.resource_name || app.id }} · {{ appHostname(app) }}</p>
-        <p>{{ shortId(selected.id) }} · {{ shortSha(selected.commit_sha) }} and its instance will be destroyed. <template v-if="live">Live deployment {{ shortId(live.id) }} keeps serving.</template><template v-else>No deployment is live; the app stays unavailable.</template></p>
-        <p class="deployment-note">CLI: <code>{{ destroyCommand(selected) }}</code></p>
-        <div class="modal-actions">
+
+      <form v-else-if="confirming === 'destroy'" class="deployment-confirm" @submit.prevent="confirmDestroy">
+        <div class="deployment-confirm-body">
+          <div class="deployment-card" role="group" aria-label="Deployment">
+            <code class="deployment-card-id">{{ shortId(selected.id) }}</code>
+            <span class="deployment-card-meta" :title="commitLine(selected)">{{ commitLine(selected) }}</span>
+            <span class="deployment-card-pills"><span class="deployment-pill">{{ deploymentStateLabel(selected) }}</span></span>
+          </div>
+
+          <p class="deployment-callout deployment-callout--danger" role="note"><code>{{ shortId(selected.id) }}</code> · <code>{{ shortSha(selected.commit_sha) }}</code> and its instance will be destroyed.</p>
+          <p v-if="live" class="deployment-confirm-info"><span aria-hidden="true">ⓘ</span><span>Live deployment {{ shortId(live.id) }} keeps serving.</span></p>
+          <p v-else class="deployment-callout deployment-callout--warning" role="note">No deployment is live; the app stays unavailable.</p>
+          <p class="deployment-confirm-app" :title="appLine">{{ appLine }}</p>
+
+          <details class="deployment-cli app-detail-disclosure">
+            <summary>CLI equivalent</summary>
+            <div class="app-detail-command"><code>{{ destroyCommand(selected) }}</code><CopyIconButton :value="destroyCommand(selected)" label="destroy command" /></div>
+          </details>
+        </div>
+        <div class="deployment-confirm-footer">
           <button type="button" class="btn-secondary" :disabled="busy" @click="cancelConfirm">Cancel</button>
           <button type="submit" class="btn-danger" :disabled="busy">{{ busy ? 'Destroying…' : 'Destroy deployment' }}</button>
         </div>
       </form>
 
-      <p v-if="selected.error" class="deployment-error-callout" role="note">{{ selected.error }}</p>
+      <template v-else>
+        <p class="deployment-inspector-title">{{ selected.commit_subject || 'No commit subject' }}</p>
+        <p class="deployment-inspector-meta"><code>{{ shortSha(selected.commit_sha) }}</code> · {{ selected.pushed_ref || 'unknown ref' }}</p>
 
-      <dl class="deployment-inspector-grid">
-        <div class="deployment-inspector-item"><dt>Endpoint</dt><dd>{{ endpointOf(selected) }}<CopyIconButton v-if="selected.public_ip" :value="selected.public_ip" label="endpoint" /></dd></div>
-        <div class="deployment-inspector-item"><dt>Instance</dt><dd>{{ selected.instance_id || '—' }} · {{ selected.instance_type || 'unknown' }}</dd></div>
-        <div class="deployment-inspector-item"><dt>ID</dt><dd :title="selected.id">{{ shortId(selected.id) }}…<CopyIconButton :value="selected.id" label="deployment ID" /></dd></div>
-        <div class="deployment-inspector-item"><dt>Commit</dt><dd :title="selected.commit_sha || ''">{{ shortSha(selected.commit_sha) }}<CopyIconButton v-if="selected.commit_sha" :value="selected.commit_sha" label="commit" /></dd></div>
-        <div v-if="isDebugDeployment(selected)" class="deployment-inspector-item"><dt>Debug mode</dt><dd class="deployment-debug">Enabled</dd></div>
-        <div v-if="selected.cleanup" class="deployment-inspector-item"><dt>Cleanup</dt><dd>{{ selected.cleanup === 'done' ? 'Done' : 'Pending' }}</dd></div>
-      </dl>
+        <div class="deployment-actions">
+          <button v-if="canSwitch(app, selected)" type="button" class="btn-primary" :disabled="busy" @click="startConfirm('switch')">Switch live</button>
+          <button v-if="canDestroy(app, selected)" type="button" class="btn-danger" :disabled="busy" @click="startConfirm('destroy')">Destroy deployment</button>
+          <p v-if="selected.role === 'live'" class="deployment-note">The live deployment cannot be destroyed. Switch to another deployment first.</p>
+        </div>
 
-      <ol class="deployment-milestones" aria-label="Timeline">
-        <li v-for="step in milestones(selected)" :key="step.label" :class="{ 'is-done': step.at }">
-          <span class="deployment-milestone-label">{{ step.label }}</span>
-          <time v-if="step.at" :datetime="step.at" :title="formatTime(step.at)">{{ relativeTime(step.at) }}</time>
-          <span v-else class="deployment-milestone-pending">—</span>
-        </li>
-      </ol>
+        <p v-if="selected.error" class="deployment-error-callout" role="note">{{ selected.error }}</p>
 
-      <h5 class="deployment-verify-title">Verify before switching</h5>
-      <div class="app-detail-command">
-        <code>{{ verifyCommand(selected) }}</code>
-        <CopyIconButton :value="verifyCommand(selected)" label="verification command" />
-      </div>
-      <p v-if="selected.tls_after_switch" class="deployment-note">This deployment obtains its TLS certificate only while it is live. Verify TLS once it is live and the certificate is issued.</p>
-      <p class="deployment-note">Running means the host and attestation respond. Verify, unlock and test the deployment yourself before switching.</p>
+        <dl class="deployment-inspector-grid">
+          <div class="deployment-inspector-item"><dt>Endpoint</dt><dd>{{ endpointOf(selected) }}<CopyIconButton v-if="selected.public_ip" :value="selected.public_ip" label="endpoint" /></dd></div>
+          <div class="deployment-inspector-item"><dt>Instance</dt><dd>{{ selected.instance_id || '—' }} · {{ selected.instance_type || 'unknown' }}</dd></div>
+          <div class="deployment-inspector-item"><dt>ID</dt><dd :title="selected.id">{{ shortId(selected.id) }}…<CopyIconButton :value="selected.id" label="deployment ID" /></dd></div>
+          <div class="deployment-inspector-item"><dt>Commit</dt><dd :title="selected.commit_sha || ''">{{ shortSha(selected.commit_sha) }}<CopyIconButton v-if="selected.commit_sha" :value="selected.commit_sha" label="commit" /></dd></div>
+          <div v-if="isDebugDeployment(selected)" class="deployment-inspector-item"><dt>Debug mode</dt><dd class="deployment-debug">Enabled</dd></div>
+          <div v-if="selected.cleanup" class="deployment-inspector-item"><dt>Cleanup</dt><dd>{{ selected.cleanup === 'done' ? 'Done' : 'Pending' }}</dd></div>
+        </dl>
+
+        <ol class="deployment-milestones" aria-label="Timeline">
+          <li v-for="step in milestones(selected)" :key="step.label" :class="{ 'is-done': step.at }">
+            <span class="deployment-milestone-label">{{ step.label }}</span>
+            <time v-if="step.at" :datetime="step.at" :title="formatTime(step.at)">{{ relativeTime(step.at) }}</time>
+            <span v-else class="deployment-milestone-pending">—</span>
+          </li>
+        </ol>
+
+        <h5 class="deployment-verify-title">Verify before switching</h5>
+        <div class="app-detail-command">
+          <code>{{ verifyCommand(selected) }}</code>
+          <CopyIconButton :value="verifyCommand(selected)" label="verification command" />
+        </div>
+        <p v-if="selected.tls_after_switch" class="deployment-note">This deployment obtains its TLS certificate only while it is live. Verify TLS once it is live and the certificate is issued.</p>
+        <p class="deployment-note">Running means the host and attestation respond. Verify, unlock and test the deployment yourself before switching.</p>
+      </template>
     </aside>
   </section>
 </template>
@@ -194,9 +260,17 @@ async function confirmDestroy() {
 .app-deployments-header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
 .app-deployments-refresh { margin-left: auto; }
 .text-button { border: 0; background: none; padding: 0; color: var(--theme-accent); cursor: pointer; }
-.deployment-outcome { color: var(--theme-danger); }
-.deployment-outcome--success { color: var(--theme-success); }
 .deployment-list-empty { padding: 32px; border: 1px dashed var(--theme-border); border-radius: 12px; color: var(--theme-text-muted); text-align: center; }
+
+/* Callouts: a tinted box with a bar in the text colour. An action's outcome is one too. */
+.deployment-callout, .deployment-outcome { margin: 0; padding: 11px 14px; border-left: 3px solid currentColor; border-radius: 10px; font-size: 0.9rem; line-height: 1.45; overflow-wrap: anywhere; }
+.deployment-callout--danger, .deployment-outcome { background: var(--theme-danger-bg); color: var(--theme-danger); }
+.deployment-callout--warning { background: var(--theme-warning-bg); color: var(--theme-warning); }
+.deployment-outcome--success { background: var(--theme-success-bg); color: var(--theme-success); }
+.deployment-outcome--cancelled { border-left-color: var(--theme-border-strong); background: var(--theme-surface-subtle); color: var(--theme-text-secondary); }
+.app-deployments > .deployment-outcome { margin-top: 12px; }
+.deployment-inspector > .deployment-outcome { margin-top: 18px; }
+.deployment-callout code, .deployment-outcome code { font-size: 0.85rem; }
 
 /* Deployments: one row each, the commit subject first. */
 .deployment-list { list-style: none; margin: 12px 0 0; padding: 0; border: 1px solid var(--theme-border); border-radius: 12px; overflow: hidden; }
@@ -219,8 +293,9 @@ async function confirmDestroy() {
 }
 
 /* Pills */
-.deployment-role { justify-self: start; padding: 2px 8px; border-radius: 999px; background: var(--theme-surface-muted); color: var(--theme-text-secondary); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
-.deployment-role--live { background: var(--theme-success-bg); color: var(--theme-success); }
+.deployment-role, .deployment-pill { justify-self: start; padding: 2px 8px; border-radius: 999px; background: var(--theme-surface-muted); color: var(--theme-text-secondary); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+.deployment-role--live, .deployment-pill--live { background: var(--theme-success-bg); color: var(--theme-success); }
+.deployment-pill--debug { background: var(--theme-danger-bg); color: var(--theme-danger); }
 .deployment-badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; font-size: 0.8rem; text-transform: none; letter-spacing: normal; white-space: nowrap; }
 .deployment-badge::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .deployment-debug { color: var(--theme-danger); font-size: 0.8rem; font-weight: 600; }
@@ -233,8 +308,12 @@ async function confirmDestroy() {
 .deployment-inspector-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
 .deployment-inspector-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .deployment-inspector-heading h4 { margin: 0; font-size: 1.05rem; font-weight: 600; }
-.deployment-drawer-close { border: 0; background: none; color: var(--theme-text-muted); font-size: 1.6rem; line-height: 1; cursor: pointer; }
-.deployment-drawer-close:hover { color: var(--theme-text-primary); }
+.deployment-drawer-icon { display: inline-grid; flex-shrink: 0; place-items: center; width: 32px; height: 32px; margin: -4px; padding: 0; border: 0; border-radius: 8px; background: none; color: var(--theme-text-muted); font-size: 1.2rem; line-height: 1; cursor: pointer; transition: background-color 0.15s ease, color 0.15s ease; }
+/* The × glyph sits high in its line box; this centres it on the title. */
+.deployment-drawer-close { padding-top: 3px; font-size: 1.6rem; }
+.deployment-drawer-icon:hover:not(:disabled) { background: var(--theme-surface-muted); color: var(--theme-text-primary); }
+.deployment-drawer-icon:focus-visible { outline: 2px solid var(--theme-focus); }
+.deployment-drawer-icon:disabled { opacity: 0.4; cursor: not-allowed; }
 .deployment-inspector-title { margin: 18px 0 2px; color: var(--theme-text-primary); font-size: 1.15rem; font-weight: 500; }
 .deployment-inspector-meta { margin: 0 0 18px; color: var(--theme-text-muted); }
 .deployment-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
@@ -244,6 +323,8 @@ async function confirmDestroy() {
 .deployment-inspector-item { min-width: 0; }
 .deployment-inspector-item dt { margin-bottom: 4px; color: var(--theme-text-muted); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
 .deployment-inspector-item dd { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--theme-text-secondary); font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", monospace; font-size: 0.9rem; overflow-wrap: anywhere; }
+/* The value rule above would otherwise win over the debug warning colour. */
+.deployment-inspector-item dd.deployment-debug { color: var(--theme-danger); }
 .deployment-milestones { list-style: none; margin: 0 0 24px; padding: 0 0 0 4px; }
 .deployment-milestones li { position: relative; display: flex; justify-content: space-between; padding: 0 0 12px 22px; color: var(--theme-text-muted); }
 .deployment-milestones li::before { content: ''; position: absolute; top: 5px; left: 0; width: 9px; height: 9px; border: 2px solid var(--theme-border-strong); border-radius: 50%; background: var(--theme-surface); }
@@ -255,9 +336,46 @@ async function confirmDestroy() {
 /* Small enough that the full command fits the drawer on one line. */
 .deployment-inspector .app-detail-command code { font-size: 0.78rem; }
 .deployment-note { color: var(--theme-text-muted); font-size: 0.85rem; }
-.deployment-confirm { margin: 0 0 20px; padding: 16px; border: 1px solid var(--theme-border); border-radius: 10px; background: var(--theme-surface-subtle); }
-.deployment-confirm h5 { margin: 0 0 10px; font-size: 1rem; font-weight: 600; }
-.deployment-confirm ul { display: grid; gap: 4px; margin: 0 0 12px; padding: 0; list-style: none; }
-.deployment-confirm label { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
-.modal-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+
+/* A confirmation fills the drawer: the step's content, then its buttons pinned to the bottom edge. */
+.deployment-inspector.is-confirming { display: flex; flex-direction: column; padding-bottom: 0; }
+.deployment-step-header { align-items: center; }
+.deployment-step-header h4 { flex: 1; min-width: 0; margin: 0 0 0 8px; font-size: 1.05rem; font-weight: 600; }
+.deployment-confirm { display: flex; flex: 1 0 auto; flex-direction: column; }
+.deployment-confirm-body { display: flex; flex-direction: column; gap: 18px; padding: 24px 0 28px; }
+.deployment-confirm-body p { margin: 0; }
+.deployment-confirm code { font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", monospace; }
+
+.deployment-transition { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: stretch; gap: 10px; }
+.deployment-transition-arrow { align-self: center; color: var(--theme-text-faint); font-size: 1.15rem; }
+.deployment-card { display: flex; min-width: 0; flex-direction: column; gap: 4px; padding: 14px 16px; border: 1px solid var(--theme-border); border-radius: 12px; background: var(--theme-surface-subtle); }
+.deployment-card--target { border-color: var(--theme-border-strong); }
+.deployment-card-id { color: var(--theme-text-primary); font-size: 1rem; font-weight: 600; }
+.deployment-card-meta { overflow: hidden; color: var(--theme-text-muted); font-size: 0.85rem; text-overflow: ellipsis; white-space: nowrap; }
+.deployment-card-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; padding-top: 6px; }
+.deployment-card-pills .deployment-pill { font-size: 0.68rem; letter-spacing: 0.06em; }
+.deployment-card-empty { margin: auto 0; color: var(--theme-text-muted); font-size: 0.9rem; }
+
+.deployment-confirm-summary { display: flex; flex-direction: column; gap: 4px; }
+.deployment-confirm-summary > p:first-child { color: var(--theme-text-primary); font-size: 0.95rem; }
+.deployment-confirm-summary code { font-size: 0.9rem; font-weight: 600; }
+.deployment-confirm-app { overflow: hidden; color: var(--theme-text-muted); font-size: 0.85rem; text-overflow: ellipsis; white-space: nowrap; }
+.deployment-confirm-info { display: flex; gap: 8px; color: var(--theme-text-muted); font-size: 0.85rem; line-height: 1.45; }
+
+.deployment-checks { display: flex; flex-direction: column; gap: 8px; }
+.deployment-check { display: flex; align-items: flex-start; gap: 10px; padding: 12px 14px; border: 1px solid var(--theme-border); border-radius: 10px; color: var(--theme-text-secondary); font-size: 0.9rem; line-height: 1.4; cursor: pointer; transition: border-color 0.15s ease, background-color 0.15s ease; }
+.deployment-check:hover { border-color: var(--theme-border-strong); }
+.deployment-check:has(input:checked) { border-color: var(--theme-success-border); background: var(--theme-success-bg); }
+.deployment-check input { flex-shrink: 0; width: 16px; height: 16px; margin: 1px 0 0; accent-color: var(--theme-success-strong); cursor: pointer; }
+.deployment-check code { font-size: 0.85rem; font-weight: 600; }
+
+.deployment-cli > summary { color: var(--theme-text-muted); font-size: 0.85rem; }
+.deployment-cli > summary:hover { color: var(--theme-text-secondary); }
+/* Tighter than the verify box: the longer switch and destroy commands still fit on one line. */
+.deployment-cli .app-detail-command { gap: 10px; margin-top: 10px; padding: 10px 12px 10px 14px; }
+.deployment-cli .app-detail-command code { font-size: 0.75rem; }
+
+.deployment-confirm-footer { position: sticky; bottom: 0; display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin: auto -28px 0; padding: 16px 28px 24px; border-top: 1px solid var(--theme-border); background: var(--theme-surface); }
+.deployment-confirm-footer button { padding: 10px 18px; border: 1px solid transparent; border-radius: 8px; font-size: 0.95rem; }
+.deployment-confirm-footer .btn-danger { border-color: var(--theme-danger-border); }
 </style>
