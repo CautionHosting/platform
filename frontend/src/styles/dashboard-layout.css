@@ -1652,9 +1652,10 @@
   border-radius: 2px;
 }
 
-/* Keep status/actions compact; the application identity gets the remaining width. */
+/* Keep status/actions compact; the application identity gets the remaining width.
+   The status column fits the longest state ("Cleanup pending") on one line. */
 .apps-table .col-status {
-  width: 8.5rem;
+  width: 10rem;
 }
 
 .apps-table .col-attestation {
@@ -1766,13 +1767,11 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  max-width: 100%;
   padding: 3px 8px;
   font-size: 0.8rem;
   text-transform: none;
   letter-spacing: normal;
-  white-space: normal;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
 }
 
 .apps-table .app-status-badge::before {

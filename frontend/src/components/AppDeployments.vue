@@ -284,7 +284,8 @@ async function confirmDestroy() {
 .deployment-row-meta { overflow: hidden; color: var(--theme-text-muted); font-size: 0.85rem; text-overflow: ellipsis; white-space: nowrap; }
 .deployment-row-meta code { font-size: 0.82rem; }
 .deployment-row-error { color: var(--theme-danger); }
-.deployment-row-state { display: inline-flex; align-items: center; gap: 6px; }
+/* "Cleanup pending" plus the debug marker is wider than the column: the marker then drops under the badge. */
+.deployment-row-state { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; }
 .deployment-row-time { color: var(--theme-text-muted); font-size: 0.85rem; text-align: right; white-space: nowrap; }
 .deployment-row-chevron { color: var(--theme-text-faint); font-size: 1.2rem; }
 @media (max-width: 760px) {
