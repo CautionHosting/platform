@@ -187,8 +187,10 @@ pub async fn create_resource(
     // than persisted resource configuration.
     let configuration = initial_resource_configuration();
 
-    // New fully managed apps follow the deployments lifecycle only when the flag
-    // is on. BYOC (`create_managed_onprem_resource`) always stays legacy.
+    // New fully managed apps follow the deployments lifecycle only when the flag is on.
+    // Interactive `caution init --byoc` also creates its app here, then links it:
+    // that first BYOC link of a pristine app applies `APP_DEPLOYMENTS_BYOC_ENABLED`
+    // instead (`app_deployments::assign_byoc_lifecycle`).
     let lifecycle = crate::app_deployments::lifecycle_for_new_app(
         crate::app_deployments::enabled_for_new_apps(),
     );
@@ -1146,8 +1148,28 @@ pub(crate) async fn destroy_resource_by_id(
     let resource_region = resource_region
         .or_else(|| std::env::var("AWS_REGION").ok())
         .unwrap_or_else(|| "us-west-2".to_string());
-    let destroy_credentials =
-        destroy_credentials(state, org_id, resource_id, &resource_region).await;
+    // A deployments app's state lives in the account its network records, or,
+    // before it has one, its linked credential's (`app_account`): never Caution's
+    // keys on a linked state (OpenTofu would drop its Elastic IP from the state),
+    // and no provisioner Auto Scaling group to scale down.
+    let destroy_credentials = if deployments {
+        crate::app_deployments::account::app_account(state, resource_id, &resource_region)
+            .await
+            .map(|account| {
+                let credentials = match account {
+                    crate::app_deployments::account::AppAccount::Platform { region } => {
+                        crate::fully_managed_capacity::platform_credentials_for_region(&region)
+                    }
+                    crate::app_deployments::account::AppAccount::Linked(credentials) => credentials,
+                };
+                (Some(credentials), None)
+            })
+            .map_err(|error| -> BoxError { Box::new(error) })
+    } else {
+        destroy_credentials(state, org_id, resource_id, &resource_region)
+            .await
+            .map_err(|error| -> BoxError { Box::new(error) })
+    };
 
     // Use a dedicated session lock so OpenTofu cannot consume the API pool or
     // hold a database transaction open. Closing the connection releases it.
@@ -1202,7 +1224,7 @@ pub(crate) async fn destroy_resource_by_id(
         )
         .await
         .map_err(|error| -> BoxError { error.into() }),
-        Err(error) => Err(Box::new(error) as BoxError),
+        Err(error) => Err(error),
     };
     if let Err(source) = terraform_result {
         tracing::error!(resource_id = %resource_id, error = %source, "OpenTofu destroy failed");

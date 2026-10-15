@@ -5,10 +5,11 @@
 //! and the deployment half of app destruction. Deployment destruction never
 //! touches the live deployment; only app destruction destroys it.
 
+use super::account::{self, AppAccount};
 use super::events;
 use super::lifecycle::stop_meter;
 use super::{LIFECYCLE_DEPLOYMENTS, PROCESS_ID, admission, lock_app_operations};
-use crate::{AppState, AuthContext, deployment, ec2, fully_managed_capacity};
+use crate::{AppState, AuthContext, deployment, ec2};
 use axum::{
     Extension, Json,
     extract::{Path, State},
@@ -54,11 +55,18 @@ pub(crate) fn destroy_precondition(
 /// EC2 resources tagged with the deployment. A seam so the database-backed
 /// tests run without AWS or OpenTofu; production uses [`Platform`].
 pub(super) trait DestroyBackend {
+    /// The account the app's deployments live in ([`account::app_account`]).
+    async fn app_account(
+        &self,
+        app_id: Uuid,
+        region: &str,
+    ) -> Result<AppAccount, account::AppAccountError>;
+
     /// The instance holding the app Elastic IP.
     async fn address_holder(
         &self,
         app_id: Uuid,
-        region: &str,
+        account: &AppAccount,
     ) -> Result<Option<String>, ec2::DescribeAppAddressError>;
 
     async fn destroy_state(
@@ -66,7 +74,7 @@ pub(super) trait DestroyBackend {
         org_id: Uuid,
         app_id: Uuid,
         deployment_id: Uuid,
-        region: &str,
+        account: &AppAccount,
     ) -> Result<(), deployment::DestroyDeploymentStateError>;
 
     /// Deletes a state lock left by an OpenTofu run that died with its process.
@@ -81,12 +89,12 @@ pub(super) trait DestroyBackend {
         &self,
         app_id: Uuid,
         deployment_id: Uuid,
-        region: &str,
+        account: &AppAccount,
     ) -> Result<Vec<ec2::Instance>, ec2::DescribeInstancesError>;
 
     async fn terminate_instances(
         &self,
-        region: &str,
+        account: &AppAccount,
         instance_ids: &[String],
     ) -> Result<(), ec2::TerminateInstancesError>;
 
@@ -95,23 +103,18 @@ pub(super) trait DestroyBackend {
         &self,
         app_id: Uuid,
         deployment_id: Uuid,
-        region: &str,
+        account: &AppAccount,
     ) -> Result<Vec<ec2::SecurityGroup>, ec2::DescribeSecurityGroupsError>;
 
     async fn delete_security_group(
         &self,
-        region: &str,
+        account: &AppAccount,
         group_id: &str,
     ) -> Result<(), ec2::DeleteSecurityGroupError>;
 }
 
-pub(super) struct Platform;
-
-pub(super) fn ec2_client(region: &str) -> ec2::Ec2Client {
-    ec2::Ec2Client::new(&fully_managed_capacity::platform_credentials_for_region(
-        region,
-    ))
-}
+/// Production: EC2 and OpenTofu in the app's account.
+pub(super) struct Platform<'a>(pub(super) &'a AppState);
 
 /// The EC2 filters selecting what OpenTofu tags with the app and the deployment.
 fn deployment_tag_filters(app_id: Uuid, deployment_id: Uuid) -> Vec<ec2::Filter> {
@@ -124,13 +127,22 @@ fn deployment_tag_filters(app_id: Uuid, deployment_id: Uuid) -> Vec<ec2::Filter>
     ]
 }
 
-impl DestroyBackend for Platform {
-    async fn address_holder(
+impl DestroyBackend for Platform<'_> {
+    async fn app_account(
         &self,
         app_id: Uuid,
         region: &str,
+    ) -> Result<AppAccount, account::AppAccountError> {
+        account::app_account(self.0, app_id, region).await
+    }
+
+    async fn address_holder(
+        &self,
+        app_id: Uuid,
+        account: &AppAccount,
     ) -> Result<Option<String>, ec2::DescribeAppAddressError> {
-        ec2_client(region)
+        account
+            .ec2()
             .describe_app_address(&app_id.to_string())
             .await
             .map(|address| address.instance_id)
@@ -141,9 +153,16 @@ impl DestroyBackend for Platform {
         org_id: Uuid,
         app_id: Uuid,
         deployment_id: Uuid,
-        region: &str,
+        account: &AppAccount,
     ) -> Result<(), deployment::DestroyDeploymentStateError> {
-        deployment::destroy_deployment_state(org_id, app_id, deployment_id, region).await
+        deployment::destroy_deployment_state(
+            org_id,
+            app_id,
+            deployment_id,
+            account.region(),
+            account.provider_credentials(),
+        )
+        .await
     }
 
     async fn clear_state_lock(
@@ -157,41 +176,42 @@ impl DestroyBackend for Platform {
         &self,
         app_id: Uuid,
         deployment_id: Uuid,
-        region: &str,
+        account: &AppAccount,
     ) -> Result<Vec<ec2::Instance>, ec2::DescribeInstancesError> {
         let mut filters = deployment_tag_filters(app_id, deployment_id);
         filters.push(ec2::Filter::new(
             "instance-state-name",
             &["pending", "running", "shutting-down", "stopping", "stopped"],
         ));
-        ec2_client(region).describe_instances(&filters).await
+        account.ec2().describe_instances(&filters).await
     }
 
     async fn terminate_instances(
         &self,
-        region: &str,
+        account: &AppAccount,
         instance_ids: &[String],
     ) -> Result<(), ec2::TerminateInstancesError> {
-        ec2_client(region).terminate_instances(instance_ids).await
+        account.ec2().terminate_instances(instance_ids).await
     }
 
     async fn tagged_security_groups(
         &self,
         app_id: Uuid,
         deployment_id: Uuid,
-        region: &str,
+        account: &AppAccount,
     ) -> Result<Vec<ec2::SecurityGroup>, ec2::DescribeSecurityGroupsError> {
-        ec2_client(region)
+        account
+            .ec2()
             .describe_security_groups(&deployment_tag_filters(app_id, deployment_id))
             .await
     }
 
     async fn delete_security_group(
         &self,
-        region: &str,
+        account: &AppAccount,
         group_id: &str,
     ) -> Result<(), ec2::DeleteSecurityGroupError> {
-        ec2_client(region).delete_security_group(group_id).await
+        account.ec2().delete_security_group(group_id).await
     }
 }
 
@@ -274,7 +294,7 @@ pub(super) async fn sweep_leftovers(
     backend: &impl DestroyBackend,
     app_id: Uuid,
     deployment_id: Uuid,
-    region: &str,
+    account: &AppAccount,
 ) -> Result<(), SweepLeftoversError> {
     use SweepLeftoversErrorCtx as Ctx;
 
@@ -294,20 +314,20 @@ pub(super) async fn sweep_leftovers(
         .collect();
 
     let instances = backend
-        .tagged_instances(app_id, deployment_id, region)
+        .tagged_instances(app_id, deployment_id, account)
         .await
         .with_context(Ctx::describe_instances(deployment_id))?;
     let leftovers = leftover_instances(&instances, app_id, deployment_id, &live);
     if !leftovers.is_empty() {
         tracing::warn!(deployment_id = %deployment_id, instance_ids = ?leftovers, "terminating deployment instances its state missed");
         backend
-            .terminate_instances(region, &leftovers)
+            .terminate_instances(account, &leftovers)
             .await
             .with_context(Ctx::terminate_instances(deployment_id))?;
     }
 
     match backend
-        .tagged_security_groups(app_id, deployment_id, region)
+        .tagged_security_groups(app_id, deployment_id, account)
         .await
     {
         Ok(groups) => {
@@ -315,7 +335,10 @@ pub(super) async fn sweep_leftovers(
                 .iter()
                 .filter(|group| tagged_for(&group.tags, app_id, deployment_id))
             {
-                if let Err(error) = backend.delete_security_group(region, &group.group_id).await {
+                if let Err(error) = backend
+                    .delete_security_group(account, &group.group_id)
+                    .await
+                {
                     tracing::info!(deployment_id = %deployment_id, group_id = %group.group_id, error = %error, "leftover security group not deleted; retried while its deployment is cleaned up");
                 }
             }
@@ -339,6 +362,14 @@ pub(super) async fn sweep_leftovers(
 /// Failure modes for [`destroy_and_sweep`].
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum DestroyAndSweepError {
+    #[error("failed to resolve the AWS account of deployment {deployment_id} [{location}]")]
+    Account {
+        deployment_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
     #[error("failed to destroy the state of deployment {deployment_id} [{location}]")]
     DestroyState {
         deployment_id: Uuid,
@@ -370,11 +401,15 @@ pub(super) async fn destroy_and_sweep(
 ) -> Result<(), DestroyAndSweepError> {
     use DestroyAndSweepErrorCtx as Ctx;
 
+    let account = backend
+        .app_account(app_id, region)
+        .await
+        .with_context(Ctx::account(deployment_id))?;
     backend
-        .destroy_state(org_id, app_id, deployment_id, region)
+        .destroy_state(org_id, app_id, deployment_id, &account)
         .await
         .with_context(Ctx::destroy_state(deployment_id))?;
-    sweep_leftovers(db, backend, app_id, deployment_id, region)
+    sweep_leftovers(db, backend, app_id, deployment_id, &account)
         .await
         .with_context(Ctx::sweep(deployment_id))
 }
@@ -424,7 +459,7 @@ pub(crate) async fn complete_destroy(
     state: &AppState,
     target: &DestroyTarget,
 ) -> Result<(), CompleteDestroyError> {
-    complete_destroy_with(state, &Platform, target).await
+    complete_destroy_with(state, &Platform(state), target).await
 }
 
 pub(super) async fn complete_destroy_with(
@@ -563,8 +598,14 @@ pub(crate) async fn destroy_handler(
     // the row in `destroying` nor leave its operation unanswered.
     let task_state = state.clone();
     let task = tokio::spawn(async move {
-        let Some((target, operation_id)) =
-            begin_destroy(&task_state.db, &Platform, &auth, app_id, deployment_id).await?
+        let Some((target, operation_id)) = begin_destroy(
+            &task_state.db,
+            &Platform(&task_state),
+            &auth,
+            app_id,
+            deployment_id,
+        )
+        .await?
         else {
             return Ok(());
         };
@@ -682,8 +723,12 @@ pub(super) async fn begin_destroy(
                 location: std::panic::Location::caller(),
             });
         };
+        let account = backend
+            .app_account(app_id, region)
+            .await
+            .with_context(Ctx::aws())?;
         let holder = backend
-            .address_holder(app_id, region)
+            .address_holder(app_id, &account)
             .await
             .with_context(Ctx::aws())?;
         if holder.as_deref() == Some(instance_id) {
@@ -779,7 +824,7 @@ pub(crate) async fn destroy_all_for_app(
     org_id: Uuid,
     app_id: Uuid,
 ) -> Result<(), DestroyAllError> {
-    destroy_all_for_app_with(state, &Platform, org_id, app_id).await
+    destroy_all_for_app_with(state, &Platform(state), org_id, app_id).await
 }
 
 pub(super) async fn destroy_all_for_app_with(

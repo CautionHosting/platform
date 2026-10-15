@@ -6,7 +6,7 @@
 
 use super::destroy::{DestroyBackend, Platform, destroy_and_sweep};
 use super::{PROCESS_ID, admission, lock_app_operations};
-use crate::{AppState, ec2, fully_managed_capacity, managed_dns};
+use crate::{AppState, ec2, managed_dns};
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use sqlx::{PgPool, Postgres, Transaction};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -206,6 +206,43 @@ impl AppAddressMover for ec2::Ec2Client {
     }
 }
 
+/// The app EIP calls in the app's own account, resolved when one is made: only
+/// an activation touches the address, after Running is committed. A failed
+/// resolution then fails the call like any EC2 error, leaving the deployment
+/// Running for the reconciler to make live; a candidate never resolves one.
+struct AccountMover<'a> {
+    state: &'a AppState,
+    app_id: Uuid,
+    region: &'a str,
+}
+
+impl AppAddressMover for AccountMover<'_> {
+    async fn move_address(
+        &self,
+        resource_id: &str,
+        target: &str,
+        expected_holder: Option<&str>,
+    ) -> Result<String, ec2::MoveAppAddressError> {
+        let account = super::account::app_account(self.state, self.app_id, self.region)
+            .await
+            .with_context(ec2::MoveAppAddressErrorCtx::describe_address())?;
+        account
+            .ec2()
+            .move_address(resource_id, target, expected_holder)
+            .await
+    }
+
+    async fn describe_address(
+        &self,
+        resource_id: &str,
+    ) -> Result<ec2::AppAddress, ec2::DescribeAppAddressError> {
+        let account = super::account::app_account(self.state, self.app_id, self.region)
+            .await
+            .with_context(ec2::DescribeAppAddressErrorCtx::describe_addresses())?;
+        account.ec2().describe_address(resource_id).await
+    }
+}
+
 /// Failure modes for [`project_live`].
 #[derive(Debug, thiserror::Error, CtxError)]
 #[error("failed to record deployment {deployment_id} live for app {app_id} [{location}]")]
@@ -276,11 +313,14 @@ pub(crate) async fn complete_running(
     app_id: Uuid,
     deployment: &RunningDeployment,
 ) -> Result<Activation, CompleteRunningError> {
-    let credentials = fully_managed_capacity::platform_credentials_for_region(&deployment.region);
     complete_running_with(
         &state.db,
         state.managed_dns.is_some(),
-        &ec2::Ec2Client::new(&credentials),
+        &AccountMover {
+            state,
+            app_id,
+            region: &deployment.region,
+        },
         app_id,
         deployment,
     )
@@ -445,7 +485,15 @@ pub(crate) async fn fail_attempt(
     deployment_id: Uuid,
     message: &str,
 ) {
-    fail_attempt_with(state, &Platform, org_id, app_id, deployment_id, message).await;
+    fail_attempt_with(
+        state,
+        &Platform(state),
+        org_id,
+        app_id,
+        deployment_id,
+        message,
+    )
+    .await;
 }
 
 pub(super) async fn fail_attempt_with(

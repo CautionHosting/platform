@@ -7,11 +7,14 @@ to it. The previous deployment keeps running, so a rollback is another switch.
 
 ## Enabling
 
-Set both in `~/.config/caution/.env`, then restart the API (`env.example` lists them):
+Set these in `~/.config/caution/.env`, then restart the API (`env.example` lists them):
 
 - `APP_DEPLOYMENTS_ENABLED=true` gives new fully managed apps (`POST /resources`) the
   deployments lifecycle. Default off. The lifecycle is fixed at creation: existing
-  apps stay Legacy, and BYOC apps always do.
+  apps stay Legacy.
+- `APP_DEPLOYMENTS_BYOC_ENABLED=true` gives new BYOC apps (`caution init --byoc`) the
+  deployments lifecycle in their linked account. Default off; BYOC apps created while it
+  is off stay Legacy. See [BYOC](#byoc-linked-aws-accounts).
 - `MAX_CANDIDATES_PER_APP` is a positive integer, default `3`. The API refuses to
   start if it is set but invalid.
 
@@ -102,6 +105,38 @@ Set both in `~/.config/caution/.env`, then restart the API (`env.example` lists 
   destroyed. `caution apps destroy` (the app) destroys every deployment and clears
   the live pointer; it returns 409 while a build, provisioning or deployment destroy
   is active.
+
+## BYOC (linked AWS accounts)
+
+- **Same lifecycle, customer's account.** Each deployment is a standalone EC2 instance
+  in the linked account, created by the delegated IAM user from `caution init --byoc`.
+  The provisioner, its policy and existing linked accounts are unchanged. Its Auto
+  Scaling group and launch template are not used (they stay at zero instances) and
+  `caution teardown --byoc` removes them as before.
+- **Network.** The first push creates only the app Elastic IP there (the app state at
+  the usual key). It also picks the first provisioner subnet whose zone offers the
+  instance type. Later candidates reuse both. The VPC and instance profile are the
+  provisioner's.
+- **Scope tag.** The delegated policy only terminates, edits and associates resources
+  tagged `caution:deployment-id = <provisioner deployment ID>`, so the Elastic IP,
+  security groups and instances carry it from creation.
+- **Fixed environment.** The app network records the provisioner deployment ID
+  (`app_network.scope_tag`), and every operation uses that environment's keys, never
+  Caution's. While the app has a network, re-running `caution init --byoc` with another
+  environment or region, a push with another linked environment or region, or a
+  `provider` block naming another VPC is refused (409). Rotating the keys of the same
+  environment works, whatever VPC a `provider` block gave the network. Destroy the app to
+  move it.
+- **Unavailable access.** A revoked key, a deleted credential or a decryption failure
+  makes reconciliation skip the app. Switch, deployment and app destroy, and cleanup
+  then fail with nothing changed, and resume once access returns. In any pass where the
+  reconciler cannot read the app's Elastic IP it skips the lost-runtime checks, for
+  fully managed apps too (a released managed Elastic IP no longer gets a lost runtime
+  marked).
+- **Billing.** No fully managed meters, capacity reservation or Caution estimate:
+  `estimated_monthly_usd` is null. The customer pays AWS directly.
+- **Host failure.** As for fully managed apps: the deployment becomes `runtime_lost`;
+  push, verify and switch to recover. There is no automatic instance replacement.
 
 ## History
 
@@ -279,7 +314,8 @@ running deployment meters, so treat the migration as one-way once the flag has b
 
 Every other test stack runs with `APP_DEPLOYMENTS_ENABLED=false`
 (`API_EXTRA_ENV` defaults to it), whatever `~/.config/caution/.env` says, so Legacy E2Es
-test Legacy on a host that enables the flag.
+test Legacy on a host that enables the flag. It defaults both flags off: an override
+that omits `APP_DEPLOYMENTS_BYOC_ENABLED` takes it from `~/.config/caution/.env`.
 
 - `make test-app-deployments-db`: concurrency, reconciliation and metering tests on an
   isolated Postgres (anonymous container, random port; safe on a shared host).
@@ -299,7 +335,11 @@ test Legacy on a host that enables the flag.
   `-a`), `apps get` (table, SSH-signed `--this-is-a-ci-machine` read without history),
   the history entries of the switches and destroys (passkey, `ssh_signed`, rejected),
   and short `-d` IDs.
+- `make test-e2e-app-deployments-byoc`: the same flow in the BYOC test account
+  (`ONPREM_AWS_*` exported, as for `test-e2e-byoc`). `caution init --byoc` creates the
+  app and its linked environment; `caution teardown --byoc` removes both. A leak also
+  names the provisioner deployment ID to tear down.
 - To run a Legacy target with the flag on, override the default:
-  `make test-e2e API_EXTRA_ENV="-e APP_DEPLOYMENTS_ENABLED=true"` (also
-  `test-e2e-ssh-units`, `test-e2e-byoc`); Legacy apps must behave the same and get no
-  `deployment_events`.
+  `make test-e2e API_EXTRA_ENV="-e APP_DEPLOYMENTS_ENABLED=true -e APP_DEPLOYMENTS_BYOC_ENABLED=false"`
+  (also `test-e2e-ssh-units`, `test-e2e-byoc`); Legacy apps must behave the same and get
+  no `deployment_events`.

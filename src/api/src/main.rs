@@ -1848,6 +1848,17 @@ pub(crate) enum CreateManagedOnpremResourceError {
         #[source]
         source: BoxError,
     },
+
+    #[error("the app's deployments live in another environment [{location}]")]
+    LinkedNetworkChanged { location: Location },
+
+    #[error("failed to assign the lifecycle of a new BYOC app [{location}]")]
+    AssignLifecycle {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
 impl IntoResponse for CreateManagedOnpremResourceError {
@@ -1898,6 +1909,13 @@ impl IntoResponse for CreateManagedOnpremResourceError {
                 "Failed to get resource type",
             ),
             CreateManagedOnpremResourceError::InsertResource { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            CreateManagedOnpremResourceError::LinkedNetworkChanged { .. } => (
+                StatusCode::CONFLICT,
+                "This app's deployments live in the AWS environment they were first deployed to. Destroy the app (`caution apps destroy`) before linking a different environment.",
+            ),
+            CreateManagedOnpremResourceError::AssignLifecycle { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
@@ -1993,6 +2011,49 @@ async fn create_managed_onprem_resource(
             }
         })?;
 
+        // An app network stays in the environment it was created in: linking
+        // another would strand its EIP and instances. Legacy apps have no network.
+        // The VPC is not compared: rotating the keys of a network in a `provider`
+        // block's VPC works.
+        let environment: Option<(Option<String>, Option<String>, Option<String>)> =
+            sqlx::query_as(app_deployments::account::NETWORK_ENVIRONMENT_SQL)
+                .bind(existing_resource_id)
+                .fetch_optional(&state.db)
+                .await
+                .with_context(Ctx::existing_query())?;
+        if let Some((scope, vpc, region)) = &environment
+            && !app_deployments::account::keeps_environment(
+                (scope.as_deref(), vpc.as_deref(), region.as_deref()),
+                Some(app_deployments::account::Linked {
+                    scope_tag: &deployment_id,
+                    vpc_id: None,
+                    region: req.aws_region.as_deref().unwrap_or_default(),
+                }),
+            )
+        {
+            return Err(CreateManagedOnpremResourceError::LinkedNetworkChanged {
+                location: std::panic::Location::caller(),
+            });
+        }
+
+        // Interactive `caution init --byoc` creates the app through `POST /resources`,
+        // then links it here: the first link of a pristine app takes the BYOC flag.
+        // Checked before the credential below is replaced; a relink of a linked or
+        // deployed app keeps its lifecycle.
+        if app_deployments::assign_byoc_lifecycle(
+            &state.db,
+            existing_resource_id,
+            app_deployments::byoc_enabled_for_new_apps(),
+        )
+        .await
+        .with_context(Ctx::assign_lifecycle())?
+        {
+            tracing::info!(
+                "First BYOC link of app {}: lifecycle set by APP_DEPLOYMENTS_BYOC_ENABLED",
+                existing_resource_id
+            );
+        }
+
         sqlx::query(
             "UPDATE compute_resources
              SET configuration = COALESCE(configuration, '{}'::jsonb) || $1::jsonb, updated_at = NOW()
@@ -2063,12 +2124,17 @@ async fn create_managed_onprem_resource(
         let provider_resource_id = Uuid::new_v4().to_string();
         let resource_slug = format!("app-{}", &provider_resource_id[..8]);
 
+        // New BYOC apps follow the deployments lifecycle only while their flag is on;
+        // the update branch above applies it only to the first link of a pristine app.
+        let lifecycle =
+            app_deployments::lifecycle_for_new_app(app_deployments::byoc_enabled_for_new_apps());
+
         // Create the resource first (so we have a resource_id for the credential)
         let resource: (Uuid, types::ResourceState, DateTime<Utc>) = sqlx::query_as(
             "INSERT INTO compute_resources
              (organization_id, provider_account_id, resource_type_id, provider_resource_id,
-              resource_name, state, configuration, created_by)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+              resource_name, state, configuration, created_by, lifecycle)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              RETURNING id, state, created_at",
         )
         .bind(org_id)
@@ -2079,6 +2145,7 @@ async fn create_managed_onprem_resource(
         .bind(types::ResourceState::Initialized)
         .bind(&configuration)
         .bind(auth.user_id)
+        .bind(lifecycle)
         .fetch_one(&state.db)
         .await
         .with_context(Ctx::insert_resource())?;
@@ -3079,8 +3146,11 @@ pub(crate) enum DeployLogicError {
         source: app_deployments::admission::ClaimError,
     },
 
-    #[error("BYOC credentials are linked to a deployments-lifecycle app [{location}]")]
-    ByocDeployments { location: Location },
+    #[error("the push targets another AWS environment than the app network's [{location}]")]
+    LinkedNetworkChanged { location: Location },
+
+    #[error("the linked environment has no BYOC builder instance profile [{location}]")]
+    LinkedBuilderMissing { location: Location },
 
     #[error("failed to read the app network [{location}]")]
     AppNetwork {
@@ -3343,9 +3413,13 @@ impl DeployLogicError {
                     (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
                 }
             },
-            DeployLogicError::ByocDeployments { .. } => (
-                StatusCode::BAD_REQUEST,
-                "This app deploys through Caution-managed deployments and cannot use BYOC credentials.",
+            DeployLogicError::LinkedNetworkChanged { .. } => (
+                StatusCode::CONFLICT,
+                "This push targets another AWS environment than the one this app's deployments live in (its linked account, VPC and region, or Caution's account). Keep that environment, or destroy the app before moving it.",
+            ),
+            DeployLogicError::LinkedBuilderMissing { .. } => (
+                StatusCode::CONFLICT,
+                "This app's linked AWS environment predates the BYOC builder. Run `caution init --byoc` again to provision a current environment (destroy the app first if it has deployments).",
             ),
             DeployLogicError::AppNetwork { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
@@ -4602,17 +4676,6 @@ async fn deploy_logic(
         return Err(error);
     }
 
-    // BYOC stays Legacy: a candidate runs on Caution-managed capacity only.
-    if matches!(deploy_target, DeployTarget::Candidate { .. }) && managed_onprem_config.is_some() {
-        let error = DeployLogicError::ByocDeployments {
-            location: std::panic::Location::caller(),
-        };
-        deploy_target
-            .reject(&state, req.org_id, resource_id, error.client_response().1)
-            .await;
-        return Err(error);
-    }
-
     if !is_managed_onprem && cpu_count > fully_managed_capacity::MAX_FULLY_MANAGED_ENCLAVE_VCPUS {
         let error = DeployLogicError::VcpuLimit {
             location: std::panic::Location::caller(),
@@ -4642,6 +4705,58 @@ async fn deploy_logic(
         && let Some(ref mut onprem) = managed_onprem_config
     {
         merge_provider_into_onprem(provider, onprem);
+    }
+
+    // A candidate deploys into the environment its app network lives in: the
+    // same linked environment, VPC and region, or Caution's account.
+    if matches!(deploy_target, DeployTarget::Candidate { .. }) {
+        let environment: Option<(Option<String>, Option<String>, Option<String>)> =
+            sqlx::query_as(app_deployments::account::NETWORK_ENVIRONMENT_SQL)
+                .bind(resource_id)
+                .fetch_optional(&state.db)
+                .await
+                .with_context(Ctx::app_network())?;
+        if let Some((scope, vpc, region)) = &environment
+            && !app_deployments::account::keeps_environment(
+                (scope.as_deref(), vpc.as_deref(), region.as_deref()),
+                managed_onprem_config
+                    .as_ref()
+                    .zip(deployment_credentials.as_ref())
+                    .map(|(onprem, credentials)| app_deployments::account::Linked {
+                        scope_tag: &onprem.deployment_id,
+                        vpc_id: Some(&onprem.vpc_id),
+                        region: &credentials.region,
+                    }),
+            )
+        {
+            let error = DeployLogicError::LinkedNetworkChanged {
+                location: std::panic::Location::caller(),
+            };
+            deploy_target
+                .reject(&state, req.org_id, resource_id, error.client_response().1)
+                .await;
+            return Err(error);
+        }
+    }
+
+    // A linked environment without a builder instance profile predates the BYOC
+    // builder: its build would run in Caution's account and bucket, where the
+    // linked instance cannot read the EIF. Refused before the build; Legacy BYOC
+    // is unaffected.
+    if matches!(deploy_target, DeployTarget::Candidate { .. })
+        && let Some(onprem) = &managed_onprem_config
+        && onprem
+            .builder_instance_profile_name
+            .as_deref()
+            .is_none_or(str::is_empty)
+    {
+        let error = DeployLogicError::LinkedBuilderMissing {
+            location: std::panic::Location::caller(),
+        };
+        deploy_target
+            .reject(&state, req.org_id, resource_id, error.client_response().1)
+            .await;
+        return Err(error);
     }
 
     let should_cleanup_on_failure = was_destroyed
@@ -4896,22 +5011,23 @@ async fn deploy_logic(
     };
     // A candidate's instance must fit the app subnet's availability zone.
     if let Some(network) = &app_network {
-        let offered = crate::ec2::Ec2Client::new(
-            &fully_managed_capacity::platform_credentials_for_region(&network.region),
-        )
-        .instance_type_offered_in_zone(
-            &capacity_requirements.instance_type,
-            &network.availability_zone,
-        )
-        .await
-        .with_context(Ctx::zone_offering())
-        .and_then(|offered| {
-            offered
-                .then_some(())
-                .ok_or_else(|| DeployLogicError::InstanceTypeUnavailableInZone {
-                    location: std::panic::Location::caller(),
-                })
+        let credentials = deployment_credentials.clone().unwrap_or_else(|| {
+            fully_managed_capacity::platform_credentials_for_region(&network.region)
         });
+        let offered = crate::ec2::Ec2Client::new(&credentials)
+            .instance_type_offered_in_zone(
+                &capacity_requirements.instance_type,
+                &network.availability_zone,
+            )
+            .await
+            .with_context(Ctx::zone_offering())
+            .and_then(|offered| {
+                offered.then_some(()).ok_or_else(|| {
+                    DeployLogicError::InstanceTypeUnavailableInZone {
+                        location: std::panic::Location::caller(),
+                    }
+                })
+            });
         if let Err(error) = &offered {
             deploy_target
                 .reject(&state, req.org_id, resource_id, error.client_response().1)
@@ -5514,12 +5630,22 @@ async fn provision_candidate(
                 .execute(&state.db)
                 .await
                 .with_context(Ctx::database())?;
+            // A BYOC app's network lives in its linked account.
+            let linked = match (&nitro_request.managed_onprem, &nitro_request.credentials) {
+                (Some(onprem), Some(credentials)) => Some(
+                    deployment::linked_network(credentials, onprem, &requirements.instance_type)
+                        .await
+                        .with_context(Ctx::app_network())?,
+                ),
+                _ => None,
+            };
             let network = deployment::provision_app_network(&deployment::AppNetworkRequest {
                 org_id: req.org_id,
                 resource_id,
                 aws_account_id: aws_account_id.to_string(),
                 region: region.to_string(),
                 instance_type: requirements.instance_type.clone(),
+                linked,
             })
             .await
             .with_context(Ctx::app_network())?;
@@ -5532,8 +5658,14 @@ async fn provision_candidate(
             network
         }
     };
-    let bucket = std::env::var("EIF_S3_BUCKET")
-        .unwrap_or_else(|_| format!("caution-eif-storage-{aws_account_id}"));
+    // A BYOC build is in the linked account's bucket, as `eif_path` names it.
+    let eif_s3_path = if nitro_request.managed_onprem.is_some() {
+        nitro_request.eif_path.clone()
+    } else {
+        let bucket = std::env::var("EIF_S3_BUCKET")
+            .unwrap_or_else(|_| format!("caution-eif-storage-{aws_account_id}"));
+        format!("s3://{bucket}/{eif_s3_key}")
+    };
     let state_key = deployment::deployment_state_key(req.org_id, resource_id, deployment_id);
     app_deployments::lifecycle::mark_provisioning(
         &state.db,
@@ -5544,14 +5676,10 @@ async fn provision_candidate(
     )
     .await
     .with_context(Ctx::database())?;
-    let result = deployment::provision_deployment(
-        nitro_request,
-        deployment_id,
-        &network,
-        &format!("s3://{bucket}/{eif_s3_key}"),
-    )
-    .await
-    .with_context(Ctx::provision())?;
+    let result =
+        deployment::provision_deployment(nitro_request, deployment_id, &network, &eif_s3_path)
+            .await
+            .with_context(Ctx::provision())?;
     app_deployments::lifecycle::record_instance(
         &state.db,
         deployment_id,

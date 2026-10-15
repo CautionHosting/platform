@@ -235,7 +235,7 @@ pub(crate) enum EncryptorFromKeyError {
 
 #[cfg(test)]
 impl Encryptor {
-    fn from_key(key_b64: &str) -> Result<Self, EncryptorFromKeyError> {
+    pub(crate) fn from_key(key_b64: &str) -> Result<Self, EncryptorFromKeyError> {
         use EncryptorFromKeyErrorCtx as Ctx;
 
         let key_bytes = general_purpose::STANDARD

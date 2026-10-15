@@ -986,6 +986,101 @@ mod tests {
         assert_eq!(main_tf, std::fs::read_to_string(&golden).unwrap());
     }
 
+    /// The deployments lifecycle's fully managed states, pinned before BYOC shares
+    /// their blocks.
+    #[tokio::test]
+    async fn managed_deployment_and_network_tf_are_unchanged() {
+        assert!(
+            std::env::var_os("EIF_S3_BUCKET").is_none()
+                && std::env::var_os("SSH_KEY_NAME").is_none(),
+            "run with EIF_S3_BUCKET and SSH_KEY_NAME unset"
+        );
+        let mut request = deployment_request("/tmp/enclave.eif", None);
+        request.managed_onprem = None;
+        request.ports = vec![8080, 9000];
+        request.http_port = Some(8080);
+        request.domain = Some("app.example.com".to_string());
+        let deployment_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let deployment_dir = TempDir::new().unwrap();
+        generate_deployment_main_tf(
+            deployment_dir.path(),
+            &request,
+            deployment_id,
+            &sample_network(),
+            "s3://bucket/e.eif",
+        )
+        .await
+        .unwrap();
+        let network_dir = TempDir::new().unwrap();
+        generate_app_network_main_tf(
+            network_dir.path(),
+            &AppNetworkRequest {
+                org_id: Uuid::nil(),
+                resource_id: Uuid::nil(),
+                aws_account_id: "123456789012".to_string(),
+                region: "us-west-2".to_string(),
+                instance_type: "m5.xlarge".to_string(),
+                linked: None,
+            },
+        )
+        .await
+        .unwrap();
+        for (dir, name) in [
+            (&deployment_dir, "deployment_main.tf"),
+            (&network_dir, "app_network_main.tf"),
+        ] {
+            let main_tf = std::fs::read_to_string(dir.path().join("main.tf")).unwrap();
+            let golden = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/testdata")
+                .join(name);
+            if std::env::var_os("UPDATE_GOLDEN").is_some() {
+                std::fs::write(&golden, &main_tf).unwrap();
+            }
+            assert_eq!(
+                main_tf,
+                std::fs::read_to_string(&golden).unwrap(),
+                "{}",
+                golden.display()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn linked_deployment_tf_uses_the_linked_account_and_scope_tag() {
+        // `deployment_request` links `managed_onprem_config()` (deployment ID `dep-123`).
+        let mut request = deployment_request("/tmp/enclave.eif", None);
+        request.credentials = Some(AwsCredentials {
+            access_key_id: "AKIALINKED".to_string(),
+            secret_access_key: "secret".to_string(),
+            region: "us-west-2".to_string(),
+        });
+        let deployment_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let work_dir = TempDir::new().unwrap();
+        generate_deployment_main_tf(
+            work_dir.path(),
+            &request,
+            deployment_id,
+            &sample_network(),
+            "s3://customer-bucket/e.eif",
+        )
+        .await
+        .unwrap();
+        let tf = norm(&std::fs::read_to_string(work_dir.path().join("main.tf")).unwrap());
+        assert!(tf.contains(r#"variable "provider_access_key""#));
+        assert!(tf.contains("access_key = var.provider_access_key"));
+        assert!(
+            !tf.contains("AKIALINKED"),
+            "keys are variables, never written"
+        );
+        // The security group and the instance: the delegated policy only
+        // terminates, edits and associates resources carrying the scope tag.
+        assert_eq!(
+            tf.matches(r#""caution:deployment-id" = "dep-123""#).count(),
+            2
+        );
+        assert!(tf.contains(r#"DeploymentId = "11111111-1111-1111-1111-111111111111""#));
+    }
+
     fn sample_network() -> AppNetwork {
         AppNetwork {
             region: "us-west-2".to_string(),
@@ -995,7 +1090,90 @@ mod tests {
             instance_profile_name: "enclave-00000000-profile".to_string(),
             eip_allocation_id: "eipalloc-0abc".to_string(),
             eip_public_ip: "198.51.100.42".to_string(),
+            scope_tag: None,
         }
+    }
+
+    fn sample_linked() -> LinkedNetwork {
+        LinkedNetwork {
+            credentials: AwsCredentials {
+                access_key_id: "AKIALINKED".to_string(),
+                secret_access_key: "secret".to_string(),
+                region: "us-east-1".to_string(),
+            },
+            scope_tag: "dep-123".to_string(),
+            vpc_id: "vpc-123".to_string(),
+            subnet_id: "subnet-123".to_string(),
+            availability_zone: "us-east-1a".to_string(),
+            instance_profile_name: "runtime-profile".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn linked_app_network_tf_creates_only_a_scoped_eip() {
+        let request = AppNetworkRequest {
+            org_id: Uuid::nil(),
+            resource_id: Uuid::nil(),
+            aws_account_id: "123456789012".to_string(),
+            region: "us-east-1".to_string(),
+            instance_type: "m5.xlarge".to_string(),
+            linked: Some(sample_linked()),
+        };
+        let work_dir = TempDir::new().unwrap();
+        generate_app_network_main_tf(work_dir.path(), &request)
+            .await
+            .unwrap();
+        let tf = norm(&std::fs::read_to_string(work_dir.path().join("main.tf")).unwrap());
+        assert!(tf.contains(r#"resource "aws_eip" "enclave""#));
+        // AllocateAddress requires the scope tag in the request itself.
+        assert!(tf.contains(r#""caution:deployment-id" = "dep-123""#));
+        assert!(tf.contains("var.provider_access_key"));
+        assert!(!tf.contains("AKIALINKED"));
+        assert!(tf.contains(r#"output "eip_allocation_id""#));
+        for absent in [
+            r#"resource "aws_vpc""#,
+            r#"resource "aws_subnet""#,
+            "aws_iam_role",
+            r#"output "vpc_id""#,
+            "aws_ec2_instance_type_offerings",
+        ] {
+            assert!(!tf.contains(absent), "unexpected {absent}");
+        }
+    }
+
+    #[test]
+    fn linked_network_outputs_keep_the_provisioner_network() {
+        let outputs = serde_json::json!({
+            "eip_allocation_id": {"value": "eipalloc-1"},
+            "eip_public_ip": {"value": "198.51.100.7"},
+        });
+        let network =
+            parse_linked_network_outputs(&outputs, "us-east-1", &sample_linked()).unwrap();
+        assert_eq!(
+            network,
+            AppNetwork {
+                region: "us-east-1".to_string(),
+                vpc_id: "vpc-123".to_string(),
+                subnet_id: "subnet-123".to_string(),
+                availability_zone: "us-east-1a".to_string(),
+                instance_profile_name: "runtime-profile".to_string(),
+                eip_allocation_id: "eipalloc-1".to_string(),
+                eip_public_ip: "198.51.100.7".to_string(),
+                scope_tag: Some("dep-123".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn managed_app_network_json_is_unchanged() {
+        let json = serde_json::to_value(sample_network()).unwrap();
+        assert!(
+            json.get("scope_tag").is_none(),
+            "managed networks serialize as before"
+        );
+        // Rows written before M4 have no scope tag.
+        let parsed: AppNetwork = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.scope_tag, None);
     }
 
     #[tokio::test]
@@ -1006,6 +1184,7 @@ mod tests {
             aws_account_id: "123456789012".to_string(),
             region: "us-west-2".to_string(),
             instance_type: "m5.xlarge".to_string(),
+            linked: None,
         };
         let work_dir = TempDir::new().unwrap();
         generate_app_network_main_tf(work_dir.path(), &request)
@@ -1967,10 +2146,14 @@ fn run_tofu_apply_with_provider_creds(
     run_tofu_apply_command(&mut cmd)
 }
 
-/// `tofu apply` for a configuration that declares no variables and uses the
+/// `tofu apply` for a configuration that declares no port variables. With
+/// `credentials` (a linked account) its AWS provider uses them; otherwise the
 /// platform's environment credentials.
 #[tracing::instrument(skip_all, err)]
-fn run_tofu_apply_plain(work_dir: &Path) -> std::result::Result<(), TofuApplyError> {
+fn run_tofu_apply_plain(
+    work_dir: &Path,
+    credentials: Option<&AwsCredentials>,
+) -> std::result::Result<(), TofuApplyError> {
     tracing::info!("Running tofu apply in {}...", work_dir.display());
 
     let mut cmd = Command::new("tofu");
@@ -1978,6 +2161,11 @@ fn run_tofu_apply_plain(work_dir: &Path) -> std::result::Result<(), TofuApplyErr
         .arg("-auto-approve")
         .arg("-no-color")
         .current_dir(work_dir);
+    if let Some(creds) = credentials {
+        cmd.env("TF_VAR_provider_access_key", &creds.access_key_id);
+        cmd.env("TF_VAR_provider_secret_key", &creds.secret_access_key);
+        cmd.env("TF_VAR_provider_region", &creds.region);
+    }
 
     run_tofu_apply_command(&mut cmd)
 }
@@ -3207,6 +3395,34 @@ pub(crate) fn parse_app_network_outputs(
         instance_profile_name: field("instance_profile_name")?,
         eip_allocation_id: field("eip_allocation_id")?,
         eip_public_ip: field("eip_public_ip")?,
+        scope_tag: None,
+    })
+}
+
+/// A linked app network: the provisioner's network around the EIP its app state created.
+pub(crate) fn parse_linked_network_outputs(
+    outputs: &serde_json::Value,
+    region: &str,
+    linked: &LinkedNetwork,
+) -> std::result::Result<AppNetwork, ParseAppNetworkOutputsError> {
+    let field = |name: &str| {
+        outputs[name]["value"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| ParseAppNetworkOutputsError::MissingField {
+                field: name.to_string(),
+                location: std::panic::Location::caller(),
+            })
+    };
+    Ok(AppNetwork {
+        region: region.to_string(),
+        vpc_id: linked.vpc_id.clone(),
+        subnet_id: linked.subnet_id.clone(),
+        availability_zone: linked.availability_zone.clone(),
+        instance_profile_name: linked.instance_profile_name.clone(),
+        eip_allocation_id: field("eip_allocation_id")?,
+        eip_public_ip: field("eip_public_ip")?,
+        scope_tag: Some(linked.scope_tag.clone()),
     })
 }
 
@@ -3256,8 +3472,8 @@ pub(crate) enum ProvisionAppNetworkError {
     },
 }
 
-/// Applies the app network state (VPC, IAM, unassociated EIP) on the per-app key with
-/// platform credentials. Idempotent: a re-apply leaves an existing network unchanged.
+/// Applies the app network state (VPC, IAM, unassociated EIP; only the EIP in a linked
+/// account) on the per-app key. Idempotent: a re-apply leaves an existing network unchanged.
 #[tracing::instrument(skip_all, err)]
 pub(crate) async fn provision_app_network(
     request: &AppNetworkRequest,
@@ -3293,11 +3509,18 @@ pub(crate) async fn provision_app_network(
         .await
         .with_context(Ctx::tofu_init())?;
 
-    run_tofu_apply_plain(work_dir).with_context(Ctx::tofu_apply())?;
+    run_tofu_apply_plain(
+        work_dir,
+        request.linked.as_ref().map(|linked| &linked.credentials),
+    )
+    .with_context(Ctx::tofu_apply())?;
 
     let outputs = run_tofu_output_json(work_dir).with_context(Ctx::outputs())?;
-    let network =
-        parse_app_network_outputs(&outputs, &request.region).with_context(Ctx::outputs())?;
+    let network = match &request.linked {
+        Some(linked) => parse_linked_network_outputs(&outputs, &request.region, linked),
+        None => parse_app_network_outputs(&outputs, &request.region),
+    }
+    .with_context(Ctx::outputs())?;
 
     tracing::info!(
         "App network for resource {} ready: vpc {}, EIP {}",
@@ -3415,7 +3638,7 @@ pub(crate) async fn provision_deployment(
         &request.resource_name,
         &request.ports,
         request.http_port,
-        None,
+        request.credentials.as_ref(),
     )
     .with_context(Ctx::tofu_apply())?;
 
@@ -3470,14 +3693,16 @@ pub(crate) enum DestroyDeploymentStateError {
     },
 }
 
-/// Destroys one deployment's state. Re-runnable: an empty or missing state destroys
-/// nothing and succeeds.
+/// Destroys one deployment's state, with `credentials` for a linked account
+/// (the environment's otherwise). Re-runnable: an empty or missing state
+/// destroys nothing and succeeds.
 #[tracing::instrument(skip_all, err)]
 pub(crate) async fn destroy_deployment_state(
     org_id: Uuid,
     resource_id: Uuid,
     deployment_id: Uuid,
     region: &str,
+    credentials: Option<&AwsCredentials>,
 ) -> std::result::Result<(), DestroyDeploymentStateError> {
     use DestroyDeploymentStateErrorCtx as Ctx;
 
@@ -3494,16 +3719,23 @@ pub(crate) async fn destroy_deployment_state(
         .await
         .with_context(Ctx::backend())?;
 
-    write_main_tf(work_dir, build_destroy_tf_body(false, region))
-        .await
-        .with_context(Ctx::generate_main_tf())?;
+    write_main_tf(
+        work_dir,
+        build_destroy_tf_body(credentials.is_some(), region),
+    )
+    .await
+    .with_context(Ctx::generate_main_tf())?;
 
     run_tofu_init(work_dir, provider_lockfile().await.as_deref(), None)
         .await
         .with_context(Ctx::tofu_init())?;
 
-    run_tofu_destroy(work_dir, &format!("deployment {deployment_id}"), None)
-        .with_context(Ctx::tofu_destroy())?;
+    run_tofu_destroy(
+        work_dir,
+        &format!("deployment {deployment_id}"),
+        credentials,
+    )
+    .with_context(Ctx::tofu_destroy())?;
 
     Ok(())
 }
@@ -4376,15 +4608,24 @@ fn port_variable_blocks() -> Vec<hcl::Block> {
     ]
 }
 
+/// The provisioner's scope tag in a linked (BYOC) account. Its delegated policy
+/// only terminates, edits and associates resources carrying it, so every
+/// resource created there carries it from creation. Its value is the
+/// provisioner's deployment ID, not a Caution deployment.
+pub(crate) const SCOPE_TAG_KEY: &str = "caution:deployment-id";
+
 /// `extra_tags` as object entries, appended after a resource's fixed tags.
 fn extra_tag_entries<'a>(
     extra_tags: &'a [(&str, String)],
 ) -> impl Iterator<Item = (hcl::expr::ObjectKey, hcl::Expression)> + 'a {
     extra_tags.iter().map(|(key, value)| {
-        (
-            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(*key)),
-            hcl::Expression::String(value.clone()),
-        )
+        // `caution:deployment-id` is no HCL identifier: quote it.
+        let key = if key.contains(':') {
+            hcl::expr::ObjectKey::Expression(hcl::Expression::String((*key).to_string()))
+        } else {
+            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(*key))
+        };
+        (key, hcl::Expression::String(value.clone()))
     })
 }
 
@@ -4539,7 +4780,10 @@ fn enclave_instance_block(
     instance_profile: hcl::Expression,
     extra_tags: &[(&str, String)],
 ) -> hcl::Block {
-    let ssh_key_name = std::env::var("SSH_KEY_NAME").ok();
+    // A key pair named in Caution's account does not exist in a linked one.
+    let ssh_key_name = std::env::var("SSH_KEY_NAME")
+        .ok()
+        .filter(|_| request.managed_onprem.is_none());
 
     let mut instance_builder = hcl::Block::builder("resource")
         .add_label("aws_instance")
@@ -4732,7 +4976,12 @@ fn enclave_instance_block(
 }
 
 /// The enclave EIP. Associated with `instance` when given; unassociated otherwise.
-fn enclave_eip_block(resource_id_str: &str, instance: Option<hcl::Expression>) -> hcl::Block {
+/// `extra_tags` are appended after the fixed tags.
+fn enclave_eip_block(
+    resource_id_str: &str,
+    instance: Option<hcl::Expression>,
+    extra_tags: &[(&str, String)],
+) -> hcl::Block {
     let mut builder = hcl::Block::builder("resource")
         .add_label("aws_eip")
         .add_label("enclave")
@@ -4742,24 +4991,20 @@ fn enclave_eip_block(resource_id_str: &str, instance: Option<hcl::Expression>) -
         builder = builder.add_attribute(("instance", instance));
     }
 
+    let mut tags = vec![
+        (
+            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("Name")),
+            hcl::Expression::String(format!("enclave-{resource_id_str}")),
+        ),
+        (
+            hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("ResourceId")),
+            hcl::Expression::String(resource_id_str.to_string()),
+        ),
+    ];
+    tags.extend(extra_tag_entries(extra_tags));
+
     builder
-        .add_attribute((
-            "tags",
-            hcl::Expression::Object(
-                vec![
-                    (
-                        hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("Name")),
-                        hcl::Expression::String(format!("enclave-{resource_id_str}")),
-                    ),
-                    (
-                        hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("ResourceId")),
-                        hcl::Expression::String(resource_id_str.to_string()),
-                    ),
-                ]
-                .into_iter()
-                .collect(),
-            ),
-        ))
+        .add_attribute(("tags", hcl::Expression::Object(tags.into_iter().collect())))
         .build()
 }
 
@@ -4853,6 +5098,7 @@ async fn generate_nitro_deployment_main_tf(
             enclave_eip_block(
                 &resource_id_str,
                 Some(traversal("aws_instance", &["enclave", "id"])),
+                &[],
             ),
         ]);
     for block in blocks {
@@ -4917,6 +5163,12 @@ pub(crate) struct AppNetwork {
     pub(crate) instance_profile_name: String,
     pub(crate) eip_allocation_id: String,
     pub(crate) eip_public_ip: String,
+    /// The provisioner's deployment ID when the network lives in a linked (BYOC)
+    /// account; absent (and absent from the JSON) in Caution's account. Every
+    /// later operation on the app's deployments uses that environment
+    /// (`app_deployments::account`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) scope_tag: Option<String>,
 }
 
 pub(crate) struct AppNetworkRequest {
@@ -4926,6 +5178,84 @@ pub(crate) struct AppNetworkRequest {
     pub(crate) region: String,
     /// The first deployment's instance type; selects the subnet's AZ.
     pub(crate) instance_type: String,
+    /// A linked (BYOC) account's environment; `None` builds the network in Caution's account.
+    pub(crate) linked: Option<LinkedNetwork>,
+}
+
+/// What a linked (BYOC) app network reuses from the provisioner's environment.
+/// Only the app EIP is created there.
+pub(crate) struct LinkedNetwork {
+    pub(crate) credentials: AwsCredentials,
+    /// The provisioner's deployment ID ([`SCOPE_TAG_KEY`]), not a Caution deployment.
+    pub(crate) scope_tag: String,
+    pub(crate) vpc_id: String,
+    pub(crate) subnet_id: String,
+    pub(crate) availability_zone: String,
+    pub(crate) instance_profile_name: String,
+}
+
+/// Failure modes for [`linked_network`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum LinkedNetworkError {
+    #[error("failed to read the provisioner's subnets [{location}]")]
+    Subnets {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("failed to check instance type offerings [{location}]")]
+    Offering {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("no provisioner subnet offers {instance_type} [{location}]")]
+    NoSubnet {
+        instance_type: String,
+        location: Location,
+    },
+}
+
+/// The linked environment of a BYOC app's first deployment: the first of the
+/// provisioner's subnets, in its order, whose zone offers `instance_type`.
+#[tracing::instrument(skip_all, err)]
+pub(crate) async fn linked_network(
+    credentials: &AwsCredentials,
+    onprem: &ManagedOnPremConfig,
+    instance_type: &str,
+) -> std::result::Result<LinkedNetwork, LinkedNetworkError> {
+    use LinkedNetworkErrorCtx as Ctx;
+
+    let ec2 = crate::ec2::Ec2Client::new(credentials);
+    let zones = ec2
+        .subnet_zones(&onprem.subnet_ids)
+        .await
+        .with_context(Ctx::subnets())?;
+    for subnet_id in &onprem.subnet_ids {
+        let Some(zone) = zones.get(subnet_id) else {
+            continue;
+        };
+        if ec2
+            .instance_type_offered_in_zone(instance_type, zone)
+            .await
+            .with_context(Ctx::offering())?
+        {
+            return Ok(LinkedNetwork {
+                credentials: credentials.clone(),
+                scope_tag: onprem.deployment_id.clone(),
+                vpc_id: onprem.vpc_id.clone(),
+                subnet_id: subnet_id.clone(),
+                availability_zone: zone.clone(),
+                instance_profile_name: onprem.instance_profile_name.clone(),
+            });
+        }
+    }
+    Err(LinkedNetworkError::NoSubnet {
+        instance_type: instance_type.to_string(),
+        location: std::panic::Location::caller(),
+    })
 }
 
 /// Generates the app network state: network, IAM and an unassociated EIP, with their IDs
@@ -4941,6 +5271,43 @@ async fn generate_app_network_main_tf(
     let eif_bucket = std::env::var("EIF_S3_BUCKET")
         .unwrap_or_else(|_| format!("caution-eif-storage-{}", request.aws_account_id));
 
+    if let Some(linked) = &request.linked {
+        // The provisioner owns the network and IAM: only the app EIP is created,
+        // with the scope tag the delegated policy requires to allocate it.
+        let mut body = hcl::Body::builder().add_block(tf_settings_block());
+        let blocks =
+            managed_provider_blocks(Some(&linked.credentials), &request.region, &org_id_str)
+                .into_iter()
+                .chain([enclave_eip_block(
+                    &resource_id_str,
+                    None,
+                    &[(SCOPE_TAG_KEY, linked.scope_tag.clone())],
+                )])
+                .chain(
+                    [
+                        (
+                            "eip_allocation_id",
+                            traversal("aws_eip", &["enclave", "allocation_id"]),
+                        ),
+                        (
+                            "eip_public_ip",
+                            traversal("aws_eip", &["enclave", "public_ip"]),
+                        ),
+                    ]
+                    .into_iter()
+                    .map(|(name, value)| {
+                        hcl::Block::builder("output")
+                            .add_label(name)
+                            .add_attribute(("value", value))
+                            .build()
+                    }),
+                );
+        for block in blocks {
+            body = body.add_block(block);
+        }
+        return write_main_tf(work_dir, body.build()).await;
+    }
+
     let mut body = hcl::Body::builder().add_block(tf_settings_block());
     let blocks = managed_provider_blocks(None, &request.region, &org_id_str)
         .into_iter()
@@ -4952,7 +5319,7 @@ async fn generate_app_network_main_tf(
             &resource_id_str,
         ))
         .chain(enclave_network_blocks(&resource_id_str))
-        .chain([enclave_eip_block(&resource_id_str, None)])
+        .chain([enclave_eip_block(&resource_id_str, None, &[])])
         .chain(
             [
                 ("vpc_id", traversal("aws_vpc", &["enclave", "id"])),
@@ -5005,14 +5372,19 @@ async fn generate_deployment_main_tf(
     let short_id: String = request.resource_id.to_string()[..8].to_owned();
     let resource_id_str = request.resource_id.to_string();
     let org_id_str = request.org_id.to_string();
-    let deployment_tag = [("DeploymentId", deployment_id.to_string())];
+    let mut deployment_tags = vec![("DeploymentId", deployment_id.to_string())];
+    if let Some(onprem) = request.managed_onprem.as_ref() {
+        deployment_tags.push((SCOPE_TAG_KEY, onprem.deployment_id.clone()));
+    }
     let url = match request.domain.as_deref() {
         Some(domain) => format!("https://{domain}"),
         None => "http://${aws_instance.enclave.public_ip}".to_string(),
     };
 
     let mut body = hcl::Body::builder().add_block(tf_settings_block());
-    let blocks = managed_provider_blocks(None, &network.region, &org_id_str)
+    // Linked (BYOC) candidates carry credentials; fully managed ones use the platform's.
+    let credentials = request.credentials.as_ref();
+    let blocks = managed_provider_blocks(credentials, &network.region, &org_id_str)
         .into_iter()
         .chain([amazon_linux_ami_data_block()])
         .chain(port_variable_blocks())
@@ -5022,7 +5394,7 @@ async fn generate_deployment_main_tf(
                 &short_id,
                 &resource_id_str,
                 hcl::Expression::String(network.vpc_id.clone()),
-                &deployment_tag,
+                &deployment_tags,
             ),
             enclave_instance_block(
                 request,
@@ -5032,7 +5404,7 @@ async fn generate_deployment_main_tf(
                 &resource_id_str,
                 hcl::Expression::String(network.subnet_id.clone()),
                 hcl::Expression::String(network.instance_profile_name.clone()),
-                &deployment_tag,
+                &deployment_tags,
             ),
         ])
         .chain(

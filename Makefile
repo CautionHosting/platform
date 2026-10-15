@@ -3,7 +3,7 @@
 
 export DOCKER_BUILDKIT=1
 
-.PHONY: admin build-admin build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-host install-cli install-cli-stagex install-cli-host release-cli sign-cli verify-cli reproduce-cli test test-unit test-live-caddy-nitro test-cli-install test-e2e test-e2e-admin test-e2e-ssh-units test-e2e-pgp-units test-e2e-pgp-audit test-e2e-stuck-pending test-e2e-app-deployments-schema test-e2e-platform-ports test-e2e-legal test-e2e-webauthn test-e2e-webauthn-reset test-e2e-webauthn-roundtrip test-e2e-webauthn-browser test-e2e-org-user-quorum test-e2e-byoc test-e2e-billing-gates test-e2e-paddle-subscriptions test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e build-drift-detector run-drift-detector test-e2e-app-deployments
+.PHONY: admin build-admin build-all build-enclave network postgres migrate run-api run-api-test run-gateway run-gateway-test run-email-test up up-test down down-clean down-test logs clean clean-enclave build-cli build-cli-host install-cli install-cli-stagex install-cli-host release-cli sign-cli verify-cli reproduce-cli test test-unit test-live-caddy-nitro test-cli-install test-e2e test-e2e-admin test-e2e-ssh-units test-e2e-pgp-units test-e2e-pgp-audit test-e2e-stuck-pending test-e2e-app-deployments-schema test-e2e-platform-ports test-e2e-legal test-e2e-webauthn test-e2e-webauthn-reset test-e2e-webauthn-roundtrip test-e2e-webauthn-browser test-e2e-org-user-quorum test-e2e-byoc test-e2e-billing-gates test-e2e-paddle-subscriptions test-paddle-sandbox build-gateway-e2e postgres-test migrate-test prepare-byoc-provisioner build-frontend-dist build-hcl-patcher clean-e2e build-drift-detector run-drift-detector test-e2e-app-deployments test-e2e-app-deployments-byoc
 
 OUT_DIR := out
 ENCLAVE_OUT_DIR := $(OUT_DIR)/enclave
@@ -673,7 +673,7 @@ PRICES_FILE ?= $(HOME)/.config/caution/prices.json
 KEYMAKER_POLICY_DIR ?= $(HOME)/.config/caution/policies
 # Test stacks run with app deployments off, whatever the operator's .env says;
 # test-e2e-app-deployments turns it on.
-API_EXTRA_ENV ?= -e APP_DEPLOYMENTS_ENABLED=false
+API_EXTRA_ENV ?= -e APP_DEPLOYMENTS_ENABLED=false -e APP_DEPLOYMENTS_BYOC_ENABLED=false
 E2E_LOCK_FILE ?= /tmp/caution-platform-e2e.lock
 ONPREM_PROVISIONER_DIR ?= ../bring-your-own-compute-setup
 ONPREM_PROVISIONER_IMAGE ?= codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest
@@ -924,11 +924,25 @@ test-e2e-app-deployments-schema:
 # keep the stack and its database, which record what leaked.
 test-e2e-app-deployments:
 	@$(MAKE) build-cli
-	@$(MAKE) up-test API_EXTRA_ENV="-e APP_DEPLOYMENTS_ENABLED=true -e MAX_CANDIDATES_PER_APP=1"
+	@$(MAKE) up-test API_EXTRA_ENV="-e APP_DEPLOYMENTS_ENABLED=true -e APP_DEPLOYMENTS_BYOC_ENABLED=false -e MAX_CANDIDATES_PER_APP=1"
 	@CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_app_deployments.sh; \
 	status=$$?; \
 	if [ $$status -eq 86 ]; then \
 		echo "LEAKED infrastructure: test stack and database kept. Destroy the app listed above, then run: make down-test"; \
+	else \
+		$(MAKE) down-test; \
+	fi; \
+	exit $$status
+
+# The same lifecycle E2E in the BYOC test account (ONPREM_AWS_* exported). The flag
+# for fully managed apps stays off: only the BYOC apps use the new lifecycle.
+test-e2e-app-deployments-byoc:
+	@$(MAKE) build-cli
+	@$(MAKE) up-test API_EXTRA_ENV="-e APP_DEPLOYMENTS_ENABLED=false -e APP_DEPLOYMENTS_BYOC_ENABLED=true -e MAX_CANDIDATES_PER_APP=1"
+	@E2E_BYOC=1 CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_app_deployments.sh; \
+	status=$$?; \
+	if [ $$status -eq 86 ]; then \
+		echo "LEAKED infrastructure: test stack and database kept. Destroy the app and BYOC environment listed above, then run: make down-test"; \
 	else \
 		$(MAKE) down-test; \
 	fi; \

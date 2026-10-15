@@ -6,8 +6,9 @@
 //! by a restart. The Elastic IP association is the source of truth for the
 //! live selection.
 
+use super::account::AppAccount;
 use super::destroy::{
-    DestroyBackend, DestroyTarget, Platform, complete_destroy_with, destroy_and_sweep, ec2_client,
+    DestroyBackend, DestroyTarget, Platform, complete_destroy_with, destroy_and_sweep,
 };
 use super::events;
 use super::lifecycle::{fail_attempt_with, project_live, stop_meter};
@@ -49,31 +50,32 @@ pub(super) trait ReconcileBackend: DestroyBackend {
     async fn app_address(
         &self,
         app_id: Uuid,
-        region: &str,
+        account: &AppAccount,
     ) -> Result<ec2::AppAddress, ec2::DescribeAppAddressError>;
 
     /// Attaches the app EIP to `instance_id`, never taking it from a holder.
     async fn attach_address(
         &self,
         app_id: Uuid,
-        region: &str,
+        account: &AppAccount,
         instance_id: &str,
     ) -> Result<String, ec2::MoveAppAddressError>;
 
     async fn instance_runtime(
         &self,
-        region: &str,
+        account: &AppAccount,
         instance_id: &str,
     ) -> Result<Option<ec2::InstanceRuntime>, ec2::DescribeInstanceRuntimeError>;
 }
 
-impl ReconcileBackend for Platform {
+impl ReconcileBackend for Platform<'_> {
     async fn app_address(
         &self,
         app_id: Uuid,
-        region: &str,
+        account: &AppAccount,
     ) -> Result<ec2::AppAddress, ec2::DescribeAppAddressError> {
-        ec2_client(region)
+        account
+            .ec2()
             .describe_app_address(&app_id.to_string())
             .await
     }
@@ -81,28 +83,27 @@ impl ReconcileBackend for Platform {
     async fn attach_address(
         &self,
         app_id: Uuid,
-        region: &str,
+        account: &AppAccount,
         instance_id: &str,
     ) -> Result<String, ec2::MoveAppAddressError> {
-        ec2_client(region)
+        account
+            .ec2()
             .move_app_address(&app_id.to_string(), instance_id, None)
             .await
     }
 
     async fn instance_runtime(
         &self,
-        region: &str,
+        account: &AppAccount,
         instance_id: &str,
     ) -> Result<Option<ec2::InstanceRuntime>, ec2::DescribeInstanceRuntimeError> {
-        ec2_client(region)
-            .describe_instance_runtime(instance_id)
-            .await
+        account.ec2().describe_instance_runtime(instance_id).await
     }
 }
 
 /// One reconciliation pass. Each step logs its errors; the next one still runs.
 pub(crate) async fn reconcile(state: Arc<AppState>) {
-    reconcile_with(&state, &Platform).await;
+    reconcile_with(&state, &Platform(&state)).await;
 }
 
 pub(super) async fn reconcile_with(state: &AppState, backend: &impl ReconcileBackend) {
@@ -507,6 +508,15 @@ pub(super) async fn reconcile_apps(
     .await
     .with_context(ReconcileAppsErrorCtx::database())?;
     for app in apps {
+        // Never another account's view of the app: an unreadable linked access
+        // skips it until the access returns.
+        let account = match backend.app_account(app.id, &app.region).await {
+            Ok(account) => account,
+            Err(error) => {
+                tracing::warn!(app_id = %app.id, error = %error, "deployments app account unavailable; reconciliation will retry");
+                continue;
+            }
+        };
         let running: Vec<(Uuid, String)> = match sqlx::query_as(
             "SELECT id, instance_id FROM app_deployments
              WHERE app_id = $1 AND status = 'running' AND instance_id IS NOT NULL
@@ -522,11 +532,20 @@ pub(super) async fn reconcile_apps(
                 continue;
             }
         };
-        if let Err(error) = repair_live(state, backend, &app, &running).await {
-            tracing::warn!(app_id = %app.id, error = %error, "live deployment repair will retry");
+        match repair_live(state, backend, &app, &account, &running).await {
+            Ok(()) => {}
+            // An unreadable app EIP (a revoked key, or another account's keys)
+            // means its instances would look missing too: none is judged lost.
+            Err(error @ RepairLiveError::DescribeAddress { .. }) => {
+                tracing::warn!(app_id = %app.id, error = %error, "app Elastic IP unreadable; lost-runtime checks skipped");
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!(app_id = %app.id, error = %error, "live deployment repair will retry");
+            }
         }
         for (deployment_id, instance_id) in &running {
-            mark_runtime_lost(state, backend, &app.region, *deployment_id, instance_id).await;
+            mark_runtime_lost(state, backend, &account, *deployment_id, instance_id).await;
         }
     }
     Ok(())
@@ -570,12 +589,13 @@ pub(super) async fn repair_live(
     state: &AppState,
     backend: &impl ReconcileBackend,
     app: &DeploymentsApp,
+    account: &AppAccount,
     running: &[(Uuid, String)],
 ) -> Result<(), RepairLiveError> {
     use RepairLiveErrorCtx as Ctx;
 
     let address = backend
-        .app_address(app.id, &app.region)
+        .app_address(app.id, account)
         .await
         .with_context(Ctx::describe_address(app.id))?;
     let holder = match address.instance_id.as_deref() {
@@ -640,7 +660,7 @@ pub(super) async fn repair_live(
     }
     let eip_public_ip = if activate {
         backend
-            .attach_address(app.id, &app.region, &instance_id)
+            .attach_address(app.id, account, &instance_id)
             .await
             .with_context(Ctx::attach_address(app.id))?
     } else {
@@ -671,11 +691,11 @@ fn runtime_gone(runtime: Option<&ec2::InstanceRuntime>) -> bool {
 async fn mark_runtime_lost(
     state: &AppState,
     backend: &impl ReconcileBackend,
-    region: &str,
+    account: &AppAccount,
     deployment_id: Uuid,
     instance_id: &str,
 ) {
-    match backend.instance_runtime(region, instance_id).await {
+    match backend.instance_runtime(account, instance_id).await {
         Ok(runtime) if runtime_gone(runtime.as_ref()) => {}
         Ok(_) => return,
         Err(error) => {

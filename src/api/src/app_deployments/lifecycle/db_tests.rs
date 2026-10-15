@@ -5,10 +5,12 @@
 //! deployment switch, destruction and reconciliation: run
 //! `bash tests/e2e/test_app_deployments_db.sh` (isolated PostgreSQL).
 
+mod byoc;
 mod history;
 mod reconciliation;
 
 use super::*;
+use crate::app_deployments::account::{self, AppAccount};
 use crate::app_deployments::admission::ReserveError;
 use crate::app_deployments::destroy::{
     self, DestroyAllError, DestroyBackend, DestroyError, DestroyRejection, begin_destroy,
@@ -337,10 +339,18 @@ impl FakeBackend {
 }
 
 impl DestroyBackend for FakeBackend {
+    async fn app_account(
+        &self,
+        _app_id: Uuid,
+        region: &str,
+    ) -> Result<AppAccount, account::AppAccountError> {
+        Ok(AppAccount::platform(region))
+    }
+
     async fn address_holder(
         &self,
         _app_id: Uuid,
-        _region: &str,
+        _account: &AppAccount,
     ) -> Result<Option<String>, ec2::DescribeAppAddressError> {
         Ok(self.holder.clone())
     }
@@ -350,7 +360,7 @@ impl DestroyBackend for FakeBackend {
         _org_id: Uuid,
         _app_id: Uuid,
         deployment_id: Uuid,
-        _region: &str,
+        _account: &AppAccount,
     ) -> Result<(), deployment::DestroyDeploymentStateError> {
         self.destroyed.lock().unwrap().push(deployment_id);
         if self.fail.load(Ordering::SeqCst) {
@@ -373,14 +383,14 @@ impl DestroyBackend for FakeBackend {
         &self,
         _app_id: Uuid,
         _deployment_id: Uuid,
-        _region: &str,
+        _account: &AppAccount,
     ) -> Result<Vec<ec2::Instance>, ec2::DescribeInstancesError> {
         Ok(self.ec2.tagged_instances())
     }
 
     async fn terminate_instances(
         &self,
-        _region: &str,
+        _account: &AppAccount,
         instance_ids: &[String],
     ) -> Result<(), ec2::TerminateInstancesError> {
         self.ec2.terminate(instance_ids);
@@ -391,14 +401,14 @@ impl DestroyBackend for FakeBackend {
         &self,
         _app_id: Uuid,
         _deployment_id: Uuid,
-        _region: &str,
+        _account: &AppAccount,
     ) -> Result<Vec<ec2::SecurityGroup>, ec2::DescribeSecurityGroupsError> {
         Ok(self.ec2.tagged_groups())
     }
 
     async fn delete_security_group(
         &self,
-        _region: &str,
+        _account: &AppAccount,
         group_id: &str,
     ) -> Result<(), ec2::DeleteSecurityGroupError> {
         self.ec2.delete_group(group_id)
@@ -2579,6 +2589,9 @@ async fn reads_are_scoped_to_the_callers_deployments_apps(pool: &PgPool) {
     }
 }
 
+/// 32 zero bytes: the DB tests seal and open linked credentials with it.
+const TEST_ENCRYPTION_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
 fn test_state(pool: &PgPool, data_dir: &str) -> std::sync::Arc<AppState> {
     Arc::new(AppState {
         db: pool.clone(),
@@ -2587,7 +2600,9 @@ fn test_state(pool: &PgPool, data_dir: &str) -> std::sync::Arc<AppState> {
         git_hostname: "git.test".to_string(),
         git_ssh_port: None,
         data_dir: data_dir.to_string(),
-        encryptor: None,
+        encryptor: Some(Arc::new(
+            crate::encryption::Encryptor::from_key(TEST_ENCRYPTION_KEY).unwrap(),
+        )),
         internal_service_secret: None,
         paddle_client_token: None,
         paddle_setup_price_id: None,

@@ -4,11 +4,12 @@
 //! Passkey-signed switch: moves the app Elastic IP to a Running deployment
 //! and records it live. The gateway refuses session-only and SSH-signed calls.
 
+use super::account;
 use super::events;
 use super::handlers::TLS_AFTER_SWITCH_SQL;
 use super::lifecycle::{AppAddressMover, project_live};
 use super::{LIFECYCLE_DEPLOYMENTS, lock_app_operations};
-use crate::{AppState, AuthContext, ec2, fully_managed_capacity};
+use crate::{AppState, AuthContext, ec2};
 use axum::{
     Extension, Json,
     extract::{Path, State},
@@ -430,9 +431,11 @@ async fn execute(
     use SwitchErrorCtx as Ctx;
 
     let (plan, region, instance_id) = check(row, deployment_id, request)?;
-    let ec2 = ec2::Ec2Client::new(&fully_managed_capacity::platform_credentials_for_region(
-        &region,
-    ));
+    // A failed account read moved nothing (`Inspect`).
+    let ec2 = account::app_account(state, app_id, &region)
+        .await
+        .with_context(Ctx::inspect())?
+        .ec2();
     if let SwitchPlan::Move = plan {
         let runtime = ec2
             .describe_instance_runtime(&instance_id)

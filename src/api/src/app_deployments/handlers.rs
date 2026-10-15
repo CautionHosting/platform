@@ -7,9 +7,10 @@
 //! authorizes SSH keys against the app ID in the path, so it is not SSH-signable.
 
 use super::LIFECYCLE_DEPLOYMENTS;
+use super::account;
 use super::lifecycle::{Role, role_for};
 use super::summary;
-use crate::{AppState, AuthContext, ec2, fully_managed_capacity};
+use crate::{AppState, AuthContext};
 use axum::{
     Extension, Json,
     extract::{Path, Query, State},
@@ -108,6 +109,8 @@ pub(super) struct DeploymentRow {
     pub(super) live_deployment_id: Option<Uuid>,
     /// The app Elastic IP.
     pub(super) stable_ip: Option<String>,
+    /// The app network lives in a linked (BYOC) account.
+    linked: bool,
     /// Hourly price at the configured margin; set by `load_views`, not a column.
     #[sqlx(skip)]
     pub(super) hourly_usd: Option<f64>,
@@ -226,7 +229,8 @@ pub(super) async fn query_rows_with(
                 d.activated_at, d.failed_at, d.error, d.bundle_hash,
                 {TLS_AFTER_SWITCH_SQL} AS tls_after_switch,
                 d.cleaned_up_at, d.destroyed_at, d.configuration,
-                cr.live_deployment_id, cr.public_ip AS stable_ip
+                cr.live_deployment_id, cr.public_ip AS stable_ip,
+                (cr.app_network->>'scope_tag') IS NOT NULL AS linked
          FROM app_deployments d
          JOIN compute_resources cr ON cr.id = d.app_id
          JOIN organization_members om
@@ -252,15 +256,21 @@ pub(super) async fn query_rows_with(
 /// Bounds one EC2 lookup, so a slow answer delays a read by at most this long.
 const INSTANCE_LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The instance's current address from EC2, or `None` when it has none or EC2
-/// cannot be read: one unreadable instance must not fail the whole read.
-async fn current_instance_ip(row: &DeploymentRow) -> Option<String> {
+/// The instance's current address from EC2, read in the app's account, or
+/// `None` when it has none or EC2 cannot be read: one unreadable instance must
+/// not fail the whole read.
+async fn current_instance_ip(state: &AppState, row: &DeploymentRow) -> Option<String> {
     let (Some(instance_id), Some(region)) = (row.instance_id.as_deref(), row.region.as_deref())
     else {
         return None;
     };
-    let credentials = fully_managed_capacity::platform_credentials_for_region(region);
-    let client = ec2::Ec2Client::new(&credentials);
+    let client = match account::app_account(state, row.app_id, region).await {
+        Ok(account) => account.ec2(),
+        Err(error) => {
+            tracing::warn!(deployment_id = %row.id, error = ?error, "failed to resolve the deployment's AWS account");
+            return None;
+        }
+    };
     match tokio::time::timeout(
         INSTANCE_LOOKUP_TIMEOUT,
         client.describe_instance_runtime(instance_id),
@@ -288,18 +298,32 @@ async fn current_instance_ip(row: &DeploymentRow) -> Option<String> {
     }
 }
 
-async fn load_views(
-    db: &PgPool,
+/// Caution's hourly price for an instance; none in a linked (BYOC) account,
+/// which pays AWS directly.
+fn instance_hourly_usd(
+    linked: bool,
+    instance_type: Option<&str>,
     pricing: &crate::PricingConfig,
+) -> Option<f64> {
+    if linked {
+        return None;
+    }
+    instance_type
+        .and_then(|instance_type| pricing.instance_pricing(instance_type))
+        .map(|pricing| pricing.unit_cost_usd())
+}
+
+async fn load_views(
+    state: &AppState,
     user_id: Uuid,
     app_id: Option<Uuid>,
     deployment_id: Option<Uuid>,
     retained_only: bool,
 ) -> Result<Vec<DeploymentView>, QueryRowsError> {
-    let rows = query_rows_with(db, user_id, app_id, deployment_id, retained_only).await?;
+    let rows = query_rows_with(&state.db, user_id, app_id, deployment_id, retained_only).await?;
     let addresses = futures::future::join_all(rows.iter().map(|row| async {
         if row.needs_instance_ip() {
-            current_instance_ip(row).await
+            current_instance_ip(state, row).await
         } else {
             None
         }
@@ -309,11 +333,8 @@ async fn load_views(
         .into_iter()
         .zip(addresses)
         .map(|(mut row, ip)| {
-            row.hourly_usd = row
-                .instance_type
-                .as_deref()
-                .and_then(|instance_type| pricing.instance_pricing(instance_type))
-                .map(|pricing| pricing.unit_cost_usd());
+            row.hourly_usd =
+                instance_hourly_usd(row.linked, row.instance_type.as_deref(), &state.pricing);
             row.into_view(ip.as_deref())
         })
         .collect())
@@ -357,8 +378,7 @@ pub(crate) async fn list_handler(
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<DeploymentView>>, ListDeploymentsError> {
     load_views(
-        &state.db,
-        &state.pricing,
+        &state,
         auth.user_id,
         Some(app_id),
         None,
@@ -413,8 +433,7 @@ pub(crate) async fn get_in_app_handler(
     use GetDeploymentInAppErrorCtx as Ctx;
 
     load_views(
-        &state.db,
-        &state.pricing,
+        &state,
         auth.user_id,
         Some(app_id),
         Some(deployment_id),
@@ -472,22 +491,15 @@ pub(crate) async fn get_handler(
 ) -> Result<Json<DeploymentView>, GetDeploymentError> {
     use GetDeploymentErrorCtx as Ctx;
 
-    load_views(
-        &state.db,
-        &state.pricing,
-        auth.user_id,
-        None,
-        Some(deployment_id),
-        false,
-    )
-    .await
-    .with_context(Ctx::load(deployment_id))?
-    .pop()
-    .map(Json)
-    .ok_or_else(|| GetDeploymentError::NotFound {
-        deployment_id,
-        location: std::panic::Location::caller(),
-    })
+    load_views(&state, auth.user_id, None, Some(deployment_id), false)
+        .await
+        .with_context(Ctx::load(deployment_id))?
+        .pop()
+        .map(Json)
+        .ok_or_else(|| GetDeploymentError::NotFound {
+            deployment_id,
+            location: std::panic::Location::caller(),
+        })
 }
 
 #[cfg(test)]
@@ -518,8 +530,24 @@ mod tests {
             configuration: serde_json::json!({}),
             live_deployment_id,
             stable_ip: Some("198.51.100.42".to_string()),
+            linked: false,
             hourly_usd: None,
         }
+    }
+
+    #[test]
+    fn linked_accounts_get_no_caution_estimate() {
+        let pricing = crate::PricingConfig {
+            compute_margin_percent: 0.0,
+            subscription_tiers: caution_config::pricing::DuplicateCheckedTiers(Default::default()),
+            credit_packages: Default::default(),
+            paddle_catalog: None,
+        };
+        assert_eq!(
+            instance_hourly_usd(false, Some("m5.xlarge"), &pricing),
+            Some(0.192)
+        );
+        assert_eq!(instance_hourly_usd(true, Some("m5.xlarge"), &pricing), None);
     }
 
     #[test]

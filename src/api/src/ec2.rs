@@ -280,6 +280,18 @@ pub(crate) enum DescribeSecurityGroupsError {
     },
 }
 
+/// Failure modes for [`Ec2Client::subnet_zones`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum SubnetZonesError {
+    #[error("EC2 DescribeSubnets request failed [{location}]")]
+    Request {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
 /// Failure modes for [`Ec2Client::delete_security_group`].
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum DeleteSecurityGroupError {
@@ -909,6 +921,28 @@ impl Ec2Client {
             .await
             .with_context(Ctx::request())?;
         Ok(!parse_tag_values(&body, "instanceType").is_empty())
+    }
+
+    /// The availability zone of each of `subnet_ids`.
+    #[tracing::instrument(skip_all, err)]
+    pub async fn subnet_zones(
+        &self,
+        subnet_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, String>, SubnetZonesError> {
+        use SubnetZonesErrorCtx as Ctx;
+
+        let mut params = vec![
+            ("Action".to_string(), "DescribeSubnets".to_string()),
+            ("Version".to_string(), "2016-11-15".to_string()),
+        ];
+        for (index, subnet_id) in subnet_ids.iter().enumerate() {
+            params.push((format!("SubnetId.{}", index + 1), subnet_id.clone()));
+        }
+        let body = self
+            .signed_request(&params)
+            .await
+            .with_context(Ctx::request())?;
+        Ok(parse_subnet_zones(&body))
     }
 
     #[tracing::instrument(skip_all, err)]
@@ -1795,6 +1829,15 @@ fn parse_tag_values(xml: &str, tag_name: &str) -> Vec<String> {
     values
 }
 
+/// `subnetId` to `availabilityZone` in a DescribeSubnets response: each subnet
+/// item holds one of each (`availabilityZoneId` is another tag).
+fn parse_subnet_zones(xml: &str) -> std::collections::HashMap<String, String> {
+    parse_tag_values(xml, "subnetId")
+        .into_iter()
+        .zip(parse_tag_values(xml, "availabilityZone"))
+        .collect()
+}
+
 fn parse_images(xml: &str) -> Vec<Image> {
     let image_ids = parse_tag_values(xml, "imageId");
     let creation_dates = parse_tag_values(xml, "creationDate");
@@ -1842,6 +1885,20 @@ mod tests {
             .iter()
             .find(|(param_key, _)| param_key == key)
             .map(|(_, value)| value.as_str())
+    }
+
+    #[test]
+    fn subnet_zones_pair_each_subnet_with_its_zone() {
+        let xml = "<DescribeSubnetsResponse><subnetSet>\
+            <item><subnetId>subnet-a</subnetId><availabilityZone>us-east-1a</availabilityZone>\
+            <availabilityZoneId>use1-az1</availabilityZoneId><subnetArn>arn:subnet-a</subnetArn></item>\
+            <item><subnetId>subnet-b</subnetId><availabilityZone>us-east-1b</availabilityZone>\
+            <availabilityZoneId>use1-az2</availabilityZoneId></item>\
+            </subnetSet></DescribeSubnetsResponse>";
+        let zones = parse_subnet_zones(xml);
+        assert_eq!(zones.len(), 2);
+        assert_eq!(zones["subnet-a"], "us-east-1a");
+        assert_eq!(zones["subnet-b"], "us-east-1b");
     }
 
     #[test]

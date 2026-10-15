@@ -32,6 +32,9 @@
 #         apps list / -a and the history
 #   16    Unchanged push rebuilds HEAD and goes live (nothing is live)
 #   17    Final destroy
+# E2E_BYOC=1: step 5 is caution init --byoc, step 17 caution teardown --byoc. A
+# failed init whose output names no provisioner deployment prints `LEAKED? BYOC
+# environment ...` and exits 86: check the test account for caution-* resources.
 #
 # The cleanup trap waits for every background push and for the app's active
 # operation, then destroys the app until the database shows it terminated. If it
@@ -58,6 +61,15 @@ DESTROY_TIMEOUT="${DESTROY_TIMEOUT:-1200}"
 # 1 (default, strict): `verify -d` must succeed and write the trust file. 0 tolerates
 # the environmental failures test_happy_path.sh tolerates.
 E2E_STRICT_VERIFY="${E2E_STRICT_VERIFY:-1}"
+# 1: the same flow in a linked AWS account (BYOC). `caution init --byoc` replaces
+# `apps create`, and `caution teardown --byoc` the final destroy. Needs the BYOC test
+# account's ONPREM_AWS_ACCESS_KEY_ID/ONPREM_AWS_SECRET_ACCESS_KEY (as test_byoc.sh)
+# and a stack with APP_DEPLOYMENTS_BYOC_ENABLED=true: make test-e2e-app-deployments-byoc.
+E2E_BYOC="${E2E_BYOC:-0}"
+ONPREM_TEST_REGION="${ONPREM_TEST_REGION:-us-east-1}"
+ONPREM_PROVISIONER_IMAGE="${ONPREM_PROVISIONER_IMAGE:-codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest}"
+PROVISIONER_DEPLOYMENT_ID=""
+BYOC_ENVIRONMENT_UP=false
 # Size of the blob of the interrupted push: large enough that the client is still
 # transferring when it is killed.
 INTERRUPT_MB="${INTERRUPT_MB:-128}"
@@ -112,6 +124,23 @@ cleanup() {
     fi
 
     destroy_leftover_apps
+
+    # The linked environment goes once its app is gone (teardown deletes its VPC).
+    if [ "$BYOC_ENVIRONMENT_UP" = true ]; then
+        if [ "$LEAKED" = 1 ] || [ -z "$PROVISIONER_DEPLOYMENT_ID" ]; then
+            echo "LEAKED BYOC environment ${PROVISIONER_DEPLOYMENT_ID:-unknown} in $ONPREM_TEST_REGION: tear it down after destroying its app"
+            LEAKED=1
+        else
+            echo "Tearing down BYOC environment $PROVISIONER_DEPLOYMENT_ID..."
+            docker run --rm \
+                -e AWS_ACCESS_KEY_ID="$ONPREM_AWS_ACCESS_KEY_ID" \
+                -e AWS_SECRET_ACCESS_KEY="$ONPREM_AWS_SECRET_ACCESS_KEY" \
+                ${ONPREM_AWS_SESSION_TOKEN:+-e AWS_SESSION_TOKEN="$ONPREM_AWS_SESSION_TOKEN"} \
+                -e AWS_REGION="$ONPREM_TEST_REGION" -e TEARDOWN=true \
+                -e DEPLOYMENT_ID="$PROVISIONER_DEPLOYMENT_ID" "$ONPREM_PROVISIONER_IMAGE" \
+                || { echo "LEAKED BYOC environment $PROVISIONER_DEPLOYMENT_ID: provisioner teardown failed"; LEAKED=1; }
+        fi
+    fi
 
     if [ "$HAD_OPERATOR_CONFIG" = true ]; then
         cp "$OPERATOR_CONFIG_BACKUP" "$CONFIG_DIR/config.json"
@@ -188,6 +217,14 @@ line_with() {
         fi
     done <<<"$1"
     return 1
+}
+
+# The CLI provisions and tears down the linked environment with the BYOC account's keys.
+byoc_cli() {
+    env AWS_ACCESS_KEY_ID="$ONPREM_AWS_ACCESS_KEY_ID" \
+        AWS_SECRET_ACCESS_KEY="$ONPREM_AWS_SECRET_ACCESS_KEY" \
+        ${ONPREM_AWS_SESSION_TOKEN:+AWS_SESSION_TOKEN="$ONPREM_AWS_SESSION_TOKEN"} \
+        "$CAUTION_BIN" -u "$GATEWAY_URL" "$@"
 }
 
 db() {
@@ -394,12 +431,22 @@ done
 
 # The stack must run with the flag and the candidate cap this test relies on: fail
 # closed when the API container's environment cannot be read.
-if ! API_ENV=$(docker inspect "$API_CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null); then
-    step_fail "cannot read the environment of the API container '$API_CONTAINER' (is the test stack up? run: make test-e2e-app-deployments)"
+if [ "$E2E_BYOC" = 1 ]; then
+    REQUIRED_FLAGS=(APP_DEPLOYMENTS_BYOC_ENABLED=true MAX_CANDIDATES_PER_APP=1)
+    MAKE_TARGET=test-e2e-app-deployments-byoc
+    if [ -z "${ONPREM_AWS_ACCESS_KEY_ID:-}" ] || [ -z "${ONPREM_AWS_SECRET_ACCESS_KEY:-}" ]; then
+        step_fail "E2E_BYOC=1 needs ONPREM_AWS_ACCESS_KEY_ID and ONPREM_AWS_SECRET_ACCESS_KEY (the BYOC test account)"
+    fi
+else
+    REQUIRED_FLAGS=(APP_DEPLOYMENTS_ENABLED=true MAX_CANDIDATES_PER_APP=1)
+    MAKE_TARGET=test-e2e-app-deployments
 fi
-for setting in APP_DEPLOYMENTS_ENABLED=true MAX_CANDIDATES_PER_APP=1; do
+if ! API_ENV=$(docker inspect "$API_CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null); then
+    step_fail "cannot read the environment of the API container '$API_CONTAINER' (is the test stack up? run: make $MAKE_TARGET)"
+fi
+for setting in "${REQUIRED_FLAGS[@]}"; do
     if ! grep -qx "$setting" <<<"$API_ENV"; then
-        step_fail "API container '$API_CONTAINER' lacks $setting (run: make test-e2e-app-deployments)"
+        step_fail "API container '$API_CONTAINER' lacks $setting (run: make $MAKE_TARGET)"
     fi
 done
 step_pass "Gateway health check, API flags"
@@ -470,6 +517,27 @@ DELETE FROM credit_ledger WHERE organization_id = '$ORG_ID';
 INSERT INTO credit_ledger (organization_id, delta_cents, entry_type, description)
 VALUES ('$ORG_ID', 10000, 'purchase', 'e2e deploy gate seed');
 " >/dev/null 2>&1 || log "  Warning: could not seed credits"
+
+# BYOC deploys also need an active subscription (the subscription test_byoc.sh seeds).
+if [ "$E2E_BYOC" = 1 ]; then
+    log "Seeding an active subscription for the BYOC deploy gate..."
+    db "
+DELETE FROM subscription_ledger WHERE organization_id = '$ORG_ID';
+DELETE FROM subscriptions WHERE user_id = '$USER_ID';
+INSERT INTO subscriptions (
+    user_id, organization_id, tier, billing_period,
+    max_vcpus, max_apps, price_cents_per_cycle, status,
+    started_at, current_period_start, current_period_end,
+    next_billing_at, created_at, updated_at
+)
+VALUES (
+    '$USER_ID', '$ORG_ID', 'starter', 'monthly',
+    4, 2, 2900, 'active',
+    NOW(), NOW(), NOW(),
+    TIMESTAMPTZ '9999-12-31 23:59:59+00', NOW(), NOW()
+);
+" >/dev/null || step_fail "Seed an active subscription for the BYOC deploy gate (org '$ORG_ID')"
+fi
 step_pass "E2E login (user: $USER_ID)"
 
 # ── Step 3: Add SSH Key ──────────────────────────────────────────────
@@ -522,21 +590,46 @@ step_pass "Demo app fixture and deployment-switch built"
 # ── Step 5: caution apps create (brief step 1) ───────────────────────
 
 STEP_NUM=5
-log "Running caution apps create..."
-CREATE_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" apps create 2>&1) || {
-    echo "$CREATE_OUTPUT"
-    step_fail "caution apps create"
-}
+if [ "$E2E_BYOC" = 1 ]; then
+    CREATE_CMD="caution init --byoc"
+    log "Running caution init --byoc in $ONPREM_TEST_REGION..."
+    CREATE_STATUS=0
+    CREATE_OUTPUT=$(byoc_cli init --byoc --yes --region "$ONPREM_TEST_REGION" \
+        --name "bg-byoc-$(date +%Y%m%d%H%M%S)" 2>&1) || CREATE_STATUS=$?
+    # The CLI echoes the provisioner's log, whose `[OK] Deployment ID: <id>` precedes
+    # the app creation and credential registration; its own summary line comes last.
+    # Its state file (~/.caution/<app>/bring-your-own-compute.json) is written only
+    # after both API calls, so it holds nothing the output lacks.
+    PROVISIONER_DEPLOYMENT_ID=$(grep -oE 'Deployment ID: [a-f0-9]+' <<<"$CREATE_OUTPUT" | tail -1 | awk '{print $3}' || true)
+    if [ -n "$PROVISIONER_DEPLOYMENT_ID" ]; then
+        BYOC_ENVIRONMENT_UP=true
+    fi
+    if [ "$CREATE_STATUS" != 0 ] || [ -z "$PROVISIONER_DEPLOYMENT_ID" ]; then
+        echo "$CREATE_OUTPUT"
+        if [ -z "$PROVISIONER_DEPLOYMENT_ID" ]; then
+            echo "LEAKED? BYOC environment of a failed caution init --byoc in $ONPREM_TEST_REGION: check the test account for caution-* resources"
+            LEAKED=1
+        fi
+        step_fail "caution init --byoc (exit $CREATE_STATUS, provisioner deployment '${PROVISIONER_DEPLOYMENT_ID:-none}')"
+    fi
+else
+    CREATE_CMD="caution apps create"
+    log "Running caution apps create..."
+    CREATE_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" apps create 2>&1) || {
+        echo "$CREATE_OUTPUT"
+        step_fail "caution apps create"
+    }
+fi
 
 if [ -f ".caution/deployment.json" ]; then
     RESOURCE_ID=$(jq -r '.resource_id' .caution/deployment.json)
 else
     echo "$CREATE_OUTPUT"
-    step_fail "caution apps create (no .caution/deployment.json)"
+    step_fail "$CREATE_CMD (no .caution/deployment.json)"
 fi
 GIT_URL=$(git remote get-url caution 2>/dev/null || true)
 if [ -z "$GIT_URL" ] || [[ "$GIT_URL" != *"$RESOURCE_ID"* ]]; then
-    step_fail "caution apps create (git remote not set)"
+    step_fail "$CREATE_CMD (git remote not set)"
 fi
 # Pushes would go to the host the API advertises: it must be this stack (GIT_HOSTNAME=localhost).
 GIT_HOST=$(url_host "$GIT_URL")
@@ -547,9 +640,9 @@ fi
 RES_JSON=$(api_get "/resources/$RESOURCE_ID") || step_fail "GET /api/resources/$RESOURCE_ID"
 LIFECYCLE=$(jq -r '.lifecycle' <<<"$RES_JSON")
 if [ "$LIFECYCLE" != "deployments" ]; then
-    step_fail "New app is on lifecycle '$LIFECYCLE', want 'deployments' (is APP_DEPLOYMENTS_ENABLED=true on the API?)"
+    step_fail "New app is on lifecycle '$LIFECYCLE', want 'deployments' (is ${REQUIRED_FLAGS[0]} on the API?)"
 fi
-step_pass "caution apps create: lifecycle is deployments (app: $RESOURCE_ID)"
+step_pass "$CREATE_CMD: lifecycle is deployments (app: $RESOURCE_ID)"
 
 # ── Step 6: Push A (brief step 2) ────────────────────────────────────
 
@@ -604,6 +697,15 @@ GET_A_OUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" apps get </dev/null 2>&1) || {
 echo "$GET_A_OUT"
 contains "$GET_A_OUT" "Live: ${A_ID:0:8}" || step_fail "apps get does not print 'Live: ${A_ID:0:8}'"
 line_with "$GET_A_OUT" "${A_ID:0:8}  " >/dev/null || step_fail "apps get has no deployments table row for ${A_ID:0:8}"
+if [ "$E2E_BYOC" = 1 ]; then
+    # The network was created in the linked environment, and nothing is metered as fully managed.
+    if [ "$(db "SELECT app_network->>'scope_tag' FROM compute_resources WHERE id = '$RESOURCE_ID'")" != "$PROVISIONER_DEPLOYMENT_ID" ]; then
+        step_fail "App network is not in the linked environment $PROVISIONER_DEPLOYMENT_ID"
+    fi
+    if [ "$(db "SELECT COUNT(*) FROM tracked_resources WHERE application_id = '$RESOURCE_ID'")" != "0" ]; then
+        step_fail "BYOC app has fully managed meters"
+    fi
+fi
 step_pass "Push A: live and running (deployment $A_ID), apps list and apps get agree"
 
 # ── Step 7: Push interrupted mid-transfer (Task 3) ───────────────────
@@ -1040,8 +1142,14 @@ step_pass "Unchanged push after destroy rebuilt HEAD and went live (deployment $
 # ── Step 17: Final destroy ───────────────────────────────────────────
 
 STEP_NUM=17
-log "Destroying the app..."
-"$CAUTION_BIN" -u "$GATEWAY_URL" apps destroy "$RESOURCE_ID" --force || step_fail "caution apps destroy (final)"
+if [ "$E2E_BYOC" = 1 ]; then
+    log "Tearing down the app and its linked environment..."
+    byoc_cli teardown --byoc --force || step_fail "caution teardown --byoc"
+    BYOC_ENVIRONMENT_UP=false
+else
+    log "Destroying the app..."
+    "$CAUTION_BIN" -u "$GATEWAY_URL" apps destroy "$RESOURCE_ID" --force || step_fail "caution apps destroy (final)"
+fi
 if [ "$(db "SELECT state::text FROM compute_resources WHERE id = '$RESOURCE_ID'")" != "terminated" ]; then
     step_fail "App is not terminated after the final destroy"
 fi

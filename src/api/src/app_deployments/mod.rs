@@ -3,6 +3,7 @@
 
 //! App deployments (blue-green) for apps on the `deployments` lifecycle.
 
+pub(crate) mod account;
 pub(crate) mod admission;
 pub(crate) mod destroy;
 pub(crate) mod events;
@@ -58,13 +59,59 @@ pub(crate) fn enabled_for_new_apps() -> bool {
     std::env::var("APP_DEPLOYMENTS_ENABLED").is_ok_and(|value| value.trim() == "true")
 }
 
-/// The lifecycle of a new fully managed app: `deployments` only when the flag is on.
+/// `APP_DEPLOYMENTS_BYOC_ENABLED`: new BYOC apps (`caution init --byoc`) get the
+/// deployments lifecycle. Apart from the managed flag, so each mode is released
+/// on its own.
+pub(crate) fn byoc_enabled_for_new_apps() -> bool {
+    std::env::var("APP_DEPLOYMENTS_BYOC_ENABLED").is_ok_and(|value| value.trim() == "true")
+}
+
+/// The lifecycle of a new app: `deployments` only when its mode's flag is on.
 pub(crate) fn lifecycle_for_new_app(enabled: bool) -> &'static str {
     if enabled {
         LIFECYCLE_DEPLOYMENTS
     } else {
         LIFECYCLE_LEGACY
     }
+}
+
+/// Failure modes for [`assign_byoc_lifecycle`].
+#[derive(Debug, thiserror::Error, CtxError)]
+#[error("failed to assign the BYOC lifecycle of app {app_id} [{location}]")]
+pub(crate) struct AssignByocLifecycleError {
+    app_id: Uuid,
+    #[location]
+    location: Location,
+    #[source]
+    source: BoxError,
+}
+
+/// The first BYOC link of a pristine app is BYOC app creation: interactive
+/// `caution init --byoc` creates the app through `POST /resources` (which
+/// follows the managed flag), then links it. Sets the lifecycle the BYOC flag
+/// (`byoc_enabled`) gives a new app, only while the app is initialized, has no
+/// region, network, deployment or BYOC credential. Returns whether the app was
+/// pristine (and its lifecycle assigned); any other link keeps the lifecycle.
+pub(crate) async fn assign_byoc_lifecycle(
+    db: &PgPool,
+    app_id: Uuid,
+    byoc_enabled: bool,
+) -> Result<bool, AssignByocLifecycleError> {
+    sqlx::query(
+        "UPDATE compute_resources cr SET lifecycle = $2
+         WHERE cr.id = $1 AND cr.destroyed_at IS NULL AND cr.state = 'initialized'
+           AND cr.region IS NULL AND cr.app_network IS NULL
+           AND NOT EXISTS (SELECT 1 FROM app_deployments d WHERE d.app_id = cr.id)
+           AND NOT EXISTS (
+               SELECT 1 FROM cloud_credentials c WHERE c.resource_id = cr.id AND c.managed_on_prem
+           )",
+    )
+    .bind(app_id)
+    .bind(lifecycle_for_new_app(byoc_enabled))
+    .execute(db)
+    .await
+    .map(|result| result.rows_affected() == 1)
+    .with_context(AssignByocLifecycleErrorCtx::new(app_id))
 }
 
 /// Failure modes for [`lock_app_operations`].

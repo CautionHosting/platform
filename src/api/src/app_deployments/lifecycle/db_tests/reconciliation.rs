@@ -34,6 +34,9 @@ async fn reconciliation() {
     unassociated_or_unknown_holder_is_only_reported(&state).await;
     lost_runtime_is_marked_and_keeps_the_pointer(&state).await;
     concurrent_selection_is_not_reverted(&state).await;
+    linked_apps_are_reconciled_in_their_account(&state).await;
+    unreadable_linked_access_skips_the_app(&state).await;
+    unreadable_address_marks_nothing_lost(&state).await;
     pool.close().await;
 }
 
@@ -46,6 +49,14 @@ struct FakeAws {
     /// The EC2 state by instance (`None`: not found).
     runtimes: Mutex<HashMap<String, Option<&'static str>>>,
     attached: Mutex<Vec<String>>,
+    /// Apps on a linked account: their keys, `None` when unreadable.
+    linked: Mutex<HashMap<Uuid, Option<deployment::AwsCredentials>>>,
+    /// Instances whose runtime was read with linked keys.
+    linked_reads: Mutex<Vec<String>>,
+    /// Instances the app EIP was attached to with linked keys.
+    linked_attaches: Mutex<Vec<String>>,
+    /// Deployments whose state was destroyed with linked keys.
+    linked_destroys: Mutex<Vec<Uuid>>,
     /// State lock deletions and destroys, in order.
     calls: Mutex<Vec<Call>>,
     fail_destroy: AtomicBool,
@@ -73,6 +84,23 @@ impl FakeAws {
             .unwrap()
             .insert(instance_id.to_string(), state);
         self
+    }
+
+    fn linked(self, app: Uuid, credentials: Option<deployment::AwsCredentials>) -> Self {
+        self.linked.lock().unwrap().insert(app, credentials);
+        self
+    }
+
+    fn linked_reads(&self) -> Vec<String> {
+        self.linked_reads.lock().unwrap().clone()
+    }
+
+    fn linked_attaches(&self) -> Vec<String> {
+        self.linked_attaches.lock().unwrap().clone()
+    }
+
+    fn linked_destroys(&self) -> Vec<Uuid> {
+        self.linked_destroys.lock().unwrap().clone()
     }
 
     fn holder(&self, app: Uuid) -> Option<String> {
@@ -120,12 +148,27 @@ impl FakeAws {
 }
 
 impl DestroyBackend for FakeAws {
-    async fn address_holder(
+    async fn app_account(
         &self,
         app_id: Uuid,
         region: &str,
+    ) -> Result<AppAccount, account::AppAccountError> {
+        match self.linked.lock().unwrap().get(&app_id).cloned() {
+            None => Ok(AppAccount::platform(region)),
+            Some(Some(credentials)) => Ok(AppAccount::Linked(credentials)),
+            Some(None) => Err(account::AppAccountError::Unavailable {
+                app_id,
+                location: std::panic::Location::caller(),
+            }),
+        }
+    }
+
+    async fn address_holder(
+        &self,
+        app_id: Uuid,
+        account: &AppAccount,
     ) -> Result<Option<String>, ec2::DescribeAppAddressError> {
-        self.app_address(app_id, region)
+        self.app_address(app_id, account)
             .await
             .map(|address| address.instance_id)
     }
@@ -135,8 +178,11 @@ impl DestroyBackend for FakeAws {
         _org_id: Uuid,
         _app_id: Uuid,
         deployment_id: Uuid,
-        _region: &str,
+        account: &AppAccount,
     ) -> Result<(), deployment::DestroyDeploymentStateError> {
+        if account.provider_credentials().is_some() {
+            self.linked_destroys.lock().unwrap().push(deployment_id);
+        }
         self.calls
             .lock()
             .unwrap()
@@ -165,14 +211,14 @@ impl DestroyBackend for FakeAws {
         &self,
         _app_id: Uuid,
         _deployment_id: Uuid,
-        _region: &str,
+        _account: &AppAccount,
     ) -> Result<Vec<ec2::Instance>, ec2::DescribeInstancesError> {
         Ok(self.ec2.tagged_instances())
     }
 
     async fn terminate_instances(
         &self,
-        _region: &str,
+        _account: &AppAccount,
         instance_ids: &[String],
     ) -> Result<(), ec2::TerminateInstancesError> {
         self.ec2.terminate(instance_ids);
@@ -183,14 +229,14 @@ impl DestroyBackend for FakeAws {
         &self,
         _app_id: Uuid,
         _deployment_id: Uuid,
-        _region: &str,
+        _account: &AppAccount,
     ) -> Result<Vec<ec2::SecurityGroup>, ec2::DescribeSecurityGroupsError> {
         Ok(self.ec2.tagged_groups())
     }
 
     async fn delete_security_group(
         &self,
-        _region: &str,
+        _account: &AppAccount,
         group_id: &str,
     ) -> Result<(), ec2::DeleteSecurityGroupError> {
         self.ec2.delete_group(group_id)
@@ -201,7 +247,7 @@ impl ReconcileBackend for FakeAws {
     async fn app_address(
         &self,
         app_id: Uuid,
-        _region: &str,
+        _account: &AppAccount,
     ) -> Result<ec2::AppAddress, ec2::DescribeAppAddressError> {
         let Some(holder) = self.addresses.lock().unwrap().get(&app_id).cloned() else {
             return Err(ec2::DescribeAppAddressError::DescribeAddresses {
@@ -220,9 +266,15 @@ impl ReconcileBackend for FakeAws {
     async fn attach_address(
         &self,
         app_id: Uuid,
-        _region: &str,
+        account: &AppAccount,
         instance_id: &str,
     ) -> Result<String, ec2::MoveAppAddressError> {
+        if account.provider_credentials().is_some() {
+            self.linked_attaches
+                .lock()
+                .unwrap()
+                .push(instance_id.to_string());
+        }
         let mut addresses = self.addresses.lock().unwrap();
         let holder = addresses.get_mut(&app_id).unwrap();
         if holder
@@ -242,9 +294,15 @@ impl ReconcileBackend for FakeAws {
 
     async fn instance_runtime(
         &self,
-        _region: &str,
+        account: &AppAccount,
         instance_id: &str,
     ) -> Result<Option<ec2::InstanceRuntime>, ec2::DescribeInstanceRuntimeError> {
+        if account.provider_credentials().is_some() {
+            self.linked_reads
+                .lock()
+                .unwrap()
+                .push(instance_id.to_string());
+        }
         let Some(state) = self.runtimes.lock().unwrap().get(instance_id).copied() else {
             return Err(ec2::DescribeInstanceRuntimeError::Request {
                 location: std::panic::Location::caller(),
@@ -255,6 +313,14 @@ impl ReconcileBackend for FakeAws {
             state: state.to_string(),
             public_ip: None,
         }))
+    }
+}
+
+fn linked_keys() -> deployment::AwsCredentials {
+    deployment::AwsCredentials {
+        access_key_id: "AKIALINKED".to_string(),
+        secret_access_key: "secret".to_string(),
+        region: "us-east-1".to_string(),
     }
 }
 
@@ -1047,9 +1113,15 @@ async fn concurrent_selection_is_not_reverted(state: &AppState) {
     // Read before a switch to `other` committed: the EIP still at the target.
     serve(pool, f.app, other).await;
     let aws = FakeAws::default().address(f.app, Some(&instance_id));
-    repair_live(state, &aws, &unselected, &running)
-        .await
-        .unwrap();
+    repair_live(
+        state,
+        &aws,
+        &unselected,
+        &AppAccount::platform("us-east-1"),
+        &running,
+    )
+    .await
+    .unwrap();
     assert_eq!(app_row(pool, f.app).await.live, Some(other));
     assert!(!deployment_row(pool, f.target).await.1);
 
@@ -1065,7 +1137,14 @@ async fn concurrent_selection_is_not_reverted(state: &AppState) {
     let repair = {
         let (state, aws) = (test_state(pool, "/nonexistent"), aws.clone());
         tokio::spawn(async move {
-            repair_live(&state, &*aws, &unselected, &[(g.target, g_instance)]).await
+            repair_live(
+                &state,
+                &*aws,
+                &unselected,
+                &AppAccount::platform("us-east-1"),
+                &[(g.target, g_instance)],
+            )
+            .await
         })
     };
     wait_for_lock_waiters(pool, 1).await;
@@ -1080,4 +1159,57 @@ async fn concurrent_selection_is_not_reverted(state: &AppState) {
     assert!(aws.attached().is_empty());
     assert_eq!(aws.holder(g.app), None);
     assert!(!deployment_row(pool, g.target).await.1);
+}
+
+async fn linked_apps_are_reconciled_in_their_account(state: &AppState) {
+    let pool = &state.db;
+    let (f, instance_id) = networked(pool).await;
+    let aws = FakeAws::default()
+        .linked(f.app, Some(linked_keys()))
+        .address(f.app, None)
+        .runtime(&instance_id, Some("running"));
+
+    reconcile_with(state, &aws).await;
+    assert_eq!(aws.attached(), vec![instance_id.clone()]);
+    assert_eq!(aws.linked_attaches(), vec![instance_id.clone()]);
+    assert_eq!(aws.linked_reads(), vec![instance_id]);
+
+    // A failed attempt's cleanup destroys its state with the linked keys too.
+    let failed = fixture(pool, "failed").await;
+    update(
+        pool,
+        "UPDATE app_deployments SET failure_kind = 'provisioning' WHERE id = $1",
+        failed.target,
+    )
+    .await;
+    abandon(pool, failed.target).await;
+    let aws = FakeAws::default().linked(failed.app, Some(linked_keys()));
+    reconcile_with(state, &aws).await;
+    assert_eq!(aws.destroyed(), vec![failed.target]);
+    assert_eq!(aws.linked_destroys(), vec![failed.target]);
+}
+
+async fn unreadable_linked_access_skips_the_app(state: &AppState) {
+    let pool = &state.db;
+    let (f, instance_id) = networked(pool).await;
+    // Caution's account would report the instance missing: it is never asked.
+    let aws = FakeAws::default()
+        .linked(f.app, None)
+        .address(f.app, None)
+        .runtime(&instance_id, None);
+
+    reconcile_with(state, &aws).await;
+    assert_eq!(status(pool, f.target).await.as_deref(), Some("running"));
+    assert!(aws.attached().is_empty());
+}
+
+async fn unreadable_address_marks_nothing_lost(state: &AppState) {
+    let pool = &state.db;
+    let (f, instance_id) = networked(pool).await;
+    // No address configured: EC2 cannot read the app EIP (a revoked key, or
+    // another account's keys), where the instance also looks missing.
+    let aws = FakeAws::default().runtime(&instance_id, None);
+
+    reconcile_with(state, &aws).await;
+    assert_eq!(status(pool, f.target).await.as_deref(), Some("running"));
 }
