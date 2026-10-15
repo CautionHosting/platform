@@ -73,11 +73,11 @@ Set these in `~/.config/caution/.env`, then restart the API (`env.example` lists
   linked checkout; a full ID works anywhere. Anything shorter than 8 characters is
   refused before any request ("use the full ID or at least its first 8 characters").
 - **Dashboard.** The app header is compact, with an App details disclosure for the
-  rest. Deployments list the live one first; selecting one opens the inspector with its
-  verification command, **Switch live** (a passkey prompt; offered for a running
-  non-live deployment) and **Destroy deployment** (not offered for the live one, one
-  still building, or for Legacy apps). Settings shows the retained instances and their
-  estimated cost. History is a collapsible list below the deployments. A Legacy app
+  rest. Deployments list the live one first, one row each; selecting one opens a side
+  panel with its verification command, **Switch live** (a passkey prompt; offered for a
+  running non-live deployment) and **Destroy deployment** (not offered for the live one,
+  one still building, or for Legacy apps). Settings shows the retained instances and
+  their estimated cost. History is a timeline below the deployments. A Legacy app
   shows its **Deployment** section (single deployment, with its commit) directly, and no
   deployment actions.
 - **Known limits.** A candidate is metered only from its health check on, as Legacy

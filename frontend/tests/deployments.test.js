@@ -4,8 +4,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
-  appStateLabel, candidateCountLabel, canDestroy, canSwitch, destroyAppSentence, destroyDeployment, historyRowLabel,
-  debugSwitchNotice, deploymentsUrl, isActiveApp, isDebugDeployment, orderDeployments, retainedInstanceRows, retainedMonthlyTotal, roleLabel,
+  appStateLabel, candidateCountLabel, canDestroy, canSwitch, destroyAppSentence, destroyDeployment, historyEvent, historyRowLabel,
+  debugSwitchNotice, deploymentsUrl, isActiveApp, isDebugDeployment, orderDeployments, relativeTime, retainedInstanceRows, retainedMonthlyTotal, roleLabel,
   switchDeployment, switchRequestBody, verifyCommand,
 } from '../src/utils/deployments.js'
 
@@ -97,10 +97,23 @@ test('retained instances list every billed instance and an honest total', () => 
   assert.deepEqual(retainedMonthlyTotal(rows), { total: 140.16, complete: false })
 })
 
-test('history rows name the operation, outcome and actor', () => {
+test('history rows name the operation and outcome, with a tone', () => {
   assert.equal(historyRowLabel({ kind: 'operation', operation: 'switch', outcome: 'succeeded', previous_deployment_id: 'a0000000-1', target_deployment_id: 'b0000000-1' }), 'Switch a0000000 → b0000000 · Succeeded')
-  assert.equal(historyRowLabel({ kind: 'attempt', outcome: 'failed', target_deployment_id: 'c0000000-1', commit_sha: 'b6e8c92aa' }), 'Attempt c0000000 · b6e8c92 · Failed')
-  assert.equal(historyRowLabel({ kind: 'operation', operation: 'deployment_destroy', outcome: 'requested', target_deployment_id: 'c0000000-1' }), 'Deployment destroy c0000000 · In progress')
+  assert.equal(historyRowLabel({ kind: 'attempt', outcome: 'failed', target_deployment_id: 'c0000000-1', commit_sha: 'b6e8c92aa' }), 'Deploy c0000000 · Failed')
+  assert.equal(historyRowLabel({ kind: 'operation', operation: 'deployment_destroy', outcome: 'requested', target_deployment_id: 'c0000000-1' }), 'Destroy c0000000 · In progress')
+  assert.equal(historyRowLabel({ kind: 'operation', operation: 'app_destroy', outcome: 'succeeded', target_deployment_id: null }), 'Destroy app · Succeeded')
+  assert.deepEqual(['succeeded', 'observed', 'requested', 'failed', 'rejected', 'other'].map((outcome) => historyEvent({ kind: 'operation', operation: 'switch', outcome }).tone), ['success', 'success', 'pending', 'danger', 'danger', 'neutral'])
+})
+
+test('relative times stay short and fall back to the date', () => {
+  const now = Date.parse('2026-10-15T12:00:00Z')
+  assert.equal(relativeTime('2026-10-15T11:59:30Z', now), 'just now')
+  assert.equal(relativeTime('2026-10-15T11:55:00Z', now), '5 min ago')
+  assert.equal(relativeTime('2026-10-15T09:00:00Z', now), '3 h ago')
+  assert.equal(relativeTime('2026-10-14T11:00:00Z', now), '1 day ago')
+  assert.equal(relativeTime('2026-10-12T12:00:00Z', now), '3 days ago')
+  assert.ok(!relativeTime('2026-09-01T12:00:00Z', now).includes('ago'))
+  assert.equal(relativeTime(null, now), '—')
 })
 
 test('the destroy-app sentence never invents a retained count', () => {

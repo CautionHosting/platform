@@ -124,7 +124,7 @@ try {
   }
   const textIncludes = text => page.waitForFunction(text => document.body.innerText.includes(text), {}, text)
   const switchTo = async (shortTarget) => {
-    await page.click(`[aria-label="Inspect deployment ${shortTarget}"]`)
+    await inspect(shortTarget)
     await button('Switch live')
     await page.click('.deployment-confirm input[type="checkbox"]')
     await button('Approve with passkey')
@@ -132,9 +132,15 @@ try {
   // Every success, stale or uncertain answer is followed by a refresh. Wait for the
   // refreshed Live row (the first row) before the next step acts on it or flips the mock.
   const liveIs = (short) => page.waitForFunction((short) => {
-    const row = document.querySelector('.deployments-table tbody tr')
-    return row?.cells[3].textContent.trim() === 'Live' && row.cells[0].textContent.includes(short)
+    const row = document.querySelector('.deployment-row')
+    return row?.dataset.role === 'Live' && row.dataset.deployment === short
   }, {}, short)
+  // Opens a deployment's drawer, closing any open one first (its backdrop covers the list).
+  const inspect = async (short) => {
+    if (await page.$('.deployment-inspector')) { await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('.deployment-inspector')) }
+    await page.click(`[aria-label="Inspect deployment ${short}"]`)
+    await page.waitForFunction((short) => document.querySelector('.deployment-inspector')?.getAttribute('aria-label') === `Deployment ${short}`, {}, short)
+  }
   const openApp = async () => {
     await textIncludes('key-service')
     await page.evaluate(() => [...document.querySelectorAll('.app-name-text')].find((el) => el.textContent.trim() === 'key-service').click())
@@ -149,19 +155,19 @@ try {
   await textIncludes('Single deployment: each push rebuilds and replaces the running app.')
   assert.ok((await page.$eval('#app-details', (el) => el.textContent)).includes('04fa238'))
   assert.equal(await page.evaluate(() => [...document.querySelectorAll('button')].some((el) => el.textContent.trim() === 'App details')), false)
-  assert.equal(await page.$('.deployments-table'), null)
+  assert.equal(await page.$('.deployment-list'), null)
   assert.equal(await page.evaluate(() => [...document.querySelectorAll('button')].some((el) => ['Switch live', 'Destroy deployment'].includes(el.textContent.trim()))), false)
   assert.deepEqual(state.legacyRequests, [])
   await page.reload()
   await openApp(); await liveIs('d1000000')
-  assert.deepEqual(await page.$$eval('.deployments-table tbody tr', (rows) => rows.map((row) => row.cells[3].textContent.trim())), ['Live', 'Candidate', 'Candidate'])
+  assert.deepEqual(await page.$$eval('.deployment-row', (rows) => rows.map((row) => row.dataset.role)), ['Live', 'Candidate', 'Candidate'])
   assert.deepEqual([...new Set(state.listQueries)], ['?retained=1']) // the dashboard asks for retained deployments only
   // Debug mode shows in the list (B only), the inspector and the Switch-live confirmation.
-  assert.deepEqual(await page.$$eval('.deployments-table tbody tr', (rows) => rows.filter((row) => row.cells[4].textContent.includes('debug')).map((row) => row.cells[0].textContent.trim())), ['d2000000'])
-  await page.click('[aria-label="Inspect deployment d2000000"]')
+  assert.deepEqual(await page.$$eval('.deployment-row', (rows) => rows.filter((row) => row.querySelector('.deployment-debug')).map((row) => row.dataset.deployment)), ['d2000000'])
+  await inspect('d2000000')
   await page.waitForFunction(() => [...document.querySelectorAll('.deployment-inspector dt')].some((el) => el.textContent.trim() === 'Debug mode'))
   await button('Switch live'); await textIncludes('This deployment runs in debug mode.'); await button('Cancel')
-  await page.click('[aria-label="Inspect deployment d1000000"]'); await textIncludes('Deployment d1000000')
+  await inspect('d1000000'); await textIncludes('Deployment d1000000')
   assert.equal(await page.evaluate(() => [...document.querySelectorAll('.deployment-inspector dt')].some((el) => el.textContent.trim() === 'Debug mode')), false)
   // A → B, signed with the real virtual passkey.
   await switchTo('d2000000'); await textIncludes('d2000000 is live at 198.51.100.42')
@@ -188,19 +194,20 @@ try {
   // Rollback to A.
   await switchTo('d1000000'); await textIncludes('d1000000 is live'); await liveIs('d1000000'); assert.equal(state.live, A)
   // The live deployment offers no Destroy; a destroy answered 5xx reads as unknown, refreshes, and is retried.
-  await page.click('[aria-label="Inspect deployment d1000000"]'); assert.equal(await page.$('.deployment-inspector .btn-danger'), null)
-  state.destroyMode = 'fail'; await page.click('[aria-label="Inspect deployment d3000000"]'); await button('Destroy deployment'); await page.click('.deployment-confirm .btn-danger'); await textIncludes('The destroy outcome is unknown; refresh to check.')
+  await inspect('d1000000'); assert.equal(await page.$('.deployment-inspector .btn-danger'), null)
+  state.destroyMode = 'fail'; await inspect('d3000000'); await button('Destroy deployment'); await page.click('.deployment-confirm .btn-danger'); await textIncludes('The destroy outcome is unknown; refresh to check.')
   // The component refreshes after the unknown outcome: the mock's pending cleanup appears in the inspector.
   await page.waitForFunction(() => [...document.querySelectorAll('.deployment-inspector dt')].some((el) => el.textContent.trim() === 'Cleanup'))
-  state.destroyMode = 'ok'; await page.click('[aria-label="Inspect deployment d3000000"]'); await button('Destroy deployment'); await page.click('.deployment-confirm .btn-danger'); await textIncludes('d3000000 was destroyed')
+  state.destroyMode = 'ok'; await inspect('d3000000'); await button('Destroy deployment'); await page.click('.deployment-confirm .btn-danger'); await textIncludes('d3000000 was destroyed')
   // Copy feedback stays in the icon, with an announcement and no toast.
   await page.evaluate(() => { window.copied = []; Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text) => window.copied.push(text) } }) })
-  await page.click('[aria-label="Inspect deployment d2000000"]'); await page.click('[aria-label="Copy verification command"]')
+  await inspect('d2000000'); await page.click('[aria-label="Copy verification command"]')
   assert.deepEqual(await page.evaluate(() => window.copied), [`caution verify -d ${B}`])
   await page.waitForSelector('[aria-label="verification command copied"]')
   assert.equal(await page.$('.toast'), null)
-  // History shows the switches, the rejection and both destroy outcomes.
-  await page.click('.app-history summary'); await textIncludes('Switch d1000000 → d2000000 · Succeeded'); await textIncludes('Rejected')
+  // History, always shown, lists the switches, the rejection and the destroy outcomes; Escape closes the drawer.
+  await page.keyboard.press('Escape'); await page.waitForFunction(() => !document.querySelector('.deployment-inspector'))
+  await textIncludes('Switch d1000000 → d2000000'); await textIncludes('Rejected'); await textIncludes('Destroy d3000000')
   // Layout: no horizontal overflow; the inspector follows the list on narrow screens.
   for (const width of [1580, 1000]) {
     await page.setViewport({ width, height: 1100 })

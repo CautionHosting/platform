@@ -155,12 +155,37 @@ export const retainedMonthlyTotal = (rows) => ({
 
 const OUTCOME_LABELS = { requested: 'In progress', observed: 'Succeeded (observed after restart)' }
 const outcomeLabel = (outcome) => OUTCOME_LABELS[outcome] || sentence(outcome)
+const OUTCOME_TONES = { succeeded: 'success', observed: 'success', requested: 'pending', failed: 'danger', rejected: 'danger' }
+// The operations `deployment_events` records (migration 058).
+const OPERATION_TITLES = { switch: 'Switch', deployment_destroy: 'Destroy', app_destroy: 'Destroy app' }
+
+// One history entry as the timeline shows it: what happened, how it ended, and its tone.
+export const historyEvent = (entry) => {
+  const target = shortId(entry?.target_deployment_id)
+  const outcome = outcomeLabel(entry?.outcome)
+  const tone = OUTCOME_TONES[entry?.outcome] || 'neutral'
+  if (entry?.kind === 'attempt') return { kind: 'attempt', title: `Deploy ${target}`, outcome, tone }
+  if (entry?.operation === 'switch') return { kind: 'switch', title: `Switch ${shortId(entry.previous_deployment_id) || 'none'} → ${target}`, outcome, tone }
+  const operation = OPERATION_TITLES[entry?.operation] || sentence(entry?.operation)
+  return { kind: 'destroy', title: `${operation}${target ? ` ${target}` : ''}`, outcome, tone }
+}
 
 export const historyRowLabel = (entry) => {
-  const target = shortId(entry?.target_deployment_id)
-  if (entry?.kind === 'attempt') return `Attempt ${target} · ${shortSha(entry.commit_sha)} · ${outcomeLabel(entry.outcome)}`
-  if (entry?.operation === 'switch') return `Switch ${shortId(entry.previous_deployment_id) || 'none'} → ${target} · ${outcomeLabel(entry.outcome)}`
-  return `${sentence(entry?.operation)}${target ? ` ${target}` : ''} · ${outcomeLabel(entry?.outcome)}`
+  const event = historyEvent(entry)
+  return `${event.title} · ${event.outcome}`
+}
+
+// "just now", "5 min ago", "3 h ago", "2 days ago"; past a week, the date.
+export const relativeTime = (value, now = Date.now()) => {
+  const at = new Date(value).getTime()
+  if (!value || Number.isNaN(at)) return '—'
+  const seconds = Math.max(0, Math.round((now - at) / 1000))
+  if (seconds < 60) return 'just now'
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)} h ago`
+  if (seconds < 7 * 86400) { const days = Math.floor(seconds / 86400); return `${days} day${days === 1 ? '' : 's'} ago` }
+  const sameYear = new Date(at).getFullYear() === new Date(now).getFullYear()
+  return new Date(at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', ...(sameYear ? {} : { year: 'numeric' }) })
 }
 
 // `count` is null until the deployments list has loaded: never state a number then.
