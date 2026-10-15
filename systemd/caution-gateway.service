@@ -7,7 +7,8 @@ After=caution-api.service caution-postgres.service caution-network.service
 
 [Service]
 ExecStartPre=-/usr/bin/docker rm -f gateway
-ExecStart=/usr/bin/docker run --name gateway -p 8000:8080 -p 2222:2222 --network caution-network --env-file %h/.config/caution/.env -v caution-data-dir:/var/cache/caution caution-gateway
+ExecStartPre=/usr/bin/mkdir -p %h/.config/caution/policies
+ExecStart=/usr/bin/docker run --name gateway -p 8000:8080 -p 2222:2222 --network caution-network --env-file %h/.config/caution/.env -v caution-data-dir:/var/cache/caution -v %h/.config/caution/policies:/run/config:ro caution-gateway
 ExecStop=/usr/bin/docker stop gateway
 
 [Install]

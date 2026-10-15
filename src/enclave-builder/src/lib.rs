@@ -1,6 +1,18 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
+mod artifacts;
+#[cfg(test)]
+mod reproduction_tests;
+
 const ENCLAVE_SOURCE_BASE: &str = "https://codeberg.org/caution/enclaveos/archive";
 pub const FRAMEWORK_SOURCE: &str = "https://codeberg.org/caution/platform/archive/main.tar.gz";
 /// Canonical Codeberg archive prefixes and their GitHub mirrors.
@@ -82,6 +94,8 @@ pub mod docker;
 pub mod extract;
 pub mod manifest;
 pub mod pcrs;
+pub mod source_transport;
+pub mod tap_framer;
 
 use dterror::ResultExt;
 use serde::{Deserialize, Serialize};
@@ -108,6 +122,7 @@ pub struct EnclaveBuilder {
     pub work_dir: PathBuf,
     /// Whether to skip Docker cache for EIF builds
     pub no_cache: bool,
+    cache_type: CacheType,
 }
 
 #[derive(Debug, Clone)]
@@ -243,6 +258,14 @@ pub enum ExtractUserImageError {
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error, dterror::CtxError)]
 pub enum BuildEnclaveError {
+    #[error("could not verify locksmith artifacts [{location}]")]
+    CheckArtifacts {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
     #[error("invalid binary path [{location}]")]
     InvalidBinaryPath {
         #[location]
@@ -400,6 +423,7 @@ impl EnclaveBuilder {
             framework_source: framework_source.into(),
             work_dir,
             no_cache,
+            cache_type,
         })
     }
 
@@ -422,12 +446,29 @@ impl EnclaveBuilder {
             framework_source: framework_source.into(),
             work_dir,
             no_cache: false,
+            cache_type: CacheType::Build,
         })
     }
 
     pub fn with_no_cache(mut self, no_cache: bool) -> Self {
         self.no_cache = no_cache;
         self
+    }
+
+    fn check_locksmith_artifacts(
+        &self,
+        user_fs: &Path,
+        locksmith: bool,
+        external_manifest: Option<&EnclaveManifest>,
+    ) -> Result<(), BuildEnclaveError> {
+        // Remote deployments also supply a manifest. Only a manifest-bound
+        // verification rebuild may bypass today's deployment packaging rules.
+        let reproduction =
+            self.cache_type == CacheType::Reproduction && external_manifest.is_some();
+        if locksmith && !reproduction {
+            artifacts::check(user_fs).with_context(BuildEnclaveErrorCtx::check_artifacts())?;
+        }
+        Ok(())
     }
 
     pub fn get_cached_eif(&self) -> Option<Deployment> {
@@ -699,6 +740,8 @@ impl EnclaveBuilder {
                 .with_context(Ctx::extract_user_image())?
         };
 
+        self.check_locksmith_artifacts(&user_fs, locksmith, external_manifest.as_ref())?;
+
         let enclave_source_result = compile::get_or_clone_enclave_source(
             &self.enclave_source,
             &self.enclave_version,
@@ -849,6 +892,8 @@ impl EnclaveBuilder {
             "Starting enclave build from filesystem: {}",
             user_fs_path.display()
         );
+
+        self.check_locksmith_artifacts(&user_fs_path, locksmith, external_manifest.as_ref())?;
 
         let enclave_source_result = compile::get_or_clone_enclave_source(
             &self.enclave_source,

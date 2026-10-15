@@ -43,8 +43,12 @@ for _ in $(seq 1 30); do
     sleep 1
 done
 
+# QR login tokens are username-scoped (migration 048); the name need not exist.
+QR_USER=e2e-qr-user
+
 # ── 1. begin: distinct tokens, requestee in URL ──────────────────────
-BEGIN=$(curl -s -X POST "$GATEWAY_URL/auth/qr-login/begin")
+BEGIN=$(curl -s -X POST "$GATEWAY_URL/auth/qr-login/begin" \
+    -H 'Content-Type: application/json' -d "{\"username\":\"$QR_USER\"}")
 REQUESTER=$(echo "$BEGIN" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
 URL=$(echo "$BEGIN" | sed -n 's/.*"url":"\([^"]*\)".*/\1/p')
 REQUESTEE=$(echo "$URL" | sed -n 's/.*token=\([^"&]*\).*/\1/p')
@@ -78,8 +82,8 @@ if [ -n "$CRED" ]; then
 else
     EXPECT_EXPIRES=0  # no credentials registered; session fetch returns None
 fi
-psql_c "INSERT INTO qr_login_tokens (token, requestee_token, status, session_id, expires_at)
-        VALUES ('$REQ','$REE','completed','$SID', NOW() + INTERVAL '1 hour');" >/dev/null
+psql_c "INSERT INTO qr_login_tokens (token, requestee_token, status, session_id, expires_at, username)
+        VALUES ('$REQ','$REE','completed','$SID', NOW() + INTERVAL '1 hour', '$QR_USER');" >/dev/null
 
 # ── 3. status: session returned once, then consumed (one-shot) ───────
 POLL1=$(curl -s "$GATEWAY_URL/auth/qr-login/status?token=$REQ")

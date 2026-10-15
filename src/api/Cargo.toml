@@ -36,6 +36,14 @@ futures = "0.3"
 reqwest = { version = "0.11", features = ["json"] }
 url = { workspace = true }
 
+# Quorum integration: reuse upstream formats and proof verification.
+locksmith.workspace = true
+keymaker-models.workspace = true
+public-certificate-models.workspace = true
+bootproof-sdk = { git = "https://codeberg.org/caution/bootproof.git", rev = "2590edb0f23cae6589bc73cc8324673023ac1deb" }
+serde_cbor = "0.11"
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+
 # Enclave dependencies
 sha2 = { workspace = true }
 enclave-builder = { path = "../enclave-builder" }
@@ -53,9 +61,6 @@ hmac = { workspace = true }
 hex = { workspace = true }
 subtle = { workspace = true }
 
-# Cache directory
-dirs = { workspace = true }
-
 # GPG decryption for managed on-prem
 sequoia-openpgp = { workspace = true }
 caution-config = { version = "0.1.0", path = "../caution-config" }
@@ -65,4 +70,4 @@ hcl-rs = { version = "0.19", features = ["perf"] }
 indexmap = { version = "2", features = ["serde"] }
 
 [features]
-e2e-testing-unsafe = []
+e2e-testing-unsafe = ["locksmith/unsafe-e2e"]

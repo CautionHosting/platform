@@ -444,9 +444,10 @@ STEP_NUM=17
 # GET /auth/qr-login/status is what the desktop side polls while waiting for the
 # phone to authenticate. A just-issued token must report "pending" with no
 # session_id yet — the starting state of the cross-device handoff. Independent
-# of credential state (step 13 deleted the user's cred), so a bare begin is fine.
+# of credential state (step 13 deleted the user's cred), but QR begin still
+# requires the username that scopes the approval ceremony.
 QR_BEGIN=$(curl -s -w '\n%{http_code}' -X POST "$GATEWAY_URL/auth/qr-login/begin" \
-    -H 'Content-Type: application/json' -d '{}')
+    -H 'Content-Type: application/json' -d "{\"username\":\"$SCOPED_USERNAME\"}")
 CODE=$(echo "$QR_BEGIN" | tail -1)
 JSON=$(echo "$QR_BEGIN" | sed '$d')
 [ "$CODE" = 200 ] || step_fail "qr-login/begin (status test) returned HTTP $CODE (want 200)"

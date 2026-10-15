@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use dterror::ResultExt;
 use flate2::read::GzDecoder;
 use std::path::{Path, PathBuf};
@@ -286,6 +294,7 @@ fn archive_http_client() -> Result<reqwest::Client, ArchiveHttpClientError> {
     use ArchiveHttpClientErrorCtx as Ctx;
 
     reqwest::Client::builder()
+        .redirect(crate::source_transport::redirect_policy())
         .connect_timeout(std::time::Duration::from_secs(30))
         .timeout(std::time::Duration::from_secs(90))
         .build()

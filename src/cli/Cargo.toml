@@ -11,6 +11,7 @@ name = "caution"
 path = "src/bin/caution.rs"
 
 [dependencies]
+webauthn-rs-proto = "0.5.5"
 # Workspace dependencies
 thiserror = { workspace = true }
 dterror = { workspace = true }
@@ -37,17 +38,18 @@ serde_cbor = "0.11"
 authenticator = { version = "0.4", features = ["crypto_openssl"], default-features = false }
 qrcode = "0.14"
 rpassword = "7.3"
+crossterm = { version = "0.29", default-features = false, features = ["events", "windows"] }
 shlex = "1.3"
 zeroize = "1"
 indicatif = "0.17"
 
 # Attestation verification
-bootproof-sdk = { git = "https://codeberg.org/caution/bootproof.git", rev = "b346db17523ad9b13ef41eb9c14df3328bbd80d1" }
+bootproof-sdk = { git = "https://codeberg.org/caution/bootproof.git", rev = "2590edb0f23cae6589bc73cc8324673023ac1deb" }
 coset = { version = "0.3", features = ["std"] }
 
 # Locksmith (shard sending)
-locksmith = { git = "https://codeberg.org/caution/locksmith.git", rev = "2db332a5315242ae84385571b2af9e2b499a369c" }
-keymaker-models = { git = "https://codeberg.org/caution/locksmith.git", rev = "2db332a5315242ae84385571b2af9e2b499a369c" }
+locksmith.workspace = true
+keymaker-models.workspace = true
 sequoia-openpgp = { workspace = true }
 
 # Archive handling
@@ -60,3 +62,11 @@ hcl-rs = { version = "0.19.7", features = ["perf"] }
 [build-dependencies]
 caution-environment-heuristics = { version = "0.1.0", path = "../environment-heuristics" }
 serde_json.workspace = true
+
+[features]
+e2e-testing-unsafe = ["locksmith/unsafe-e2e"]
+
+[dev-dependencies]
+axum.workspace = true
+tracing.workspace = true
+keyfork-shard = { version = "0.4", registry = "distrust", default-features = false, features = ["openpgp"] }

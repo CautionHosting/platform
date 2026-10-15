@@ -56,18 +56,40 @@ pub struct PendingPasskeyRegistration {
     pub token_hash: Option<String>,
 }
 
+#[derive(Clone)]
+pub struct PendingRecoveryVerification {
+    pub auth_state: SecurityKeyAuthentication,
+    pub user_id: Uuid,
+    pub credential_row_id: Uuid,
+    pub credential_id: Vec<u8>,
+    pub expires_at: time::OffsetDateTime,
+}
+
 /// Which webauthn-rs authentication ceremony a pending `/auth/login` challenge is
 /// running. `SecurityKey` covers both legacy broadcast and username-scoped login
 /// (both resolve the user from the asserted credential's `rawId`). `Discoverable`
 /// covers the username-less conditional-UI flow (resolves the user from the
 /// assertion's `userHandle` via `identify_discoverable_authentication`).
 ///
+/// A single physical key may be registered to multiple accounts, so resolving a
+/// credential by its `rawId` alone is ambiguous. Both arms therefore carry a
+/// `UsernameScope` (see `handlers::UsernameScope`) recording which account the
+/// challenge was begun for; finish uses it to scope resolution and reject a
+/// shared key used under any other account.
+///
 /// Sign flows (`PendingSignChallenge`) are already scoped to a single credential
 /// and are intentionally NOT part of this enum — they stay on
 /// `SecurityKeyAuthentication` per the Phase 1 design doc.
 #[derive(Clone)]
 pub enum AuthState {
-    SecurityKey(SecurityKeyAuthentication),
+    /// Legacy broadcast (username-less) and username-scoped login. `scope` is
+    /// `Unscoped` for the broadcast path and `Scoped { expected_user_id }` when a
+    /// username resolved to a real user with credentials, so finish resolves the
+    /// asserted credential to exactly that account.
+    SecurityKey {
+        auth_state: SecurityKeyAuthentication,
+        scope: crate::handlers::UsernameScope,
+    },
     Discoverable {
         auth_state: DiscoverableAuthentication,
         /// Whether this challenge was scoped to a specific username, and if
@@ -98,6 +120,7 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub reg_states: Arc<RwLock<HashMap<String, PendingRegistration>>>,
     pub passkey_reg_states: Arc<RwLock<HashMap<String, PendingPasskeyRegistration>>>,
+    pub recovery_verifications: Arc<RwLock<HashMap<String, PendingRecoveryVerification>>>,
     pub auth_states: Arc<RwLock<HashMap<String, PendingAuthentication>>>,
     pub sign_challenges: Arc<RwLock<HashMap<String, PendingSignChallenge>>>,
     pub session_timeout_hours: i64,
@@ -150,6 +173,7 @@ pub struct DbCredential {
 pub struct DbSession {
     pub session_id: String,
     pub credential_id: Vec<u8>,
+    pub user_id: Uuid,
     pub expires_at: time::OffsetDateTime,
     pub created_at: time::OffsetDateTime,
     pub last_used_at: time::OffsetDateTime,

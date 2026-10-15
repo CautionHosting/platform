@@ -1,8 +1,17 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use dterror::{BoxError, CtxError, Location};
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, LazyLock};
@@ -157,33 +166,46 @@ pub async fn get_or_generate_lockfile(data_dir: &str) -> Option<PathBuf> {
 /// Failure modes for [`run_with_timeout`].
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum RunCommandError {
-    #[error("could not spawn command [{location}]")]
+    #[error("Failed to spawn command [{location}]")]
     Spawn {
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("could not wait on command [{location}]")]
+    #[error("Failed to start {stream} reader [{location}]")]
+    StartReader {
+        stream: &'static str,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("Failed to wait on command [{location}]")]
     Wait {
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("could not read command output [{location}]")]
+    #[error("Failed to read output [{location}]")]
     ReadOutput {
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("command timed out after {timeout_secs}s [{location}]")]
+    #[error(
+        "Command timed out after {timeout_secs}s\nstdout: {stdout}\nstderr: {stderr} [{location}]"
+    )]
     TimedOut {
         timeout_secs: u64,
+        stdout: String,
+        stderr: String,
+        #[location]
         location: Location,
     },
-    #[error("command timed out after {timeout_secs}s; failed to read output [{location}]")]
+    #[error("Command timed out after {timeout_secs}s; failed to read output [{location}]")]
     TimedOutReadOutput {
         timeout_secs: u64,
         #[location]
@@ -244,7 +266,8 @@ pub(crate) enum TofuDestroyError {
     },
 }
 
-/// Run a command with a timeout. Kills the process if deadline expires.
+/// Drain both output pipes while waiting, so verbose commands cannot block on output.
+/// Kill and reap the child when its deadline expires.
 #[tracing::instrument(skip_all, err)]
 fn run_with_timeout(
     cmd: &mut Command,
@@ -258,45 +281,82 @@ fn run_with_timeout(
             .spawn(),
         Ctx::spawn(),
     )?;
-
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
-    loop {
-        let status = dterror::ResultExt::with_context(child.try_wait(), Ctx::wait())?;
-        match status {
-            Some(_) => {
-                return dterror::ResultExt::with_context(
-                    child.wait_with_output(),
-                    Ctx::read_output(),
-                );
+    std::thread::scope(|scope| {
+        let stdout = child.stdout.take();
+        let stdout = std::thread::Builder::new().spawn_scoped(scope, move || {
+            let mut bytes = Vec::new();
+            stdout
+                .ok_or_else(|| std::io::Error::other("Missing stdout pipe"))?
+                .read_to_end(&mut bytes)?;
+            Ok::<_, std::io::Error>(bytes)
+        });
+        let stdout = match stdout {
+            Ok(reader) => reader,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return dterror::ResultExt::with_context(Err(error), Ctx::start_reader("stdout"));
             }
-            None => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    match child.wait_with_output() {
-                        Ok(output) => {
-                            tracing::error!(
-                                stdout = %String::from_utf8_lossy(&output.stdout),
-                                stderr = %String::from_utf8_lossy(&output.stderr),
-                                "command timed out"
-                            );
-                            return Err(RunCommandError::TimedOut {
-                                timeout_secs,
-                                location: std::panic::Location::caller(),
-                            });
-                        }
-                        Err(e) => {
-                            return dterror::ResultExt::with_context(
-                                std::result::Result::<std::process::Output, _>::Err(e),
-                                Ctx::timed_out_read_output(timeout_secs),
-                            );
-                        }
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_millis(500));
+        };
+        let stderr = child.stderr.take();
+        let stderr = std::thread::Builder::new().spawn_scoped(scope, move || {
+            let mut bytes = Vec::new();
+            stderr
+                .ok_or_else(|| std::io::Error::other("Missing stderr pipe"))?
+                .read_to_end(&mut bytes)?;
+            Ok::<_, std::io::Error>(bytes)
+        });
+        let stderr = match stderr {
+            Ok(reader) => reader,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout.join();
+                return dterror::ResultExt::with_context(Err(error), Ctx::start_reader("stderr"));
             }
+        };
+
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(Some(status)),
+                Ok(None) if std::time::Instant::now() >= deadline => break Ok(None),
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(500)),
+                Err(error) => break Err(error),
+            }
+        };
+        if !matches!(status, Ok(Some(_))) {
+            let _ = child.kill();
+            let _ = child.wait();
         }
-    }
+        // Join both readers even if waiting or one reader failed.
+        let stdout = stdout
+            .join()
+            .unwrap_or_else(|_| Err(std::io::Error::other("Stdout reader panicked")));
+        let stderr = stderr
+            .join()
+            .unwrap_or_else(|_| Err(std::io::Error::other("Stderr reader panicked")));
+        let status = dterror::ResultExt::with_context(status, Ctx::wait())?;
+        let output = stdout.and_then(|stdout| stderr.map(|stderr| (stdout, stderr)));
+        if let Some(status) = status {
+            let (stdout, stderr) = dterror::ResultExt::with_context(output, Ctx::read_output())?;
+            Ok(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            })
+        } else {
+            let (stdout, stderr) =
+                dterror::ResultExt::with_context(output, Ctx::timed_out_read_output(timeout_secs))?;
+            Err(RunCommandError::TimedOut {
+                timeout_secs,
+                stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                location: std::panic::Location::caller(),
+            })
+        }
+    })
 }
 
 #[derive(Clone)]
@@ -339,6 +399,9 @@ fn effective_e2e_mode(e2e: bool, e2e_mode: &str) -> &str {
     }
 }
 
+/// Reviewed release digest, independent of builder-controlled EIF sidecars.
+const SOURCE_TAP_FRAMER_SHA256: &str = include_str!("../../tap-framer/host.sha256");
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NitroDeploymentRequest {
     pub org_id: Uuid,
@@ -354,6 +417,8 @@ pub struct NitroDeploymentRequest {
     pub cpu_count: u32,
     pub disk_gb: u32,
     pub debug_mode: bool,
+    #[serde(default)]
+    pub restart: caution_config::RestartConfig,
     pub ports: Vec<u16>,
     pub http_port: Option<u16>,
     #[serde(default)]
@@ -404,6 +469,13 @@ pub(crate) enum DeployNitroEnclaveError {
     MissingCredentials { location: Location },
     #[error("failed to upload EIF to customer bucket [{location}]")]
     UploadEifCustomerBucket {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("failed to upload paired TAP tunnel helper [{location}]")]
+    UploadTapFramer {
         #[location]
         location: Location,
         #[source]
@@ -501,6 +573,10 @@ pub async fn deploy_nitro_enclave(
             )?
         };
         dterror::ResultExt::with_context(
+            upload_tap_framer(&request, &eif_s3_path).await,
+            Ctx::upload_tap_framer(),
+        )?;
+        dterror::ResultExt::with_context(
             provision_managed_onprem(&request, &eif_s3_path, &config).await,
             Ctx::provision_managed_onprem(),
         )
@@ -526,6 +602,10 @@ pub async fn deploy_nitro_enclave(
             )
             .await,
             Ctx::upload_eif_s3(),
+        )?;
+        dterror::ResultExt::with_context(
+            upload_tap_framer(&request, &eif_s3_path).await,
+            Ctx::upload_tap_framer(),
         )?;
         dterror::ResultExt::with_context(
             provision_nitro_enclave(&request, &eif_s3_path, &config).await,
@@ -643,6 +723,79 @@ async fn scale_down_asg(
 mod tests {
     use super::*;
 
+    #[test]
+    #[cfg(unix)]
+    fn test_run_with_timeout_large_output() {
+        let output = run_with_timeout(
+            Command::new("sh").args([
+                "-c",
+                "head -c 1048576 /dev/zero; head -c 1048576 /dev/zero >&2",
+            ]),
+            10,
+        )
+        .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, vec![0; 1_048_576]);
+        assert_eq!(output.stderr, vec![0; 1_048_576]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_run_with_timeout_nonzero_exit() {
+        let output = run_with_timeout(
+            Command::new("sh").args(["-c", "printf out; printf err >&2; exit 17"]),
+            10,
+        )
+        .unwrap();
+        assert_eq!(output.status.code(), Some(17));
+        assert_eq!(output.stdout, b"out");
+        assert_eq!(output.stderr, b"err");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_run_with_timeout_kills_noisy_child() {
+        let started = std::time::Instant::now();
+        let error = run_with_timeout(
+            Command::new("sh").args([
+                "-c",
+                "printf '%s\\n' \"$$\"; while :; do printf out; printf err >&2; done",
+            ]),
+            1,
+        )
+        .unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        let RunCommandError::TimedOut {
+            timeout_secs,
+            stdout,
+            stderr,
+            ..
+        } = error
+        else {
+            panic!("Expected a command timeout");
+        };
+        assert_eq!(timeout_secs, 1);
+        assert!(stdout.contains("out"));
+        assert!(stderr.starts_with("err"));
+        let pid = stdout.lines().next().unwrap();
+        assert!(pid.parse::<u32>().is_ok());
+        assert!(
+            !Command::new("kill")
+                .args(["-0", pid])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+
+    #[test]
+    fn test_run_with_timeout_spawn_failure() {
+        // Reject before execution: emulation can report missing executables as exit 127.
+        let error = run_with_timeout(&mut Command::new("invalid\0command"), 1).unwrap_err();
+        assert!(matches!(error, RunCommandError::Spawn { .. }));
+    }
+
     fn norm(s: &str) -> String {
         s.split_whitespace().collect::<Vec<_>>().join(" ")
     }
@@ -701,7 +854,10 @@ mod tests {
         }
     }
 
-    fn deployment_request(eif_path: &str, eif_s3_key: Option<&str>) -> NitroDeploymentRequest {
+    pub(super) fn deployment_request(
+        eif_path: &str,
+        eif_s3_key: Option<&str>,
+    ) -> NitroDeploymentRequest {
         NitroDeploymentRequest {
             org_id: Uuid::nil(),
             resource_id: Uuid::nil(),
@@ -714,6 +870,7 @@ mod tests {
             cpu_count: 2,
             disk_gb: 30,
             debug_mode: false,
+            restart: Default::default(),
             ports: vec![],
             http_port: None,
             e2e: false,
@@ -956,6 +1113,91 @@ mod tests {
         assert!(norm(&main_tf).contains(r#"egress = "true""#));
     }
 
+    #[tokio::test]
+    async fn test_tunnel_upload_skips_disabled_egress() {
+        let mut request = deployment_request("/missing/enclave.eif", None);
+        request.egress = false;
+        upload_tap_framer(&request, "not-an-s3-uri").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_tunnel_upload_skips_dedicated_builder_artifacts() {
+        let mut request = deployment_request("/missing/enclave.eif", None);
+        request.egress = true;
+        request.managed_onprem = None;
+        request.eif_s3_key = Some("eifs/test.eif".to_string());
+        upload_tap_framer(&request, "s3://platform/eifs/test.eif")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_tunnel_upload_rejects_invalid_destination_before_io() {
+        let mut request = deployment_request("/missing/enclave.eif", None);
+        request.egress = true;
+        request.eif_s3_key = None;
+        assert!(matches!(
+            upload_tap_framer(&request, "not-an-s3-uri").await,
+            Err(TapFramerUploadError::InvalidDestination { .. })
+        ));
+    }
+
+    #[test]
+    fn deployment_request_without_restart_uses_legacy_defaults() {
+        let mut value = serde_json::to_value(deployment_request("/tmp/enclave.eif", None)).unwrap();
+        value.as_object_mut().unwrap().remove("restart");
+        let parsed: NitroDeploymentRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.restart, caution_config::RestartConfig::default());
+    }
+
+    #[tokio::test]
+    async fn restart_policy_reaches_both_terraform_templates() {
+        use caution_config::{RestartConfig, RestartPolicy};
+        for policy in [
+            RestartPolicy::Never,
+            RestartPolicy::OnFailure,
+            RestartPolicy::Always,
+        ] {
+            for delay_seconds in [0, 10] {
+                let mut request = deployment_request("/tmp/enclave.eif", None);
+                request.restart = RestartConfig {
+                    policy,
+                    delay_seconds,
+                };
+                for byoc in [false, true] {
+                    let work_dir = TempDir::new().unwrap();
+                    if byoc {
+                        request.managed_onprem = Some(managed_onprem_config());
+                        generate_managed_onprem_deployment_tf(
+                            work_dir.path(),
+                            &request,
+                            "s3://bucket/enclave.eif",
+                        )
+                        .await
+                        .unwrap();
+                    } else {
+                        request.managed_onprem = None;
+                        generate_nitro_deployment_main_tf(
+                            work_dir.path(),
+                            &request,
+                            "s3://bucket/enclave.eif",
+                        )
+                        .await
+                        .unwrap();
+                    }
+                    let rendered =
+                        norm(&std::fs::read_to_string(work_dir.path().join("main.tf")).unwrap());
+                    assert!(
+                        rendered.contains(&["restart_policy = \"", policy.as_str(), "\""].concat())
+                    );
+                    assert!(rendered.contains(
+                        &["restart_delay_seconds = ", &delay_seconds.to_string()].concat()
+                    ));
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_user_data_proxy_guarded_by_egress() {
         let user_data = std::fs::read_to_string(
@@ -964,6 +1206,10 @@ mod tests {
                 .join("terraform/modules/aws/nitro-enclave/user-data.sh"),
         )
         .unwrap();
+        assert!(user_data.contains("${eif_s3_path}.tap-framer"));
+        assert!(!user_data.contains("VSOCK-LISTEN:3,"));
+        assert!(user_data.contains("/usr/local/bin/tap-framer --listen 3 enclave0"));
+        assert!(!user_data.contains("TUN,tun-type=tap"));
         let needle = "Setting up vsock network proxy for enclave";
         let egress_if = r#"%{ if egress == "true" ~}"#;
         let if_pos = user_data.find(egress_if).expect("egress guard present");
@@ -1912,6 +2158,105 @@ pub(crate) enum UploadEifToS3Error {
         #[source]
         source: BoxError,
     },
+}
+
+#[derive(Debug, thiserror::Error, dterror::CtxError)]
+enum TapFramerUploadError {
+    #[error("invalid tunnel artifact destination [{location}]")]
+    InvalidDestination { location: dterror::Location },
+    #[error("could not transfer tunnel artifact '{artifact}' [{location}]")]
+    Transfer {
+        #[context(borrow = str)]
+        artifact: String,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
+async fn upload_tap_framer(
+    request: &NitroDeploymentRequest,
+    destination_eif: &str,
+) -> std::result::Result<(), TapFramerUploadError> {
+    use TapFramerUploadErrorCtx as Ctx;
+    use dterror::ResultExt;
+    if !request.egress {
+        return Ok(());
+    }
+    if request.eif_s3_key.is_some()
+        && (request.managed_onprem.is_none()
+            || request.managed_onprem.as_ref().is_some_and(|managed| {
+                managed_onprem_uses_direct_customer_bucket(request, managed)
+            }))
+    {
+        return Ok(());
+    }
+    let (bucket, key) = destination_eif
+        .strip_prefix("s3://")
+        .and_then(|path| path.split_once('/'))
+        .filter(|(bucket, key)| !bucket.is_empty() && !key.is_empty())
+        .ok_or_else(|| TapFramerUploadError::InvalidDestination {
+            location: std::panic::Location::caller(),
+        })?;
+    let key = format!("{key}.tap-framer");
+    let platform_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .load()
+        .await;
+    let body = if let Some(source_key) = &request.eif_s3_key {
+        let source_bucket = std::env::var("EIF_S3_BUCKET")
+            .unwrap_or_else(|_| format!("caution-eif-storage-{}", request.aws_account_id));
+        let source_key = format!("{source_key}.tap-framer");
+        let object = ResultExt::with_context(
+            aws_sdk_s3::Client::new(&platform_config)
+                .get_object()
+                .bucket(source_bucket)
+                .key(&source_key)
+                .send()
+                .await,
+            Ctx::transfer(&source_key),
+        )?;
+        ResultExt::with_context(object.body.collect().await, Ctx::transfer(&source_key))?
+            .into_bytes()
+            .into()
+    } else {
+        let path = Path::new(&request.eif_path).with_extension("tap-framer");
+        ResultExt::with_context(
+            aws_sdk_s3::primitives::ByteStream::from_path(path).await,
+            Ctx::transfer(&request.eif_path),
+        )?
+    };
+    let config = if let Some(credentials) = request
+        .credentials
+        .as_ref()
+        .filter(|_| request.managed_onprem.is_some())
+    {
+        aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new(credentials.region.clone()))
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                &credentials.access_key_id,
+                &credentials.secret_access_key,
+                None,
+                None,
+                "caution-managed-onprem",
+            ))
+            .load()
+            .await
+    } else {
+        platform_config
+    };
+    ResultExt::with_context(
+        aws_sdk_s3::Client::new(&config)
+            .put_object()
+            .bucket(bucket)
+            .key(&key)
+            .body(body)
+            .send()
+            .await,
+        Ctx::transfer(&key),
+    )?;
+    Ok(())
 }
 
 #[tracing::instrument(skip_all, err)]
@@ -3618,6 +3963,12 @@ async fn generate_nitro_deployment_main_tf(
                             ),
                             (
                                 hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "tap_framer_sha256",
+                                )),
+                                hcl::Expression::String(SOURCE_TAP_FRAMER_SHA256.trim().into()),
+                            ),
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
                                     "memory_mb",
                                 )),
                                 hcl::Expression::Number(request.memory_mb.into()),
@@ -3635,6 +3986,18 @@ async fn generate_nitro_deployment_main_tf(
                                 hcl::Expression::String(
                                     if request.debug_mode { "true" } else { "false" }.into(),
                                 ),
+                            ),
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "restart_policy",
+                                )),
+                                hcl::Expression::String(request.restart.policy.as_str().into()),
+                            ),
+                            (
+                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                    "restart_delay_seconds",
+                                )),
+                                hcl::Expression::Number(request.restart.delay_seconds.into()),
                             ),
                             (
                                 hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
@@ -4327,6 +4690,12 @@ async fn generate_managed_onprem_deployment_tf(
                                 ),
                                 (
                                     hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "tap_framer_sha256",
+                                    )),
+                                    hcl::Expression::String(SOURCE_TAP_FRAMER_SHA256.trim().into()),
+                                ),
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
                                         "memory_mb",
                                     )),
                                     hcl::Expression::Number(request.memory_mb.into()),
@@ -4344,6 +4713,18 @@ async fn generate_managed_onprem_deployment_tf(
                                     hcl::Expression::String(
                                         if request.debug_mode { "true" } else { "false" }.into(),
                                     ),
+                                ),
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "restart_policy",
+                                    )),
+                                    hcl::Expression::String(request.restart.policy.as_str().into()),
+                                ),
+                                (
+                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
+                                        "restart_delay_seconds",
+                                    )),
+                                    hcl::Expression::Number(request.restart.delay_seconds.into()),
                                 ),
                                 (
                                     hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
@@ -4620,3 +5001,7 @@ async fn generate_managed_onprem_deployment_tf(
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "deployment_tap_tests.rs"]
+mod tap_tests;

@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 //! Dedicated EC2 builder instances for EIF builds.
 //!
 //! Instead of building EIFs inline on the API server, this module launches
@@ -1503,6 +1511,8 @@ HELPER_S3_KEY="{helper_s3_key}"
 HELPER_SHA256="{helper_sha256}"
 HELPER_LOG="/build/remote-build-helper.log"
 HELPER_LOG_KEY="builds/$BUILD_ID/remote-build-helper.log"
+APP_BUILD_LOG="/build/app-build.log"
+APP_BUILD_LOG_KEY="builds/$BUILD_ID/app-build.log"
 COMMIT_SHA="{commit_sha}"
 ENCLAVEOS_COMMIT="{enclaveos_commit}"
 CONTAINERFILE="{containerfile}"
@@ -1561,6 +1571,9 @@ set_phase "launching-builder"
 
 fail() {{
     local msg="$1"
+    if [ -f "$APP_BUILD_LOG" ]; then
+        timeout 30 aws s3 cp "$APP_BUILD_LOG" "s3://$S3_BUCKET/$APP_BUILD_LOG_KEY" >/dev/null 2>&1 || true
+    fi
     if [ -f "$HELPER_LOG" ]; then
         timeout 30 aws s3 cp "$HELPER_LOG" "s3://$S3_BUCKET/$HELPER_LOG_KEY" >/dev/null 2>&1 || true
     fi
@@ -1594,7 +1607,12 @@ chmod +x /usr/local/bin/remote-build-helper
 # Build Docker image, then build EIF via remote-build-helper using that image
 cd /build/repo
 set_phase "building-application"
-docker build -f "$CONTAINERFILE" -t app-image .
+if docker build -f "$CONTAINERFILE" -t app-image . 2>&1 | tee "$APP_BUILD_LOG"; then
+    :
+else
+    fail "Application Docker build failed:
+$(tail -40 "$APP_BUILD_LOG" 2>/dev/null | tail -c 4096 | tr -d '\000-\010\013-\037\177' || echo "No build output available")"
+fi
 
 # Write manifest for remote-build-helper
 cat > /build/manifest.json << 'MANIFEST_EOF'
@@ -1648,6 +1666,11 @@ if [ -f "$PCRS_PATH" ]; then
     # Convert "hash PCRn" lines to JSON object {{"PCR0":"hash",...}}
     PCRS_JSON=$(awk '{{printf "%s\"%s\":\"%s\"", (NR>1?",":""), $2, $1}}' "$PCRS_PATH")
     PCRS_JSON="{{"$PCRS_JSON"}}"
+fi
+
+# Publish the paired host tunnel executable before the EIF becomes deployable.
+if [ "$EGRESS" = "true" ]; then
+    aws s3 cp /build/output/enclave.tap-framer "s3://$S3_BUCKET/$EIF_S3_KEY.tap-framer"
 fi
 
 # Upload EIF to S3
@@ -3032,6 +3055,17 @@ mod tests {
             "should retain the complete helper log"
         );
         assert!(
+            userdata.contains("-t app-image . 2>&1 | tee \"$APP_BUILD_LOG\"")
+                && userdata.contains("tail -40 \"$APP_BUILD_LOG\""),
+            "app build failures should report bounded Docker output"
+        );
+        assert!(
+            userdata.contains(
+                "timeout 30 aws s3 cp \"$APP_BUILD_LOG\" \"s3://$S3_BUCKET/$APP_BUILD_LOG_KEY\""
+            ),
+            "should upload the private application log on failure"
+        );
+        assert!(
             userdata.contains(
                 "timeout 30 aws s3 cp \"$HELPER_LOG\" \"s3://$S3_BUCKET/$HELPER_LOG_KEY\""
             ),
@@ -3469,6 +3503,12 @@ mod tests {
         .unwrap();
         assert!(script.contains("EGRESS=\"true\""));
         assert!(script.contains("CAUTION_EGRESS=\"$EGRESS\""));
+        let helper_upload = script
+            .find("aws s3 cp /build/output/enclave.tap-framer")
+            .unwrap();
+        let eif_upload = script.find("aws s3 cp \"$EIF_PATH\"").unwrap();
+        assert!(helper_upload < eif_upload);
+        assert!(script.contains("s3://$S3_BUCKET/$EIF_S3_KEY.tap-framer"));
     }
 
     #[test]

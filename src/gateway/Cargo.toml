@@ -30,9 +30,11 @@ tracing-subscriber = { workspace = true }
 url = { workspace = true }
 percent-encoding = "2"
 regex = { workspace = true }
-async-trait = { workspace = true }
 tempfile = { workspace = true }
 sequoia-openpgp = { workspace = true }
+
+locksmith.workspace = true
+keymaker-models.workspace = true
 
 # Gateway-specific dependencies
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation", "conditional-ui", "danger-credential-internals"] }
@@ -48,4 +50,4 @@ cookie = "0.18"
 axum-extra = { version = "0.10", features = ["cookie"] }
 
 [features]
-e2e-testing-unsafe = []
+e2e-testing-unsafe = ["locksmith/unsafe-e2e"]

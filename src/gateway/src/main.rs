@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use axum::{
     middleware,
     routing::{delete, get, post},
@@ -25,6 +33,7 @@ mod decoy;
 mod handlers;
 mod pgp;
 mod rate_limit;
+mod release_relay;
 mod request_id;
 mod security_headers;
 mod ssh_server;
@@ -36,6 +45,13 @@ use types::AppState;
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum MainError {
+    #[error("failed to backfill credential UV evidence [{location}]")]
+    CredentialUvBackfill {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
     #[error("failed to load configuration [{location}]")]
     Config {
         #[location]
@@ -217,7 +233,7 @@ async fn main() -> Result<(), MainError> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "gateway=debug,tower_http=debug".into()),
+                .unwrap_or_else(|_| "gateway=info,tower_http=debug".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -245,6 +261,9 @@ async fn main() -> Result<(), MainError> {
         .await
         .with_context(Ctx::database_connection())?;
 
+    db::backfill_credential_uv(&pool)
+        .await
+        .with_context(Ctx::credential_uv_backfill())?;
     tracing::info!("Database connected");
 
     let origins: Vec<Url> = config
@@ -356,6 +375,7 @@ async fn main() -> Result<(), MainError> {
         http_client,
         reg_states: Arc::new(RwLock::new(HashMap::new())),
         passkey_reg_states: Arc::new(RwLock::new(HashMap::new())),
+        recovery_verifications: Arc::new(RwLock::new(HashMap::new())),
         auth_states: Arc::new(RwLock::new(HashMap::new())),
         sign_challenges: Arc::new(RwLock::new(HashMap::new())),
         session_timeout_hours: config.session_timeout_hours,
@@ -450,6 +470,17 @@ async fn main() -> Result<(), MainError> {
             "/auth/sign-request",
             post(handlers::begin_sign_request_handler),
         )
+        .route(
+            "/auth/qr-release/begin",
+            post(release_relay::begin).layer(axum::extract::DefaultBodyLimit::max(65536)),
+        )
+        .route("/auth/qr-release/read", post(release_relay::read))
+        .route(
+            "/auth/qr-release/finish",
+            post(release_relay::finish).layer(axum::extract::DefaultBodyLimit::max(16384)),
+        )
+        .route("/auth/qr-release/status", post(release_relay::status))
+        .route("/auth/qr-release/cancel", post(release_relay::cancel))
         .route("/auth/qr-sign/begin", post(handlers::qr_sign_begin_handler))
         .route(
             "/auth/qr-sign/status",
@@ -504,6 +535,20 @@ async fn main() -> Result<(), MainError> {
         .route(
             "/passkeys/register/finish",
             post(handlers::finish_add_passkey_handler),
+        )
+        .route(
+            "/passkeys/{id}/recovery-verification/begin",
+            post(handlers::begin_recovery_verification).layer(middleware::from_fn_with_state(
+                rate_limiter.clone(),
+                rate_limit::rate_limit_middleware,
+            )),
+        )
+        .route(
+            "/passkeys/{id}/recovery-verification/finish",
+            post(handlers::finish_recovery_verification).layer(middleware::from_fn_with_state(
+                rate_limiter.clone(),
+                rate_limit::rate_limit_middleware,
+            )),
         )
         .route("/passkeys/{id}", delete(handlers::delete_passkey_handler))
         .route("/ssh-keys", post(handlers::add_ssh_key_handler))
@@ -640,6 +685,12 @@ async fn main() -> Result<(), MainError> {
                     );
                 }
             }
+
+            cleanup_state
+                .recovery_verifications
+                .write()
+                .await
+                .retain(|_, pending| pending.expires_at > now);
 
             // Clean up expired authentication states
             {

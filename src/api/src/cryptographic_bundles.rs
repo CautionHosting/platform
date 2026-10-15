@@ -1,10 +1,20 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
+
+mod holders;
 
 #[derive(Debug, Serialize, FromRow)]
 pub struct QuorumBundle {
@@ -16,6 +26,12 @@ pub struct QuorumBundle {
     pub created_by: Option<Uuid>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+    #[sqlx(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holders: Option<Vec<holders::HolderMetadata>>,
+    #[sqlx(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle_hash: Option<String>,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -30,6 +46,8 @@ pub struct SecretsBundle {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateBundleRequest {
+    #[serde(default)]
+    pub allow_legacy: bool,
     pub data: serde_json::Value,
     pub name: Option<String>,
     pub labels: Option<serde_json::Value>,
@@ -37,9 +55,24 @@ pub struct CreateBundleRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateBundleRequest {
+    #[serde(default)]
+    pub allow_legacy: bool,
     pub data: Option<serde_json::Value>,
     pub name: Option<String>,
     pub labels: Option<serde_json::Value>,
+}
+
+// Derived display metadata only: computing this hash does not verify the proof.
+fn canonical_hash(data: &serde_json::Value) -> Option<String> {
+    use keymaker_models::generate_quorum::{GenerateQuorumResponse, deterministic_bundle_hash};
+    if data.get("format").is_some() {
+        let bundle: locksmith::legacy::ImportedV0 = serde_json::from_value(data.clone()).ok()?;
+        return bundle.content_hash().ok();
+    }
+    let response: GenerateQuorumResponse = serde_json::from_value(data.clone()).ok()?;
+    deterministic_bundle_hash(&response.data)
+        .ok()
+        .map(hex::encode)
 }
 
 // -- Quorum Bundles --
@@ -64,7 +97,7 @@ pub async fn list_quorum_bundles(
 ) -> Result<Vec<QuorumBundle>, ListQuorumBundlesError> {
     use ListQuorumBundlesErrorCtx as Ctx;
 
-    let rows = sqlx::query_as::<_, QuorumBundle>(
+    let mut rows = sqlx::query_as::<_, QuorumBundle>(
         "SELECT id, organization_id, data, name, labels, created_by, created_at, updated_at
          FROM quorum_bundles
          WHERE organization_id = $1
@@ -75,6 +108,10 @@ pub async fn list_quorum_bundles(
     .await
     .with_context(Ctx::database(org_id))?;
 
+    for bundle in &mut rows {
+        bundle.bundle_hash = canonical_hash(&bundle.data);
+    }
+    holders::enrich(pool, org_id, &mut rows).await;
     Ok(rows)
 }
 
@@ -100,7 +137,7 @@ pub async fn get_quorum_bundle(
 ) -> Result<Option<QuorumBundle>, GetQuorumBundleError> {
     use GetQuorumBundleErrorCtx as Ctx;
 
-    let row = sqlx::query_as::<_, QuorumBundle>(
+    let mut row = sqlx::query_as::<_, QuorumBundle>(
         "SELECT id, organization_id, data, name, labels, created_by, created_at, updated_at
          FROM quorum_bundles
          WHERE organization_id = $1 AND id = $2",
@@ -111,6 +148,10 @@ pub async fn get_quorum_bundle(
     .await
     .with_context(Ctx::database(org_id, bundle_id))?;
 
+    if let Some(bundle) = &mut row {
+        bundle.bundle_hash = canonical_hash(&bundle.data);
+        holders::enrich(pool, org_id, std::slice::from_mut(bundle)).await;
+    }
     Ok(row)
 }
 
@@ -407,4 +448,30 @@ pub async fn delete_secrets_bundle(
         .with_context(Ctx::database(org_id, bundle_id))?;
 
     Ok(result.rows_affected() > 0)
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn canonical_hash_matches_shared_hash_and_ignores_json_order() {
+        use keymaker_models::generate_quorum::{GenerateQuorumResponse, deterministic_bundle_hash};
+        let data = json!({"data":{"version":"V1","bundle_id":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],"label":{"a":"1","b":"2"},"keyring":[],"threshold":1,"max":1,"shardfile":"shares","public_key":"key"},"necroproof":[]});
+        let response: GenerateQuorumResponse = serde_json::from_value(data.clone()).unwrap();
+        assert_eq!(
+            canonical_hash(&data),
+            Some(hex::encode(
+                deterministic_bundle_hash(&response.data).unwrap()
+            ))
+        );
+        let mut reordered = data.clone();
+        reordered["data"]["label"] = serde_json::from_str(r#"{"b":"2","a":"1"}"#).unwrap();
+        assert_eq!(canonical_hash(&data), canonical_hash(&reordered));
+        reordered["data"]["public_key"] = json!("different");
+        assert_ne!(canonical_hash(&data), canonical_hash(&reordered));
+        assert_eq!(canonical_hash(&json!({})), None);
+        assert_eq!(canonical_hash(&json!({"version":"V0"})), None);
+    }
 }

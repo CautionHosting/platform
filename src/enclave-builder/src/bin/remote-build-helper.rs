@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use std::path::{Path, PathBuf};
 
 use dterror::{BoxError, CtxError, Location, ResultExt as _};
@@ -74,6 +82,13 @@ enum RemoteBuildError {
         #[context(borrow = Path)]
         path: PathBuf,
         location: Location,
+    },
+    #[error("could not export paired TAP tunnel helper [{location}]")]
+    ExportTapFramer {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
     },
     #[error("failed to copy EIF to {} [{location}]", path.display())]
     CopyEif {
@@ -321,6 +336,12 @@ async fn main() -> Result<(), RemoteBuildError> {
     tokio::fs::copy(&generated_pcrs, &output_pcrs)
         .await
         .with_context(Ctx::copy_pcrs(&output_pcrs))?;
+
+    if egress {
+        enclave_builder::tap_framer::export_binary(&builder.work_dir, &output_eif)
+            .await
+            .with_context(Ctx::export_tap_framer())?;
+    }
 
     println!("EIF written to {}", output_eif.display());
     println!("PCRs written to {}", output_pcrs.display());

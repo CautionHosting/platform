@@ -30,6 +30,7 @@ pub struct PasskeySummary {
     pub created_at: String,
     pub last_used_at: Option<String>,
     pub is_current_session: bool,
+    pub uv_verified: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -45,6 +46,11 @@ pub struct PasskeyBeginRequest {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum PasskeyError {
+    #[error("Verify this passkey with a PIN or biometric before using it for quorum approval. [{location}]")]
+    UserVerificationRequired {
+        #[location]
+        location: Location,
+    },
     #[error("No matching passkey registration state found. Please start over. [{location}]")]
     NoRegistrationState {
         #[location]
@@ -53,12 +59,6 @@ pub enum PasskeyError {
 
     #[error("Passkey registration challenge has expired. Please try again. [{location}]")]
     ChallengeExpired {
-        #[location]
-        location: Location,
-    },
-
-    #[error("This passkey is already registered. [{location}]")]
-    CredentialAlreadyRegistered {
         #[location]
         location: Location,
     },
@@ -77,6 +77,18 @@ pub enum PasskeyError {
 
     #[error("You must keep at least one passkey on your account. [{location}]")]
     LastCredential {
+        #[location]
+        location: Location,
+    },
+
+    #[error("This security key is already registered to another account. [{location}]")]
+    CredentialAlreadyRegistered {
+        #[location]
+        location: Location,
+    },
+
+    #[error("This passkey is already on your account. [{location}]")]
+    CredentialAlreadyOnAccount {
         #[location]
         location: Location,
     },
@@ -126,6 +138,11 @@ pub enum PasskeyError {
 impl IntoResponse for PasskeyError {
     fn into_response(self) -> Response {
         match self {
+            Self::UserVerificationRequired { .. } => (
+                StatusCode::BAD_REQUEST,
+                "This passkey must verify a PIN or biometric for quorum approval.",
+            )
+                .into_response(),
             error @ Self::Auth { .. } => {
                 tracing::warn!(?error, "Passkey management: authentication failed");
                 generic_auth_failure_response().into_response()
@@ -140,9 +157,6 @@ impl IntoResponse for PasskeyError {
                 "Passkey registration challenge has expired. Please try again.",
             )
                 .into_response(),
-            Self::CredentialAlreadyRegistered { .. } => {
-                (StatusCode::CONFLICT, "This passkey is already registered.").into_response()
-            }
             Self::TooManyPending { .. } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many pending passkey registrations. Please try again later.",
@@ -154,6 +168,16 @@ impl IntoResponse for PasskeyError {
             Self::LastCredential { .. } => (
                 StatusCode::CONFLICT,
                 "You must keep at least one passkey on your account.",
+            )
+                .into_response(),
+            Self::CredentialAlreadyRegistered { .. } => (
+                StatusCode::CONFLICT,
+                "This security key is already registered to another account.",
+            )
+                .into_response(),
+            Self::CredentialAlreadyOnAccount { .. } => (
+                StatusCode::CONFLICT,
+                "This passkey is already on your account.",
             )
                 .into_response(),
             Self::BadRequest { .. } => {
@@ -230,6 +254,7 @@ pub async fn list_passkeys_handler(
         db::validate_auth_session(&state.db, &session_id)
             .await
             .with_context(Ctx::internal())?
+            .map(|(cred, _)| cred)
     } else {
         None
     };
@@ -268,6 +293,7 @@ pub async fn list_passkeys_handler(
             let transports = parse_transports(credential.transport.as_ref());
             PasskeySummary {
                 id: credential.id,
+                uv_verified: credential.uv_verified,
                 name: credential.name,
                 credential_id: hex::encode(&credential.credential_id),
                 kind: passkey_kind_from_transports(&transports).to_string(),
@@ -315,21 +341,13 @@ pub async fn begin_add_passkey_handler(
             })?;
     let user_unique_id = Uuid::from_slice(&user_handle).with_context(Ctx::internal())?;
 
-    let existing_cred_ids = db::get_all_credential_ids(&state.db)
-        .await
-        .with_context(Ctx::internal())?;
-    let exclude_credentials: Vec<CredentialID> = existing_cred_ids
-        .into_iter()
-        .map(CredentialID::from)
-        .collect();
-
     let (mut ccr, reg_state) = state
         .webauthn
         .start_securitykey_registration(
             user_unique_id,
             &registration_user.username,
             &registration_user.username,
-            Some(exclude_credentials).filter(|v| !v.is_empty()),
+            None,
             None,
             None,
         )
@@ -412,14 +430,6 @@ pub async fn finish_add_passkey_handler(
         .with_context(Ctx::internal())?;
 
     let credential_id = seckey.cred_id().clone();
-    if db::credential_exists(&state.db, &credential_id)
-        .await
-        .with_context(Ctx::internal())?
-    {
-        return Err(PasskeyError::CredentialAlreadyRegistered {
-            location: std::panic::Location::caller(),
-        });
-    }
 
     let passkey_json = serde_json::to_vec(&seckey).with_context(Ctx::internal())?;
     let transports = req
@@ -427,6 +437,34 @@ pub async fn finish_add_passkey_handler(
         .cloned()
         .filter(|value| value.is_array());
     let resident = read_credprops_rk(&reg_response);
+
+    if db::credential_conflicts_with_other_user(&state.db, &credential_id, &passkey_json)
+        .await
+        .with_context(Ctx::internal())?
+    {
+        tracing::warn!(
+            credential_id = %hex::encode(&credential_id),
+            user_id = %user_id,
+            "Passkey registration rejected: credential ID already registered to another user with a different key"
+        );
+        return Err(PasskeyError::CredentialAlreadyRegistered {
+            location: std::panic::Location::caller(),
+        });
+    }
+
+    if db::credential_exists_for_user(&state.db, user_id, &credential_id)
+        .await
+        .with_context(Ctx::internal())?
+    {
+        tracing::warn!(
+            credential_id = %hex::encode(&credential_id),
+            user_id = %user_id,
+            "Passkey registration rejected: credential ID already registered to this account"
+        );
+        return Err(PasskeyError::CredentialAlreadyOnAccount {
+            location: std::panic::Location::caller(),
+        });
+    }
 
     db::save_fido2_credential(
         &state.db,
@@ -490,4 +528,59 @@ pub async fn delete_passkey_handler(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status_of(err: PasskeyError) -> StatusCode {
+        err.into_response().status()
+    }
+
+    #[test]
+    fn same_account_duplicate_maps_to_conflict_not_internal() {
+        // Regression guard: re-adding a credential the caller already owns on
+        // their own account must surface as 409 Conflict, not fall through to a
+        // constraint-violation 500 from save_fido2_credential.
+        let err = PasskeyError::CredentialAlreadyOnAccount {
+            location: std::panic::Location::caller(),
+        };
+        assert_eq!(status_of(err), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn cross_account_conflict_maps_to_conflict() {
+        // The forged-rawId / other-account case keeps its 409 as well.
+        let err = PasskeyError::CredentialAlreadyRegistered {
+            location: std::panic::Location::caller(),
+        };
+        assert_eq!(status_of(err), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn same_account_duplicate_body_is_distinct_from_cross_account() {
+        // The two 409s carry distinct client messages so a user re-adding their
+        // own key is not told the key belongs to "another account".
+        let on_account = PasskeyError::CredentialAlreadyOnAccount {
+            location: std::panic::Location::caller(),
+        }
+        .into_response();
+        let body = axum::body::to_bytes(on_account.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), b"This passkey is already on your account.");
+
+        let other_account = PasskeyError::CredentialAlreadyRegistered {
+            location: std::panic::Location::caller(),
+        }
+        .into_response();
+        let body = axum::body::to_bytes(other_account.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            body.as_ref(),
+            b"This security key is already registered to another account."
+        );
+    }
 }

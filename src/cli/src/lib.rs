@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use base64::{Engine as _, engine::general_purpose};
 use clap::{Parser, Subcommand};
 use dterror::{BoxError, CtxError, FromContext, Location, ResultExt};
@@ -30,7 +38,13 @@ mod cache;
 mod credentials;
 mod env_notice;
 mod pgp_keys;
+mod quorum_init;
+mod quorum_inspect;
+mod quorum_legacy;
+mod quorum_upload;
 mod secrets;
+mod service_trust;
+mod share_release;
 mod ssh_keys;
 mod verify;
 
@@ -479,9 +493,12 @@ enum Commands {
         force: bool,
     },
     #[command(
-        about = "Verify enclave attestation against the local source at the manifest commit."
+        about = "Verify an application from local source, or discover and verify a hosted service."
     )]
     Verify {
+        /// Discover, reproduce and save trust for a hosted service on the selected Platform.
+        #[arg(long, value_enum, conflicts_with_all = ["attestation_url", "from_local", "from_tarball", "app_source_url", "pcrs", "save_pcrs", "inspect_attestation"])]
+        service: Option<service_trust::Service>,
         #[arg(
             long,
             help = "Attestation endpoint URL (default: inferred from .caution/deployment)"
@@ -742,29 +759,18 @@ enum SecretCommands {
         #[arg(long, help = "Acknowledge unsafe plaintext private keyring generation")]
         shoot_self_in_foot: bool,
     },
-    #[command(about = "Generate a new cryptographic quorum")]
-    New {
-        #[arg(help = "Path to armored PGP keyring file")]
-        keyring: PathBuf,
-        #[arg(long, requires = "max", help = "Minimum shares needed to reconstruct")]
-        threshold: Option<u8>,
-        #[arg(
-            long,
-            requires = "threshold",
-            help = "Total shares to generate (defaults to the eligible cert count)"
-        )]
-        max: Option<u8>,
-        #[arg(long, help = "Skip uploading bundle to Caution")]
-        no_upload: bool,
-        #[arg(long, help = "Name for the quorum bundle")]
-        name: Option<String>,
-        #[arg(
-            long = "label",
-            help = "Label in key=value format (can be repeated)",
-            value_name = "KEY=VALUE"
-        )]
-        labels: Vec<String>,
-    },
+    #[command(
+        visible_alias = "new",
+        about = "Initialize a cryptographic quorum bundle",
+        after_help = "Always saves .caution/quorum-bundle.json and .caution/keymaker-pcr-policy.json in the current directory. Redirected stdout also receives the bundle JSON."
+    )]
+    Init(quorum_init::Options),
+    #[command(about = "Upload a saved proofed V1 bundle without generating a new quorum")]
+    Upload(quorum_upload::Options),
+    #[command(about = "Import historical PGP quorum metadata without reconstructing its secret")]
+    ImportLegacy(quorum_legacy::Options),
+    #[command(about = "Inspect a saved quorum bundle (verifies its proof by default)")]
+    Inspect(quorum_inspect::Options),
     #[command(about = "Encrypt env file values into .caution/secrets/*.asc")]
     Encrypt {
         #[arg(help = "Env keys to encrypt (defaults to every key in the env file)")]
@@ -790,6 +796,11 @@ enum SecretCommands {
             help = "Directory for encrypted secret files"
         )]
         secrets_dir: PathBuf,
+        #[arg(
+            long,
+            help = "Accept an imported V0 bundle without a Keymaker generation proof"
+        )]
+        allow_legacy: bool,
     },
     #[command(about = "Rename a quorum bundle")]
     Rename {
@@ -805,6 +816,8 @@ enum SecretCommands {
     },
     #[command(about = "Send a shard to a running enclave's locksmith daemon")]
     SendShard {
+        #[command(flatten)]
+        release: share_release::Options,
         #[arg(
             long,
             help = "App ID or resource name (defaults to current deployment)"
@@ -814,7 +827,7 @@ enum SecretCommands {
         bundle: Option<PathBuf>,
         #[arg(
             long,
-            help = "Path for private OpenPGP Keyring (if not using smartcards)"
+            help = "Private OpenPGP keyring; a unique holder match is selected automatically. Omit for an OpenPGP smartcard"
         )]
         keyring: Option<PathBuf>,
     },
@@ -1323,6 +1336,7 @@ pub(crate) enum ReadConfigFromDirError {
     },
 }
 
+#[derive(Clone)]
 struct ApiClient {
     base_url: String,
     client: reqwest::Client,
@@ -3175,6 +3189,22 @@ enclave "default" {{
             .with_context(Ctx::signed_request())
     }
 
+    // Construct only after approval. reqwest's request timeout also covers body reads.
+    fn signed_operation_request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+    ) -> reqwest::RequestBuilder {
+        let request = self
+            .client
+            .request(method.clone(), [&self.base_url, path].concat());
+        if method == reqwest::Method::POST && path == "/api/quorum-bundles/from-org-users" {
+            request.timeout(Duration::from_secs(125))
+        } else {
+            request
+        }
+    }
+
     async fn signed_request(
         &self,
         session_id: &str,
@@ -3191,6 +3221,7 @@ enclave "default" {{
         }
 
         let body_json = body;
+
         let body_hash = hex::encode(Sha256::digest(&body_json));
         let method_name = method.as_str();
 
@@ -3251,8 +3282,7 @@ enclave "default" {{
         output::verbose(self.verbose, "Sending FIDO2-signed request");
 
         let response = self
-            .client
-            .request(method, format!("{}{}", self.base_url, path))
+            .signed_operation_request(method, path)
             .header("X-Fido2-Challenge-Id", &sign_resp.challenge_id)
             .header("X-Fido2-Response", &fido_response_b64)
             .header("Content-Type", "application/json")
@@ -3562,7 +3592,13 @@ pub async fn run() -> Result<(), RunError> {
 
     env_notice::gate(cli.verbose);
 
-    if let Err(e) = check_dependencies(cli.verbose) {
+    if !matches!(
+        &cli.command,
+        Commands::Secret {
+            command: SecretCommands::Inspect(_)
+        }
+    ) && let Err(e) = check_dependencies(cli.verbose)
+    {
         output::error(format!("Dependency check failed: {}", e));
         return Err(RunError::DependencyCheck {
             location: std::panic::Location::caller(),
@@ -3679,6 +3715,7 @@ pub async fn run() -> Result<(), RunError> {
             }
         }
         Commands::Verify {
+            service,
             attestation_url,
             from_local,
             from_tarball,
@@ -3688,19 +3725,25 @@ pub async fn run() -> Result<(), RunError> {
             save_pcrs,
             inspect_attestation,
         } => {
-            verify::verify(
-                &client,
-                attestation_url,
-                from_local,
-                from_tarball,
-                app_source_url,
-                pcrs,
-                no_cache,
-                save_pcrs,
-                inspect_attestation,
-            )
-            .await
-            .with_context(Ctx::command_dispatch())?;
+            if let Some(service) = service {
+                service_trust::run(&client, service, no_cache)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
+            } else {
+                verify::verify(
+                    &client,
+                    attestation_url,
+                    from_local,
+                    from_tarball,
+                    app_source_url,
+                    pcrs,
+                    no_cache,
+                    save_pcrs,
+                    inspect_attestation,
+                )
+                .await
+                .with_context(Ctx::command_dispatch())?;
+            }
         }
         Commands::Apps { command } => match command {
             AppCommands::Create => {
@@ -3859,15 +3902,23 @@ pub async fn run() -> Result<(), RunError> {
                 )
                 .with_context(Ctx::command_dispatch())?;
             }
-            SecretCommands::New {
-                keyring,
-                threshold,
-                max,
-                no_upload,
-                name,
-                labels,
-            } => {
-                secrets::new(&client, keyring, threshold, max, !no_upload, name, labels)
+            SecretCommands::Inspect(options) => {
+                quorum_inspect::run(&client, options)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
+            }
+            SecretCommands::ImportLegacy(options) => {
+                quorum_legacy::run(&client, options)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
+            }
+            SecretCommands::Init(options) => {
+                quorum_init::run(&client, options)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
+            }
+            SecretCommands::Upload(options) => {
+                quorum_upload::run(&client, options)
                     .await
                     .with_context(Ctx::command_dispatch())?;
             }
@@ -3876,8 +3927,9 @@ pub async fn run() -> Result<(), RunError> {
                 env_file,
                 bundle,
                 secrets_dir,
+                allow_legacy,
             } => {
-                secrets::encrypt(keys, env_file, bundle, secrets_dir)
+                secrets::encrypt(&client, keys, env_file, bundle, secrets_dir, allow_legacy)
                     .with_context(Ctx::command_dispatch())?;
             }
             SecretCommands::Rename { id, name } => {
@@ -3898,11 +3950,12 @@ pub async fn run() -> Result<(), RunError> {
                 }
             },
             SecretCommands::SendShard {
+                release,
                 app,
                 bundle,
                 keyring,
             } => {
-                secrets::send_shard(&client, app, bundle, keyring)
+                secrets::send_shard(&client, app, bundle, keyring, release)
                     .await
                     .with_context(Ctx::command_dispatch())?;
             }
@@ -3918,13 +3971,13 @@ mod tests {
     use super::verify::{
         ARCHIVE_PREFLIGHT_ATTEMPTS, ArchivePreflightStatus, MAX_ATTESTATION_RESPONSE_BYTES,
         TlsConnection, TlsExpectation, TrustedHashes, TrustedTls,
-        append_attestation_response_chunk, attestation_inspection_json,
-        attestation_user_data, classify_app_source_refs, classify_archive_preflight,
-        configured_enclave, display_user_data, dns_answer_is_absent, dns_contains_deployment_ip,
-        git_command, measured_build_cache_key, persist_trusted_hashes,
-        persist_trusted_hashes_with_backup, preflight_archive_urls, reproduction_uses_steve,
-        resolve_reproduction_e2e_mode, tls_connection, tls_expectation_from_config,
-        validate_attested_tls, verify_deprecation_warnings,
+        append_attestation_response_chunk, attestation_inspection_json, attestation_user_data,
+        classify_app_source_refs, classify_archive_preflight, configured_enclave,
+        display_user_data, dns_answer_is_absent, dns_contains_deployment_ip, git_command,
+        measured_build_cache_key, persist_trusted_hashes, persist_trusted_hashes_with_backup,
+        preflight_archive_urls, reproduction_uses_steve, resolve_reproduction_e2e_mode,
+        tls_connection, tls_expectation_from_config, validate_attested_tls,
+        verify_deprecation_warnings,
     };
     use super::{
         AccountCommands, ApiClient, Cli, Commands, PgpKeyCommands, RunError,
@@ -4431,6 +4484,58 @@ enclave "main" {{
             qr: false,
             workdir: None,
         }
+    }
+
+    #[test]
+    fn hosted_generation_timeout_is_scoped_to_the_operation_request() {
+        let client = test_api_client();
+        let request = client
+            .signed_operation_request(reqwest::Method::POST, "/api/quorum-bundles/from-org-users")
+            .build()
+            .unwrap();
+        assert_eq!(
+            request.timeout(),
+            Some(&std::time::Duration::from_secs(125))
+        );
+        for path in [
+            "/auth/qr-sign/begin",
+            "/auth/qr-sign/status",
+            "/api/quorum-bundles",
+        ] {
+            let request = client
+                .signed_operation_request(reqwest::Method::POST, path)
+                .build()
+                .unwrap();
+            assert_eq!(request.timeout(), None, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn hosted_generation_deadline_starts_on_send_and_covers_body() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n")
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        let mut client = test_api_client();
+        client.base_url = ["http://", &address.to_string()].concat();
+        let mut request = client
+            .signed_operation_request(reqwest::Method::POST, "/api/quorum-bundles/from-org-users")
+            .build()
+            .unwrap();
+        // Shorten only the test deadline; exercise reqwest's actual send/body timer.
+        *request.timeout_mut() = Some(std::time::Duration::from_millis(100));
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let response = client.client.execute(request).await.unwrap();
+        assert!(response.bytes().await.unwrap_err().is_timeout());
+        server.abort();
     }
 
     async fn serve_preflight_responses(

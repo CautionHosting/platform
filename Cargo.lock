@@ -181,10 +181,10 @@ dependencies = [
  "aws-sdk-s3",
  "axum",
  "base64 0.22.1",
+ "bootproof-sdk",
  "bytes",
  "caution-config",
  "chrono",
- "dirs",
  "dterror 0.3.0",
  "enclave-builder",
  "futures",
@@ -192,11 +192,15 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "indexmap 2.14.0",
+ "keymaker-models",
+ "locksmith",
+ "public-certificate-models",
  "rand 0.8.7",
  "regex",
  "reqwest 0.11.27",
  "sequoia-openpgp",
  "serde",
+ "serde_cbor",
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
@@ -211,6 +215,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "webauthn-rs",
 ]
 
 [[package]]
@@ -1408,7 +1413,7 @@ dependencies = [
 [[package]]
 name = "bootproof"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/bootproof.git?rev=b03721957e3850931f5b53627e7c3d1c302a06fe#b03721957e3850931f5b53627e7c3d1c302a06fe"
+source = "git+https://codeberg.org/caution/bootproof.git?rev=2590edb0f23cae6589bc73cc8324673023ac1deb#2590edb0f23cae6589bc73cc8324673023ac1deb"
 dependencies = [
  "aws-nitro-enclaves-nsm-api",
  "serde_bytes",
@@ -1419,21 +1424,7 @@ dependencies = [
 [[package]]
 name = "bootproof-sdk"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/bootproof.git?rev=b03721957e3850931f5b53627e7c3d1c302a06fe#b03721957e3850931f5b53627e7c3d1c302a06fe"
-dependencies = [
- "coset 0.4.2",
- "ring",
- "serde_cbor",
- "thiserror 2.0.20",
- "tracing",
- "webpki",
- "x509-parser 0.18.1",
-]
-
-[[package]]
-name = "bootproof-sdk"
-version = "0.1.0"
-source = "git+https://codeberg.org/caution/bootproof.git?rev=b346db17523ad9b13ef41eb9c14df3328bbd80d1#b346db17523ad9b13ef41eb9c14df3328bbd80d1"
+source = "git+https://codeberg.org/caution/bootproof.git?rev=2590edb0f23cae6589bc73cc8324673023ac1deb#2590edb0f23cae6589bc73cc8324673023ac1deb"
 dependencies = [
  "coset 0.4.2",
  "ring",
@@ -1824,13 +1815,15 @@ name = "cli"
 version = "0.1.0"
 dependencies = [
  "authenticator",
+ "axum",
  "base64 0.22.1",
- "bootproof-sdk 0.1.0 (git+https://codeberg.org/caution/bootproof.git?rev=b346db17523ad9b13ef41eb9c14df3328bbd80d1)",
+ "bootproof-sdk",
  "caution-config",
  "caution-environment-heuristics",
  "chrono",
  "clap",
  "coset 0.3.8",
+ "crossterm",
  "dirs",
  "dterror 0.3.0",
  "enclave-builder",
@@ -1838,6 +1831,7 @@ dependencies = [
  "hcl-rs",
  "hex",
  "indicatif",
+ "keyfork-shard",
  "keymaker-models",
  "locksmith",
  "qrcode",
@@ -1854,8 +1848,10 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tracing",
  "url",
  "uuid",
+ "webauthn-rs-proto",
  "zeroize",
 ]
 
@@ -2899,7 +2895,6 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
- "tower 0.4.13",
  "tower-http",
  "tracing",
  "tracing-subscriber",
@@ -2925,10 +2920,9 @@ dependencies = [
 name = "enclave-builder"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "base64 0.22.1",
  "bollard",
- "bootproof-sdk 0.1.0 (git+https://codeberg.org/caution/bootproof.git?rev=b346db17523ad9b13ef41eb9c14df3328bbd80d1)",
+ "bootproof-sdk",
  "coset 0.3.8",
  "dterror 0.3.0",
  "flate2",
@@ -3264,7 +3258,6 @@ dependencies = [
 name = "gateway"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "axum",
  "axum-extra",
  "base64 0.22.1",
@@ -3275,6 +3268,8 @@ dependencies = [
  "futures",
  "hex",
  "hmac 0.12.1",
+ "keymaker-models",
+ "locksmith",
  "percent-encoding",
  "rand 0.10.2",
  "rand 0.8.7",
@@ -4477,10 +4472,12 @@ dependencies = [
 [[package]]
 name = "keymaker-models"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=2db332a5315242ae84385571b2af9e2b499a369c#2db332a5315242ae84385571b2af9e2b499a369c"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=890a46a72c4aee6c6faccddd496c16653e98a765#890a46a72c4aee6c6faccddd496c16653e98a765"
 dependencies = [
  "serde",
+ "serde_cbor",
  "sha2 0.10.9",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4667,16 +4664,17 @@ dependencies = [
 [[package]]
 name = "locksmith"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=2db332a5315242ae84385571b2af9e2b499a369c#2db332a5315242ae84385571b2af9e2b499a369c"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=890a46a72c4aee6c6faccddd496c16653e98a765#890a46a72c4aee6c6faccddd496c16653e98a765"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
  "blahaj",
  "bootproof",
- "bootproof-sdk 0.1.0 (git+https://codeberg.org/caution/bootproof.git?rev=b03721957e3850931f5b53627e7c3d1c302a06fe)",
+ "bootproof-sdk",
  "card-backend",
  "card-backend-pcsc",
  "cfg-if",
+ "crossterm",
  "daemonize",
  "dterror 0.1.0",
  "ed25519-dalek 2.2.0",
@@ -4692,8 +4690,10 @@ dependencies = [
  "keymaker-models",
  "openpgp-card 0.6.1",
  "openpgp-card-rpgp",
+ "openpgp-card-sequoia",
  "pgp",
  "rand 0.8.7",
+ "rpassword",
  "rpgpie",
  "sequoia-openpgp",
  "serde",
@@ -4708,6 +4708,8 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "webauthn-rs",
+ "webauthn-rs-proto",
  "x25519-dalek",
 ]
 
@@ -4835,7 +4837,6 @@ dependencies = [
  "thiserror 2.0.20",
  "time",
  "tokio",
- "tower 0.4.13",
  "tower-http",
  "tracing",
  "tracing-subscriber",
@@ -5903,6 +5904,14 @@ name = "psl-types"
 version = "2.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
+
+[[package]]
+name = "public-certificate-models"
+version = "0.1.0"
+source = "git+https://codeberg.org/caution/locksmith.git?rev=890a46a72c4aee6c6faccddd496c16653e98a765#890a46a72c4aee6c6faccddd496c16653e98a765"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "publicsuffix"

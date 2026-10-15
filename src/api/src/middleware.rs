@@ -186,10 +186,8 @@ pub async fn validate_session(db: &PgPool, session_id: &str) -> Result<Uuid, Val
     use ValidateSessionErrorCtx as Ctx;
 
     let result: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT u.id
+        "SELECT s.user_id
          FROM auth_sessions s
-         INNER JOIN fido2_credentials c ON s.credential_id = c.credential_id
-         INNER JOIN users u ON c.user_id = u.id
          WHERE s.session_id = $1 AND s.expires_at > NOW()",
     )
     .bind(session_id)

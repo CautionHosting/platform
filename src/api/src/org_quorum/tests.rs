@@ -1,0 +1,580 @@
+use super::*;
+
+fn request() -> GenerateOrgQuorumBundleRequest {
+    GenerateOrgQuorumBundleRequest {
+        name: None,
+        threshold: 1,
+        participants: vec![OrgQuorumParticipantSelection {
+            user_id: Uuid::new_v4(),
+            key_source: OrgQuorumKeySource::CautionBackedPgp,
+            pgp_key_id: None,
+        }],
+        pgp_certificates: vec![],
+        allow_caution_backed_keys: true,
+        labels: serde_json::Value::Null,
+        keymaker_pcr_policy: None,
+    }
+}
+
+#[test]
+fn rejects_duplicate_users_and_invalid_thresholds() {
+    let mut r = request();
+    assert!(validate_request(&r).is_ok());
+    r.participants.push(r.participants[0].clone());
+    assert!(validate_request(&r).is_err());
+    r.participants.pop();
+    for threshold in [0, 2, 255] {
+        r.threshold = threshold;
+        assert!(validate_request(&r).is_err());
+    }
+}
+
+#[test]
+fn requires_explicit_custody_selection() {
+    let mut r = request();
+    r.allow_caution_backed_keys = false;
+    assert!(validate_request(&r).is_err());
+    r.participants[0].key_source = OrgQuorumKeySource::ExistingPgp;
+    assert!(validate_request(&r).is_err());
+    r.participants[0].pgp_key_id = Some(Uuid::new_v4());
+    assert!(validate_request(&r).is_ok());
+}
+
+#[test]
+fn missing_and_malformed_credentials_fail() {
+    assert!(credential_snapshot(vec![]).is_err());
+    assert!(credential_snapshot(vec![(b"{}".to_vec(), true)]).is_err());
+}
+
+#[test]
+fn rejects_invalid_pgp_and_participant_limits() {
+    assert!(eligible_certificate("not a certificate", None).is_err());
+    let mut r = request();
+    r.participants.clear();
+    assert!(validate_request(&r).is_err());
+    for count in [254, 255, 256] {
+        r.pgp_certificates = vec![String::new(); count];
+        assert_eq!(validate_request(&r).is_ok(), count == 254);
+        // The limit applies to the combined local and organization selection.
+        r.pgp_certificates.pop();
+        r.participants = request().participants;
+        assert_eq!(validate_request(&r).is_ok(), count == 254);
+        r.participants.clear();
+    }
+}
+
+#[test]
+fn holder_eligibility_uses_generation_time_for_historical_bundles() {
+    use sequoia_openpgp::{cert::CertBuilder, serialize::SerializeInto, types::KeyFlags};
+
+    let created = SystemTime::now() - Duration::from_secs(86400);
+    let generated = created + Duration::from_secs(60);
+    let expired = created + Duration::from_secs(7200);
+    let (cert, _) = CertBuilder::new()
+        .set_creation_time(created)
+        .add_signing_subkey()
+        .add_authentication_subkey()
+        .add_subkey(
+            KeyFlags::empty().set_storage_encryption(),
+            Some(Duration::from_secs(3600)),
+            None,
+        )
+        .generate()
+        .unwrap();
+    let cert = String::from_utf8(cert.armored().to_vec().unwrap()).unwrap();
+    for key in [
+        Key::OpenPGP { cert: cert.clone() },
+        Key::WebAuthn {
+            cert,
+            credential: vec!["test".into()],
+        },
+    ] {
+        let keys = [key];
+        assert!(validate_keyring(&keys, Some(generated)).is_ok());
+        assert!(validate_keyring(&keys, Some(expired)).is_err());
+        assert!(validate_keyring(&keys, Some(created - Duration::from_secs(1))).is_err());
+        assert!(validate_keyring(&keys, None).is_err());
+    }
+}
+
+fn certificate() -> String {
+    use sequoia_openpgp::{cert::CertBuilder, serialize::Serialize};
+    let (cert, _) = CertBuilder::new()
+        .add_userid("test holder")
+        .add_signing_subkey()
+        .add_authentication_subkey()
+        .add_storage_encryption_subkey()
+        .generate()
+        .unwrap();
+    let mut bytes = Vec::new();
+    cert.armored().serialize(&mut bytes).unwrap();
+    String::from_utf8(bytes).unwrap()
+}
+
+#[test]
+fn assembled_combinations_preserve_id_and_compact_derived_order() {
+    let pgp = certificate();
+    let derived = [certificate(), certificate()];
+    let id = *Uuid::new_v4().as_bytes();
+    // Synthetic credential strings only test orchestration, not WebAuthn validity.
+    let holders = vec![
+        Holder::WebAuthn(vec!["a".into(), "b".into()]),
+        Holder::Pgp(pgp.clone()),
+        Holder::WebAuthn(vec!["c".into()]),
+    ];
+    let mixed = assemble_request(&request(), id, holders, derived.to_vec())
+        .unwrap()
+        .to_latest();
+    assert_eq!(mixed.bundle_id, id);
+    assert_eq!(mixed.max, 3);
+    assert_eq!(
+        mixed.keyring,
+        vec![
+            Key::WebAuthn {
+                credential: vec!["a".into(), "b".into()],
+                cert: derived[0].clone()
+            },
+            Key::OpenPGP { cert: pgp.clone() },
+            Key::WebAuthn {
+                credential: vec!["c".into()],
+                cert: derived[1].clone()
+            },
+        ]
+    );
+    let pgp_only = assemble_request(&request(), id, vec![Holder::Pgp(pgp)], vec![])
+        .unwrap()
+        .to_latest();
+    assert_eq!(pgp_only.max, 1);
+    let web = assemble_request(
+        &request(),
+        id,
+        vec![Holder::WebAuthn(vec!["a".into(), "b".into()])],
+        vec![derived[0].clone()],
+    )
+    .unwrap()
+    .to_latest();
+    assert_eq!(web.max, 1);
+}
+
+#[test]
+fn rejects_duplicate_effective_certificates_and_bad_derived_counts() {
+    let cert = certificate();
+    assert!(
+        validate_keyring(
+            &[
+                Key::OpenPGP { cert: cert.clone() },
+                Key::WebAuthn {
+                    cert: cert.clone(),
+                    credential: vec!["a".into()]
+                }
+            ],
+            None
+        )
+        .is_err()
+    );
+    assert!(
+        assemble_request(
+            &request(),
+            [1; 16],
+            vec![Holder::Pgp(cert.clone())],
+            vec![cert]
+        )
+        .is_err()
+    );
+    assert!(
+        assemble_request(
+            &request(),
+            [1; 16],
+            vec![Holder::WebAuthn(vec!["a".into()])],
+            vec![]
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn matches_response_fields_and_preserves_envelope() {
+    use keymaker_models::{Proofed, generate_quorum::GenerateQuorumBundle};
+    let cert = certificate();
+    let mut selection = request();
+    selection.threshold = 3;
+    let holders = (0..5).map(|_| Holder::Pgp(certificate())).collect();
+    let req = assemble_request(&selection, [1; 16], holders, vec![]).unwrap();
+    let expected = req.clone().to_latest();
+    let mut bundle = v1::GenerateQuorumResponse {
+        threshold: expected.threshold,
+        max: expected.max,
+        bundle_id: expected.bundle_id,
+        label: expected.label,
+        keyring: expected.keyring,
+        shardfile: "synthetic shardfile".into(),
+        public_key: cert,
+    };
+    let response = Proofed {
+        data: GenerateQuorumBundle::V1(bundle.clone()),
+        necroproof: vec![1, 2, 3],
+    };
+    assert!(check_response(&req, &response).is_ok()); // Field checks only, not proof acceptance.
+    let data = serde_json::to_value(&response).unwrap();
+    let stored = serde_json::json!({"data": data});
+    let roundtrip: GenerateQuorumResponse = serde_json::from_value(stored["data"].clone()).unwrap();
+    assert_eq!(roundtrip.necroproof, vec![1, 2, 3]);
+    assert_eq!(roundtrip.data, response.data);
+    for field in ["id", "labels", "keyring", "threshold", "max"] {
+        bundle = response.data.clone().to_latest();
+        match field {
+            "threshold" => bundle.threshold = 1,
+            "max" => bundle.max += 1,
+            "id" => bundle.bundle_id = [2; 16],
+            "labels" => {
+                bundle.label.insert("wrong".into(), "value".into());
+            }
+            _ => bundle.keyring.clear(),
+        }
+        assert!(
+            check_response(
+                &req,
+                &Proofed {
+                    data: GenerateQuorumBundle::V1(bundle.clone()),
+                    necroproof: vec![]
+                }
+            )
+            .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn busy_and_timeout_do_not_retry_generation() {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+    // Only the timeout case gets a short client timeout; a shared 75 ms budget made the
+    // status cases time out under parallel test load on slow (emulated amd64) hosts.
+    for (status, delay, timeout, expected) in [
+        (429, 0, 10_000, StatusCode::TOO_MANY_REQUESTS),
+        (503, 0, 10_000, StatusCode::SERVICE_UNAVAILABLE),
+        (200, 1_000, 75, StatusCode::GATEWAY_TIMEOUT),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = ["http://", &listener.local_addr().unwrap().to_string()].concat();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let recorded = calls.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 4096];
+            stream.read(&mut request).unwrap();
+            recorded.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(delay));
+            let response = [
+                "HTTP/1.1 ",
+                &status.to_string(),
+                " Test\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            ]
+            .concat();
+            let _ = stream.write_all(response.as_bytes());
+        });
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(timeout))
+            .build()
+            .unwrap();
+        let error = post::<_, serde_json::Value>(&client, &url, &serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.status, expected);
+        server.join().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[path = "database.rs"]
+mod database;
+
+mod recipients {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/quorum_certificates.rs"
+    ));
+}
+
+#[test]
+fn rejects_shared_recipients_including_notations_and_expired_keys() {
+    for notation in [
+        None,
+        Some("organization-id@caution.co"),
+        Some("bundle-id@caution.co"),
+    ] {
+        for expired in [false, true] {
+            for different_timestamps in [false, true] {
+                let certs = recipients::shared_recipient(notation, expired, different_timestamps);
+                for cert in &certs {
+                    assert!(eligible_certificate(cert, None).is_ok());
+                }
+                let keys: Vec<_> = certs
+                    .into_iter()
+                    .map(|cert| Key::OpenPGP { cert })
+                    .collect();
+                for at in [None, Some(SystemTime::now())] {
+                    let error = validate_keyring(&keys, at).unwrap_err();
+                    assert!(error.message.contains("share an encryption key"));
+                }
+            }
+        }
+    }
+    assert!(
+        validate_keyring(
+            &[
+                Key::OpenPGP {
+                    cert: certificate()
+                },
+                Key::OpenPGP {
+                    cert: certificate()
+                }
+            ],
+            None
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn policy_files_fail_closed_when_missing_or_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("keymaker-pcr-policy.json");
+    assert_eq!(
+        load_policy(&path).unwrap_err().status,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    for json in [
+        "not JSON",
+        r#"{"sets":[]}"#,
+        r#"{"sets":[{"pcrs":{"0":"ab"}}]}"#,
+    ] {
+        std::fs::write(&path, json).unwrap();
+        assert_eq!(
+            load_policy(&path).unwrap_err().status,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+    for byte in ["00", "ab"] {
+        std::fs::write(
+            &path,
+            serde_json::json!({"sets":[{"pcrs":{
+                "0":byte.repeat(48), "1":byte.repeat(48), "2":byte.repeat(48)
+            }}]})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(load_policy(&path).is_ok(), byte == "ab");
+    }
+}
+
+#[test]
+fn client_policy_is_optional_and_rejects_malformed_or_debug_pins() {
+    assert!(client_policy(None).unwrap().is_none());
+    for value in [
+        serde_json::json!("not a policy"),
+        serde_json::json!({"sets":[]}),
+        serde_json::json!({"sets":[{"pcrs":{"0":"ab"}}]}),
+        serde_json::json!({"sets":[{"pcrs":{"0":"ab".repeat(48)}}], "extra":true}),
+    ] {
+        assert_eq!(
+            client_policy(Some(&value)).unwrap_err().status,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    for byte in ["00", "ab"] {
+        let value = serde_json::json!({"sets":[{"pcrs":{
+            "0":byte.repeat(48), "1":byte.repeat(48), "2":byte.repeat(48)
+        }}]});
+        let result = client_policy(Some(&value));
+        assert_eq!(result.is_ok_and(|policy| policy.is_some()), byte == "ab");
+    }
+}
+
+#[test]
+fn client_policy_drops_expired_sets_and_bounds_the_rest() {
+    let set = |expiry: Option<u64>| {
+        let pins = "ab".repeat(48);
+        serde_json::json!({"pcrs":{"0":pins, "1":pins, "2":pins}, "expires_at_unix_seconds":expiry})
+    };
+    let policy = |sets: Vec<serde_json::Value>| serde_json::json!({ "sets": sets });
+    let future = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
+    // Thousands of expired sets cost nothing; only the current one is verified.
+    let mut sets = vec![set(Some(1)); 5000];
+    sets.push(set(None));
+    let accepted = client_policy(Some(&policy(sets))).unwrap().unwrap();
+    assert_eq!(accepted.sets.len(), 1);
+    let bounded = policy(vec![set(Some(future)); MAX_CLIENT_POLICY_SETS]);
+    assert!(client_policy(Some(&bounded)).is_ok());
+    for sets in [
+        vec![set(Some(future)); MAX_CLIENT_POLICY_SETS + 1],
+        vec![set(Some(1))],
+    ] {
+        assert_eq!(
+            client_policy(Some(&policy(sets))).unwrap_err().status,
+            StatusCode::BAD_REQUEST
+        );
+    }
+}
+
+#[test]
+fn conflicting_name_labels_are_rejected() {
+    let mut r = request();
+    r.name = Some("prod".into());
+    for label in [
+        serde_json::json!("staging"),
+        serde_json::json!(3),
+        serde_json::Value::Null,
+    ] {
+        r.labels = serde_json::json!({"name": label});
+        assert!(validate_request(&r).is_err());
+    }
+    r.labels = serde_json::json!({"name": "prod"});
+    assert!(validate_request(&r).is_ok());
+    r.name = None;
+    assert!(validate_request(&r).is_ok());
+}
+
+#[test]
+fn rejects_shared_ecdh_recipients_with_different_kdf_parameters() {
+    use sequoia_openpgp::types::{HashAlgorithm, SymmetricAlgorithm};
+    for kdf in [
+        (HashAlgorithm::SHA512, SymmetricAlgorithm::AES256),
+        (HashAlgorithm::SHA256, SymmetricAlgorithm::AES128),
+        (HashAlgorithm::SHA512, SymmetricAlgorithm::AES128),
+    ] {
+        let certs = recipients::shared_recipient_with_kdf(None, false, false, Some(kdf), false);
+        let keys: Vec<_> = certs
+            .into_iter()
+            .map(|cert| Key::OpenPGP { cert })
+            .collect();
+        for key in &keys {
+            let Key::OpenPGP { cert } = key else {
+                unreachable!()
+            };
+            assert!(validate_keyring(std::slice::from_ref(key), None).is_ok());
+            assert!(eligible_certificate(cert, None).is_ok());
+        }
+        assert!(
+            validate_keyring(&keys, None)
+                .unwrap_err()
+                .message
+                .contains("share an encryption key")
+        );
+    }
+}
+
+#[test]
+fn accepts_repeated_ecdh_keys_within_one_holder_only() {
+    use sequoia_openpgp::{
+        parse::Parse,
+        policy::StandardPolicy,
+        types::{HashAlgorithm, SymmetricAlgorithm},
+    };
+    for kdf in [
+        (HashAlgorithm::SHA512, SymmetricAlgorithm::AES256),
+        (HashAlgorithm::SHA256, SymmetricAlgorithm::AES128),
+        (HashAlgorithm::SHA512, SymmetricAlgorithm::AES128),
+    ] {
+        let certs = recipients::shared_recipient_with_kdf(None, false, false, Some(kdf), true);
+        let repeated_cert = sequoia_openpgp::Cert::from_bytes(certs[0].as_bytes()).unwrap();
+        assert_eq!(
+            repeated_cert
+                .keys()
+                .with_policy(&StandardPolicy::new(), None)
+                .supported()
+                .alive()
+                .revoked(false)
+                .for_storage_encryption()
+                .count(),
+            3
+        );
+        let repeated = Key::OpenPGP {
+            cert: certs[0].clone(),
+        };
+        let shared = Key::OpenPGP {
+            cert: certs[1].clone(),
+        };
+        let independent = Key::OpenPGP {
+            cert: certificate(),
+        };
+        for at in [None, Some(SystemTime::now())] {
+            assert!(validate_keyring(std::slice::from_ref(&repeated), at).is_ok());
+            assert!(validate_keyring(&[repeated.clone(), independent.clone()], at).is_ok());
+            for pair in [
+                [repeated.clone(), shared.clone()],
+                [shared.clone(), repeated.clone()],
+            ] {
+                assert!(
+                    validate_keyring(&pair, at)
+                        .unwrap_err()
+                        .message
+                        .contains("share an encryption key")
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn legacy_upload_requires_signed_opt_in_and_public_consistency() {
+    let data: serde_json::Value =
+        serde_json::from_str(include_str!("../../../../tests/fixtures/imported-v0.json")).unwrap();
+    assert!(verify_upload(&data, false).is_err());
+    verify_upload(&data, true).unwrap();
+    let mut broken = data.clone();
+    broken["original"]["keyring_hash"] = serde_json::json!([0]);
+    assert!(verify_upload(&broken, true).is_err());
+    let mut broken = data.clone();
+    broken["threshold"] = serde_json::json!(0);
+    assert!(verify_upload(&broken, true).is_err());
+    let mut disguised = data;
+    disguised["data"] = serde_json::json!({"version":"V1"});
+    assert!(verify_upload(&disguised, true).is_err());
+    assert!(
+        verify_upload(
+            &serde_json::json!({"data":{"version":"V1"},"necroproof":[]}),
+            true
+        )
+        .is_err()
+    );
+    let request: crate::cryptographic_bundles::CreateBundleRequest =
+        serde_json::from_value(serde_json::json!({"data": {}})).unwrap();
+    assert!(!request.allow_legacy);
+}
+
+#[test]
+fn credential_snapshots_require_uv_and_enforce_recovery_bounds_without_reordering() {
+    let row = |id: u8, verified| {
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("test-credential.json")).unwrap();
+        use base64::Engine;
+        value["cred"]["cred_id"] =
+            serde_json::json!(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([id]));
+        (serde_json::to_vec(&value).unwrap(), verified)
+    };
+    for count in [0usize, 1, 64, 65] {
+        let rows: Vec<_> = (0..count).map(|i| row(i as u8, i == 0)).collect();
+        assert_eq!(credential_snapshot(rows).is_ok(), (1..=64).contains(&count));
+    }
+    assert!(credential_snapshot(vec![row(1, false)]).is_err());
+    let rows = vec![row(2, false), row(1, true)];
+    let expected: Vec<_> = rows
+        .iter()
+        .map(|(bytes, _)| {
+            serde_json::to_string(&serde_json::from_slice::<SecurityKey>(bytes).unwrap()).unwrap()
+        })
+        .collect();
+    assert_eq!(credential_snapshot(rows).unwrap(), expected);
+    assert!(credential_snapshot(vec![row(1, true), (b"{}".to_vec(), false)]).is_err());
+}

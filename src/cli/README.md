@@ -144,14 +144,39 @@ parses, normalizes, and fingerprints the public certificate again before storing
 it. Each file must contain exactly one public certificate and be no larger than
 64 KiB.
 
+### Quorum initialization
+
+`caution secret init` creates a hosted v1 quorum; `new` remains an alias.
+Use `--keymaker-url` for direct PGP-only creation. WebAuthn and mixed quorums
+use Platform mediation. Caution-backed holders need 1–64 registered credentials
+and at least one passkey verified with PIN/biometrics. Existing passkeys can be
+verified under Dashboard → Authentication → Verify for quorum approval. See [selection, trust policies and dependency limits](../../docs/org-user-quorums.md).
+
+If direct generation succeeds but its Platform upload fails, keep the saved
+bundle and retry its upload with:
+
+```sh
+caution secret upload --bundle .caution/quorum-bundle.json
+# For a bundle outside the current app checkout, supply its trusted policy:
+caution --qr secret upload --bundle /path/to/quorum-bundle.json \
+  --keymaker-pcr-policy /path/to/verified-keymaker-policy.json
+```
+
+Upload verifies the existing V1 proof before authentication and signs the existing
+artifact; it never contacts Keymaker or rewrites local files. It first checks the
+selected Platform for the same bundle ID and complete data, returning success
+without another upload if already present. Conflicting data is rejected. This
+check reconciles a previous uncertain upload; it does not prevent simultaneous
+uploads from racing. ImportedV0 continues to use `import-legacy --upload`.
+
 ### Encrypt Env Secrets
 
 After generating a quorum bundle with Keymaker, encrypt local `.env` values into
 the layout consumed by Caution deployments:
 
 ```sh
-export KEYMAKER_URL=http://35.163.164.207
-caution secret new keyring.asc --threshold 2 --max 4 --no-upload
+caution secret init keyring.asc --threshold 2 --max 4 \
+  --keymaker-pcr-policy keymaker-policy.json
 caution secrets encrypt
 ```
 
@@ -345,3 +370,9 @@ to be owned by.
 | Anton Livaja   | [F4BF 5C81 EC78 A5DD 341C 91EE DC4B 7D1F 52E0 BA4D](https://keyoxide.org/F4BF5C81EC78A5DD341C91EEDC4B7D1F52E0BA4D) |
 | Ryan Heywood   | [8882 3A75 ECAA 786B 0FF3 8B14 8E40 1478 A3FB EF72](https://keyoxide.org/88823A75ECAA786B0FF38B148E401478A3FBEF72) |
 | Daniel Grove   | [C92F E5A3 FBD5 8DD3 EC5A A26B B101 16B8 193F 2DBD](https://keyoxide.org/C92FE5A3FBD58DD3EC5AA26BB10116B8193F2DBD) |
+
+## Legacy PGP bundles
+
+Use `caution secret import-legacy --bundle PATH` for the one-time holder-assisted
+import. Encryption and share release then require `--allow-legacy` on each use.
+See [import, packaging and rebuild steps](../../docs/legacy-v0.md).

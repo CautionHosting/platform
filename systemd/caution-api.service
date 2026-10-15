@@ -7,7 +7,8 @@ After=caution-postgres.service caution-network.service
 
 [Service]
 ExecStartPre=-/usr/bin/docker rm -f api
-ExecStart=/usr/bin/docker run --name api --network caution-network -e TF_PLUGIN_CACHE_DIR=/var/cache/caution/terraform --env-file %h/.config/caution/.env -v %h/.config/caution/prices.json:/app/prices.json:ro -v %h/.config/caution/config.json:/app/config.json:ro -v caution-data-dir:/var/cache/caution caution-api
+ExecStartPre=/usr/bin/mkdir -p %h/.config/caution/policies
+ExecStart=/usr/bin/docker run --name api --network caution-network -e TF_PLUGIN_CACHE_DIR=/var/cache/caution/terraform --env-file %h/.config/caution/.env -v %h/.config/caution/prices.json:/app/prices.json:ro -v %h/.config/caution/config.json:/app/config.json:ro -v %h/.config/caution/policies:/run/config:ro -v caution-data-dir:/var/cache/caution caution-api
 ExecStop=/usr/bin/docker stop api
 
 [Install]

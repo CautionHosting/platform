@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use axum::{
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
@@ -79,6 +87,16 @@ pub enum LoginError {
         source: BoxError,
     },
 
+    /// The credential owner lookup itself failed; a server error, not a rejection.
+    #[error("could not look up the credential owner [{location}]")]
+    DbGetUserIdByCredential {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
     #[error("authentication challenge has expired [{location}]")]
     ChallengeExpired {
         #[location]
@@ -124,6 +142,17 @@ pub enum LoginError {
 
     #[error("could not update fido2 credentials for user {user_id} [{location}]")]
     DbUpdateFido2Credential {
+        user_id: Uuid,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("could not record passkey use for user {user_id} [{location}]")]
+    DbRecordCredentialUse {
         user_id: Uuid,
 
         #[location]
@@ -266,11 +295,15 @@ impl IntoResponse for LoginError {
             // distinguishable from another by status code or body. These are
             // expected client-side authentication failures, not internal
             // errors, so they're logged at debug/warn, not error.
+            Self::CredentialNotFound { .. } => {
+                tracing::debug!(?self, "Login finish: credential not found");
+                generic_auth_failure_response().into_response()
+            }
             Self::UnexpectedCredentialOwner { .. } => {
                 tracing::debug!(?self, "Login finish: decoy/scope rejection");
                 generic_auth_failure_response().into_response()
             }
-            Self::DbGetPublicKeyForCredential { .. } | Self::ParseSecurityKey { .. } => {
+            Self::ParseSecurityKey { .. } => {
                 tracing::warn!(?self, "Login finish: credential lookup/parse failure");
                 generic_auth_failure_response().into_response()
             }
@@ -408,12 +441,6 @@ pub enum RegisterError {
         location: Location,
     },
 
-    #[error("This security key is already registered. Each key can only be registered once. [{location}]")]
-    CredentialAlreadyRegistered {
-        #[location]
-        location: Location,
-    },
-
     #[error("Too many pending registrations. Please try again later. [{location}]")]
     TooManyPending {
         #[location]
@@ -431,6 +458,12 @@ pub enum RegisterError {
 
     #[error("This username is already taken. [{location}]")]
     UsernameTaken {
+        #[location]
+        location: Location,
+    },
+
+    #[error("This security key is already registered to another account. [{location}]")]
+    CredentialAlreadyRegistered {
         #[location]
         location: Location,
     },
@@ -482,11 +515,6 @@ impl IntoResponse for RegisterError {
                 StatusCode::GONE,
                 "No matching registration state found. Please start over.".to_string(),
             ),
-            Self::CredentialAlreadyRegistered { .. } => (
-                StatusCode::CONFLICT,
-                "This security key is already registered. Each key can only be registered once."
-                    .to_string(),
-            ),
             Self::TooManyPending { .. } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many pending registrations. Please try again later.".to_string(),
@@ -498,6 +526,10 @@ impl IntoResponse for RegisterError {
             Self::UsernameTaken { .. } => (
                 StatusCode::CONFLICT,
                 "This username is already taken.".to_string(),
+            ),
+            Self::CredentialAlreadyRegistered { .. } => (
+                StatusCode::CONFLICT,
+                "This security key is already registered to another account.".to_string(),
             ),
             Self::InvalidPayload { .. } => (
                 StatusCode::BAD_REQUEST,
@@ -551,4 +583,34 @@ pub(crate) fn build_auth_cookies(
         .build();
 
     (session_cookie.to_string(), csrf_cookie.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_login_credential_is_the_generic_auth_failure() {
+        let error = LoginError::CredentialNotFound {
+            location: std::panic::Location::caller(),
+            source: Box::new(std::io::Error::other("credential not found")),
+        };
+        assert_eq!(error.into_response().status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn public_key_lookup_failure_is_internal() {
+        let response = LoginError::DbGetPublicKeyForCredential {
+            user_id: Uuid::nil(),
+            source: Box::new(DomainError("private database diagnostic")),
+            location: std::panic::Location::caller(),
+        }
+        .into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!response.headers().contains_key(header::SET_COOKIE));
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), b"an internal error occurred");
+    }
 }
