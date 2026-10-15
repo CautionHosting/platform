@@ -1,6 +1,6 @@
 enclave "default" {
   build {
-    app_sources = ["https://codeberg.org/caution/demo-ai-inference.git"]
+    app_sources = ["https://git.caution.co/public/demo-ai-inference.git"]
     cache = false
   }
   network {

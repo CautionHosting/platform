@@ -5,15 +5,17 @@ mod artifacts;
 #[cfg(test)]
 mod reproduction_tests;
 
-const ENCLAVE_SOURCE_BASE: &str = "https://codeberg.org/caution/enclaveos/archive";
-pub const FRAMEWORK_SOURCE: &str = "https://codeberg.org/caution/platform/archive/main.tar.gz";
-/// Canonical Codeberg archive prefixes and their GitHub mirrors.
-const ARCHIVE_MIRRORS: [(&str, &str); 2] = [
+const ENCLAVE_SOURCE_BASE: &str = "https://git.caution.co/public/enclaveos/archive";
+pub const FRAMEWORK_SOURCE: &str = "https://git.caution.co/public/platform/archive/main.tar.gz";
+/// Canonical archives, historical Codeberg aliases, and their GitHub mirrors.
+const ARCHIVE_MIRRORS: [(&str, &str, &str); 2] = [
     (
+        "https://git.caution.co/public/platform/archive/",
         "https://codeberg.org/caution/platform/archive/",
         "https://github.com/CautionHosting/platform/archive/",
     ),
     (
+        "https://git.caution.co/public/enclaveos/archive/",
         "https://codeberg.org/caution/enclaveos/archive/",
         "https://github.com/CautionHosting/enclaveos/archive/",
     ),
@@ -35,8 +37,11 @@ pub fn pin_archive_url_to_commit(url: &str, commit: &str) -> String {
 pub fn archive_url_candidates(url: &str) -> Vec<String> {
     let mut candidates = vec![url.to_string()];
 
-    for (canonical, mirror) in ARCHIVE_MIRRORS {
+    for (canonical, historical, mirror) in ARCHIVE_MIRRORS {
         if let Some(archive_name) = url.strip_prefix(canonical) {
+            candidates.push([mirror, archive_name].concat());
+        } else if let Some(archive_name) = url.strip_prefix(historical) {
+            candidates.push([canonical, archive_name].concat());
             candidates.push([mirror, archive_name].concat());
         }
     }
@@ -642,7 +647,7 @@ impl EnclaveBuilder {
         );
 
         // Extract git URL and ref from archive URL like:
-        // https://codeberg.org/caution/platform/archive/main.tar.gz
+        // https://git.caution.co/public/platform/archive/main.tar.gz
         if let Some(archive_pos) = framework_source.find("/archive/") {
             let base_url = &framework_source[..archive_pos];
             let git_url = format!("{}.git", base_url);
@@ -1137,10 +1142,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn enclave_source_url_uses_codeberg() {
+    fn enclave_source_url_uses_caution_forge() {
         assert_eq!(
             enclave_source_url("abc"),
-            "https://codeberg.org/caution/enclaveos/archive/abc.tar.gz"
+            "https://git.caution.co/public/enclaveos/archive/abc.tar.gz"
         );
     }
 
@@ -1167,7 +1172,7 @@ mod tests {
 
         // 2. Git URL -> GitRepository with url/branch/commit.
         match classify_enclave_source(
-            "https://codeberg.org/caution/enclaveos.git",
+            "https://git.caution.co/public/enclaveos.git",
             "develop",
             Some("dead".to_string()),
         ) {
@@ -1176,7 +1181,7 @@ mod tests {
                 branch,
                 commit,
             } => {
-                assert_eq!(url, "https://codeberg.org/caution/enclaveos.git");
+                assert_eq!(url, "https://git.caution.co/public/enclaveos.git");
                 assert_eq!(branch, "develop");
                 assert_eq!(commit.as_deref(), Some("dead"));
             }
@@ -1236,22 +1241,30 @@ mod tests {
 
     #[test]
     fn test_pin_archive_url_to_commit_rewrites_archive_urls() {
-        let url = "https://codeberg.org/caution/platform/archive/main.tar.gz";
+        let url = "https://git.caution.co/public/platform/archive/main.tar.gz";
 
         assert_eq!(
             pin_archive_url_to_commit(url, "abc123"),
-            "https://codeberg.org/caution/platform/archive/abc123.tar.gz"
+            "https://git.caution.co/public/platform/archive/abc123.tar.gz"
         );
     }
 
     #[test]
     fn test_archive_url_candidates_adds_configured_mirrors() {
-        for (codeberg_prefix, github_prefix) in ARCHIVE_MIRRORS {
+        for (canonical_prefix, historical_prefix, github_prefix) in ARCHIVE_MIRRORS {
             for archive_name in ["main.tar.gz", "abc123.tar.gz"] {
-                let codeberg = [codeberg_prefix, archive_name].concat();
+                let canonical = [canonical_prefix, archive_name].concat();
+                let historical = [historical_prefix, archive_name].concat();
                 let github = [github_prefix, archive_name].concat();
 
-                assert_eq!(archive_url_candidates(&codeberg), vec![codeberg, github]);
+                assert_eq!(
+                    archive_url_candidates(&canonical),
+                    vec![canonical.clone(), github.clone()]
+                );
+                assert_eq!(
+                    archive_url_candidates(&historical),
+                    vec![historical, canonical, github]
+                );
             }
         }
     }
@@ -1261,7 +1274,7 @@ mod tests {
         assert_eq!(
             archive_url_candidates(&enclave_source_url("abc123")),
             vec![
-                "https://codeberg.org/caution/enclaveos/archive/abc123.tar.gz".to_string(),
+                "https://git.caution.co/public/enclaveos/archive/abc123.tar.gz".to_string(),
                 "https://github.com/CautionHosting/enclaveos/archive/abc123.tar.gz".to_string(),
             ]
         );
@@ -1272,6 +1285,8 @@ mod tests {
         for url in [
             "https://codeberg.org/caution/locksmith/archive/abc123.tar.gz",
             "https://codeberg.org/caution/platform-extra/archive/abc123.tar.gz",
+            "https://git.caution.co/public/locksmith/archive/abc123.tar.gz",
+            "https://git.caution.co/public/platform-extra/archive/abc123.tar.gz",
             "https://example.com/caution/platform/archive/abc123.tar.gz",
         ] {
             assert_eq!(archive_url_candidates(url), vec![url.to_string()]);
@@ -1280,7 +1295,7 @@ mod tests {
 
     #[test]
     fn test_pin_archive_url_to_commit_leaves_non_archive_urls_unchanged() {
-        let url = "https://codeberg.org/caution/platform.git";
+        let url = "https://git.caution.co/public/platform.git";
 
         assert_eq!(pin_archive_url_to_commit(url, "abc123"), url);
     }

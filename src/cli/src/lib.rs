@@ -4734,7 +4734,7 @@ containerfile: Missing.Containerfile\n",
 
         let urls = client
             .git_url_to_archive_urls(
-                "ssh://git@codeberg.org/caution/demo-pq-enclave-binding.git",
+                "ssh://git@git.caution.co/public/demo-pq-enclave-binding.git",
                 commit,
             )
             .unwrap();
@@ -4746,7 +4746,7 @@ containerfile: Missing.Containerfile\n",
     fn git_command_disables_interactive_ssh_prompts() {
         let cmd = git_command(&[
             "ls-remote",
-            "ssh://git@codeberg.org/caution/demo-pq-enclave-binding.git",
+            "ssh://git@git.caution.co/public/demo-pq-enclave-binding.git",
         ]);
         let envs: HashMap<_, _> = cmd
             .get_envs()

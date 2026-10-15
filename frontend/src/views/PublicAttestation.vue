@@ -173,7 +173,7 @@
           <h2>Reproduce and verify with the Caution CLI</h2>
           <p>
             From a reviewed application checkout, install the
-            <a href="https://codeberg.org/caution/cli" target="_blank" rel="noopener noreferrer">
+            <a href="https://git.caution.co/public/cli" target="_blank" rel="noopener noreferrer">
               Caution CLI
             </a>
             and run:

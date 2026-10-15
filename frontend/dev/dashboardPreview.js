@@ -36,7 +36,7 @@ const previewApps = [
     public_ip: '203.0.113.10',
     managed_hostname: 'payments-edge.preview.caution.sh',
     dns_status: 'ready',
-    git_url: 'git@codeberg.org:caution/preview-payments-enclave.git',
+    git_url: 'git@git.caution.co:public/preview-payments-enclave.git',
     created_at: '2026-08-12T08:15:00Z',
     estimated_monthly_cost: 189.75,
     configuration: {
@@ -62,7 +62,7 @@ const previewApps = [
     managed_hostname: '',
     dns_status: 'publishing',
     dns_error: 'The preview DNS record could not be published.',
-    git_url: 'git@codeberg.org:caution/preview-hello-world.git',
+    git_url: 'git@git.caution.co:public/preview-hello-world.git',
     created_at: '2026-08-10T13:00:00Z',
     estimated_monthly_cost: 24.1,
     configuration: {
@@ -77,7 +77,7 @@ const previewApps = [
     public_ip: null,
     managed_hostname: '',
     dns_status: 'reserved',
-    git_url: 'git@codeberg.org:caution/preview-analytics.git',
+    git_url: 'git@git.caution.co:public/preview-analytics.git',
     created_at: '2026-08-13T07:45:00Z',
     configuration: { instance_type: 'm5.large' },
   },
@@ -89,7 +89,7 @@ const previewApps = [
     public_ip: null,
     managed_hostname: '',
     dns_status: 'unavailable',
-    git_url: 'git@codeberg.org:caution/preview-image-processor.git',
+    git_url: 'git@git.caution.co:public/preview-image-processor.git',
     created_at: '2026-08-12T17:20:00Z',
     configuration: { instance_type: 'c6i.large' },
   },
@@ -101,7 +101,7 @@ const previewApps = [
     public_ip: null,
     managed_hostname: '',
     dns_status: 'unavailable',
-    git_url: 'git@codeberg.org:caution/preview-reports.git',
+    git_url: 'git@git.caution.co:public/preview-reports.git',
     created_at: '2026-08-11T11:10:00Z',
     configuration: { instance_type: 'm5.large' },
   },
@@ -113,7 +113,7 @@ const previewApps = [
     public_ip: null,
     managed_hostname: '',
     dns_status: 'unavailable',
-    git_url: 'git@codeberg.org:caution/preview-legacy-api.git',
+    git_url: 'git@git.caution.co:public/preview-legacy-api.git',
     created_at: '2026-08-09T14:30:00Z',
     configuration: { instance_type: 'm5.large' },
   },
@@ -306,11 +306,11 @@ const previewSubscriptionTiers = {
 
 const previewBuildInputs = {
   bootproof: {
-    repo: 'https://codeberg.org/caution/bootproof.git',
+    repo: 'https://git.caution.co/public/bootproof.git',
     commit: '7f5c0d4d0b84c9cbe1e5d1789f9b0182ab8f5d12',
   },
   platform: {
-    repo: 'https://codeberg.org/caution/platform.git',
+    repo: 'https://git.caution.co/public/platform.git',
     commit: '8baa7dfb6b99a0d97bdc18a3393d0fe999999999',
   },
 }

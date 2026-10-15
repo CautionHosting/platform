@@ -36,7 +36,7 @@ ENV TARGET_ARCH="x86_64-unknown-linux-musl"
 
 WORKDIR /build-steve
 # A failed clone leaves the directory empty, so the GitHub mirror can retry in place.
-RUN (git clone https://codeberg.org/caution/steve.git . || \
+RUN (git clone https://git.caution.co/public/steve.git . || \
      git clone https://github.com/CautionHosting/steve.git .) && \
     git checkout {{STEVE_COMMIT}}
 
@@ -69,17 +69,20 @@ ENV LIBPCSCLITE_STATIC=1
 
 WORKDIR /build-locksmith
 # A failed clone leaves the directory empty, so the GitHub mirror can retry in place.
-RUN (git clone https://codeberg.org/caution/locksmith.git . || \
+RUN (git clone https://git.caution.co/public/locksmith.git . || \
      git clone https://github.com/CautionHosting/locksmith.git .) && \
     git checkout {{LOCKSMITH_COMMIT}}
 
-# Cargo.lock pins bootproof from Codeberg; on failure, fetch the same rev from
-# the GitHub mirror. insteadOf only rewrites transport, so Cargo.lock is unchanged.
+# Fetch the same locked revision from GitHub if the canonical forge fails.
+# Retain the Codeberg transport alias for historical Locksmith overrides;
+# insteadOf leaves Cargo.lock and the approved source revisions unchanged.
 RUN cargo fetch --locked --target $TARGET_ARCH || \
     CARGO_NET_GIT_FETCH_WITH_CLI=true \
-    GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_COUNT=2 \
     GIT_CONFIG_KEY_0=url.https://github.com/CautionHosting/.insteadOf \
-    GIT_CONFIG_VALUE_0=https://codeberg.org/caution/ \
+    GIT_CONFIG_VALUE_0=https://git.caution.co/public/ \
+    GIT_CONFIG_KEY_1=url.https://github.com/CautionHosting/.insteadOf \
+    GIT_CONFIG_VALUE_1=https://codeberg.org/caution/ \
     cargo fetch --locked --target $TARGET_ARCH
 
 RUN cargo build --release --locked --target ${TARGET_ARCH} -p locksmith \
@@ -100,7 +103,7 @@ ENV TARGET_ARCH="x86_64-unknown-linux-musl"
 
 WORKDIR /build-bootproof
 # A failed clone leaves the directory empty, so the GitHub mirror can retry in place.
-RUN (git clone https://codeberg.org/caution/bootproof.git . || \
+RUN (git clone https://git.caution.co/public/bootproof.git . || \
      git clone https://github.com/CautionHosting/bootproof.git .) && \
     git checkout {{BOOTPROOF_COMMIT}}
 

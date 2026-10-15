@@ -453,7 +453,7 @@ async fn health_check() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
-const PLATFORM_REPO: &str = "https://codeberg.org/caution/platform.git";
+const PLATFORM_REPO: &str = "https://git.caution.co/public/platform.git";
 
 async fn build_inputs() -> impl IntoResponse {
     #[derive(serde::Serialize)]

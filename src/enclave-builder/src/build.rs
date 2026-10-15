@@ -12,14 +12,14 @@ use crate::EifFile;
 
 const DEFAULT_ENCLAVEOS_COMMIT: &str = "9582e25239430070667fdd0a6b64d887f1c308df";
 const DEFAULT_BOOTPROOF_COMMIT: &str = "b03721957e3850931f5b53627e7c3d1c302a06fe";
-const DEFAULT_STEVE_COMMIT: &str = "c0b8d2d62e66108689745561242972048f6cfce5";
-const DEFAULT_LOCKSMITH_COMMIT: &str = "890a46a72c4aee6c6faccddd496c16653e98a765";
+const DEFAULT_STEVE_COMMIT: &str = "42ae79a260d63f327b849ef849de758ce98509a9";
+const DEFAULT_LOCKSMITH_COMMIT: &str = "80447f825990f893898f5183e975f2d728f062b4";
 
 // Kept in sync with the git clone URLs in templates/Containerfile.eif.
-pub const ENCLAVEOS_REPO: &str = "https://codeberg.org/caution/enclaveos.git";
-pub const BOOTPROOF_REPO: &str = "https://codeberg.org/caution/bootproof.git";
-pub const STEVE_REPO: &str = "https://codeberg.org/caution/steve.git";
-pub const LOCKSMITH_REPO: &str = "https://codeberg.org/caution/locksmith.git";
+pub const ENCLAVEOS_REPO: &str = "https://git.caution.co/public/enclaveos.git";
+pub const BOOTPROOF_REPO: &str = "https://git.caution.co/public/bootproof.git";
+pub const STEVE_REPO: &str = "https://git.caution.co/public/steve.git";
+pub const LOCKSMITH_REPO: &str = "https://git.caution.co/public/locksmith.git";
 
 /// STEVE's built-in default key exchange. Must match
 /// `caution_config::KeyExchange::X25519.steve_env_value()`.

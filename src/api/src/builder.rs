@@ -3538,7 +3538,7 @@ mod tests {
         assert!(userdata.contains("HTTP_UPSTREAM_PROTOCOL=\"h2c\""));
         assert!(userdata.contains("CAUTION_HTTP_UPSTREAM_PROTOCOL=\"$HTTP_UPSTREAM_PROTOCOL\""));
         assert!(userdata.contains(&format!(
-            "https://codeberg.org/caution/platform/archive/{platform_commit}.tar.gz"
+            "https://git.caution.co/public/platform/archive/{platform_commit}.tar.gz"
         )));
         assert!(userdata.contains(&format!("\"commit\":\"{platform_commit}\"")));
     }

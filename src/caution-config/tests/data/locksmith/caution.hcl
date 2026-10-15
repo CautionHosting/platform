@@ -1,6 +1,6 @@
 enclave "default" {
   build {
-    app_sources = ["https://codeberg.org/caution/locksmith/archive/${COMMIT}.tar.gz"]
+    app_sources = ["https://git.caution.co/public/locksmith/archive/${COMMIT}.tar.gz"]
   }
   network {
     ingress {

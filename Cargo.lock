@@ -1414,7 +1414,7 @@ dependencies = [
 [[package]]
 name = "bootproof"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/bootproof.git?rev=2590edb0f23cae6589bc73cc8324673023ac1deb#2590edb0f23cae6589bc73cc8324673023ac1deb"
+source = "git+https://git.caution.co/public/bootproof.git?rev=2590edb0f23cae6589bc73cc8324673023ac1deb#2590edb0f23cae6589bc73cc8324673023ac1deb"
 dependencies = [
  "aws-nitro-enclaves-nsm-api",
  "serde_bytes",
@@ -1425,7 +1425,7 @@ dependencies = [
 [[package]]
 name = "bootproof-sdk"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/bootproof.git?rev=2590edb0f23cae6589bc73cc8324673023ac1deb#2590edb0f23cae6589bc73cc8324673023ac1deb"
+source = "git+https://git.caution.co/public/bootproof.git?rev=2590edb0f23cae6589bc73cc8324673023ac1deb#2590edb0f23cae6589bc73cc8324673023ac1deb"
 dependencies = [
  "coset 0.4.2",
  "ring",
@@ -4476,7 +4476,7 @@ dependencies = [
 [[package]]
 name = "keymaker-models"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=890a46a72c4aee6c6faccddd496c16653e98a765#890a46a72c4aee6c6faccddd496c16653e98a765"
+source = "git+https://git.caution.co/public/locksmith.git?rev=80447f825990f893898f5183e975f2d728f062b4#80447f825990f893898f5183e975f2d728f062b4"
 dependencies = [
  "serde",
  "serde_cbor",
@@ -4668,7 +4668,7 @@ dependencies = [
 [[package]]
 name = "locksmith"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=890a46a72c4aee6c6faccddd496c16653e98a765#890a46a72c4aee6c6faccddd496c16653e98a765"
+source = "git+https://git.caution.co/public/locksmith.git?rev=80447f825990f893898f5183e975f2d728f062b4#80447f825990f893898f5183e975f2d728f062b4"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
@@ -5913,7 +5913,7 @@ checksum = "33cb294fe86a74cbcf50d4445b37da762029549ebeea341421c7c70370f86cac"
 [[package]]
 name = "public-certificate-models"
 version = "0.1.0"
-source = "git+https://codeberg.org/caution/locksmith.git?rev=890a46a72c4aee6c6faccddd496c16653e98a765#890a46a72c4aee6c6faccddd496c16653e98a765"
+source = "git+https://git.caution.co/public/locksmith.git?rev=80447f825990f893898f5183e975f2d728f062b4#80447f825990f893898f5183e975f2d728f062b4"
 dependencies = [
  "serde",
 ]

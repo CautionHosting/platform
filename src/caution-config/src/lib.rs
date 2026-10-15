@@ -1274,8 +1274,8 @@ mod tests {
                     build: Some(BuildConfig {
                         containerfile: Some("Containerfile.example".into()),
                         app_sources: vec![
-                            "git@codeberg.org:caution/demo-hello-world-enclave".into(),
-                            "https://codeberg.org/caution/demo-hello-world-enclave".into(),
+                            "git@git.caution.co:public/demo-hello-world-enclave".into(),
+                            "https://git.caution.co/public/demo-hello-world-enclave".into(),
                         ],
                         cache: Some(false),
                     }),
@@ -2111,7 +2111,7 @@ enclave "main" {
         let build = e.build.as_ref().unwrap();
         assert_eq!(
             build.app_sources,
-            vec!["git@codeberg.org:caution/demo-hello-world-enclave.git"]
+            vec!["git@git.caution.co:public/demo-hello-world-enclave.git"]
         );
 
         let network = e.network.as_ref().unwrap();
@@ -2157,7 +2157,7 @@ enclave "main" {
         let build = e.build.as_ref().unwrap();
         assert_eq!(
             build.app_sources,
-            vec!["https://codeberg.org/caution/demo-ai-inference.git"]
+            vec!["https://git.caution.co/public/demo-ai-inference.git"]
         );
 
         let resources = e.resources.as_ref().unwrap();
@@ -2182,7 +2182,7 @@ enclave "main" {
         let build = e.build.as_ref().unwrap();
         assert_eq!(
             build.app_sources,
-            vec!["https://codeberg.org/caution/locksmith/archive/${COMMIT}.tar.gz"]
+            vec!["https://git.caution.co/public/locksmith/archive/${COMMIT}.tar.gz"]
         );
 
         let network = e.network.as_ref().unwrap();
@@ -2216,7 +2216,7 @@ enclave "main" {
         let build = e.build.as_ref().unwrap();
         assert_eq!(
             build.app_sources,
-            vec!["git@codeberg.org:caution/demo-hello-world-enclave.git"]
+            vec!["git@git.caution.co:public/demo-hello-world-enclave.git"]
         );
 
         let network = e.network.as_ref().unwrap();
@@ -2262,7 +2262,7 @@ enclave "main" {
         let build = e.build.as_ref().unwrap();
         assert_eq!(
             build.app_sources,
-            vec!["https://codeberg.org/caution/demo-ai-inference.git"]
+            vec!["https://git.caution.co/public/demo-ai-inference.git"]
         );
 
         let resources = e.resources.as_ref().unwrap();
@@ -2291,7 +2291,7 @@ enclave "main" {
         let build = e.build.as_ref().unwrap();
         assert_eq!(
             build.app_sources,
-            vec!["https://codeberg.org/caution/locksmith/archive/${COMMIT}.tar.gz"]
+            vec!["https://git.caution.co/public/locksmith/archive/${COMMIT}.tar.gz"]
         );
 
         let network = e.network.as_ref().unwrap();

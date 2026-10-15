@@ -1,6 +1,6 @@
 enclave "default" {
   build {
-    app_sources = ["git@codeberg.org:caution/demo-hello-world-enclave.git"]
+    app_sources = ["git@git.caution.co:public/demo-hello-world-enclave.git"]
   }
   network {
     ingress {

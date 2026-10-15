@@ -40,7 +40,7 @@ url = { workspace = true }
 locksmith.workspace = true
 keymaker-models.workspace = true
 public-certificate-models.workspace = true
-bootproof-sdk = { git = "https://codeberg.org/caution/bootproof.git", rev = "2590edb0f23cae6589bc73cc8324673023ac1deb" }
+bootproof-sdk = { git = "https://git.caution.co/public/bootproof.git", rev = "2590edb0f23cae6589bc73cc8324673023ac1deb" }
 serde_cbor = "0.11"
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
 

@@ -64,7 +64,7 @@ This is the quickest install path. The installer builds with the local host
 toolchain and installs the CLI to a writable binary directory:
 
 ```sh
-git clone https://codeberg.org/caution/platform
+git clone https://git.caution.co/public/platform
 cd platform
 make install-cli
 ```
@@ -214,7 +214,7 @@ more information on these practices.
 1. Clone repo
 
    ```sh
-   git clone https://codeberg.org/caution/platform
+   git clone https://git.caution.co/public/platform
    cd platform
    ```
 
@@ -279,14 +279,14 @@ to attempt to force one or more of us to tamper with the software.
 1. Clone repo
 
    ```sh
-   git clone https://codeberg.org/caution/platform
+   git clone https://git.caution.co/public/platform
    cd platform
    ```
 
 2. Review source
 
    - Ideal: Review the entire supply chain for high risk uses
-   - Minimal: Review the build targets in the Makefile and [Containerfile](https://codeberg.org/caution/platform/src/branch/main/containerfiles/Containerfile.cli)
+   - Minimal: Review the build targets in the Makefile and [Containerfile](https://git.caution.co/public/platform/src/branch/main/containerfiles/Containerfile.cli)
 
 3. Reproduce binary
 

@@ -1,6 +1,6 @@
-**GitHub users:** This repo is mirrored from <a href="https://codeberg.org/caution/platform" target="_blank">Codeberg</a>. Please open issues and PRs there.
+**GitHub users:** This repo is mirrored from <a href="https://git.caution.co/public/platform" target="_blank">git.caution.co</a>. Please open issues and PRs there.
 
-**Hosted version:** A hosted deployment is available in closed alpha at <a href="https://dashboard.caution.co" target="_blank">dashboard.caution.co</a>. To request a registration code, <a href="mailto:info@caution.co?subject=Caution%20Alpha%20Access&body=Hi%2C%0A%0AI%20was%20reviewing%20your%20docs%20at%20https%3A%2F%2Fcodeberg.org%2Fcaution%2Fplatform%20and%20noticed%20that%20you%20are%20also%20offering%20a%20closed%20alpha%20for%20hosted%20deployments.%20Can%20I%20please%20get%20a%20code%20to%20try%20it%20out%3F%0A%0AMy%20details%3A%0AMy%20name%3A%20%0AMy%20company%20name%3A%0A%0AThank%20you">contact info@caution.co</a>.
+**Hosted version:** A hosted deployment is available in closed alpha at <a href="https://dashboard.caution.co" target="_blank">dashboard.caution.co</a>. To request a registration code, <a href="mailto:info@caution.co?subject=Caution%20Alpha%20Access&body=Hi%2C%0A%0AI%20was%20reviewing%20your%20docs%20at%20https%3A%2F%2Fgit.caution.co%2Fpublic%2Fplatform%20and%20noticed%20that%20you%20are%20also%20offering%20a%20closed%20alpha%20for%20hosted%20deployments.%20Can%20I%20please%20get%20a%20code%20to%20try%20it%20out%3F%0A%0AMy%20details%3A%0AMy%20name%3A%20%0AMy%20company%20name%3A%0A%0AThank%20you">contact info@caution.co</a>.
 
 # Caution Platform
 
@@ -8,7 +8,7 @@
 >
 > This software is in early alpha. It may introduce backwards-incompatible changes, has not undergone security audits, and is not production ready. Use at your own risk.
 
-This software is a cloud hosting management platform that builds and deploys [verifiable](#verifiable-enclaves) secure enclaves using the AWS Nitro System, based on <a href="https://codeberg.org/caution/enclaveos" target="_blank">EnclaveOS</a>.
+This software is a cloud hosting management platform that builds and deploys [verifiable](#verifiable-enclaves) secure enclaves using the AWS Nitro System, based on <a href="https://git.caution.co/public/enclaveos" target="_blank">EnclaveOS</a>.
 
 ### Verifiable Enclaves
 
@@ -81,7 +81,7 @@ npm run dev
 
 `allow-git=root` permits only the commit-pinned git dependencies declared by
 this package; npm 12 blocks git dependencies by default. Project sources are
-fetched from Codeberg. Keyfork and the private `_cargo-index` intentionally
+fetched from `git.caution.co/public`. Keyfork and the private `_cargo-index` intentionally
 remain on `git.distrust.co`.
 
 Open `http://localhost:3000`. This remains authentication-gated and proxies API,
@@ -145,7 +145,7 @@ start the real stack with `make up`, generate an access code with
    `/bin -> usr/bin` and `/lib -> usr/lib`; other `/bin` or `/lib` symlink
    layouts are rejected during EIF assembly.
 
-   The <a href="https://codeberg.org/Caution/hello-world-enclave" target="_blank">hello-world-enclave</a> repo is a good test app to deploy.
+   The <a href="https://git.caution.co/public/demo-hello-world-enclave" target="_blank">hello-world-enclave</a> repo is a good test app to deploy.
 
 4. Build and deploy:
    ```bash
@@ -350,14 +350,21 @@ caution verify --attestation-url <attestation-url>
 Local source is the default. If the deployment manifest has no app commit, the
 CLI uses the current checkout at `HEAD`.
 
-Source-archive preflights use five-second HEAD requests. The Platform framework
-and EnclaveOS archives are checked on Codeberg first, then on the configured
-GitHub mirror; each
-candidate is retried once for transient failures, while missing archives advance
-to the next candidate immediately. The canonical Codeberg URL remains in the
-measured manifest. If every candidate remains unavailable, verification stops
-before starting the expensive reproduction build. Mirrors improve availability
-but do not independently prove that an archive matches its claimed Git commit.
+Source-archive preflights use five-second HEAD requests. New Platform framework
+and EnclaveOS archives are checked on `git.caution.co` first, then on the
+configured GitHub mirror. Historical Codeberg archive URLs try Codeberg, the
+corresponding new-forge archive, then GitHub. Each candidate is retried once for
+transient failures; missing archives advance immediately. The measured manifest
+and approved commit remain unchanged during reproduction. Unconfigured
+repositories are not remapped. If every candidate is unavailable, verification
+stops before the reproduction build. Mirrors improve availability but do not
+independently prove that an archive matches its claimed Git commit.
+
+New builds record the new canonical source locations and migration-only STEVE
+and Locksmith revisions; rebuild and verify their PCRs before approving them.
+Existing manifests and trusted PCR policies are not migrated automatically.
+The BYOC provisioner image remains in the Codeberg registry until its separate
+registry migration.
 
 **Option B: Verify against known PCR hashes**
 

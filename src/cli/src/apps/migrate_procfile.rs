@@ -466,7 +466,7 @@ mod tests {
     fn hello_world_procfile_uses_block_syntax() {
         let procfile = r#"run: /usr/local/bin/hello
 containerfile: Containerfile
-app_sources: git@codeberg.org:caution/demo-hello-world-enclave.git
+app_sources: git@git.caution.co:public/demo-hello-world-enclave.git
 cache: false
 ports: 8083
 "#;
