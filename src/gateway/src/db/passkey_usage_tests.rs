@@ -138,8 +138,8 @@ async fn usage_is_monotonic_and_write_errors_propagate(pool: PgPool) {
     let user = fixture(&pool).await;
     sqlx::raw_sql(MIGRATION).execute(&pool).await.unwrap();
     // Exercise concurrent writers against a stored timestamp ahead of NOW().
-    sqlx::query("UPDATE fido2_credentials SET last_used_at = NOW() + INTERVAL '1 hour' WHERE credential_id = $1")
-        .bind(b"first".as_slice()).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE fido2_credentials SET last_used_at = NOW() + INTERVAL '1 hour' WHERE user_id = $1 AND credential_id = $2")
+        .bind(user).bind(b"first".as_slice()).execute(&pool).await.unwrap();
     let recorded = usage(&pool, user, b"first").await;
     let (a, b) = tokio::join!(
         record_credential_use(&pool, user, b"first"),
