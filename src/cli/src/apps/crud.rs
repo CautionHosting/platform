@@ -1586,7 +1586,7 @@ fn print_deployments(app: &App, deployments: &[DeploymentView], history: &Recent
                 "Hostname: {}",
                 app.managed_hostname.clone().unwrap_or_else(dash)
             ),
-            format!("Stable IP: {}", app.public_ip.clone().unwrap_or_else(dash)),
+            format!("Public IP: {}", app.public_ip.clone().unwrap_or_else(dash)),
         ),
         (
             live,
