@@ -266,13 +266,58 @@ impl Validate for UpdateOrgSettingsRequest {
     }
 }
 
+#[tracing::instrument(skip_all, err)]
+pub(crate) fn builder_size_from_request(
+    body: &serde_json::Value,
+) -> Result<&str, crate::SetBuilderConfigError> {
+    let invalid = || crate::SetBuilderConfigError::InvalidSize {
+        location: std::panic::Location::caller(),
+    };
+    let body = body.as_object().ok_or_else(invalid)?;
+    match body.get("builder_size") {
+        None => Ok("small"),
+        Some(value) => value.as_str().ok_or_else(invalid),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         AddMemberRequest, CreateResourceRequest, DeployRequest, UpdateUserRequest, Validate,
+        builder_size_from_request,
     };
+    use crate::SetBuilderConfigError;
     use crate::validation::ValidationError;
+    use axum::{http::StatusCode, response::IntoResponse};
+    use serde_json::json;
     use uuid::Uuid;
+
+    #[test]
+    fn rejects_malformed_builder_size_instead_of_defaulting() {
+        for body in [
+            json!({"builder_size": null}),
+            json!({"builder_size": 1}),
+            json!({"builder_size": true}),
+            json!({"builder_size": []}),
+            json!({"builder_size": {}}),
+            json!(null),
+            json!([]),
+            json!("small"),
+        ] {
+            let error = builder_size_from_request(&body).unwrap_err();
+            assert!(matches!(error, SetBuilderConfigError::InvalidSize { .. }));
+            assert_eq!(error.into_response().status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn accepts_string_size_and_defaults_only_when_omitted() {
+        assert_eq!(builder_size_from_request(&json!({})).unwrap(), "small");
+        assert_eq!(
+            builder_size_from_request(&json!({"builder_size": "large"})).unwrap(),
+            "large"
+        );
+    }
 
     fn deploy_request(commit_sha: Option<&str>) -> DeployRequest {
         DeployRequest {
