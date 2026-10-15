@@ -87,6 +87,12 @@ pub enum PasskeyError {
         location: Location,
     },
 
+    #[error("This passkey is already on your account. [{location}]")]
+    CredentialAlreadyOnAccount {
+        #[location]
+        location: Location,
+    },
+
     #[error("invalid passkey request [{location}]")]
     BadRequest {
         #[location]
@@ -167,6 +173,11 @@ impl IntoResponse for PasskeyError {
             Self::CredentialAlreadyRegistered { .. } => (
                 StatusCode::CONFLICT,
                 "This security key is already registered to another account.",
+            )
+                .into_response(),
+            Self::CredentialAlreadyOnAccount { .. } => (
+                StatusCode::CONFLICT,
+                "This passkey is already on your account.",
             )
                 .into_response(),
             Self::BadRequest { .. } => {
@@ -441,6 +452,20 @@ pub async fn finish_add_passkey_handler(
         });
     }
 
+    if db::credential_exists_for_user(&state.db, user_id, &credential_id)
+        .await
+        .with_context(Ctx::internal())?
+    {
+        tracing::warn!(
+            credential_id = %hex::encode(&credential_id),
+            user_id = %user_id,
+            "Passkey registration rejected: credential ID already registered to this account"
+        );
+        return Err(PasskeyError::CredentialAlreadyOnAccount {
+            location: std::panic::Location::caller(),
+        });
+    }
+
     db::save_fido2_credential(
         &state.db,
         &credential_id,
@@ -503,4 +528,59 @@ pub async fn delete_passkey_handler(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status_of(err: PasskeyError) -> StatusCode {
+        err.into_response().status()
+    }
+
+    #[test]
+    fn same_account_duplicate_maps_to_conflict_not_internal() {
+        // Regression guard: re-adding a credential the caller already owns on
+        // their own account must surface as 409 Conflict, not fall through to a
+        // constraint-violation 500 from save_fido2_credential.
+        let err = PasskeyError::CredentialAlreadyOnAccount {
+            location: std::panic::Location::caller(),
+        };
+        assert_eq!(status_of(err), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn cross_account_conflict_maps_to_conflict() {
+        // The forged-rawId / other-account case keeps its 409 as well.
+        let err = PasskeyError::CredentialAlreadyRegistered {
+            location: std::panic::Location::caller(),
+        };
+        assert_eq!(status_of(err), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn same_account_duplicate_body_is_distinct_from_cross_account() {
+        // The two 409s carry distinct client messages so a user re-adding their
+        // own key is not told the key belongs to "another account".
+        let on_account = PasskeyError::CredentialAlreadyOnAccount {
+            location: std::panic::Location::caller(),
+        }
+        .into_response();
+        let body = axum::body::to_bytes(on_account.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), b"This passkey is already on your account.");
+
+        let other_account = PasskeyError::CredentialAlreadyRegistered {
+            location: std::panic::Location::caller(),
+        }
+        .into_response();
+        let body = axum::body::to_bytes(other_account.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            body.as_ref(),
+            b"This security key is already registered to another account."
+        );
+    }
 }

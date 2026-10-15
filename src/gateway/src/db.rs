@@ -646,6 +646,39 @@ where
     Ok(conflict)
 }
 
+/// Returns `true` if `user_id` has already registered the given `credential_id`.
+/// Under the composite `(user_id, credential_id)` unique constraint this is the
+/// same-account duplicate case: a user re-adding a key they already own. It is
+/// distinct from [`credential_conflicts_with_other_user`], which only flags a
+/// different public key (the forged-rawId attack) and deliberately allows the
+/// legitimate multi-account sharing of one physical key across accounts.
+#[tracing::instrument(skip_all, err)]
+pub async fn credential_exists_for_user<'e, E>(
+    executor: E,
+    user_id: Uuid,
+    credential_id: &[u8],
+) -> Result<bool, DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM fido2_credentials
+            WHERE user_id = $1 AND credential_id = $2
+        )",
+    )
+    .bind(user_id)
+    .bind(credential_id)
+    .fetch_one(executor)
+    .await
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "credential_exists_for_user",
+    ))?;
+
+    Ok(exists)
+}
+
 fn registration_uv_verified(bytes: &[u8]) -> bool {
     use webauthn_rs::prelude::{Credential, SecurityKey};
     serde_json::from_slice::<SecurityKey>(bytes)
@@ -2163,6 +2196,73 @@ mod credential_owner_tests {
         assert!(
             still_conflicts,
             "once a conflicting key exists, the original owner's re-registration must also be flagged"
+        );
+    }
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires DATABASE_URL pointing to disposable Postgres"]
+    async fn credential_exists_for_user_distinguishes_same_account_from_sharing(pool: PgPool) {
+        // The same-account duplicate case is what the composite (user_id,
+        // credential_id) constraint rejects at INSERT time. A re-add of a key the
+        // user already owns must be detected up front (so the handler returns 409)
+        // rather than surfacing as a constraint-violation 500 from save.
+        sqlx::raw_sql(
+            "CREATE TABLE fido2_credentials (
+                user_id UUID NOT NULL, credential_id BYTEA NOT NULL,
+                public_key BYTEA NOT NULL,
+                UNIQUE(user_id, credential_id))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let alice = Uuid::new_v4();
+        let bob = Uuid::new_v4();
+        let alice_key = b"alice-public-key-json";
+        // Alice owns credential C1.
+        sqlx::query(
+            "INSERT INTO fido2_credentials (user_id, credential_id, public_key) VALUES ($1, $2, $3)",
+        )
+        .bind(alice)
+        .bind(b"c1")
+        .bind(alice_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Same account re-add: Alice already owns C1 -> true. This is the case
+        // that must map to a 409, not fall through to a constraint-violation 500.
+        assert!(
+            credential_exists_for_user(&pool, alice, b"c1")
+                .await
+                .unwrap(),
+            "a user re-adding a key they already own must be detected as a same-account duplicate"
+        );
+
+        // A different account that does NOT own C1 -> false. Bob adding C1 is the
+        // legitimate multi-account sharing path (same physical key), which must be
+        // allowed, not rejected.
+        assert!(
+            !credential_exists_for_user(&pool, bob, b"c1").await.unwrap(),
+            "a different account that does not own the credential must not be flagged"
+        );
+
+        // A brand-new credential nobody owns -> false (fresh registration allowed).
+        assert!(
+            !credential_exists_for_user(&pool, alice, b"brand-new")
+                .await
+                .unwrap(),
+            "a credential no one owns must read as not present for any user"
+        );
+
+        // The two checks are independent: the same-account duplicate (identical
+        // public key) is NOT a forged-rawId conflict, so the handler relies on
+        // credential_exists_for_user to catch it after the conflict check passes.
+        assert!(
+            !credential_conflicts_with_other_user(&pool, b"c1", alice_key)
+                .await
+                .unwrap(),
+            "identical public key must not be a cross-user conflict; the same-account check is what rejects it"
         );
     }
 }
