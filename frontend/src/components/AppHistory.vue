@@ -41,13 +41,13 @@ watch(() => [props.appId, props.refreshKey, open.value], () => {
 </script>
 
 <template>
-  <details class="app-history" @toggle="open = $event.target.open">
-    <summary>History</summary>
+  <details class="app-history app-detail-disclosure" @toggle="open = $event.target.open">
+    <summary class="app-detail-subsection-title">History</summary>
     <p v-if="error" role="status">{{ error }}</p>
     <p v-else-if="loaded && entries.length === 0" class="app-detail-helper-text">No switches, destructions or failed attempts yet.</p>
     <ul>
       <li v-for="entry in entries" :key="entry.id">
-        <details>
+        <details class="app-detail-disclosure">
           <summary>{{ new Date(entry.at).toLocaleString() }} · {{ historyRowLabel(entry) }}</summary>
           <dl class="history-details">
             <template v-if="entry.actor || entry.auth_method"><dt>Actor</dt><dd>{{ entry.actor || 'deleted user' }} ({{ entry.auth_method || 'unknown' }})</dd></template>

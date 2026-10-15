@@ -1631,6 +1631,18 @@
   border-radius: 0 8px 0 0;
 }
 
+/* A totals row reads as a body row, not a second header */
+.apps-table tfoot {
+  border-top: 1px solid var(--theme-border);
+}
+
+.apps-table tfoot th {
+  font-size: 0.95rem;
+  color: var(--theme-text-secondary);
+  background: none;
+  border-radius: 0;
+}
+
 .apps-sort-label select:focus-visible,
 .apps-sort-direction:focus-visible,
 .app-name-text:focus-visible,
@@ -2656,6 +2668,60 @@
   font-weight: 500;
   color: var(--theme-text-primary);
   margin: 24px 0 12px 0;
+}
+
+/* A heading inside a section, e.g. Build instance under Settings */
+.app-detail-subsection-title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--theme-text-primary);
+  margin: 0 0 6px 0;
+}
+
+.app-settings {
+  margin-top: 40px;
+}
+
+.app-settings-group + .app-settings-group {
+  margin-top: 32px;
+}
+
+/* A collapsible subsection: the summary is its heading, with a chevron instead of the browser marker */
+.app-detail-disclosure > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.app-detail-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.app-detail-disclosure > summary::before {
+  content: '▶';
+  font-size: 0.6rem;
+  color: var(--theme-text-muted);
+  transition: transform 0.2s;
+}
+
+.app-detail-disclosure[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.app-history {
+  margin: 8px 0 24px;
+}
+
+.app-history ul {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0 0 0 16px;
+}
+
+.app-history li + li {
+  margin-top: 6px;
 }
 
 .app-detail-helper-text {

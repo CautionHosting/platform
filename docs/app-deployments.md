@@ -78,7 +78,8 @@ Set these in `~/.config/caution/.env`, then restart the API (`env.example` lists
   non-live deployment) and **Destroy deployment** (not offered for the live one, one
   still building, or for Legacy apps). Settings shows the retained instances and their
   estimated cost. History is a collapsible list below the deployments. A Legacy app
-  shows `Legacy · single deployment` and no deployment actions.
+  shows its **Deployment** section (single deployment, with its commit) directly, and no
+  deployment actions.
 - **Known limits.** A candidate is metered only from its health check on, as Legacy
   is. Rolling back keeps the configuration keys the newer deployment added (the
   `project_live` merge): they are not removed again.

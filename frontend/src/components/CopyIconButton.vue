@@ -23,7 +23,7 @@ onUnmounted(() => clearTimeout(timer))
 </script>
 
 <template>
-  <span class="copy-icon">
+  <span class="copy-icon-button">
     <button type="button" class="copy-inline-btn" :aria-label="copied ? `${label} copied` : `Copy ${label}`" :title="copied ? 'Copied' : 'Copy'" @click.stop="copy">
       <svg v-if="!copied" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
         <rect x="9" y="9" width="13" height="13" rx="2" ry="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
@@ -37,7 +37,8 @@ onUnmounted(() => clearTimeout(timer))
 </template>
 
 <style scoped>
-.copy-icon { display: inline-flex; }
+/* Not `.copy-icon`: dashboard-layout.css inverts that class for the copy.svg images, which hid this icon. */
+.copy-icon-button { display: inline-flex; }
 /* Dashboard.vue styles `.copy-inline-btn` in its scoped CSS, which does not reach this component. */
 .copy-inline-btn { display: inline-flex; padding: 2px; border: 0; background: none; color: var(--theme-text-secondary); cursor: pointer; }
 .copy-inline-btn:focus-visible { outline: 2px solid var(--theme-focus); }

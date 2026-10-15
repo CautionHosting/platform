@@ -144,10 +144,11 @@ try {
   // List: Active/All columns; Legacy label.
   await textIncludes('key-service')
   assert.ok((await page.$eval('.apps-list-table', (el) => el.textContent)).includes('Legacy'))
-  // Legacy app: single-deployment line, no deployment actions, and no deployments/history requests.
+  // Legacy app: its Deployment section shown without a toggle, with the commit; no deployment actions, and no deployments/history requests.
   await page.evaluate(() => [...document.querySelectorAll('.app-name-text')].find((el) => el.textContent.trim() === 'old-service').click())
-  await textIncludes('Legacy · single deployment')
-  assert.ok((await page.$eval('.legacy-lifecycle', (el) => el.textContent)).includes('04fa238'))
+  await textIncludes('Single deployment: each push rebuilds and replaces the running app.')
+  assert.ok((await page.$eval('#app-details', (el) => el.textContent)).includes('04fa238'))
+  assert.equal(await page.evaluate(() => [...document.querySelectorAll('button')].some((el) => el.textContent.trim() === 'App details')), false)
   assert.equal(await page.$('.deployments-table'), null)
   assert.equal(await page.evaluate(() => [...document.querySelectorAll('button')].some((el) => ['Switch live', 'Destroy deployment'].includes(el.textContent.trim()))), false)
   assert.deepEqual(state.legacyRequests, [])

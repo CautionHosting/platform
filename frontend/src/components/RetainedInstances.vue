@@ -12,7 +12,7 @@ const usd = (value) => `$${value.toFixed(2)}`
 
 <template>
   <section class="retained-instances" aria-labelledby="retained-title">
-    <h4 id="retained-title">Retained instances</h4>
+    <h4 id="retained-title" class="app-detail-subsection-title">Retained instances</h4>
     <p class="app-detail-helper-text">Every retained deployment runs its own instance and is billed until destroyed, including cleanup pending. Estimates are infrastructure costs, separate from your subscription.</p>
     <table class="apps-table" aria-label="Retained instances">
       <thead><tr><th scope="col">Deployment</th><th scope="col">EC2 type</th><th scope="col">Enclave</th><th scope="col">State</th><th scope="col">Est. monthly</th></tr></thead>

@@ -61,17 +61,20 @@
 
         <p class="app-detail-meta">
           {{ appStateLabel(selectedApp) }} · {{ appHostname(selectedApp) }} · {{ selectedApp.region || '—' }} · {{ selectedApp.public_ip || '—' }}
-          <button type="button" class="text-button" :aria-expanded="appDetailsOpen" aria-controls="app-details" @click="appDetailsOpen = !appDetailsOpen">App details</button>
+          <button v-if="isDeploymentsApp(selectedApp)" type="button" class="text-button" :aria-expanded="appDetailsOpen" aria-controls="app-details" @click="appDetailsOpen = !appDetailsOpen">App details</button>
         </p>
 
-        <AppDeployments v-if="isDeploymentsApp(selectedApp)" :app="selectedApp" :deployments="selectedDeployments" :sign="buildSignedHeaders" :fetch="authFetch" @changed="refreshSelectedApp" />
-        <p v-else class="legacy-lifecycle">Legacy · single deployment<span v-if="selectedApp.configuration?.commit_sha"> · <code>{{ shortSha(selectedApp.configuration.commit_sha) }}</code></span><span v-else> · commit unknown</span></p>
-        <AppHistory v-if="isDeploymentsApp(selectedApp)" :app-id="selectedApp.id" :fetch="authFetch" :refresh-key="historyKey" />
+        <template v-if="isDeploymentsApp(selectedApp)">
+          <AppDeployments :app="selectedApp" :deployments="selectedDeployments" :sign="buildSignedHeaders" :fetch="authFetch" @changed="refreshSelectedApp" />
+          <AppHistory :app-id="selectedApp.id" :fetch="authFetch" :refresh-key="historyKey" />
+        </template>
 
-        <div v-if="appDetailsOpen" id="app-details">
+        <!-- A single-deployment (Legacy) app has no deployments table, so its details are always shown. -->
+        <div v-if="appDetailsOpen || !isDeploymentsApp(selectedApp)" id="app-details">
         <section class="deployment-details" aria-labelledby="deployment-details-title">
-          <h3 id="deployment-details-title" class="app-detail-section-title">App details</h3>
-          <p class="app-detail-helper-text">Runtime and network configuration for this application.</p>
+          <h3 id="deployment-details-title" class="app-detail-section-title">{{ isDeploymentsApp(selectedApp) ? 'App details' : 'Deployment' }}</h3>
+          <p v-if="isDeploymentsApp(selectedApp)" class="app-detail-helper-text">Runtime and network configuration for this application.</p>
+          <p v-else class="app-detail-helper-text">Single deployment: each push rebuilds and replaces the running app.</p>
 
           <div class="deployment-details-panel">
             <div class="deployment-details-grid">
@@ -82,8 +85,14 @@
                 </span>
               </div>
 
+              <div v-if="!isDeploymentsApp(selectedApp)" class="deployment-detail-item">
+                <span class="deployment-detail-label">Commit</span>
+                <span v-if="selectedApp.configuration?.commit_sha" class="deployment-detail-value" :title="selectedApp.configuration.commit_sha">{{ shortSha(selectedApp.configuration.commit_sha) }}</span>
+                <span v-else class="deployment-detail-value deployment-detail-value--muted">—</span>
+              </div>
+
               <div class="deployment-detail-item">
-                <span class="deployment-detail-label">Deployment</span>
+                <span class="deployment-detail-label">Hosting</span>
                 <span class="deployment-detail-value">{{ getDeploymentLabel(selectedApp) }}</span>
               </div>
 
@@ -111,17 +120,17 @@
                 <span v-else class="deployment-detail-value deployment-detail-value--muted">—</span>
               </div>
 
-              <div :class="['deployment-detail-item', { 'deployment-detail-item--span2': !selectedAppMonthlyCost }]">
+              <div v-if="selectedAppMonthlyCost" class="deployment-detail-item">
+                <span class="deployment-detail-label">Est. monthly cost</span>
+                <span class="deployment-detail-value">${{ selectedAppMonthlyCost }}</span>
+              </div>
+
+              <div class="deployment-detail-item deployment-detail-item--span2">
                 <span class="deployment-detail-label">App ID</span>
                 <div class="deployment-detail-value-row">
                   <span class="deployment-detail-value">{{ selectedApp.id }}</span>
                   <CopyIconButton :value="selectedApp.id" label="App ID" />
                 </div>
-              </div>
-
-              <div v-if="selectedAppMonthlyCost" class="deployment-detail-item">
-                <span class="deployment-detail-label">Est. monthly cost</span>
-                <span class="deployment-detail-value">${{ selectedAppMonthlyCost }}</span>
               </div>
             </div>
 
@@ -194,11 +203,12 @@
         </section>
         </div>
 
-        <h3 class="app-detail-section-title">Settings</h3>
+        <section class="app-settings" aria-labelledby="app-settings-title">
+        <h3 id="app-settings-title" class="app-detail-section-title">Settings</h3>
 
         <!-- Builder Configuration -->
-        <div class="app-detail-section app-detail-section--fullwidth app-detail-section--borderless">
-          <h4 class="app-detail-section-title">Build instance</h4>
+        <div class="app-settings-group">
+          <h4 class="app-detail-subsection-title">Build instance</h4>
           <p class="app-detail-helper-text">Select the dedicated builder size for this app. Larger builders compile faster.</p>
           <div class="builder-size-options">
             <button
@@ -213,17 +223,17 @@
           </div>
         </div>
 
-        <RetainedInstances v-if="isDeploymentsApp(selectedApp)" :deployments="selectedDeployments" />
+        <RetainedInstances v-if="isDeploymentsApp(selectedApp)" class="app-settings-group" :deployments="selectedDeployments" />
 
-        <!-- Deployment Section (full width, outside the two-column layout) -->
-        <details v-if="selectedApp.git_url" class="app-detail-section app-detail-section--fullwidth app-detail-section--borderless">
-          <summary class="app-detail-section-title">Deploy via Git</summary>
+        <details v-if="selectedApp.git_url" class="app-settings-group app-detail-disclosure">
+          <summary class="app-detail-subsection-title">Deploy via Git</summary>
           <p class="app-detail-helper-text">Add this Git remote, then push to deploy.</p>
           <div class="app-detail-command">
             <code>git remote add caution {{ selectedApp.git_url }}</code>
             <CopyIconButton :value="`git remote add caution ${selectedApp.git_url}`" label="git command" />
           </div>
         </details>
+        </section>
 
         <!-- Danger zone (outside the content card) -->
         <div class="app-detail-danger-zone app-detail-danger-zone--standalone">
@@ -6454,23 +6464,7 @@ export default {
   margin-bottom: 0;
 }
 
-.app-detail-section--fullwidth {
-  margin-top: 48px;
-}
-
-.app-detail-section--borderless {
-  background: none;
-  border: none;
-  padding: 0;
-  box-shadow: none;
-}
-
 .app-detail-meta {
-  margin: 0 0 16px;
-  color: var(--theme-text-muted);
-}
-
-.legacy-lifecycle {
   margin: 0 0 16px;
   color: var(--theme-text-muted);
 }
@@ -6621,7 +6615,7 @@ export default {
   min-width: 0;
 }
 
-.deployment-detail-value-row .copy-icon {
+.deployment-detail-value-row .copy-icon-button {
   margin-top: -2px;
 }
 
