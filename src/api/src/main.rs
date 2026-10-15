@@ -2036,6 +2036,16 @@ async fn create_managed_onprem_resource(
             });
         }
 
+        // A request `create_credential` would refuse must not change the app: checked
+        // before the lifecycle below, which would leave a pristine app without a
+        // credential on the flag's lifecycle. Fails as `create_credential` does.
+        req.validate()
+            .inspect_err(|e| tracing::error!("Invalid credential request: {e}"))
+            .with_context::<cloud_credentials::CreateCredentialError>(
+                cloud_credentials::CreateCredentialErrorCtx::invalid_request(),
+            )
+            .with_context(Ctx::credential_internal())?;
+
         // Interactive `caution init --byoc` creates the app through `POST /resources`,
         // then links it here: the first link of a pristine app takes the BYOC flag.
         // Checked before the credential below is replaced; a relink of a linked or

@@ -17,6 +17,7 @@ async fn byoc() {
     unreadable_linked_access_never_uses_platform_credentials(&state).await;
     relinking_another_environment_is_refused(&state).await;
     byoc_apps_follow_the_byoc_flag(&state).await;
+    an_invalid_first_link_keeps_the_lifecycle(&state).await;
     app_destroy_never_uses_platform_keys_on_a_linked_state(&pool).await;
     pool.close().await;
 }
@@ -340,6 +341,67 @@ async fn byoc_apps_follow_the_byoc_flag(state: &Arc<AppState>) {
         .await
         .expect("relinking the same environment");
     assert_eq!(lifecycle(pool, relinked).await, kept);
+}
+
+/// A first link `create_credential` refuses leaves the pristine app as it was:
+/// no credential, and the lifecycle `POST /resources` gave it, not the BYOC flag's.
+async fn an_invalid_first_link_keeps_the_lifecycle(state: &Arc<AppState>) {
+    use crate::app_deployments::{
+        LIFECYCLE_DEPLOYMENTS, LIFECYCLE_LEGACY, byoc_enabled_for_new_apps, lifecycle_for_new_app,
+    };
+    use axum::{Extension, extract::State};
+
+    let pool = &state.db;
+    let org = organization(pool).await;
+    let user = member(pool, org).await;
+    // The app is on the lifecycle the flag would not give it.
+    let kept = if lifecycle_for_new_app(byoc_enabled_for_new_apps()) == LIFECYCLE_LEGACY {
+        LIFECYCLE_DEPLOYMENTS
+    } else {
+        LIFECYCLE_LEGACY
+    };
+    let app = deployments_app(pool, org).await;
+    sqlx::query("UPDATE compute_resources SET lifecycle = $2 WHERE id = $1")
+        .bind(app)
+        .bind(kept)
+        .execute(pool)
+        .await
+        .unwrap();
+
+    // `relink`'s body without `iam_user`, which a managed on-prem link requires.
+    let body = json!({
+        "platform": "aws", "managed_on_prem": true, "resource_id": app,
+        "deployment_id": "dep-test", "vpc_id": "vpc-test", "subnet_ids": ["subnet-a"],
+        "eif_bucket": "bucket", "instance_profile_name": "profile",
+        "asg_name": "asg", "launch_template_name": "template", "launch_template_id": "lt-1",
+        "scope_tag": "caution:deployment-id=dep-test",
+        "aws_access_key_id": "AKIAROTATED", "aws_secret_access_key": "secret",
+        "aws_region": "us-east-1", "aws_account_id": "210987654321",
+    })
+    .to_string();
+    let error = crate::create_managed_onprem_resource(
+        State(state.clone()),
+        Extension(crate::AuthContext::session(user)),
+        body,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            crate::CreateManagedOnpremResourceError::CredentialInternal { .. }
+        ),
+        "{error:?}"
+    );
+
+    assert_eq!(lifecycle(pool, app).await, kept);
+    let credentials: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM cloud_credentials WHERE resource_id = $1")
+            .bind(app)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(credentials, 0);
 }
 
 /// App destroy resolves a deployments app's account: a linked app state whose

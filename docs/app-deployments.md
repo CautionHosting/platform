@@ -128,8 +128,9 @@ Set these in `~/.config/caution/.env`, then restart the API (`env.example` lists
   environment works, whatever VPC a `provider` block gave the network. Destroy the app to
   move it.
 - **Unavailable access.** A revoked key, a deleted credential or a decryption failure
-  makes reconciliation skip the app. Switch, deployment and app destroy, and cleanup
-  then fail with nothing changed, and resume once access returns. In any pass where the
+  makes reconciliation skip the app. Switch, deployment destroy and cleanup then fail
+  with nothing changed; app destroy fails after it has moved the app to `terminating`
+  and withdrawn its DNS. Each resumes once access returns. In any pass where the
   reconciler cannot read the app's Elastic IP it skips the lost-runtime checks, for
   fully managed apps too (a released managed Elastic IP no longer gets a lost runtime
   marked).
