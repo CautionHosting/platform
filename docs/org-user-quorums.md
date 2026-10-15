@@ -351,7 +351,7 @@ verification revision `2590edb0f23cae6589bc73cc8324673023ac1deb`, including the 
 ES384 encoding fix. The certificate verifier passes the locally computed bundle
 hash to Bootproof, which checks `user_data` before returning the authenticated
 payload. No old-remote patch or local path dependency is required.
-The default Locksmith daemon revision is also `80447f825990f893898f5183e975f2d728f062b4`,
+The default Locksmith daemon revision is also `eee2a8a3673c92b668b0a82d0da2e06c131df6e2`,
 matching the API/CLI loader. `LOCKSMITH_COMMIT` still overrides this default.
 The standalone mock E2E helper uses the same revision. This revision includes
 holder-identity checks during shard submission, certified release indices, and

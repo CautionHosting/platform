@@ -40,7 +40,17 @@ RUN (git clone https://git.caution.co/public/steve.git . || \
      git clone https://github.com/CautionHosting/steve.git .) && \
     git checkout {{STEVE_COMMIT}}
 
-RUN cargo fetch --locked --target $TARGET_ARCH
+# Fetch the same locked revision from GitHub if the canonical forge fails.
+# Retain the Codeberg transport alias for historical dependency URLs;
+# insteadOf leaves Cargo.lock and the approved source revisions unchanged.
+RUN cargo fetch --locked --target $TARGET_ARCH || \
+    CARGO_NET_GIT_FETCH_WITH_CLI=true \
+    GIT_CONFIG_COUNT=2 \
+    GIT_CONFIG_KEY_0=url.https://github.com/CautionHosting/.insteadOf \
+    GIT_CONFIG_VALUE_0=https://git.caution.co/public/ \
+    GIT_CONFIG_KEY_1=url.https://github.com/CautionHosting/.insteadOf \
+    GIT_CONFIG_VALUE_1=https://codeberg.org/caution/ \
+    cargo fetch --locked --target $TARGET_ARCH
 
 RUN cargo build --release --locked --target ${TARGET_ARCH} -p steve \
       && install -D -m 0755 /build-steve/target/${TARGET_ARCH}/release/steve /binaries/steve

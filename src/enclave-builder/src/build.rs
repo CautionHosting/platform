@@ -12,8 +12,8 @@ use crate::EifFile;
 
 const DEFAULT_ENCLAVEOS_COMMIT: &str = "9582e25239430070667fdd0a6b64d887f1c308df";
 const DEFAULT_BOOTPROOF_COMMIT: &str = "b03721957e3850931f5b53627e7c3d1c302a06fe";
-const DEFAULT_STEVE_COMMIT: &str = "42ae79a260d63f327b849ef849de758ce98509a9";
-const DEFAULT_LOCKSMITH_COMMIT: &str = "80447f825990f893898f5183e975f2d728f062b4";
+const DEFAULT_STEVE_COMMIT: &str = "6431612db09899314c7c30bc7ca0b1c54f7bc3c0";
+const DEFAULT_LOCKSMITH_COMMIT: &str = "eee2a8a3673c92b668b0a82d0da2e06c131df6e2";
 
 // Kept in sync with the git clone URLs in templates/Containerfile.eif.
 pub const ENCLAVEOS_REPO: &str = "https://git.caution.co/public/enclaveos.git";
