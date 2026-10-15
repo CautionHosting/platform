@@ -684,7 +684,7 @@ fn safe_unpack(
 /// matched, because it measures the application rather than the whole image,
 /// which is what makes the failure so confusing to diagnose.
 ///
-/// See https://codeberg.org/caution/platform/issues/401.
+/// See https://git.caution.co/public/platform/issues/401.
 #[tracing::instrument(skip_all, err)]
 pub async fn export_image_filesystem_tar(
     image_ref: &str,
