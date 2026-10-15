@@ -16,18 +16,23 @@ if ! docker images | grep -q "^${IMAGE_NAME} "; then
     echo ""
 fi
 
-AWS_CREDS_ARGS=""
+AWS_CREDS_ARGS=()
 
 if [ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ]; then
     echo "✓ Using AWS credentials from environment"
-    AWS_CREDS_ARGS="-e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY"
+    AWS_CREDS_ARGS+=(-e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY)
     if [ -n "$AWS_SESSION_TOKEN" ]; then
-        AWS_CREDS_ARGS="$AWS_CREDS_ARGS -e AWS_SESSION_TOKEN=$AWS_SESSION_TOKEN"
+        AWS_CREDS_ARGS+=(-e AWS_SESSION_TOKEN)
     fi
-elif [ -d "$HOME/.aws" ]; then
+fi
+
+if [ -d "$HOME/.aws" ]; then
     echo "✓ Using AWS credentials from ~/.aws"
-    AWS_CREDS_ARGS="-v $HOME/.aws:/root/.aws:ro"
-else
+    AWS_CREDS_ARGS+=(-v "$HOME/.aws:/tmp/.aws:ro")
+    if [[ -d "$HOME/.aws/login/cache" ]]; then
+        AWS_CREDS_ARGS+=(-v "$HOME/.aws/login/cache:/tmp/.aws/login/cache:rw")
+    fi
+elif [ ${#AWS_CREDS_ARGS[@]} -eq 0 ]; then
     echo "❌ No AWS credentials found!"
     echo ""
     echo "Provide credentials via:"
@@ -37,6 +42,15 @@ else
     exit 1
 fi
 
+for name in AWS_PROFILE AWS_DEFAULT_PROFILE AWS_REGION AWS_DEFAULT_REGION; do
+    if [[ -n "${!name}" ]]; then
+        AWS_CREDS_ARGS+=(-e "$name")
+    fi
+done
+
+if [[ $# -eq 0 ]]; then
+    set -- apply
+fi
 COMMAND="${1:-apply}"
 
 echo ""
@@ -44,10 +58,11 @@ echo "Running: $COMMAND"
 echo ""
 
 docker run --rm -it \
-    $AWS_CREDS_ARGS \
+    --user "$(id -u):$(id -g)" -e HOME=/tmp \
+    "${AWS_CREDS_ARGS[@]}" \
     -v "$(pwd):/workspace" \
-    $IMAGE_NAME \
-    $COMMAND
+    "$IMAGE_NAME" \
+    "$@"
 
 echo ""
 echo "✅ Done!"

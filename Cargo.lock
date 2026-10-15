@@ -185,7 +185,6 @@ dependencies = [
  "bytes",
  "caution-config",
  "chrono",
- "dirs",
  "dterror 0.3.0",
  "enclave-builder",
  "futures",
@@ -2896,7 +2895,6 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
- "tower 0.4.13",
  "tower-http",
  "tracing",
  "tracing-subscriber",
@@ -2922,7 +2920,6 @@ dependencies = [
 name = "enclave-builder"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "base64 0.22.1",
  "bollard",
  "bootproof-sdk",
@@ -3261,7 +3258,6 @@ dependencies = [
 name = "gateway"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "axum",
  "axum-extra",
  "base64 0.22.1",
@@ -4841,7 +4837,6 @@ dependencies = [
  "thiserror 2.0.20",
  "time",
  "tokio",
- "tower 0.4.13",
  "tower-http",
  "tracing",
  "tracing-subscriber",

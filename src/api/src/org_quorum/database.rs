@@ -162,8 +162,16 @@ async fn credentials(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid) {
         "missing credentials accepted"
     );
     let before = request_log().len();
-    assert!(generate_org_quorum_bundle(pool, org, user, r.clone()).await.is_err());
-    assert_eq!(request_log().len(), before, "empty snapshot reached a key service");
+    assert!(
+        generate_org_quorum_bundle(pool, org, user, r.clone())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        request_log().len(),
+        before,
+        "empty snapshot reached a key service"
+    );
     // Copy of the gateway's throwaway ES256 timing fixture. Distinct IDs, same
     // public key: this tests snapshot serialization/order, not authentication.
     let template: Value = serde_json::from_str(include_str!("test-credential.json")).unwrap();
@@ -186,10 +194,20 @@ async fn credentials(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid) {
     }
     // An enrolled credential alone is insufficient; no service request is sent.
     let before = request_log().len();
-    assert!(generate_org_quorum_bundle(pool, org, user, r.clone()).await.is_err());
+    assert!(
+        generate_org_quorum_bundle(pool, org, user, r.clone())
+            .await
+            .is_err()
+    );
     assert_eq!(request_log().len(), before);
-    sqlx::query("UPDATE fido2_credentials SET uv_verified = true WHERE user_id = $1 AND credential_id = $2")
-        .bind(user).bind(vec![1u8]).execute(pool).await.unwrap();
+    sqlx::query(
+        "UPDATE fido2_credentials SET uv_verified = true WHERE user_id = $1 AND credential_id = $2",
+    )
+    .bind(user)
+    .bind(vec![1u8])
+    .execute(pool)
+    .await
+    .unwrap();
     expected.reverse();
     let holders = resolve_holders(pool, org, &r).await.unwrap();
     assert!(matches!(&holders[..], [Holder::WebAuthn(values)] if values == &expected));
@@ -203,26 +221,65 @@ async fn credentials(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid) {
     for id in 3u8..=65 {
         use base64::Engine;
         let mut value = template.clone();
-        value["cred"]["cred_id"] = json!(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([id]));
-        sqlx::query("INSERT INTO fido2_credentials(user_id, credential_id, public_key) VALUES ($1,$2,$3)")
-            .bind(user).bind(vec![id]).bind(serde_json::to_vec(&value).unwrap())
-            .execute(pool).await.unwrap();
+        value["cred"]["cred_id"] =
+            json!(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([id]));
+        sqlx::query(
+            "INSERT INTO fido2_credentials(user_id, credential_id, public_key) VALUES ($1,$2,$3)",
+        )
+        .bind(user)
+        .bind(vec![id])
+        .bind(serde_json::to_vec(&value).unwrap())
+        .execute(pool)
+        .await
+        .unwrap();
     }
     let before = request_log().len();
-    let error = generate_org_quorum_bundle(pool, org, user, r.clone()).await.unwrap_err();
+    let error = generate_org_quorum_bundle(pool, org, user, r.clone())
+        .await
+        .unwrap_err();
     assert!(error.to_string().contains("64"));
-    assert_eq!(request_log().len(), before, "oversized snapshot reached a key service");
+    assert_eq!(
+        request_log().len(),
+        before,
+        "oversized snapshot reached a key service"
+    );
     for id in 3u8..=65 {
         sqlx::query("DELETE FROM fido2_credentials WHERE user_id = $1 AND credential_id = $2")
-            .bind(user).bind(vec![id]).execute(pool).await.unwrap();
+            .bind(user)
+            .bind(vec![id])
+            .execute(pool)
+            .await
+            .unwrap();
     }
-    sqlx::query("UPDATE fido2_credentials SET public_key = $1 WHERE user_id = $2 AND credential_id = $3")
-        .bind(b"{}".as_slice()).bind(user).bind(vec![2u8]).execute(pool).await.unwrap();
+    sqlx::query(
+        "UPDATE fido2_credentials SET public_key = $1 WHERE user_id = $2 AND credential_id = $3",
+    )
+    .bind(b"{}".as_slice())
+    .bind(user)
+    .bind(vec![2u8])
+    .execute(pool)
+    .await
+    .unwrap();
     let before = request_log().len();
-    assert!(generate_org_quorum_bundle(pool, org, user, r.clone()).await.is_err());
-    assert_eq!(request_log().len(), before, "malformed snapshot reached a key service");
-    sqlx::query("UPDATE fido2_credentials SET public_key = $1 WHERE user_id = $2 AND credential_id = $3")
-        .bind(expected[1].as_bytes()).bind(user).bind(vec![2u8]).execute(pool).await.unwrap();
+    assert!(
+        generate_org_quorum_bundle(pool, org, user, r.clone())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        request_log().len(),
+        before,
+        "malformed snapshot reached a key service"
+    );
+    sqlx::query(
+        "UPDATE fido2_credentials SET public_key = $1 WHERE user_id = $2 AND credential_id = $3",
+    )
+    .bind(expected[1].as_bytes())
+    .bind(user)
+    .bind(vec![2u8])
+    .execute(pool)
+    .await
+    .unwrap();
     let members = list_participants(pool, org).await.unwrap();
     let selected = members.iter().find(|m| m.user_id == user).unwrap();
     assert_eq!(selected.webauthn_credentials, 2);
@@ -340,7 +397,7 @@ async fn storage_roundtrip(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid
         org,
         created.id,
         storage::UpdateBundleRequest {
-                allow_legacy: false,
+            allow_legacy: false,
             data: None,
             name: Some("after".into()),
             labels: Some(json!({"metadata":"edited"})),

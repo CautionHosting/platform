@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use axum::{
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
@@ -433,12 +441,6 @@ pub enum RegisterError {
         location: Location,
     },
 
-    #[error("This security key is already registered. Each key can only be registered once. [{location}]")]
-    CredentialAlreadyRegistered {
-        #[location]
-        location: Location,
-    },
-
     #[error("Too many pending registrations. Please try again later. [{location}]")]
     TooManyPending {
         #[location]
@@ -456,6 +458,12 @@ pub enum RegisterError {
 
     #[error("This username is already taken. [{location}]")]
     UsernameTaken {
+        #[location]
+        location: Location,
+    },
+
+    #[error("This security key is already registered to another account. [{location}]")]
+    CredentialAlreadyRegistered {
         #[location]
         location: Location,
     },
@@ -507,11 +515,6 @@ impl IntoResponse for RegisterError {
                 StatusCode::GONE,
                 "No matching registration state found. Please start over.".to_string(),
             ),
-            Self::CredentialAlreadyRegistered { .. } => (
-                StatusCode::CONFLICT,
-                "This security key is already registered. Each key can only be registered once."
-                    .to_string(),
-            ),
             Self::TooManyPending { .. } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many pending registrations. Please try again later.".to_string(),
@@ -523,6 +526,10 @@ impl IntoResponse for RegisterError {
             Self::UsernameTaken { .. } => (
                 StatusCode::CONFLICT,
                 "This username is already taken.".to_string(),
+            ),
+            Self::CredentialAlreadyRegistered { .. } => (
+                StatusCode::CONFLICT,
+                "This security key is already registered to another account.".to_string(),
             ),
             Self::InvalidPayload { .. } => (
                 StatusCode::BAD_REQUEST,

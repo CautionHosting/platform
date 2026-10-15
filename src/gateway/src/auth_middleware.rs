@@ -585,7 +585,7 @@ pub async fn fido2_auth_middleware(
     };
 
     // Validate session FIRST to ensure the auth method claim is legitimate
-    let credential_id = db::validate_auth_session(&state.db, &session_id)
+    let (_credential_id, user_id) = db::validate_auth_session(&state.db, &session_id)
         .await
         .with_context(Ctx::session_validation())?
         .ok_or_else(|| SessionAuthError::InvalidSession {
@@ -595,10 +595,6 @@ pub async fn fido2_auth_middleware(
     // Now that session is validated, check CSRF for cookie-based auth
     validate_csrf(&req, &session_id, using_header_auth, &state.csrf_secret)
         .with_context(Ctx::csrf())?;
-
-    let user_id = db::get_user_id_by_credential(&state.db, &credential_id)
-        .await
-        .with_context(Ctx::user_lookup())?;
 
     req.headers_mut().insert(
         "X-Authenticated-User-ID",
@@ -1376,9 +1372,10 @@ async fn fido2_sign_flow(
         "Verifying FIDO2 signature with credential: {}",
         hex::encode(&credential_id_bytes)
     );
-    let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
-        .await
-        .with_context(Ctx::credential_lookup())?;
+    let cred_bytes =
+        db::get_credential_public_key(&state.db, pending.user_id, &credential_id_bytes)
+            .await
+            .with_context(Ctx::credential_lookup())?;
 
     // Use SecurityKey for flexible UV policy (Passkey enforces UV=Required)
     let _seckey: SecurityKey =

@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use axum::{
     Json, Router,
     body::Body,
@@ -2583,14 +2591,11 @@ async fn set_builder_config(
 ) -> Result<Json<serde_json::Value>, SetBuilderConfigError> {
     use SetBuilderConfigErrorCtx as Ctx;
 
+    let builder_size = validated_types::builder_size_from_request(&body)?;
+
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
         .with_context(Ctx::primary_org_lookup())?;
-
-    let builder_size = body
-        .get("builder_size")
-        .and_then(|v| v.as_str())
-        .unwrap_or("small");
 
     if !state.builder_sizes.is_valid(builder_size) {
         let valid: Vec<&str> = state

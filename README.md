@@ -1,4 +1,4 @@
-**GitHub users:** This repo is mirrored from <a href="https://git.caution.co/public/platform" target="_blank">git.caution.co</a>. Please open issues and PRs there; a forge account is required.
+This repository may be mirrored on other Git forges. The [canonical repository](https://git.caution.co/public/platform) is hosted on [git.caution.co](https://git.caution.co/public). Please open issues and PRs there; a forge account is required.
 
 **Hosted version:** A hosted deployment is available in closed alpha at <a href="https://dashboard.caution.co" target="_blank">dashboard.caution.co</a>. To request a registration code, <a href="mailto:info@caution.co?subject=Caution%20Alpha%20Access&body=Hi%2C%0A%0AI%20was%20reviewing%20your%20docs%20at%20https%3A%2F%2Fgit.caution.co%2Fpublic%2Fplatform%20and%20noticed%20that%20you%20are%20also%20offering%20a%20closed%20alpha%20for%20hosted%20deployments.%20Can%20I%20please%20get%20a%20code%20to%20try%20it%20out%3F%0A%0AMy%20details%3A%0AMy%20name%3A%20%0AMy%20company%20name%3A%0A%0AThank%20you">contact info@caution.co</a>.
 
@@ -22,10 +22,11 @@ An enclave is **verifiable** when you can independently confirm that the code ru
 
 ### Prerequisites
 
-- Docker with <a href="https://docs.docker.com/engine/storage/containerd/#enable-containerd-image-store-on-docker-engine" target="_blank">containerd</a> enabled
+- Docker with BuildKit/buildx and <a href="https://docs.docker.com/engine/storage/containerd/#enable-containerd-image-store-on-docker-engine" target="_blank">containerd</a> enabled; the supplied units use `/usr/bin/docker` and require daemon access without `sudo`
 - GNU Make
 - Bash
-- x86_64 system for running the platform services; the CLI also supports macOS on Apple silicon
+- Git, wget, coreutils, and OpenSSL; Python 3 and jq for the bootstrap regression tests
+- Linux/x86_64 with a working systemd user session for the platform services; the CLI also supports macOS on Apple silicon
 
 ### 1. Bootstrap AWS infrastructure
 
@@ -33,12 +34,37 @@ Follow the [bootstrapping guide](infra-bootstrap/README.md) to create the requir
 
 ### 2. Run the platform
 
-Set up `.env` file using the credentials from bootstrapping:
+Prepare configuration and install the supplied systemd user units:
 
 ```bash
-cp env.example $HOME/.config/caution/.env
-# Edit .env with your AWS credentials and bucket names from bootstrapping
+make setup
 ```
+
+This creates missing `.env`, `prices.json`, and `config.json` files under
+`$HOME/.config/caution` from the examples, preserving existing files and their
+permissions. It installs/refreshes the units under
+`${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user` and reloads the user manager;
+it does **not** enable or start services, build images, or provision AWS resources.
+
+Before continuing, review all three configuration files. In `.env`, set the AWS
+credentials, bucket names, and builder settings from bootstrapping, and review
+database credentials, service secrets, and public URLs for your environment.
+Uncomment and set `CSRF_SECRET`, and set `INTERNAL_SERVICE_SECRET` to a separate
+nonempty random value (generate each with `openssl rand -hex 32`). Both are
+required even in development; the internal secret must match across services.
+Keep `CAUTION_DATA_DIR=/var/cache/caution` for the supplied container units so
+the API and gateway share repositories and other persistent data.
+Migrations use `POSTGRES_PASSWORD`, `POSTGRES_USER`, and `POSTGRES_DB` by default;
+explicit `PGPASSWORD` and `MIGRATION_DB_*` overrides remain supported.
+`DATABASE_URL` must use matching database credentials.
+The copied examples are development defaults, not production-ready configuration.
+
+Run setup and startup as the same user, not with `sudo`. On remote hosts, use a
+login session with a working systemd user bus. To keep services running after
+logout, an administrator may need to run `loginctl enable-linger <user>`.
+If Docker access was just granted through group membership, the systemd user
+manager also needs a fresh login with that membership; opening another shell
+alone does not update an already-running user manager.
 
 Install the CLI with the local host toolchain. This is the default on every
 supported platform and supports local PC/SC for Locksmith shard submission:
@@ -57,11 +83,19 @@ See [src/cli/README.md](src/cli/README.md) for additional installation options,
 native dependencies, signature verification, and the current StageX PC/SC
 limitation.
 
-Start the platform services:
+Start the platform services after reviewing configuration:
 
 ```bash
 make up
 ```
+
+`make up` starts PostgreSQL, runs migrations, builds the API, gateway (including
+frontend assets), email, and metering images, then starts those services. No
+separate `make build-all` is needed; the first run requires network access for
+image pulls and build dependencies.
+
+Run the script/setup regression tests with `make test-bootstrap`; these also run
+as part of `make test` and use temporary directories and stubbed cloud commands.
 
 For Key Services setup, quorum creation, and secret recovery, see the
 [secrets operator runbook](docs/secrets-operations.md).
