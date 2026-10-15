@@ -1,4 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 //! Discovery supplies candidates; only independent reproduction establishes saved trust.
 use crate::{ApiClient, output, quorum_init, share_release::terminal_label, verify};
 use dterror::{BoxError, CtxError, Location, ResultExt};
@@ -546,15 +554,14 @@ async fn release_config_at(
         };
         return Ok((service_url(&url)?, policy));
     }
-    if let Some(url) = &explicit_url {
-        if saved
+    if let Some(url) = &explicit_url
+        && saved
             .as_ref()
             .is_none_or(|r| service_url(url).ok().as_ref() != Some(&r.endpoint))
-        {
-            return Err(Error::invalid(
-                "explicit recryptor URL has no matching saved trust; supply --recryptor-pcr-policy",
-            ));
-        }
+    {
+        return Err(Error::invalid(
+            "explicit recryptor URL has no matching saved trust; supply --recryptor-pcr-policy",
+        ));
     }
     let record = match saved {
         Some(record) => record,

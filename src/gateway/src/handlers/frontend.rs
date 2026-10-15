@@ -86,12 +86,10 @@ mod tests {
         let (_dir, mut app) = test_frontend();
         let response = get(&mut app, "/components").await;
         assert_eq!(response.status(), StatusCode::OK);
-        assert!(
-            response.headers()[header::CONTENT_TYPE]
-                .to_str()
-                .unwrap()
-                .contains("text/html")
-        );
+        assert!(response.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .contains("text/html"));
     }
 
     fn test_frontend() -> (tempfile::TempDir, axum::Router) {

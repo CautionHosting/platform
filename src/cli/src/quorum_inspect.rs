@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
-use locksmith::bundle::RecoverySource;
 use crate::{
     ApiClient, output,
     quorum_init::{self, InitError, InitErrorCtx as Ctx},
@@ -11,6 +10,7 @@ use dterror::ResultExt;
 use keymaker_models::generate_quorum::{
     GenerateQuorumBundle, GenerateQuorumResponse, deterministic_bundle_hash, v1::Key,
 };
+use locksmith::bundle::RecoverySource;
 use sequoia_openpgp::{Cert, parse::Parse};
 use sha2::{Digest, Sha256};
 use std::{path::PathBuf, time::SystemTime};
@@ -62,12 +62,21 @@ fn summary(
     platform_name: Option<&str>,
 ) -> Result<String, InitError> {
     let GenerateQuorumBundle::V1(data) = bundle;
-    if data.threshold == 0 || data.threshold > data.max || usize::from(data.max) != data.keyring.len() {
-        return Err(InitError::invalid("invalid bundle threshold or holder count"));
+    if data.threshold == 0
+        || data.threshold > data.max
+        || usize::from(data.max) != data.keyring.len()
+    {
+        return Err(InitError::invalid(
+            "invalid bundle threshold or holder count",
+        ));
     }
     let id = uuid::Uuid::from_bytes(data.bundle_id).to_string();
-    let platform_name = platform_name.filter(|_| !options.unverified).filter(|name| !name.trim().is_empty());
-    let title = platform_name.or_else(|| data.label.get("name").map(String::as_str)).filter(|name| !name.is_empty())
+    let platform_name = platform_name
+        .filter(|_| !options.unverified)
+        .filter(|name| !name.trim().is_empty());
+    let title = platform_name
+        .or_else(|| data.label.get("name").map(String::as_str))
+        .filter(|name| !name.is_empty())
         .map(|name| format!("{} · {}", terminal_label(name), &id[..8]))
         .unwrap_or_else(|| format!("Bundle {}", &id[..8]));
     let status = if options.unverified {
@@ -78,47 +87,128 @@ fn summary(
         "TEST ONLY — synthetic proof accepted; no authenticated generation time."
     };
     let mut lines = vec![format!("{title}\n{status}\n")];
-    if platform_name.is_some() { lines.push("Bundle name from Platform (descriptive metadata).".into()); }
-    let pgp = data.keyring.iter().filter(|key| matches!(key, Key::OpenPGP { .. })).count();
+    if platform_name.is_some() {
+        lines.push("Bundle name from Platform (descriptive metadata).".into());
+    }
+    let pgp = data
+        .keyring
+        .iter()
+        .filter(|key| matches!(key, Key::OpenPGP { .. }))
+        .count();
     let custody = [(pgp, "External PGP"), (data.keyring.len() - pgp, "Passkey")]
-        .into_iter().filter(|(count, _)| *count > 0).map(|(count, kind)| format!("{count} {kind}")).collect::<Vec<_>>().join(" · ");
-    lines.push(format!("Quorum       {} of {} holders · {custody}", data.threshold, data.max));
+        .into_iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, kind)| format!("{count} {kind}"))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    lines.push(format!(
+        "Quorum       {} of {} holders · {custody}",
+        data.threshold, data.max
+    ));
     if !options.unverified {
         if let Some(at) = generation_time {
             let at: chrono::DateTime<chrono::Utc> = at.into();
-            lines.push(format!("Generated    {} (authenticated)", at.format("%d %b %Y, %H:%M:%S UTC")));
+            lines.push(format!(
+                "Generated    {} (authenticated)",
+                at.format("%d %b %Y, %H:%M:%S UTC")
+            ));
         }
-        if let Some(platform) = platform { lines.push(format!("Platform     {} (metadata source)", terminal_label(platform))); }
+        if let Some(platform) = platform {
+            lines.push(format!(
+                "Platform     {} (metadata source)",
+                terminal_label(platform)
+            ));
+        }
     }
-    let mut labels: Vec<_> = data.label.iter().filter(|(key, _)| key.as_str() != "name").collect();
+    let mut labels: Vec<_> = data
+        .label
+        .iter()
+        .filter(|(key, _)| key.as_str() != "name")
+        .collect();
     labels.sort_by_key(|(key, _)| *key);
-    for (key, value) in labels { lines.push(format!("Label        {} = {}", terminal_label(key), terminal_label(value))); }
+    for (key, value) in labels {
+        lines.push(format!(
+            "Label        {} = {}",
+            terminal_label(key),
+            terminal_label(value)
+        ));
+    }
     let mut rows = Vec::new();
     for (index, key) in data.keyring.iter().enumerate() {
         let (cert, custody, credentials) = match key {
             Key::OpenPGP { cert } => (cert, "External PGP", None),
-            Key::WebAuthn { cert, credential } => (cert, "Passkey · Caution Enclave-held key", Some(credential.len())),
+            Key::WebAuthn { cert, credential } => (
+                cert,
+                "Passkey · Caution Enclave-held key",
+                Some(credential.len()),
+            ),
         };
-        let fingerprint = Cert::from_bytes(cert.as_bytes()).with_context(Ctx::new("invalid holder certificate"))?.fingerprint().to_string();
-        let name = names.get(&fingerprint).filter(|name| names.values().filter(|other| *other == *name).count() == 1)
-            .map(|name| terminal_label(name)).unwrap_or_else(|| format!("Holder {}", index + 1));
-        let certificate = if verbose { fingerprint } else { share_release::short_fingerprint(&fingerprint) };
+        let fingerprint = Cert::from_bytes(cert.as_bytes())
+            .with_context(Ctx::new("invalid holder certificate"))?
+            .fingerprint()
+            .to_string();
+        let name = names
+            .get(&fingerprint)
+            .filter(|name| names.values().filter(|other| *other == *name).count() == 1)
+            .map(|name| terminal_label(name))
+            .unwrap_or_else(|| format!("Holder {}", index + 1));
+        let certificate = if verbose {
+            fingerprint
+        } else {
+            share_release::short_fingerprint(&fingerprint)
+        };
         rows.push((name, custody, certificate, credentials));
     }
-    let width = rows.iter().map(|row| row.0.chars().count()).max().unwrap_or(0).max(6);
+    let width = rows
+        .iter()
+        .map(|row| row.0.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(6);
     let passkeys = rows.iter().any(|row| row.3.is_some());
-    let method_width = rows.iter().map(|row| row.1.chars().count()).max().unwrap_or(0).max("APPROVAL METHOD".len());
-    lines.push(format!("\n{:<width$}  {:<method_width$}  {:<17}{}", "HOLDER", "APPROVAL METHOD", "CERTIFICATE", if passkeys { "  PASSKEYS" } else { "" }));
+    let method_width = rows
+        .iter()
+        .map(|row| row.1.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max("APPROVAL METHOD".len());
+    lines.push(format!(
+        "\n{:<width$}  {:<method_width$}  {:<17}{}",
+        "HOLDER",
+        "APPROVAL METHOD",
+        "CERTIFICATE",
+        if passkeys { "  PASSKEYS" } else { "" }
+    ));
     for (name, custody, certificate, credentials) in rows {
-        let count = if passkeys { format!("  {}", credentials.map(|n| n.to_string()).unwrap_or_else(|| "—".into())) } else { String::new() };
-        lines.push(format!("{name:<width$}  {custody:<method_width$}  {certificate:<17}{count}"));
+        let count = if passkeys {
+            format!(
+                "  {}",
+                credentials
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "—".into())
+            )
+        } else {
+            String::new()
+        };
+        lines.push(format!(
+            "{name:<width$}  {custody:<method_width$}  {certificate:<17}{count}"
+        ));
     }
-    if passkeys { lines.push("Multiple included passkeys still contribute one share per holder.".into()); }
-    if !names.is_empty() { lines.push("\nNames reflect current Platform registrations, not authorization evidence.".into()); }
+    if passkeys {
+        lines.push("Multiple included passkeys still contribute one share per holder.".into());
+    }
+    if !names.is_empty() {
+        lines.push(
+            "\nNames reflect current Platform registrations, not authorization evidence.".into(),
+        );
+    }
     if verbose {
         lines.push("\nIdentifiers & verification".into());
         lines.push(format!("Bundle ID: {id}"));
-        lines.push(format!("Bundle hash: {}", hex::encode(deterministic_bundle_hash(bundle).with_context(Ctx::new("hash bundle"))?)));
+        lines.push(format!(
+            "Bundle hash: {}",
+            hex::encode(deterministic_bundle_hash(bundle).with_context(Ctx::new("hash bundle"))?)
+        ));
         // Match Dashboard hashing of the exact UTF-8 public-key text.
         lines.push(format!(
             "Public key SHA-256: {}",
@@ -144,19 +234,42 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
     let text =
         std::fs::read_to_string(&options.bundle).with_context(Ctx::new("read quorum bundle"))?;
     if locksmith::legacy::is_imported_json(&text).with_context(Ctx::new("invalid bundle format"))? {
-        let bundle = locksmith::legacy::ImportedV0::from_json(&text).with_context(Ctx::new("invalid imported legacy bundle"))?;
+        let bundle = locksmith::legacy::ImportedV0::from_json(&text)
+            .with_context(Ctx::new("invalid imported legacy bundle"))?;
         let envelope = serde_json::from_str(&text).with_context(Ctx::new("invalid bundle JSON"))?;
-        let display = if options.unverified { share_release::BundleDisplay::default() } else {
+        let display = if options.unverified {
+            share_release::BundleDisplay::default()
+        } else {
             share_release::bundle_display(client, &envelope, "inspect").await
         };
         let view = bundle.recovery();
-        let mut lines = vec!["Legacy V0 — no Keymaker generation proof".to_owned(),
-            format!("Quorum       {} of {} holders · External PGP", view.threshold, view.max),
-            format!("Content hash {}", bundle.content_hash().with_context(Ctx::new("hash legacy artifact"))?)];
+        let mut lines = vec![
+            "Legacy V0 — no Keymaker generation proof".to_owned(),
+            format!(
+                "Quorum       {} of {} holders · External PGP",
+                view.threshold, view.max
+            ),
+            format!(
+                "Content hash {}",
+                bundle
+                    .content_hash()
+                    .with_context(Ctx::new("hash legacy artifact"))?
+            ),
+        ];
         for key in view.keyring {
-            let Key::OpenPGP { cert } = key else { unreachable!("validated legacy PGP holder") };
-            let fingerprint = Cert::from_bytes(cert).with_context(Ctx::new("parse holder"))?.fingerprint().to_string();
-            lines.push(share_release::holder_label(view.keyring, &fingerprint, false, &display.holders));
+            let Key::OpenPGP { cert } = key else {
+                unreachable!("validated legacy PGP holder")
+            };
+            let fingerprint = Cert::from_bytes(cert)
+                .with_context(Ctx::new("parse holder"))?
+                .fingerprint()
+                .to_string();
+            lines.push(share_release::holder_label(
+                view.keyring,
+                &fingerprint,
+                false,
+                &display.holders,
+            ));
         }
         lines.push("Public structure checked; encrypted metadata is rechecked by each releasing holder. Encryption and release require --allow-legacy.".into());
         output::status(lines.join("\n"));
@@ -170,7 +283,15 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
             serde_json::from_str(&text).with_context(Ctx::new("invalid quorum bundle JSON"))?;
         share_release::bundle_display(client, &envelope, "inspect").await
     };
-    output::status(summary(&bundle, at, &display.holders, &options, client.verbose, Some(&client.base_url), display.name.as_deref())?);
+    output::status(summary(
+        &bundle,
+        at,
+        &display.holders,
+        &options,
+        client.verbose,
+        Some(&client.base_url),
+        display.name.as_deref(),
+    )?);
     Ok(())
 }
 
@@ -234,14 +355,21 @@ mod tests {
                     credential: vec!["snapshot".into(); 2],
                 };
             }
-            let text = summary(&bundle, None, &HolderNames::new(), &options(), false, None, None).unwrap();
+            let text = summary(
+                &bundle,
+                None,
+                &HolderNames::new(),
+                &options(),
+                false,
+                None,
+                None,
+            )
+            .unwrap();
             assert!(text.contains("UNVERIFIED"));
             assert!(text.contains("01010101"));
             assert!(!text.contains("0 External PGP") && !text.contains("0 Passkey"));
             assert!(text.contains("Holder 1"));
-            assert!(
-                !text.contains("Public key SHA-256")
-            );
+            assert!(!text.contains("Public key SHA-256"));
             assert!(!text.contains('\x1b'));
             assert!(!text.contains("\nspoof"));
             assert!(!text.contains("snapshot"));
@@ -269,7 +397,16 @@ mod tests {
         let mut opts = options();
         opts.unverified = false;
         opts.keymaker_pcr_policy = Some("trusted.json".into());
-        let text = summary(&bundle, Some(SystemTime::UNIX_EPOCH), &names, &opts, true, Some("https://platform.test"), None).unwrap();
+        let text = summary(
+            &bundle,
+            Some(SystemTime::UNIX_EPOCH),
+            &names,
+            &opts,
+            true,
+            Some("https://platform.test"),
+            None,
+        )
+        .unwrap();
         assert!(text.contains("Proof verified — historical"));
         assert!(text.contains("01 Jan 1970, 00:00:00 UTC (authenticated)"));
         assert!(text.contains(&fingerprint));
@@ -302,14 +439,37 @@ mod tests {
     #[test]
     fn platform_title_overrides_saved_name_only_in_verified_mode() {
         let bundle = fixture();
-        let mut opts = options(); opts.unverified = false;
-        let text = summary(&bundle, None, &HolderNames::new(), &opts, false, None, Some("Current\x1bname")).unwrap();
+        let mut opts = options();
+        opts.unverified = false;
+        let text = summary(
+            &bundle,
+            None,
+            &HolderNames::new(),
+            &opts,
+            false,
+            None,
+            Some("Current\x1bname"),
+        )
+        .unwrap();
         assert!(text.starts_with("Current\\u{1b}name · 01010101"));
         assert!(text.contains("Bundle name from Platform (descriptive metadata)."));
-        let fallback = summary(&bundle, None, &HolderNames::new(), &opts, false, None, None).unwrap();
+        let fallback =
+            summary(&bundle, None, &HolderNames::new(), &opts, false, None, None).unwrap();
         assert!(fallback.starts_with("test\\u{1b}"));
         opts.unverified = true;
-        assert!(!summary(&bundle, None, &HolderNames::new(), &opts, false, None, Some("Current")).unwrap().contains("Current"));
+        assert!(
+            !summary(
+                &bundle,
+                None,
+                &HolderNames::new(),
+                &opts,
+                false,
+                None,
+                Some("Current")
+            )
+            .unwrap()
+            .contains("Current")
+        );
     }
 
     #[test]
@@ -324,7 +484,18 @@ mod tests {
         let mut bundle = fixture();
         let GenerateQuorumBundle::V1(data) = &mut bundle;
         data.threshold = 0;
-        assert!(summary(&bundle, None, &HolderNames::new(), &options(), false, None, None).is_err());
+        assert!(
+            summary(
+                &bundle,
+                None,
+                &HolderNames::new(),
+                &options(),
+                false,
+                None,
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]

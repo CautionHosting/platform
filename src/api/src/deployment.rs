@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use dterror::{BoxError, CtxError, Location};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
@@ -846,7 +854,10 @@ mod tests {
         }
     }
 
-    pub(super) fn deployment_request(eif_path: &str, eif_s3_key: Option<&str>) -> NitroDeploymentRequest {
+    pub(super) fn deployment_request(
+        eif_path: &str,
+        eif_s3_key: Option<&str>,
+    ) -> NitroDeploymentRequest {
         NitroDeploymentRequest {
             org_id: Uuid::nil(),
             resource_id: Uuid::nil(),
@@ -2169,8 +2180,8 @@ async fn upload_tap_framer(
     request: &NitroDeploymentRequest,
     destination_eif: &str,
 ) -> std::result::Result<(), TapFramerUploadError> {
-    use dterror::ResultExt;
     use TapFramerUploadErrorCtx as Ctx;
+    use dterror::ResultExt;
     if !request.egress {
         return Ok(());
     }

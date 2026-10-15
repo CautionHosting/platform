@@ -34,20 +34,31 @@ pub(crate) type HolderNames = std::collections::BTreeMap<String, String>;
 
 // Names are current registration metadata, never authorization evidence.
 fn matched_names(bundle: &Value, rows: &[Value]) -> Option<HolderNames> {
-    let keys = bundle.get("data").unwrap_or(bundle).get("keyring")?.as_array()?;
+    let keys = bundle
+        .get("data")
+        .unwrap_or(bundle)
+        .get("keyring")?
+        .as_array()?;
     let mut result = None;
     for row in rows.iter().filter(|row| row.get("data") == Some(bundle)) {
         let metadata = row.get("holders")?.as_array()?;
-        if metadata.len() != keys.len() { return None; }
+        if metadata.len() != keys.len() {
+            return None;
+        }
         let mut names = HolderNames::new();
         for (key, meta) in keys.iter().zip(metadata) {
             let (custody, entry) = if let Some(entry) = key.get("OpenPGP") {
                 ("pgp", entry)
-            } else { ("caution_backed", key.get("WebAuthn")?) };
+            } else {
+                ("caution_backed", key.get("WebAuthn")?)
+            };
             let cert = Cert::from_bytes(entry.get("cert")?.as_str()?.as_bytes()).ok()?;
             let fingerprint = cert.fingerprint().to_string();
             if meta.get("custody")?.as_str()? != custody
-                || meta.get("fingerprint")?.as_str()? != fingerprint { return None; }
+                || meta.get("fingerprint")?.as_str()? != fingerprint
+            {
+                return None;
+            }
             if let Some(name) = meta.get("username").and_then(Value::as_str) {
                 // Never render terminal controls received from display metadata.
                 if !name.is_empty() && !name.chars().any(char::is_control) {
@@ -55,7 +66,9 @@ fn matched_names(bundle: &Value, rows: &[Value]) -> Option<HolderNames> {
                 }
             }
         }
-        if result.as_ref().is_some_and(|previous| previous != &names) { return None; }
+        if result.as_ref().is_some_and(|previous| previous != &names) {
+            return None;
+        }
         result = Some(names);
     }
     result
@@ -85,9 +98,15 @@ impl NameLookup {
     fn message(&self, command: &str) -> Option<String> {
         let reason = match self {
             Self::Found(_) => return None,
-            Self::ServerMismatch { selected, saved } => return Some(format!(
-                "Holder names unavailable: server mismatch\n  Selected server: {}\n  Saved session:   {}\nUse: caution --url '{}' secret {}\nLocal bundle verification is independent of this lookup.",
-                terminal_label(selected), terminal_label(saved), terminal_label(saved).replace('\'', "'\"'\"'"), command)),
+            Self::ServerMismatch { selected, saved } => {
+                return Some(format!(
+                    "Holder names unavailable: server mismatch\n  Selected server: {}\n  Saved session:   {}\nUse: caution --url '{}' secret {}\nLocal bundle verification is independent of this lookup.",
+                    terminal_label(selected),
+                    terminal_label(saved),
+                    terminal_label(saved).replace('\'', "'\"'\"'"),
+                    command
+                ));
+            }
             Self::MissingSession => "no saved Platform session",
             Self::InvalidSession => "saved Platform session could not be read",
             Self::ExpiredSession => "Platform session expired or was rejected",
@@ -97,21 +116,43 @@ impl NameLookup {
             Self::UnavailableMetadata => "holder metadata or names are unavailable",
             Self::InconsistentMetadata => "holder metadata does not match the bundle",
         };
-        Some(format!("Holder names unavailable: {reason}. Using certificate identifiers."))
+        Some(format!(
+            "Holder names unavailable: {reason}. Using certificate identifiers."
+        ))
     }
 }
 
 fn names_from_rows(bundle: &Value, rows: &[Value]) -> NameLookup {
-    let matching: Vec<_> = rows.iter().filter(|row| row.get("data") == Some(bundle)).collect();
-    if matching.is_empty() { return NameLookup::UnmatchedBundle; }
-    if matching.iter().any(|row| !row.get("holders").is_some_and(Value::is_array)) {
+    let matching: Vec<_> = rows
+        .iter()
+        .filter(|row| row.get("data") == Some(bundle))
+        .collect();
+    if matching.is_empty() {
+        return NameLookup::UnmatchedBundle;
+    }
+    if matching
+        .iter()
+        .any(|row| !row.get("holders").is_some_and(Value::is_array))
+    {
         return NameLookup::UnavailableMetadata;
     }
     // Duplicate uploads can have different record names; do not choose arbitrarily.
-    let name = matching[0].get("name").and_then(Value::as_str).filter(|name| !name.trim().is_empty());
-    let name = name.filter(|name| matching.iter().all(|row| row.get("name").and_then(Value::as_str) == Some(*name))).map(str::to_owned);
+    let name = matching[0]
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty());
+    let name = name
+        .filter(|name| {
+            matching
+                .iter()
+                .all(|row| row.get("name").and_then(Value::as_str) == Some(*name))
+        })
+        .map(str::to_owned);
     match matched_names(bundle, rows) {
-        Some(names) if !names.is_empty() || name.is_some() => NameLookup::Found(BundleDisplay { holders: names, name }),
+        Some(names) if !names.is_empty() || name.is_some() => NameLookup::Found(BundleDisplay {
+            holders: names,
+            name,
+        }),
         Some(_) => NameLookup::UnavailableMetadata,
         None => NameLookup::InconsistentMetadata,
     }
@@ -125,27 +166,59 @@ async fn lookup_names(client: &ApiClient, bundle: &Value) -> NameLookup {
     };
     // Check the server before using any session, even when it has also expired.
     if !client.is_same_server(&config) {
-        return NameLookup::ServerMismatch { selected: client.base_url.clone(), saved: config.server_url.unwrap_or_default() };
+        return NameLookup::ServerMismatch {
+            selected: client.base_url.clone(),
+            saved: config.server_url.unwrap_or_default(),
+        };
     }
-    if client.is_session_expired(&config) { return NameLookup::ExpiredSession; }
+    if client.is_session_expired(&config) {
+        return NameLookup::ExpiredSession;
+    }
     // Custom session headers must not follow an API redirect to another host.
-    let Ok(http) = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build()
-        else { return NameLookup::ApiFailure; };
+    let Ok(http) = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    else {
+        return NameLookup::ApiFailure;
+    };
     let lookup = async {
-        let Ok(response) = http.get(format!("{}/api/quorum-bundles", client.base_url))
-            .header("X-Session-ID", &config.session_id).send().await else { return NameLookup::ApiFailure; };
-        if response.status() == reqwest::StatusCode::UNAUTHORIZED { return NameLookup::ExpiredSession; }
-        if !response.status().is_success() { return NameLookup::ApiFailure; }
-        let Ok(rows) = response.json::<Vec<Value>>().await else { return NameLookup::ApiFailure; };
+        let Ok(response) = http
+            .get(format!("{}/api/quorum-bundles", client.base_url))
+            .header("X-Session-ID", &config.session_id)
+            .send()
+            .await
+        else {
+            return NameLookup::ApiFailure;
+        };
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return NameLookup::ExpiredSession;
+        }
+        if !response.status().is_success() {
+            return NameLookup::ApiFailure;
+        }
+        let Ok(rows) = response.json::<Vec<Value>>().await else {
+            return NameLookup::ApiFailure;
+        };
         names_from_rows(bundle, &rows)
     };
-    tokio::time::timeout(Duration::from_secs(5), lookup).await.unwrap_or(NameLookup::Timeout)
+    tokio::time::timeout(Duration::from_secs(5), lookup)
+        .await
+        .unwrap_or(NameLookup::Timeout)
 }
 
-pub(crate) async fn bundle_display(client: &ApiClient, bundle: &Value, command: &str) -> BundleDisplay {
+pub(crate) async fn bundle_display(
+    client: &ApiClient,
+    bundle: &Value,
+    command: &str,
+) -> BundleDisplay {
     let outcome = lookup_names(client, bundle).await;
-    if let Some(message) = outcome.message(command) { output::warning(message); }
-    match outcome { NameLookup::Found(display) => display, _ => BundleDisplay::default() }
+    if let Some(message) = outcome.message(command) {
+        output::warning(message);
+    }
+    match outcome {
+        NameLookup::Found(display) => display,
+        _ => BundleDisplay::default(),
+    }
 }
 
 pub(crate) async fn holder_names(client: &ApiClient, bundle: &Value) -> HolderNames {
@@ -153,20 +226,45 @@ pub(crate) async fn holder_names(client: &ApiClient, bundle: &Value) -> HolderNa
 }
 
 pub(crate) fn short_fingerprint(value: &str) -> String {
-    if value.len() > 16 { format!("{}…{}", &value[..8], &value[value.len()-8..]) } else { value.to_owned() }
+    if value.len() > 16 {
+        format!("{}…{}", &value[..8], &value[value.len() - 8..])
+    } else {
+        value.to_owned()
+    }
 }
 
-pub(crate) fn holder_label(keys: &[Key], holder: &str, webauthn: bool, names: &HolderNames) -> String {
-    let unique_name = names.get(holder).filter(|name| names.values().filter(|other| *other == *name).count() == 1);
-    let kind = if webauthn { "Passkey · Caution Enclave-held key" } else { "External PGP" };
+pub(crate) fn holder_label(
+    keys: &[Key],
+    holder: &str,
+    webauthn: bool,
+    names: &HolderNames,
+) -> String {
+    let unique_name = names
+        .get(holder)
+        .filter(|name| names.values().filter(|other| *other == *name).count() == 1);
+    let kind = if webauthn {
+        "Passkey · Caution Enclave-held key"
+    } else {
+        "External PGP"
+    };
     let short = short_fingerprint(holder);
     if let Some(name) = unique_name {
-        if webauthn { format!("{} · {kind}", terminal_label(name)) } else { format!("{} · {kind} · {short}", terminal_label(name)) }
+        if webauthn {
+            format!("{} · {kind}", terminal_label(name))
+        } else {
+            format!("{} · {kind} · {short}", terminal_label(name))
+        }
     } else {
-        let index = keys.iter().position(|key| {
-            let cert = match key { Key::OpenPGP { cert } | Key::WebAuthn { cert, .. } => cert };
-            Cert::from_bytes(cert.as_bytes()).is_ok_and(|cert| cert.fingerprint().to_string() == holder)
-        }).map_or(0, |index| index + 1);
+        let index = keys
+            .iter()
+            .position(|key| {
+                let cert = match key {
+                    Key::OpenPGP { cert } | Key::WebAuthn { cert, .. } => cert,
+                };
+                Cert::from_bytes(cert.as_bytes())
+                    .is_ok_and(|cert| cert.fingerprint().to_string() == holder)
+            })
+            .map_or(0, |index| index + 1);
         format!("Holder {index} · {kind} · {short}")
     }
 }
@@ -193,8 +291,13 @@ pub(crate) fn select_holder(
         let normalized = requested.replace(' ', "").to_uppercase();
         let fingerprints: Vec<_> = holders.iter().filter(|h| h.0 == normalized).collect();
         let matched: Vec<_> = if fingerprints.is_empty() {
-            holders.iter().filter(|h| names.get(&h.0).is_some_and(|name| name == requested)).collect()
-        } else { fingerprints };
+            holders
+                .iter()
+                .filter(|h| names.get(&h.0).is_some_and(|name| name == requested))
+                .collect()
+        } else {
+            fingerprints
+        };
         return if matched.len() == 1 {
             Ok(matched[0].clone())
         } else {
@@ -204,8 +307,7 @@ pub(crate) fn select_holder(
         };
     }
     if let Some(path) = private_keyring {
-        let bytes = std::fs::read(path)
-            .with_context(Ctx::new("unable to read private keyring"))?;
+        let bytes = std::fs::read(path).with_context(Ctx::new("unable to read private keyring"))?;
         holders = matching_private_holders(holders, &bytes)?;
     }
     if holders.len() == 1 {
@@ -217,7 +319,11 @@ pub(crate) fn select_holder(
         ));
     }
     for (index, (fingerprint, webauthn)) in holders.iter().enumerate() {
-        eprintln!("{}: {}", index + 1, holder_label(keys, fingerprint, *webauthn, names));
+        eprintln!(
+            "{}: {}",
+            index + 1,
+            holder_label(keys, fingerprint, *webauthn, names)
+        );
     }
     let selected = prompt::select("Holder: ").with_context(Ctx::new("holder selection"))?;
     holders
@@ -233,13 +339,19 @@ fn matching_private_holders(
         .with_context(Ctx::new("invalid private keyring"))?
         .collect::<sequoia_openpgp::Result<Vec<_>>>()
         .with_context(Ctx::new("invalid private keyring"))?;
-    let matches: Vec<_> = holders.into_iter().filter(|(fingerprint, webauthn)| {
-        !webauthn && certs.iter().any(|cert| {
-            cert.is_tsk() && cert.fingerprint().to_string() == *fingerprint
+    let matches: Vec<_> = holders
+        .into_iter()
+        .filter(|(fingerprint, webauthn)| {
+            !webauthn
+                && certs
+                    .iter()
+                    .any(|cert| cert.is_tsk() && cert.fingerprint().to_string() == *fingerprint)
         })
-    }).collect();
+        .collect();
     if matches.is_empty() {
-        return Err(InitError::invalid("private keyring matches no external-PGP holder in this bundle"));
+        return Err(InitError::invalid(
+            "private keyring matches no external-PGP holder in this bundle",
+        ));
     }
     Ok(matches)
 }
@@ -304,20 +416,32 @@ pub(crate) fn terminal_label(value: &str) -> String {
 
 impl ReleaseSummary {
     fn render(&self, metadata: Option<&Value>) -> String {
-        let app = metadata.and_then(|m| m.get("application"))
+        let app = metadata
+            .and_then(|m| m.get("application"))
             .filter(|app| app["id"].as_str() == Some(self.application_id.as_str()));
-        let name = app.and_then(|app| app["name"].as_str())
-            .or(self.application_name.as_deref()).filter(|s| !s.is_empty())
+        let name = app
+            .and_then(|app| app["name"].as_str())
+            .or(self.application_name.as_deref())
+            .filter(|s| !s.is_empty())
             .unwrap_or("Application name unavailable");
-        let mut text = format!("\nRelease one share\n\nApplication  {}\n", terminal_label(name));
-        if let Some(org) = metadata.and_then(|m| m["organization"]["name"].as_str()).filter(|s| !s.is_empty()) {
+        let mut text = format!(
+            "\nRelease one share\n\nApplication  {}\n",
+            terminal_label(name)
+        );
+        if let Some(org) = metadata
+            .and_then(|m| m["organization"]["name"].as_str())
+            .filter(|s| !s.is_empty())
+        {
             text.push_str(&format!("Organization {}\n", terminal_label(org)));
         }
         text.push_str(&format!("Holder       {}\nDestination  {}\nQuorum       {} of {} holders required\nMethod       {}\n\nApplication labels are Platform metadata; destination is CLI-reported.", terminal_label(&self.holder), self.address, self.threshold, self.holders, self.method));
-        if let Some(recorded) = app.and_then(|a| a["public_ip"].as_str()) {
-            if recorded.parse::<std::net::IpAddr>().ok() != Some(self.address.ip()) {
-                text.push_str(&format!("\nRecorded address {} differs from the connection destination.", terminal_label(recorded)));
-            }
+        if let Some(recorded) = app.and_then(|a| a["public_ip"].as_str())
+            && recorded.parse::<std::net::IpAddr>().ok() != Some(self.address.ip())
+        {
+            text.push_str(&format!(
+                "\nRecorded address {} differs from the connection destination.",
+                terminal_label(recorded)
+            ));
         }
         text
     }
@@ -329,12 +453,22 @@ impl ReleaseSummary {
 
 fn comparison_block(prepared: &Prepared) -> Result<String, InitError> {
     let hash = release::hash(prepared).with_context(Ctx::new("approval hash"))?;
-    Ok(format!("\nCOMPARE WITH YOUR BROWSER\n\n    {}\n\nCompare all four groups. Approve only if they match.\nThe code covers release context, not descriptive application labels or addresses.\n\nWaiting for passkey approval…", comparison_code(&hash)))
+    Ok(format!(
+        "\nCOMPARE WITH YOUR BROWSER\n\n    {}\n\nCompare all four groups. Approve only if they match.\nThe code covers release context, not descriptive application labels or addresses.\n\nWaiting for passkey approval…",
+        comparison_code(&hash)
+    ))
 }
 
 fn comparison_code(hash: &str) -> String {
-    hash.as_bytes().iter().take(16).copied().collect::<Vec<_>>().chunks(4)
-        .map(|part| String::from_utf8_lossy(part).to_uppercase()).collect::<Vec<_>>().join(" ")
+    hash.as_bytes()
+        .iter()
+        .take(16)
+        .copied()
+        .collect::<Vec<_>>()
+        .chunks(4)
+        .map(|part| String::from_utf8_lossy(part).to_uppercase())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 async fn browser_assertion(
@@ -395,7 +529,8 @@ async fn browser_assertion(
     summary.print(response.get("metadata"));
     auth::render_qr_code(url).with_context(Ctx::new("render release QR"))?;
     output::status(format!(
-        "Approve on your phone or open in your browser: {}", terminal_label(url)
+        "Approve on your phone or open in your browser: {}",
+        terminal_label(url)
     ));
     output::status(comparison_block(&prepared.data)?);
     poll_browser_assertion(
@@ -483,6 +618,7 @@ pub(crate) async fn recover(
     })
     .await
 }
+#[allow(clippy::too_many_arguments)]
 async fn recover_inner(
     client: &ApiClient,
     url: &str,
@@ -654,9 +790,13 @@ mod holder_selection_tests {
     #[test]
     fn summaries_use_descriptive_labels_and_preserve_authoritative_selection() {
         let summary = ReleaseSummary {
-            application_id: "app-id".into(), application_name: Some("local-name".into()),
-            holder: "alice · Passkey".into(), address: "203.0.113.42:49504".parse().unwrap(),
-            threshold: 3, holders: 3, method: "Browser passkey",
+            application_id: "app-id".into(),
+            application_name: Some("local-name".into()),
+            holder: "alice · Passkey".into(),
+            address: "203.0.113.42:49504".parse().unwrap(),
+            threshold: 3,
+            holders: 3,
+            method: "Browser passkey",
         };
         let metadata = json!({"application":{"id":"app-id","name":"server-name","public_ip":"203.0.113.43"},"organization":{"name":"My org"},"bundle":{"username":"wrong-holder","threshold":1}});
         let text = summary.render(Some(&metadata));
@@ -667,7 +807,11 @@ mod holder_selection_tests {
         let mismatched = json!({"application":{"id":"other","name":"wrong-app"}});
         assert!(!summary.render(Some(&mismatched)).contains("wrong-app"));
         assert!(summary.render(None).contains("local-name"));
-        let native = ReleaseSummary { method: "Native passkey", application_name: None, ..summary };
+        let native = ReleaseSummary {
+            method: "Native passkey",
+            application_name: None,
+            ..summary
+        };
         let text = native.render(None);
         assert!(text.contains("Application name unavailable"));
         assert!(!text.contains("COMPARE") && !text.contains("app-id"));
@@ -710,18 +854,30 @@ mod holder_selection_tests {
 
     #[test]
     fn comparison_prefix_matches_browser_format() {
-        assert_eq!(comparison_code(&format!("edcd12bf40e1c288{}", "0".repeat(48))), "EDCD 12BF 40E1 C288");
+        assert_eq!(
+            comparison_code(&format!("edcd12bf40e1c288{}", "0".repeat(48))),
+            "EDCD 12BF 40E1 C288"
+        );
     }
 
     fn fixture() -> (Vec<Key>, Value, Value) {
         let mut keys = Vec::new();
         let mut metadata = Vec::new();
         for (name, webauthn) in [("alice", false), ("bob", true)] {
-            let (cert, _) = CertBuilder::general_purpose(None, Some(name)).generate().unwrap();
+            let (cert, _) = CertBuilder::general_purpose(None, Some(name))
+                .generate()
+                .unwrap();
             let mut armor = Vec::new();
             cert.armored().serialize(&mut armor).unwrap();
             let cert_text = String::from_utf8(armor).unwrap();
-            keys.push(if webauthn { Key::WebAuthn { cert: cert_text, credential: vec!["first".into(), "second".into()] } } else { Key::OpenPGP { cert: cert_text } });
+            keys.push(if webauthn {
+                Key::WebAuthn {
+                    cert: cert_text,
+                    credential: vec!["first".into(), "second".into()],
+                }
+            } else {
+                Key::OpenPGP { cert: cert_text }
+            });
             metadata.push(json!({"custody":if webauthn {"caution_backed"} else {"pgp"},"fingerprint":cert.fingerprint().to_string(),"username":name}));
         }
         let bundle = json!({"data":{"keyring":keys},"necroproof":"proof"});
@@ -735,15 +891,27 @@ mod holder_selection_tests {
         let names = matched_names(&bundle, &[row]).unwrap();
         let (fp, webauthn) = select_holder(&keys, Some("bob"), None, &names).unwrap();
         assert!(webauthn);
-        assert_eq!(holder_label(&keys, &fp, true, &names), "bob · Passkey · Caution Enclave-held key");
-        assert_eq!(select_holder(&keys, Some(&fp), None, &names).unwrap(), (fp.clone(), true));
+        assert_eq!(
+            holder_label(&keys, &fp, true, &names),
+            "bob · Passkey · Caution Enclave-held key"
+        );
+        assert_eq!(
+            select_holder(&keys, Some(&fp), None, &names).unwrap(),
+            (fp.clone(), true)
+        );
         assert!(select_holder(&keys, Some("Bob"), None, &names).is_err());
         let pgp = select_holder(&keys, Some("alice"), None, &names).unwrap();
         assert!(holder_label(&keys, &pgp.0, false, &names).starts_with("alice · External PGP · "));
-        let duplicate = names.keys().map(|key| (key.clone(), "same".into())).collect();
+        let duplicate = names
+            .keys()
+            .map(|key| (key.clone(), "same".into()))
+            .collect();
         assert!(select_holder(&keys, Some("same"), None, &duplicate).is_err());
         assert!(holder_label(&keys, &fp, true, &duplicate).starts_with("Holder 2 · Passkey · "));
-        assert_eq!(select_holder(&keys[1..], None, None, &HolderNames::new()).unwrap(), (fp, true));
+        assert_eq!(
+            select_holder(&keys[1..], None, None, &HolderNames::new()).unwrap(),
+            (fp, true)
+        );
     }
 
     #[test]
@@ -775,27 +943,54 @@ mod holder_selection_tests {
     fn platform_name_requires_exact_unambiguous_bundle_match() {
         let (_, bundle, mut row) = fixture();
         row["name"] = json!("Renamed bootstrap");
-        let NameLookup::Found(display) = names_from_rows(&bundle, &[row.clone()]) else { panic!("matching bundle") };
+        let NameLookup::Found(display) = names_from_rows(&bundle, &[row.clone()]) else {
+            panic!("matching bundle")
+        };
         assert_eq!(display.name.as_deref(), Some("Renamed bootstrap"));
         assert!(!display.holders.is_empty());
-        let mut other = row.clone(); other["name"] = json!("Another name");
-        let NameLookup::Found(display) = names_from_rows(&bundle, &[row.clone(), other]) else { panic!("matching holders") };
+        let mut other = row.clone();
+        other["name"] = json!("Another name");
+        let NameLookup::Found(display) = names_from_rows(&bundle, &[row.clone(), other]) else {
+            panic!("matching holders")
+        };
         assert_eq!(display.name, None);
         row["data"]["necroproof"] = json!("different");
-        assert_eq!(names_from_rows(&bundle, &[row]), NameLookup::UnmatchedBundle);
+        assert_eq!(
+            names_from_rows(&bundle, &[row]),
+            NameLookup::UnmatchedBundle
+        );
     }
 
     #[test]
     fn lookup_outcomes_distinguish_missing_and_inconsistent_metadata() {
         let (_, bundle, row) = fixture();
-        assert!(matches!(names_from_rows(&bundle, &[row.clone()]), NameLookup::Found(_)));
+        assert!(matches!(
+            names_from_rows(&bundle, &[row.clone()]),
+            NameLookup::Found(_)
+        ));
         assert_eq!(names_from_rows(&bundle, &[]), NameLookup::UnmatchedBundle);
-        let mut missing = row.clone(); missing.as_object_mut().unwrap().remove("holders");
-        assert_eq!(names_from_rows(&bundle, &[missing]), NameLookup::UnavailableMetadata);
-        let mut invalid = row; invalid["holders"][0]["fingerprint"] = json!("wrong");
-        assert_eq!(names_from_rows(&bundle, &[invalid]), NameLookup::InconsistentMetadata);
-        assert!(NameLookup::Timeout.message("inspect").unwrap().contains("timed out"));
-        assert_eq!(short_fingerprint("0123456789abcdef0123456789abcdef"), "01234567…89abcdef");
+        let mut missing = row.clone();
+        missing.as_object_mut().unwrap().remove("holders");
+        assert_eq!(
+            names_from_rows(&bundle, &[missing]),
+            NameLookup::UnavailableMetadata
+        );
+        let mut invalid = row;
+        invalid["holders"][0]["fingerprint"] = json!("wrong");
+        assert_eq!(
+            names_from_rows(&bundle, &[invalid]),
+            NameLookup::InconsistentMetadata
+        );
+        assert!(
+            NameLookup::Timeout
+                .message("inspect")
+                .unwrap()
+                .contains("timed out")
+        );
+        assert_eq!(
+            short_fingerprint("0123456789abcdef0123456789abcdef"),
+            "01234567…89abcdef"
+        );
     }
 
     #[tokio::test]
@@ -804,23 +999,50 @@ mod holder_selection_tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
-        let client = ApiClient { base_url: base_url.clone(), client: reqwest::Client::new(),
-            config_path: dir.path().join("config.json"), deployment_path: None,
-            verbose: false, qr: false, workdir: None };
-        assert_eq!(lookup_names(&client, &json!({})).await, NameLookup::MissingSession);
+        let client = ApiClient {
+            base_url: base_url.clone(),
+            client: reqwest::Client::new(),
+            config_path: dir.path().join("config.json"),
+            deployment_path: None,
+            verbose: false,
+            qr: false,
+            workdir: None,
+        };
+        assert_eq!(
+            lookup_names(&client, &json!({})).await,
+            NameLookup::MissingSession
+        );
         std::fs::write(&client.config_path, "invalid").unwrap();
-        assert_eq!(lookup_names(&client, &json!({})).await, NameLookup::InvalidSession);
+        assert_eq!(
+            lookup_names(&client, &json!({})).await,
+            NameLookup::InvalidSession
+        );
         for expiry in ["2099-01-01T00:00:00Z", "2000-01-01T00:00:00Z"] {
             std::fs::write(&client.config_path, json!({"session_id":"secret", "expires_at":expiry,"server_url":"https://saved.test"}).to_string()).unwrap();
             let result = lookup_names(&client, &json!({})).await;
-            assert_eq!(result, NameLookup::ServerMismatch { selected: base_url.clone(), saved: "https://saved.test".into() });
+            assert_eq!(
+                result,
+                NameLookup::ServerMismatch {
+                    selected: base_url.clone(),
+                    saved: "https://saved.test".into()
+                }
+            );
             let warning = result.message("inspect").unwrap();
-            assert!(warning.contains("server mismatch") && warning.contains("--url 'https://saved.test' secret inspect"));
+            assert!(
+                warning.contains("server mismatch")
+                    && warning.contains("--url 'https://saved.test' secret inspect")
+            );
             assert!(!warning.contains("secret\n"));
         }
         std::fs::write(&client.config_path, json!({"session_id":"secret", "expires_at":"2000-01-01T00:00:00Z","server_url":base_url}).to_string()).unwrap();
-        assert_eq!(lookup_names(&client, &json!({})).await, NameLookup::ExpiredSession);
-        assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(
+            lookup_names(&client, &json!({})).await,
+            NameLookup::ExpiredSession
+        );
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 
     #[tokio::test]
@@ -831,20 +1053,38 @@ mod holder_selection_tests {
         let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         target.set_nonblocking(true).unwrap();
         let base_url = format!("http://{}", source.local_addr().unwrap());
-        let redirect = format!("HTTP/1.1 302 Found\r\nLocation: http://{}/stolen\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", target.local_addr().unwrap());
-        let client = ApiClient { base_url: base_url.clone(), client: reqwest::Client::new(),
-            config_path: dir.path().join("config.json"), deployment_path: None,
-            verbose: false, qr: false, workdir: None };
+        let redirect = format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://{}/stolen\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            target.local_addr().unwrap()
+        );
+        let client = ApiClient {
+            base_url: base_url.clone(),
+            client: reqwest::Client::new(),
+            config_path: dir.path().join("config.json"),
+            deployment_path: None,
+            verbose: false,
+            qr: false,
+            workdir: None,
+        };
         std::fs::write(&client.config_path, json!({"session_id":"secret", "expires_at":"2099-01-01T00:00:00Z", "server_url":base_url}).to_string()).unwrap();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = source.accept().unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-            let mut request = [0; 4096]; stream.read(&mut request).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut request = [0; 4096];
+            stream.read(&mut request).unwrap();
             stream.write_all(redirect.as_bytes()).unwrap();
         });
-        assert_eq!(lookup_names(&client, &json!({})).await, NameLookup::ApiFailure);
+        assert_eq!(
+            lookup_names(&client, &json!({})).await,
+            NameLookup::ApiFailure
+        );
         server.join().unwrap();
-        assert_eq!(target.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(
+            target.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 
     #[tokio::test]
@@ -854,21 +1094,30 @@ mod holder_selection_tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         let client = ApiClient {
-            base_url: base_url.clone(), client: reqwest::Client::new(),
-            config_path: dir.path().join("config.json"), deployment_path: None,
-            verbose: false, qr: false, workdir: None,
+            base_url: base_url.clone(),
+            client: reqwest::Client::new(),
+            config_path: dir.path().join("config.json"),
+            deployment_path: None,
+            verbose: false,
+            qr: false,
+            workdir: None,
         };
         assert!(holder_names(&client, &json!({})).await.is_empty());
         std::fs::write(&client.config_path, json!({"session_id":"test", "expires_at":"2099-01-01T00:00:00Z", "server_url":base_url}).to_string()).unwrap();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
             let mut request = [0; 4096];
             let n = stream.read(&mut request).unwrap();
             assert!(String::from_utf8_lossy(&request[..n]).starts_with("GET /api/quorum-bundles "));
             stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
         });
-        assert_eq!(lookup_names(&client, &json!({})).await, NameLookup::ApiFailure);
+        assert_eq!(
+            lookup_names(&client, &json!({})).await,
+            NameLookup::ApiFailure
+        );
         server.join().unwrap();
     }
 
@@ -877,8 +1126,12 @@ mod holder_selection_tests {
     async fn real_api_metadata_names_downloaded_holders() {
         let work = PathBuf::from(std::env::var("QUORUM_RECOVERY_TEST_DIR").unwrap());
         for file in ["webauthn.json", "mixed.json"] {
-            let bundle: Value = serde_json::from_slice(&std::fs::read(work.join(file)).unwrap()).unwrap();
-            let rows: Vec<Value> = serde_json::from_slice(&std::fs::read(work.join(format!("{file}.holders"))).unwrap()).unwrap();
+            let bundle: Value =
+                serde_json::from_slice(&std::fs::read(work.join(file)).unwrap()).unwrap();
+            let rows: Vec<Value> = serde_json::from_slice(
+                &std::fs::read(work.join(format!("{file}.holders"))).unwrap(),
+            )
+            .unwrap();
             let names = matched_names(&bundle, &rows).unwrap();
             assert!(!names.is_empty());
             let keys: Vec<Key> = serde_json::from_value(bundle["data"]["keyring"].clone()).unwrap();
@@ -886,22 +1139,39 @@ mod holder_selection_tests {
                 let selected = select_holder(&keys, Some(name), None, &names);
                 if names.values().filter(|other| *other == name).count() == 1 {
                     assert_eq!(&selected.unwrap().0, fp);
-                } else { assert!(selected.is_err()); }
+                } else {
+                    assert!(selected.is_err());
+                }
             }
         }
     }
 
     #[test]
     fn keyring_filters_external_private_identities_and_preserves_ambiguity() {
-        let (a, _) = CertBuilder::general_purpose(None, Some("a@example.test")).generate().unwrap();
-        let (b, _) = CertBuilder::general_purpose(None, Some("b@example.test")).generate().unwrap();
-        let holders = vec![(a.fingerprint().to_string(), false), (b.fingerprint().to_string(), false)];
+        let (a, _) = CertBuilder::general_purpose(None, Some("a@example.test"))
+            .generate()
+            .unwrap();
+        let (b, _) = CertBuilder::general_purpose(None, Some("b@example.test"))
+            .generate()
+            .unwrap();
+        let holders = vec![
+            (a.fingerprint().to_string(), false),
+            (b.fingerprint().to_string(), false),
+        ];
         let mut bytes = Vec::new();
         a.as_tsk().serialize(&mut bytes).unwrap();
-        assert_eq!(matching_private_holders(holders.clone(), &bytes).unwrap(), vec![holders[0].clone()]);
+        assert_eq!(
+            matching_private_holders(holders.clone(), &bytes).unwrap(),
+            vec![holders[0].clone()]
+        );
         b.as_tsk().serialize(&mut bytes).unwrap();
-        assert_eq!(matching_private_holders(holders.clone(), &bytes).unwrap(), holders);
-        assert!(matching_private_holders(vec![(a.fingerprint().to_string(), true)], &bytes).is_err());
+        assert_eq!(
+            matching_private_holders(holders.clone(), &bytes).unwrap(),
+            holders
+        );
+        assert!(
+            matching_private_holders(vec![(a.fingerprint().to_string(), true)], &bytes).is_err()
+        );
         let mut public = Vec::new();
         a.serialize(&mut public).unwrap();
         assert!(matching_private_holders(holders.clone(), &public).is_err());
@@ -910,18 +1180,34 @@ mod holder_selection_tests {
 
     #[test]
     fn unique_keyring_match_needs_no_prompt_and_explicit_holder_has_precedence() {
-        let (cert, _) = CertBuilder::general_purpose(None, Some("holder@example.test")).generate().unwrap();
+        let (cert, _) = CertBuilder::general_purpose(None, Some("holder@example.test"))
+            .generate()
+            .unwrap();
         let mut public = Vec::new();
         cert.armored().serialize(&mut public).unwrap();
-        let keys = vec![Key::OpenPGP { cert: String::from_utf8(public).unwrap() }];
+        let keys = vec![Key::OpenPGP {
+            cert: String::from_utf8(public).unwrap(),
+        }];
         let mut secret = Vec::new();
         cert.as_tsk().serialize(&mut secret).unwrap();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("private.asc");
         std::fs::write(&path, secret).unwrap();
         let expected = (cert.fingerprint().to_string(), false);
-        assert_eq!(select_holder(&keys, None, Some(&path), &HolderNames::new()).unwrap(), expected);
-        assert_eq!(select_holder(&keys, Some(&expected.0), Some(&directory.path().join("absent")), &HolderNames::new()).unwrap(), expected);
+        assert_eq!(
+            select_holder(&keys, None, Some(&path), &HolderNames::new()).unwrap(),
+            expected
+        );
+        assert_eq!(
+            select_holder(
+                &keys,
+                Some(&expected.0),
+                Some(&directory.path().join("absent")),
+                &HolderNames::new()
+            )
+            .unwrap(),
+            expected
+        );
         assert!(select_holder(&keys, Some("DEADBEEF"), Some(&path), &HolderNames::new()).is_err());
     }
 }

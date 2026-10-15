@@ -50,7 +50,7 @@ pub async fn e2e_login_handler(State(state): State<AppState>) -> Result<Response
 
     let session_id = db::generate_session_id();
     let expires_at = time::OffsetDateTime::now_utc() + Duration::hours(state.session_timeout_hours);
-    db::create_auth_session(&state.db, &session_id, &credential_id, expires_at)
+    db::create_auth_session(&state.db, &session_id, &credential_id, user_id, expires_at)
         .await
         .with_context(Ctx::database_query())?;
 

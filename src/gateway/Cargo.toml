@@ -30,7 +30,6 @@ tracing-subscriber = { workspace = true }
 url = { workspace = true }
 percent-encoding = "2"
 regex = { workspace = true }
-async-trait = { workspace = true }
 tempfile = { workspace = true }
 sequoia-openpgp = { workspace = true }
 

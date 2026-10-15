@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 mod artifacts;
 #[cfg(test)]
 mod reproduction_tests;
@@ -82,12 +90,12 @@ fn classify_enclave_source(
 
 pub mod build;
 pub mod compile;
-pub mod source_transport;
 pub mod docker;
 pub mod extract;
 pub mod manifest;
-pub mod tap_framer;
 pub mod pcrs;
+pub mod source_transport;
+pub mod tap_framer;
 
 use dterror::ResultExt;
 use serde::{Deserialize, Serialize};
