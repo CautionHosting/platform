@@ -552,6 +552,11 @@ run-drift-detector: network
 # Main targets
 # =============================================================================
 
+.PHONY: setup test-bootstrap
+
+setup:
+	@bash scripts/setup-platform.sh
+
 up: migrate
 	@echo "Building all images in parallel..."
 	@$(MAKE) build-api build-gateway build-email build-metering
@@ -814,6 +819,9 @@ test-live-caddy-nitro:
 test-cli-install:
 	@bash tests/test_cli_install.sh
 
+test-bootstrap:
+	@python3 -m unittest discover -s tests -p test_infra_bootstrap.py -v
+
 test-e2e:
 	@$(MAKE) build-cli
 	@$(MAKE) up-test
@@ -1059,4 +1067,4 @@ test-paddle-sandbox:
 	@echo "Uses PADDLE_API_KEY and PADDLE_API_URL from .env"
 	cargo test --package metering -- sandbox --nocapture
 
-test: test-unit test-cli-install
+test: test-unit test-cli-install test-bootstrap
