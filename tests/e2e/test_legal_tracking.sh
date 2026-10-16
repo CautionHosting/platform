@@ -812,8 +812,8 @@ if [[ "$NORMAL_API_CODE" == "200" && \
       "$UNAUTHENTICATED_CODE" == "401" && \
       "$LEGAL_GATEWAY_CODE" == "404" && \
       "$SUSPEND_GATEWAY_CODE" == "404" && \
-      "$RAW_DOT_SEGMENT_CODE" == "404" && \
-      "$ENCODED_DOT_SEGMENT_CODE" == "404" && \
+      "$RAW_DOT_SEGMENT_CODE" == "400" && \
+      "$ENCODED_DOT_SEGMENT_CODE" == "400" && \
       "$DOUBLE_SLASH_CODE" == "404" && \
       "$CASE_VARIANT_CODE" == "404" && \
       "$DIRECT_LEGAL_CODE" == "200" && \

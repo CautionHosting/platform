@@ -13,7 +13,7 @@
 #   4. status: the requestee token cannot poll the session
 #   5. retry-safety: a failed session fetch does NOT consume the session id
 
-set -uo pipefail
+set -euo pipefail
 
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8000}"
 DB_HOST="${TEST_DB_HOST:-postgres-test}"
@@ -21,19 +21,25 @@ DB_NAME="${TEST_DB_NAME:-caution_test}"
 STEPS_PASSED=0
 STEPS_FAILED=0
 
-psql_c() { docker exec -i "$DB_HOST" psql -U postgres -d "$DB_NAME" -t -A -c "$1"; }
+psql_c() { docker exec -i "$DB_HOST" psql -U postgres -d "$DB_NAME" -v ON_ERROR_STOP=1 -t -A -c "$1"; }
 
 pass() { STEPS_PASSED=$((STEPS_PASSED + 1)); echo "[PASS] $1"; }
 fail() { STEPS_FAILED=$((STEPS_FAILED + 1)); echo "[FAIL] $1" >&2; }
 
 cleanup() {
+    local status=$?
+    if [ "$status" -ne 0 ] && [ "$STEPS_FAILED" -eq 0 ]; then
+        fail "Unexpected command failure (exit $status)"
+    fi
     psql_c "DELETE FROM qr_login_tokens WHERE token LIKE 'e2e-qr-%';" >/dev/null 2>&1 || true
     # Restore the table if a fault-injection step aborted mid-way.
     psql_c "ALTER TABLE IF EXISTS auth_sessions_e2ebak RENAME TO auth_sessions;" >/dev/null 2>&1 || true
+    psql_c "DELETE FROM auth_sessions WHERE session_id='e2e-qr-sid';" >/dev/null 2>&1 || true
     echo ""
     echo "===================================="
     echo "  QR login e2e: $STEPS_PASSED passed, $STEPS_FAILED failed"
     echo "===================================="
+    exit "$status"
 }
 trap cleanup EXIT
 
@@ -75,9 +81,12 @@ REE=e2e-qr-ree
 SID=e2e-qr-sid
 psql_c "DELETE FROM qr_login_tokens WHERE token='$REQ';" >/dev/null
 if [ -n "$CRED" ]; then
-    psql_c "INSERT INTO auth_sessions (session_id, credential_id, expires_at)
-            VALUES ('$SID', decode('$CRED','hex'), NOW() + INTERVAL '1 hour')
-            ON CONFLICT (session_id) DO UPDATE SET expires_at = EXCLUDED.expires_at;" >/dev/null
+    psql_c "INSERT INTO auth_sessions (session_id, credential_id, user_id, expires_at)
+            SELECT '$SID', credential_id, user_id, NOW() + INTERVAL '1 hour'
+            FROM fido2_credentials WHERE credential_id = decode('$CRED','hex')
+            LIMIT 1
+            ON CONFLICT (session_id) DO UPDATE SET credential_id = EXCLUDED.credential_id,
+                user_id = EXCLUDED.user_id, expires_at = EXCLUDED.expires_at;" >/dev/null
     EXPECT_EXPIRES=1
 else
     EXPECT_EXPIRES=0  # no credentials registered; session fetch returns None

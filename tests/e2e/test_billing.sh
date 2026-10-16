@@ -71,6 +71,15 @@ mkdir -p "$LOG_DIR"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 cleanup() {
+    local exit_status=$?
+    trap - EXIT
+    set +e
+
+    if [ "$exit_status" -ne 0 ] && [ "$STEPS_FAILED" -eq 0 ]; then
+        STEPS_FAILED=$((STEPS_FAILED + 1))
+        STEP_RESULTS+=("[FAIL] Step $STEP_NUM: Unexpected exit (status $exit_status)")
+    fi
+
     echo ""
     echo "=== Cleanup ==="
 
@@ -100,6 +109,7 @@ cleanup() {
     echo "========================================"
     echo ""
     echo "Full log: $LOG_FILE"
+    exit "$exit_status"
 }
 trap cleanup EXIT
 
@@ -1506,10 +1516,10 @@ INSERT INTO usage_ledger (
     ('$ORG_ID', 'dashboard-cost-sync', 'aws', 'aws_cost_explorer', 13, 'usd', 1, 0,
      NOW(), '{}'),
     ('$ORG_ID', 'dashboard-renamed', 'aws', 'compute', 0, 'hours', 1, 0,
-     NOW(), '{"resource_name":"dashboard-name-a"}'),
+     NOW(), '{\"resource_name\":\"dashboard-name-a\"}'),
     ('$ORG_ID', 'dashboard-renamed', 'aws', 'compute', 0, 'hours', 1, 0,
-     NOW(), '{"resource_name":"dashboard-name-b"}');
-" >/dev/null 2>&1
+     NOW(), '{\"resource_name\":\"dashboard-name-b\"}');
+" >/dev/null
 
 DASHBOARD_USAGE=$(curl -sf "$GATEWAY_URL/api/billing/usage" -H "X-Session-ID: $SESSION_ID")
 if jq -e '
