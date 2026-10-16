@@ -392,6 +392,7 @@ mod tests {
             "/foo//internal",
             "/user/status",
             "/legal/active-documents",
+            "/test/force-error",
         ] {
             let target_url = target(path);
             assert!(

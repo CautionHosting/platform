@@ -240,7 +240,7 @@ async fn main() -> Result<(), MainError> {
         .with(sentry_middleware::RequestBreadcrumbLayer::new())
         .init();
 
-    let _sentry_guard = sentry_middleware::init_from_env();
+    let _sentry_guard = sentry_middleware::init_sentry!();
 
     #[cfg(feature = "e2e-testing-unsafe")]
     {
@@ -589,6 +589,9 @@ async fn main() -> Result<(), MainError> {
         .route("/onboarding/verify", get(handlers::proxy_handler))
         .route("/config/stripe-key", get(handlers::proxy_handler))
         .route("/legal/active-documents", get(handlers::proxy_handler))
+        // Debug endpoint: the API registers the handler only when
+        // ENABLE_TEST_ENDPOINTS is set, so this otherwise proxies to a 404.
+        .route("/test/force-error", get(handlers::proxy_handler))
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .with_state(state.clone())
         .layer(cors.clone());

@@ -23,13 +23,18 @@
 //!    instance rather than the thread-local one, state never leaks across
 //!    concurrent requests regardless of OS-thread scheduling.
 //!
+//! Each service reads its own DSN from `SENTRY_DSN_<SERVICE>`, so different
+//! applications can report to different Sentry projects (for example
+//! `SENTRY_DSN_API`, `SENTRY_DSN_GATEWAY`, `SENTRY_DSN_METERING`). A service
+//! whose variable is unset simply does not report.
+//!
 //! ## Setup
 //!
 //! ```ignore
 //! use tracing_subscriber::prelude::*;
 //!
 //! // 1. Initialize Sentry (keep the guard alive for the process lifetime)
-//! let _sentry_guard = sentry_middleware::init_from_env();
+//! let _sentry_guard = sentry_middleware::init_sentry!();
 //!
 //! // 2. Build the subscriber stack
 //! tracing_subscriber::registry()
@@ -247,20 +252,68 @@ pub struct SentryReportable(pub Arc<dyn std::error::Error + Send + Sync>);
 // Init helper
 // ---------------------------------------------------------------------------
 
-/// Initialize Sentry from the `SENTRY_DSN` environment variable.
+/// Environment variable name holding the Sentry DSN for `service`.
+///
+/// The convention is `SENTRY_DSN_<SERVICE>`, where `<SERVICE>` is the service
+/// name with ASCII letters upper-cased and every non-alphanumeric character
+/// replaced by `_`. For example, `"api"` yields `SENTRY_DSN_API` and
+/// `"email-service"` yields `SENTRY_DSN_EMAIL_SERVICE`.
+#[must_use]
+pub fn dsn_env_var(service: &str) -> String {
+    let suffix: String = service
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("SENTRY_DSN_{suffix}")
+}
+
+/// Initialize Sentry from this service's `SENTRY_DSN_<SERVICE>` environment
+/// variable.
 ///
 /// Returns the guard (which must be kept alive for the duration of the process)
-/// if initialization succeeded, or `None` if `SENTRY_DSN` is unset or invalid.
-#[tracing::instrument(skip_all)]
-pub fn init_from_env() -> Option<sentry::ClientInitGuard> {
-    if let Ok(dsn) = std::env::var("SENTRY_DSN") {
+/// if initialization succeeded, or `None` if the variable is unset or invalid.
+/// See [`dsn_env_var`] for how `service` maps to the variable name.
+///
+/// Prefer the [`init_sentry!`] macro, which supplies the calling crate's name
+/// automatically.
+#[tracing::instrument(skip_all, fields(service = %service))]
+pub fn init_from_env(service: &str) -> Option<sentry::ClientInitGuard> {
+    let env_var = dsn_env_var(service);
+    if let Ok(dsn) = std::env::var(&env_var) {
         let guard = sentry::init(sentry::ClientOptions::new().dsn(&dsn));
-        tracing::info!("Sentry initialized");
+        tracing::info!(env_var = %env_var, "Sentry initialized");
         Some(guard)
     } else {
-        tracing::warn!("SENTRY_DSN not set, Sentry reporting disabled");
+        tracing::warn!(env_var = %env_var, "Sentry DSN not set, Sentry reporting disabled");
         None
     }
+}
+
+/// Initialize Sentry for the calling crate.
+///
+/// The `env!` call expands in the caller's crate, so `CARGO_PKG_NAME` resolves
+/// to that crate's package name and `init_sentry!()` reads its own
+/// `SENTRY_DSN_<SERVICE>` variable without the name being hardcoded:
+///
+/// ```ignore
+/// let _sentry_guard = sentry_middleware::init_sentry!();
+/// ```
+///
+/// Pass an explicit name to override, for example `init_sentry!("worker")`.
+#[macro_export]
+macro_rules! init_sentry {
+    () => {
+        $crate::init_from_env(env!("CARGO_PKG_NAME"))
+    };
+    ($service:expr) => {
+        $crate::init_from_env($service)
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -460,5 +513,28 @@ where
 
             Ok(response)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dsn_env_var;
+
+    #[test]
+    fn dsn_env_var_uppercases_simple_names() {
+        assert_eq!(dsn_env_var("api"), "SENTRY_DSN_API");
+        assert_eq!(dsn_env_var("gateway"), "SENTRY_DSN_GATEWAY");
+        assert_eq!(dsn_env_var("metering"), "SENTRY_DSN_METERING");
+    }
+
+    #[test]
+    fn dsn_env_var_replaces_non_alphanumerics_with_underscores() {
+        assert_eq!(dsn_env_var("email-service"), "SENTRY_DSN_EMAIL_SERVICE");
+        assert_eq!(dsn_env_var("a.b c"), "SENTRY_DSN_A_B_C");
+    }
+
+    #[test]
+    fn dsn_env_var_handles_empty_service() {
+        assert_eq!(dsn_env_var(""), "SENTRY_DSN_");
     }
 }

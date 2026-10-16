@@ -46,7 +46,7 @@ async fn main() {
         .with(sentry_middleware::RequestBreadcrumbLayer::new())
         .init();
 
-    let _sentry_guard = sentry_middleware::init_from_env();
+    let _sentry_guard = sentry_middleware::init_sentry!();
 
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
         eprintln!("FATAL: DATABASE_URL must be set");
