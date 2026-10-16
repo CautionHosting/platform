@@ -56,7 +56,7 @@ fn extract_resource_id_from_git_url(url: &str) -> Option<String> {
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum RelinkCandidateError {
     #[error(
-        "Caution git remote is set to '{remote_url}' but does not contain a valid Caution app ID. Preserve and inspect the remote; refusing to create a successor. [{location:?}]"
+        "Caution git remote is set to '{remote_url}' but does not contain a valid Caution app ID. Preserve and inspect the remote; refusing to create a successor. [{location}]"
     )]
     RemoteWithoutAppId {
         remote_url: String,
@@ -70,7 +70,7 @@ pub(crate) enum RelinkCandidateError {
     },
 
     #[error(
-        ".caution/deployment.json exists but does not contain a valid resource_id. Preserve and inspect it; refusing to create a successor. [{location:?}]"
+        ".caution/deployment.json exists but does not contain a valid resource_id. Preserve and inspect it; refusing to create a successor. [{location}]"
     )]
     DeploymentFileWithoutResourceId {
         #[location]
@@ -125,7 +125,7 @@ fn print_destroy_redeploy_guidance(app: &App) {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum CreateError {
-    #[error("failed to check git repository [{location:?}]")]
+    #[error("failed to check git repository [{location}]")]
     CheckGitRepo {
         #[location]
         location: Location,
@@ -134,7 +134,7 @@ pub(crate) enum CreateError {
         source: BoxError,
     },
 
-    #[error("failed to read configuration [{location:?}]")]
+    #[error("failed to read configuration [{location}]")]
     ReadConfig {
         #[location]
         location: Location,
@@ -143,7 +143,7 @@ pub(crate) enum CreateError {
         source: BoxError,
     },
 
-    #[error("failed to resolve local build command [{location:?}]")]
+    #[error("failed to resolve local build command [{location}]")]
     ResolveBuildCommand {
         #[location]
         location: Location,
@@ -152,7 +152,7 @@ pub(crate) enum CreateError {
         source: BoxError,
     },
 
-    #[error("failed to get deployment path [{location:?}]")]
+    #[error("failed to get deployment path [{location}]")]
     GetDeploymentPath {
         #[location]
         location: Location,
@@ -161,7 +161,7 @@ pub(crate) enum CreateError {
         source: BoxError,
     },
 
-    #[error("failed to inspect checkout link [{location:?}]")]
+    #[error("failed to inspect checkout link [{location}]")]
     InspectCheckoutLink {
         #[location]
         location: Location,
@@ -170,7 +170,7 @@ pub(crate) enum CreateError {
         source: BoxError,
     },
 
-    #[error("{message} [{location:?}]")]
+    #[error("{message} [{location}]")]
     LinkedCheckout {
         message: String,
 
@@ -182,7 +182,7 @@ pub(crate) enum CreateError {
         source: Option<BoxError>,
     },
 
-    #[error("failed to ensure authentication [{location:?}]")]
+    #[error("failed to ensure authentication [{location}]")]
     EnsureAuthenticated {
         #[location]
         location: Location,
@@ -191,7 +191,7 @@ pub(crate) enum CreateError {
         source: BoxError,
     },
 
-    #[error("failed to send create app request [{location:?}]")]
+    #[error("failed to send create app request [{location}]")]
     SendCreateRequest {
         #[location]
         location: Location,
@@ -200,7 +200,7 @@ pub(crate) enum CreateError {
         source: BoxError,
     },
 
-    #[error("account initialization failed [{location:?}]")]
+    #[error("account initialization failed [{location}]")]
     AccountInitializationFailed {
         #[location]
         location: Location,
@@ -210,7 +210,7 @@ pub(crate) enum CreateError {
         source: Option<BoxError>,
     },
 
-    #[error("failed to create app (status {status}): {error} [{location:?}]")]
+    #[error("failed to create app (status {status}): {error} [{location}]")]
     CreateApp {
         status: reqwest::StatusCode,
 
@@ -224,7 +224,7 @@ pub(crate) enum CreateError {
         source: Option<BoxError>,
     },
 
-    #[error("failed to parse create app response [{location:?}]")]
+    #[error("failed to parse create app response [{location}]")]
     ParseCreateResponse {
         #[location]
         location: Location,
@@ -233,7 +233,7 @@ pub(crate) enum CreateError {
         source: BoxError,
     },
 
-    #[error("failed to save deployment info [{location:?}]")]
+    #[error("failed to save deployment info [{location}]")]
     SaveDeployment {
         #[location]
         location: Location,
@@ -242,7 +242,7 @@ pub(crate) enum CreateError {
         source: BoxError,
     },
 
-    #[error("failed to set git remote [{location:?}]")]
+    #[error("failed to set git remote [{location}]")]
     SetGitRemote {
         #[location]
         location: Location,
@@ -251,7 +251,7 @@ pub(crate) enum CreateError {
         source: BoxError,
     },
 
-    #[error("failed to create config file [{location:?}]")]
+    #[error("failed to create config file [{location}]")]
     CreateConfigFile {
         #[location]
         location: Location,
@@ -397,7 +397,7 @@ pub(crate) async fn create(client: &ApiClient) -> Result<(), CreateError> {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum ListError {
-    #[error("failed to ensure authentication [{location:?}]")]
+    #[error("failed to ensure authentication [{location}]")]
     EnsureAuthenticated {
         #[location]
         location: Location,
@@ -406,7 +406,7 @@ pub(crate) enum ListError {
         source: BoxError,
     },
 
-    #[error("failed to list apps [{location:?}]")]
+    #[error("failed to list apps [{location}]")]
     ListApps {
         #[location]
         location: Location,
@@ -462,7 +462,7 @@ pub(crate) async fn list(client: &ApiClient) -> Result<(), ListError> {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum GetError {
-    #[error("failed to load deployment info [{location:?}]")]
+    #[error("failed to load deployment info [{location}]")]
     LoadDeployment {
         #[location]
         location: Location,
@@ -471,7 +471,7 @@ pub(crate) enum GetError {
         source: BoxError,
     },
 
-    #[error("failed to fetch app via SSH HTTPS [{location:?}]")]
+    #[error("failed to fetch app via SSH HTTPS [{location}]")]
     FetchAppViaSshHttps {
         #[location]
         location: Location,
@@ -480,7 +480,7 @@ pub(crate) enum GetError {
         source: BoxError,
     },
 
-    #[error("failed to fetch app [{location:?}]")]
+    #[error("failed to fetch app [{location}]")]
     FetchApp {
         #[location]
         location: Location,
@@ -586,7 +586,7 @@ pub(crate) async fn get(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum DestroyError {
-    #[error("failed to load deployment info [{location:?}]")]
+    #[error("failed to load deployment info [{location}]")]
     LoadDeployment {
         #[location]
         location: Location,
@@ -595,7 +595,7 @@ pub(crate) enum DestroyError {
         source: BoxError,
     },
 
-    #[error("failed to fetch app via SSH HTTPS [{location:?}]")]
+    #[error("failed to fetch app via SSH HTTPS [{location}]")]
     FetchAppViaSshHttps {
         #[location]
         location: Location,
@@ -604,7 +604,7 @@ pub(crate) enum DestroyError {
         source: BoxError,
     },
 
-    #[error("failed to fetch app [{location:?}]")]
+    #[error("failed to fetch app [{location}]")]
     FetchApp {
         #[location]
         location: Location,
@@ -613,7 +613,7 @@ pub(crate) enum DestroyError {
         source: BoxError,
     },
 
-    #[error("failed to confirm destruction [{location:?}]")]
+    #[error("failed to confirm destruction [{location}]")]
     Confirm {
         #[location]
         location: Location,
@@ -622,7 +622,7 @@ pub(crate) enum DestroyError {
         source: BoxError,
     },
 
-    #[error("failed to destroy app via SSH HTTPS [{location:?}]")]
+    #[error("failed to destroy app via SSH HTTPS [{location}]")]
     DestroyViaSshHttps {
         #[location]
         location: Location,
@@ -631,7 +631,7 @@ pub(crate) enum DestroyError {
         source: BoxError,
     },
 
-    #[error("failed to ensure authentication [{location:?}]")]
+    #[error("failed to ensure authentication [{location}]")]
     EnsureAuthenticated {
         #[location]
         location: Location,
@@ -640,7 +640,7 @@ pub(crate) enum DestroyError {
         source: BoxError,
     },
 
-    #[error("failed to get app status [{location:?}]")]
+    #[error("failed to get app status [{location}]")]
     GetAppStatus {
         #[location]
         location: Location,
@@ -649,7 +649,7 @@ pub(crate) enum DestroyError {
         source: BoxError,
     },
 
-    #[error("failed to send delete request [{location:?}]")]
+    #[error("failed to send delete request [{location}]")]
     SendDeleteRequest {
         #[location]
         location: Location,
@@ -658,7 +658,7 @@ pub(crate) enum DestroyError {
         source: BoxError,
     },
 
-    #[error("failed to destroy app (status {status}): {error} [{location:?}]")]
+    #[error("failed to destroy app (status {status}): {error} [{location}]")]
     DestroyApp {
         status: reqwest::StatusCode,
 
@@ -811,7 +811,7 @@ pub(crate) async fn destroy(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum RenameError {
-    #[error("failed to fetch app [{location:?}]")]
+    #[error("failed to fetch app [{location}]")]
     FetchApp {
         #[location]
         location: Location,
@@ -820,7 +820,7 @@ pub(crate) enum RenameError {
         source: BoxError,
     },
 
-    #[error("failed to get current app [{location:?}]")]
+    #[error("failed to get current app [{location}]")]
     GetCurrentApp {
         #[location]
         location: Location,
@@ -829,7 +829,7 @@ pub(crate) enum RenameError {
         source: BoxError,
     },
 
-    #[error("failed to ensure authentication [{location:?}]")]
+    #[error("failed to ensure authentication [{location}]")]
     EnsureAuthenticated {
         #[location]
         location: Location,
@@ -838,7 +838,7 @@ pub(crate) enum RenameError {
         source: BoxError,
     },
 
-    #[error("failed to send rename request [{location:?}]")]
+    #[error("failed to send rename request [{location}]")]
     SendRenameRequest {
         #[location]
         location: Location,
@@ -847,7 +847,7 @@ pub(crate) enum RenameError {
         source: BoxError,
     },
 
-    #[error("failed to parse rename response [{location:?}]")]
+    #[error("failed to parse rename response [{location}]")]
     ParseRenameResponse {
         #[location]
         location: Location,
@@ -856,7 +856,7 @@ pub(crate) enum RenameError {
         source: BoxError,
     },
 
-    #[error("failed to rename app (status {status}): {error} [{location:?}]")]
+    #[error("failed to rename app (status {status}): {error} [{location}]")]
     RenameApp {
         status: reqwest::StatusCode,
 
@@ -934,7 +934,7 @@ pub(crate) async fn rename(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum TryRelinkError {
-    #[error("failed to determine re-link candidate [{location:?}]")]
+    #[error("failed to determine re-link candidate [{location}]")]
     RelinkCandidate {
         #[location]
         location: Location,
@@ -944,7 +944,7 @@ pub(crate) enum TryRelinkError {
     },
 
     #[error(
-        "unable to verify linked app {resource_id}; refusing to create a successor. Preserve the caution remote and restore authentication or connectivity before retrying. [{location:?}]"
+        "unable to verify linked app {resource_id}; refusing to create a successor. Preserve the caution remote and restore authentication or connectivity before retrying. [{location}]"
     )]
     VerifyApp {
         resource_id: String,
@@ -957,7 +957,7 @@ pub(crate) enum TryRelinkError {
     },
 
     #[error(
-        "api returned app {api_app_id} while verifying {expected_app_id}; refusing to change the checkout link [{location:?}]"
+        "api returned app {api_app_id} while verifying {expected_app_id}; refusing to change the checkout link [{location}]"
     )]
     IdMismatch {
         api_app_id: String,
@@ -969,7 +969,7 @@ pub(crate) enum TryRelinkError {
     },
 
     #[error(
-        "app {app_id} was verified but the API returned no Git URL; refusing to report a successful re-link [{location:?}]"
+        "app {app_id} was verified but the API returned no Git URL; refusing to report a successful re-link [{location}]"
     )]
     MissingGitUrl {
         app_id: String,
@@ -978,7 +978,7 @@ pub(crate) enum TryRelinkError {
         location: Location,
     },
 
-    #[error("failed to save deployment info [{location:?}]")]
+    #[error("failed to save deployment info [{location}]")]
     SaveDeployment {
         #[location]
         location: Location,
@@ -987,7 +987,7 @@ pub(crate) enum TryRelinkError {
         source: BoxError,
     },
 
-    #[error("failed to set git remote [{location:?}]")]
+    #[error("failed to set git remote [{location}]")]
     SetGitRemote {
         #[location]
         location: Location,

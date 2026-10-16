@@ -26,7 +26,7 @@ pub(crate) struct DownloadEif {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum DownloadEifError {
-    #[error("no deployment found; run 'init' first or provide an app ID [{location:?}]")]
+    #[error("no deployment found; run 'init' first or provide an app ID [{location}]")]
     NoDeployment {
         #[location]
         location: Location,
@@ -35,7 +35,7 @@ pub(crate) enum DownloadEifError {
         source: BoxError,
     },
 
-    #[error("authentication failed [{location:?}]")]
+    #[error("authentication failed [{location}]")]
     Auth {
         #[location]
         location: Location,
@@ -44,7 +44,7 @@ pub(crate) enum DownloadEifError {
         source: BoxError,
     },
 
-    #[error("HTTP request failed [{location:?}]")]
+    #[error("HTTP request failed [{location}]")]
     Http {
         #[location]
         location: Location,
@@ -53,25 +53,25 @@ pub(crate) enum DownloadEifError {
         source: BoxError,
     },
 
-    #[error("unauthorized [{location:?}]")]
+    #[error("unauthorized [{location}]")]
     Unauthorized {
         #[location]
         location: Location,
     },
 
-    #[error("forbidden [{location:?}]")]
+    #[error("forbidden [{location}]")]
     Forbidden {
         #[location]
         location: Location,
     },
 
-    #[error("resource not found [{location:?}]")]
+    #[error("resource not found [{location}]")]
     NotFound {
         #[location]
         location: Location,
     },
 
-    #[error("HTTP status {status} [{location:?}]")]
+    #[error("HTTP status {status} [{location}]")]
     HttpStatus {
         status: u16,
 
@@ -79,7 +79,7 @@ pub(crate) enum DownloadEifError {
         location: Location,
     },
 
-    #[error("output file already exists: {path}; use --force to overwrite [{location:?}]")]
+    #[error("output file already exists: {path}; use --force to overwrite [{location}]")]
     FileExists {
         path: PathBuf,
 
@@ -87,7 +87,7 @@ pub(crate) enum DownloadEifError {
         location: Location,
     },
 
-    #[error("failed to write to file [{location:?}]")]
+    #[error("failed to write to file [{location}]")]
     WriteError {
         #[location]
         location: Location,
@@ -96,7 +96,7 @@ pub(crate) enum DownloadEifError {
         source: BoxError,
     },
 
-    #[error("stream error [{location:?}]")]
+    #[error("stream error [{location}]")]
     StreamError {
         #[location]
         location: Location,
@@ -105,7 +105,7 @@ pub(crate) enum DownloadEifError {
         source: BoxError,
     },
 
-    #[error("download idle timeout (no data received for 30s) [{location:?}]")]
+    #[error("download idle timeout (no data received for 30s) [{location}]")]
     IdleTimeout {
         #[location]
         location: Location,

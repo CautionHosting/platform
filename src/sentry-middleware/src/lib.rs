@@ -54,10 +54,10 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 
-use axum::http::StatusCode;
+use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use sentry::{Breadcrumb, Hub, Scope};
 use tower::{Layer, Service};
@@ -94,6 +94,18 @@ static BREADCRUMBS: std::sync::LazyLock<BreadcrumbMap> =
 /// Maximum breadcrumbs stored per request. Mirrors Sentry's default
 /// `max_breadcrumbs` of 100.
 const MAX_BREADCRUMBS_PER_REQUEST: usize = 100;
+
+/// The service name supplied to [`init_from_env`], used as the `service_name`
+/// tag on reported events.
+///
+/// Set once at startup. It stays `None` if [`init_from_env`] was never called,
+/// but in that case Sentry is not initialized and nothing is reported anyway.
+static SERVICE_NAME: OnceLock<String> = OnceLock::new();
+
+/// The service name registered by [`init_from_env`], if any.
+fn service_name() -> Option<&'static str> {
+    SERVICE_NAME.get().map(String::as_str)
+}
 
 // ---------------------------------------------------------------------------
 // RequestBreadcrumbLayer (tracing subscriber layer)
@@ -288,19 +300,38 @@ pub fn dsn_env_var(service: &str) -> String {
 /// if initialization succeeded, or `None` if the variable is unset or invalid.
 /// See [`dsn_env_var`] for how `service` maps to the variable name.
 ///
+/// The Sentry environment is taken from the `ENVIRONMENT` variable when set, so
+/// Sentry agrees with the services' own production guards. When it is unset,
+/// Sentry's built-in default (`development`/`production`) applies.
+///
 /// Prefer the [`init_sentry!`] macro, which supplies the calling crate's name
 /// automatically.
 #[tracing::instrument(skip_all, fields(service = %service))]
 pub fn init_from_env(service: &str) -> Option<sentry::ClientInitGuard> {
+    let _ = SERVICE_NAME.set(service.to_string());
+
     let env_var = dsn_env_var(service);
     if let Ok(dsn) = std::env::var(&env_var) {
-        let guard = sentry::init(sentry::ClientOptions::new().dsn(&dsn));
+        let mut options = sentry::ClientOptions::new().dsn(&dsn);
+        if let Some(environment) = environment_from_env() {
+            options = options.environment(environment);
+        }
+        let guard = sentry::init(options);
         tracing::info!(env_var = %env_var, "Sentry initialized");
         Some(guard)
     } else {
         tracing::warn!(env_var = %env_var, "Sentry DSN not set, Sentry reporting disabled");
         None
     }
+}
+
+/// The Sentry environment, taken from the `ENVIRONMENT` variable.
+///
+/// Unset or blank leaves Sentry's own default in place.
+fn environment_from_env() -> Option<String> {
+    std::env::var("ENVIRONMENT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
 }
 
 /// Initialize Sentry for the calling crate.
@@ -394,17 +425,25 @@ pub fn drain_breadcrumbs(request_id: &uuid::Uuid) -> Vec<Breadcrumb> {
 }
 
 /// Captures an error to Sentry with the given breadcrumbs attached, using a
-/// fresh isolated Hub (empty scope, global client).
+/// fresh isolated Hub (global client, minimal scope).
 ///
 /// This is the entry point for reporting errors from spawned tasks that
-/// outlive the HTTP response (e.g. deploy workers).
+/// outlive the HTTP response (e.g. deploy workers). Such tasks have no request
+/// metadata, so the only tag attached is `service_name`.
 #[tracing::instrument(skip_all)]
 pub fn capture_error_with_breadcrumbs(
     error: &(impl std::error::Error + Send + Sync),
     breadcrumbs: Vec<Breadcrumb>,
 ) {
     let client = Hub::main().client();
-    let hub = Arc::new(Hub::new(client, Arc::new(Scope::default())));
+    let mut scope = Scope::default();
+    if let Some(service) = service_name() {
+        scope.set_tag("service_name", service);
+    }
+    for (index, location) in error_locations(error) {
+        scope.set_tag(format!("error.location.{index}").as_str(), location);
+    }
+    let hub = Arc::new(Hub::new(client, Arc::new(scope)));
     for crumb in breadcrumbs {
         hub.add_breadcrumb(crumb);
     }
@@ -415,6 +454,72 @@ pub fn capture_error_with_breadcrumbs(
 // SentryLayer (Tower layer)
 // ---------------------------------------------------------------------------
 
+/// Build the isolated scope used for a reported request error.
+///
+/// Tags the event with the request method, path (never the query string), status
+/// code, the per-request ID, and the service name when one is registered.
+fn request_scope(method: &Method, path: &str, status: StatusCode, request_id: uuid::Uuid) -> Scope {
+    let mut scope = Scope::default();
+    scope.set_tag("http.method", method.as_str());
+    scope.set_tag("http.path", path);
+    scope.set_tag("http.status_code", status.as_u16());
+    scope.set_tag("request_id", request_id);
+    if let Some(service) = service_name() {
+        scope.set_tag("service_name", service);
+    }
+    scope
+}
+
+/// Extract the code location from an error's `Display` output.
+///
+/// The dterror convention renders every message as `... [{location}]`, where
+/// [`Location`] displays as `file:line:column`, so the location is the text
+/// inside the final bracket pair. Returns `None` when the message does not end
+/// with a bracketed location.
+///
+/// [`Location`]: std::panic::Location
+fn error_location(display: &str) -> Option<&str> {
+    let inner = display.trim_end().strip_suffix(']')?;
+    let start = inner.rfind('[')?;
+    let location = inner[start + 1..].trim();
+    // A location always carries `file:line:column`, so require a colon. This
+    // keeps unrelated bracketed suffixes from being mistaken for one.
+    if location.is_empty() || !location.contains(':') {
+        return None;
+    }
+    Some(location)
+}
+
+/// Collect the code location of every error in a source chain.
+///
+/// Returns `(index, location)` pairs in the same order Sentry presents the
+/// chained exceptions, outermost first: index `0` is the error passed in (the
+/// one Sentry shows first), index `1` its first source, and so on. Frames whose
+/// `Display` has no bracketed location are omitted, but indices stay absolute so
+/// they still identify the frame's position in the chain.
+fn error_locations<E>(error: &E) -> Vec<(usize, String)>
+where
+    E: std::error::Error + ?Sized,
+{
+    let mut locations = Vec::new();
+
+    if let Some(location) = error_location(&error.to_string()) {
+        locations.push((0, location.to_string()));
+    }
+
+    let mut index = 1;
+    let mut current = error.source();
+    while let Some(source) = current {
+        if let Some(location) = error_location(&source.to_string()) {
+            locations.push((index, location.to_string()));
+        }
+        current = source.source();
+        index += 1;
+    }
+
+    locations
+}
+
 /// A Tower [`Layer`] that provides per-request Sentry error reporting with
 /// isolated breadcrumbs.
 ///
@@ -424,8 +529,12 @@ pub fn capture_error_with_breadcrumbs(
 /// 3. After the response is produced, drains this request's breadcrumbs from
 ///    the shared map.
 /// 4. If the response carries a [`SentryReportable`] and the status is 5xx,
-///    creates a fresh per-request `Hub`, injects the breadcrumbs into its scope,
-///    and captures the error against that Hub.
+///    creates a fresh per-request `Hub` tagged with `http.method`, `http.path`
+///    (path only, never the query string), `http.status_code`, `request_id`,
+///    and `service_name`, plus `error.location.{i}` for every frame in the
+///    error's source chain that has a bracketed location (index 0 is the error
+///    itself, index 1 its first source, and so on), injects the breadcrumbs into
+///    its scope, and captures the error against that Hub.
 #[derive(Debug, Clone, Copy)]
 pub struct SentryLayer;
 
@@ -465,6 +574,12 @@ where
             // Generate a unique request ID for breadcrumb correlation.
             let request_id = uuid::Uuid::new_v4();
 
+            // Capture request metadata before the request is moved into the
+            // handler, so it can tag any error that gets reported. Only the
+            // path is kept, never the query string.
+            let method = req.method().clone();
+            let path = req.uri().path().to_owned();
+
             // Run the handler with REQUEST_ID set so the breadcrumb layer
             // knows where to write. `scope` returns a future that sets the
             // task-local for the duration of the inner future.
@@ -491,13 +606,17 @@ where
                         "Reporting error to Sentry"
                     );
 
-                    // Create a fresh per-request Hub so breadcrumbs are fully
-                    // isolated from other concurrent requests. We reuse the
-                    // main hub's client (which carries release, environment,
-                    // DSN) but start with an empty scope so no state leaks
-                    // across requests or users.
+                    // Create a fresh per-request Hub so breadcrumbs and tags are
+                    // fully isolated from other concurrent requests. We reuse the
+                    // main hub's client (which carries release, environment, DSN)
+                    // but start from a scope holding only this request's tags, so
+                    // no state leaks across requests or users.
                     let client = Hub::main().client();
-                    let hub = Arc::new(Hub::new(client, Arc::new(Scope::default())));
+                    let mut scope = request_scope(&method, &path, response.status(), request_id);
+                    for (index, location) in error_locations(error.as_ref()) {
+                        scope.set_tag(format!("error.location.{index}").as_str(), location);
+                    }
+                    let hub = Arc::new(Hub::new(client, Arc::new(scope)));
                     for crumb in breadcrumbs {
                         hub.add_breadcrumb(crumb);
                     }
@@ -526,7 +645,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{REQUEST_ID, RequestBreadcrumbLayer, drain_breadcrumbs, dsn_env_var};
+    use super::{
+        REQUEST_ID, RequestBreadcrumbLayer, drain_breadcrumbs, dsn_env_var, request_scope,
+    };
 
     #[test]
     fn dsn_env_var_uppercases_simple_names() {
@@ -582,5 +703,141 @@ mod tests {
 
         assert_eq!(crumbs[2].level, sentry::Level::Error);
         assert_eq!(crumbs[2].message.as_deref(), Some("failed"));
+    }
+
+    #[test]
+    fn request_scope_tags_the_event() {
+        use axum::http::{Method, StatusCode};
+
+        // Register the service name for this test process. Harmless if another
+        // test already set it, since the value is identical.
+        let _ = super::SERVICE_NAME.set("test-service".to_string());
+
+        let event = request_scope(
+            &Method::GET,
+            "/test/force-error",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            uuid::Uuid::nil(),
+        )
+        .apply_to_event(sentry::protocol::Event::default())
+        .expect("the scope always applies to an event");
+
+        let tag = |key: &str| event.tags.get(key).map(String::as_str);
+        assert_eq!(tag("http.method"), Some("GET"));
+        assert_eq!(tag("http.path"), Some("/test/force-error"));
+        assert_eq!(tag("http.status_code"), Some("500"));
+        assert_eq!(
+            tag("request_id"),
+            Some("00000000-0000-0000-0000-000000000000")
+        );
+        assert_eq!(tag("service_name"), Some("test-service"));
+    }
+
+    #[test]
+    fn error_location_extracts_the_trailing_bracket() {
+        assert_eq!(
+            super::error_location("boom [/src/x.rs:12:3]"),
+            Some("/src/x.rs:12:3")
+        );
+        assert_eq!(
+            super::error_location("boom [/src/x.rs:12:3]\n"),
+            Some("/src/x.rs:12:3")
+        );
+        assert_eq!(super::error_location("boom [file.rs:1]"), Some("file.rs:1"));
+        assert_eq!(
+            super::error_location("has [nested] and [/a.rs:1:1]"),
+            Some("/a.rs:1:1")
+        );
+    }
+
+    #[test]
+    fn error_location_rejects_non_locations() {
+        assert_eq!(super::error_location("boom"), None);
+        assert_eq!(super::error_location("boom []"), None);
+        assert_eq!(super::error_location("boom [WARN]"), None);
+        assert_eq!(super::error_location("boom [still no colon]"), None);
+    }
+
+    #[derive(Debug)]
+    struct OuterError {
+        source: InnerError,
+    }
+
+    impl std::fmt::Display for OuterError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "outer failed [src/outer.rs:1:2]")
+        }
+    }
+
+    impl std::error::Error for OuterError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.source)
+        }
+    }
+
+    #[derive(Debug)]
+    struct InnerError;
+
+    impl std::fmt::Display for InnerError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "inner failed [src/inner.rs:3:4]")
+        }
+    }
+
+    impl std::error::Error for InnerError {}
+
+    #[derive(Debug)]
+    struct NoLocationError;
+
+    impl std::fmt::Display for NoLocationError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "no bracketed location here")
+        }
+    }
+
+    impl std::error::Error for NoLocationError {}
+
+    #[test]
+    fn error_locations_walk_the_whole_source_chain() {
+        let error = OuterError { source: InnerError };
+
+        assert_eq!(
+            super::error_locations(&error),
+            vec![
+                (0, "src/outer.rs:1:2".to_string()),
+                (1, "src/inner.rs:3:4".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn error_locations_keep_absolute_indices_when_a_frame_has_none() {
+        #[derive(Debug)]
+        struct WrappingError {
+            source: NoLocationError,
+        }
+
+        impl std::fmt::Display for WrappingError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "wrapper failed [src/wrapper.rs:5:6]")
+            }
+        }
+
+        impl std::error::Error for WrappingError {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.source)
+            }
+        }
+
+        let error = WrappingError {
+            source: NoLocationError,
+        };
+
+        // The source frame at index 1 has no location, so it is omitted, but
+        // the surviving entry keeps index 0 rather than renumbering.
+        assert_eq!(
+            super::error_locations(&error),
+            vec![(0, "src/wrapper.rs:5:6".to_string())]
+        );
     }
 }

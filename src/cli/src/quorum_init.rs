@@ -34,7 +34,7 @@ use uuid::Uuid;
 pub(crate) const DIRECT_WEBAUTHN_ERROR: &str = "WebAuthn holders require Platform-mediated Keymaker creation because Platform resolves their credential bindings internally. Remove the Keymaker URL override or select only PGP holders.";
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("{message} [{location:?}]")]
+#[error("{message} [{location}]")]
 pub(crate) struct InitError {
     #[context(borrow = str)]
     message: String,

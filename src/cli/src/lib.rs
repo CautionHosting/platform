@@ -66,7 +66,7 @@ enum SshSignedRequestErrorKind {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 #[error(
-    "Unable to send SSH-signed request {method} {path} with identity {identity:?}: {kind:?} [{location:?}]"
+    "Unable to send SSH-signed request {method} {path} with identity {identity:?}: {kind:?} [{location}]"
 )]
 struct SshSignedRequestError {
     #[context(from = SshSignedRequestErrorKindCtx)]
@@ -95,7 +95,7 @@ enum FetchAppViaSshHttpsErrorKind {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("Unable to fetch app {id} via SSH-signed HTTPS at {path}: {kind:?} [{location:?}]")]
+#[error("Unable to fetch app {id} via SSH-signed HTTPS at {path}: {kind:?} [{location}]")]
 struct FetchAppViaSshHttpsError {
     #[context(from = FetchAppViaSshHttpsErrorKindCtx<'a>)]
     kind: FetchAppViaSshHttpsErrorKind,
@@ -122,7 +122,7 @@ enum DestroyAppViaSshHttpsErrorKind {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 #[error(
-    "Unable to destroy app {id} via SSH-signed HTTPS at {path} with force_delete={force_delete}: {kind:?} [{location:?}]"
+    "Unable to destroy app {id} via SSH-signed HTTPS at {path} with force_delete={force_delete}: {kind:?} [{location}]"
 )]
 struct DestroyAppViaSshHttpsError {
     #[context(from = DestroyAppViaSshHttpsErrorKindCtx<'a>)]
@@ -140,13 +140,13 @@ struct DestroyAppViaSshHttpsError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum PreparePgpPublicKeyForUploadError {
-    #[error("PGP public key is empty [{location:?}]")]
+    #[error("PGP public key is empty [{location}]")]
     Empty {
         #[location]
         location: Location,
     },
 
-    #[error("PGP public key is too large (maximum {max_bytes} bytes) [{location:?}]")]
+    #[error("PGP public key is too large (maximum {max_bytes} bytes) [{location}]")]
     TooLarge {
         max_bytes: usize,
         #[location]
@@ -154,20 +154,20 @@ pub(crate) enum PreparePgpPublicKeyForUploadError {
     },
 
     #[error(
-        "PGP input contains private key material; export and submit only the public certificate [{location:?}]"
+        "PGP input contains private key material; export and submit only the public certificate [{location}]"
     )]
     PrivateMaterial {
         #[location]
         location: Location,
     },
 
-    #[error("PGP public key must be an ASCII-armored public certificate [{location:?}]")]
+    #[error("PGP public key must be an ASCII-armored public certificate [{location}]")]
     NotArmored {
         #[location]
         location: Location,
     },
 
-    #[error("failed to parse PGP public key [{location:?}]")]
+    #[error("failed to parse PGP public key [{location}]")]
     Parse {
         #[location]
         location: Location,
@@ -175,20 +175,20 @@ pub(crate) enum PreparePgpPublicKeyForUploadError {
         source: BoxError,
     },
 
-    #[error("PGP input must contain exactly one public certificate (got {count}) [{location:?}]")]
+    #[error("PGP input must contain exactly one public certificate (got {count}) [{location}]")]
     CertCount {
         count: usize,
         #[location]
         location: Location,
     },
 
-    #[error("PGP input did not contain a public certificate [{location:?}]")]
+    #[error("PGP input did not contain a public certificate [{location}]")]
     MissingCert {
         #[location]
         location: Location,
     },
 
-    #[error("PGP public certificate is not valid under the standard OpenPGP policy [{location:?}]")]
+    #[error("PGP public certificate is not valid under the standard OpenPGP policy [{location}]")]
     InvalidPolicy {
         #[location]
         location: Location,
@@ -196,7 +196,7 @@ pub(crate) enum PreparePgpPublicKeyForUploadError {
         source: BoxError,
     },
 
-    #[error("failed to normalize PGP public certificate [{location:?}]")]
+    #[error("failed to normalize PGP public certificate [{location}]")]
     Normalize {
         #[location]
         location: Location,
@@ -204,7 +204,7 @@ pub(crate) enum PreparePgpPublicKeyForUploadError {
         source: BoxError,
     },
 
-    #[error("normalized PGP public certificate is not valid UTF-8 [{location:?}]")]
+    #[error("normalized PGP public certificate is not valid UTF-8 [{location}]")]
     NotUtf8 {
         #[location]
         location: Location,
@@ -311,7 +311,7 @@ fn check_dependencies(verbose: bool) -> Result<(), CheckDependenciesError> {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum CheckGatewayConnectivityError {
-    #[error("failed to build HTTP client [{location:?}]")]
+    #[error("failed to build HTTP client [{location}]")]
     BuildClient {
         #[location]
         location: Location,
@@ -966,7 +966,7 @@ impl CheckoutLink {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum InspectCheckoutLinkError {
-    #[error("failed to check existing git remote [{location:?}]")]
+    #[error("failed to check existing git remote [{location}]")]
     Check {
         #[location]
         location: Location,
@@ -974,13 +974,13 @@ pub(crate) enum InspectCheckoutLinkError {
         source: BoxError,
     },
 
-    #[error("failed to list git remotes [{location:?}]")]
+    #[error("failed to list git remotes [{location}]")]
     List {
         #[location]
         location: Location,
     },
 
-    #[error("failed to read existing caution git remote [{location:?}]")]
+    #[error("failed to read existing caution git remote [{location}]")]
     ReadCaution {
         #[location]
         location: Location,
@@ -988,7 +988,7 @@ pub(crate) enum InspectCheckoutLinkError {
         source: BoxError,
     },
 
-    #[error("failed to list caution git remotes [{location:?}]")]
+    #[error("failed to list caution git remotes [{location}]")]
     ListCaution {
         #[location]
         location: Location,
@@ -1146,7 +1146,7 @@ struct PublicBuildInput {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 #[error(
-    "Invalid Platform framework commit {commit:?}; expected a 40-character Git SHA [{location:?}]"
+    "Invalid Platform framework commit {commit:?}; expected a 40-character Git SHA [{location}]"
 )]
 struct PinPlatformFrameworkSourceError {
     commit: String,
@@ -1192,7 +1192,7 @@ struct PublicBuildInputsStatusError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 #[error(
-    "Unable to resolve the current Platform framework source from {endpoint}: {kind:?} [{location:?}]"
+    "Unable to resolve the current Platform framework source from {endpoint}: {kind:?} [{location}]"
 )]
 pub(crate) struct CurrentPlatformFrameworkSourceError {
     #[context(from = CurrentPlatformFrameworkSourceErrorKindCtx)]
@@ -1207,7 +1207,7 @@ pub(crate) struct CurrentPlatformFrameworkSourceError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum RunError {
-    #[error("dependency check failed [{location:?}]")]
+    #[error("dependency check failed [{location}]")]
     DependencyCheck {
         #[location]
         location: Location,
@@ -1215,7 +1215,7 @@ pub enum RunError {
         source: BoxError,
     },
 
-    #[error("gateway connectivity check failed [{location:?}]")]
+    #[error("gateway connectivity check failed [{location}]")]
     GatewayConnectivity {
         #[location]
         location: Location,
@@ -1223,7 +1223,7 @@ pub enum RunError {
         source: BoxError,
     },
 
-    #[error("failed to initialize API client [{location:?}]")]
+    #[error("failed to initialize API client [{location}]")]
     ApiClientInit {
         #[location]
         location: Location,
@@ -1231,14 +1231,14 @@ pub enum RunError {
         source: BoxError,
     },
 
-    #[error("{detail} [{location:?}]")]
+    #[error("{detail} [{location}]")]
     ArgValidation {
         detail: &'static str,
         #[location]
         location: Location,
     },
 
-    #[error("command execution failed [{location:?}]")]
+    #[error("command execution failed [{location}]")]
     CommandDispatch {
         #[location]
         location: Location,
@@ -1249,7 +1249,7 @@ pub enum RunError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum ReadConfigError {
-    #[error("failed to read caution.hcl [{location:?}]")]
+    #[error("failed to read caution.hcl [{location}]")]
     ReadHcl {
         #[location]
         location: Location,
@@ -1257,7 +1257,7 @@ pub(crate) enum ReadConfigError {
         source: BoxError,
     },
 
-    #[error("invalid caution.hcl [{location:?}]")]
+    #[error("invalid caution.hcl [{location}]")]
     ParseHcl {
         #[location]
         location: Location,
@@ -1265,7 +1265,7 @@ pub(crate) enum ReadConfigError {
         source: BoxError,
     },
 
-    #[error("failed to read Procfile [{location:?}]")]
+    #[error("failed to read Procfile [{location}]")]
     ReadProcfile {
         #[location]
         location: Location,
@@ -1273,7 +1273,7 @@ pub(crate) enum ReadConfigError {
         source: BoxError,
     },
 
-    #[error("invalid Procfile [{location:?}]")]
+    #[error("invalid Procfile [{location}]")]
     ParseProcfile {
         #[location]
         location: Location,
@@ -1282,7 +1282,7 @@ pub(crate) enum ReadConfigError {
     },
 
     #[error(
-        "no configuration file found; run `caution init` to generate a caution.hcl template [{location:?}]"
+        "no configuration file found; run `caution init` to generate a caution.hcl template [{location}]"
     )]
     ConfigNotFound {
         #[location]
@@ -1292,7 +1292,7 @@ pub(crate) enum ReadConfigError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum ReadConfigFromDirError {
-    #[error("failed to read {path} [{location:?}]")]
+    #[error("failed to read {path} [{location}]")]
     ReadHcl {
         path: PathBuf,
         #[location]
@@ -1301,7 +1301,7 @@ pub(crate) enum ReadConfigFromDirError {
         source: BoxError,
     },
 
-    #[error("invalid caution.hcl [{location:?}]")]
+    #[error("invalid caution.hcl [{location}]")]
     ParseHcl {
         #[location]
         location: Location,
@@ -1309,7 +1309,7 @@ pub(crate) enum ReadConfigFromDirError {
         source: BoxError,
     },
 
-    #[error("failed to read {path} [{location:?}]")]
+    #[error("failed to read {path} [{location}]")]
     ReadProcfile {
         path: PathBuf,
         #[location]
@@ -1318,7 +1318,7 @@ pub(crate) enum ReadConfigFromDirError {
         source: BoxError,
     },
 
-    #[error("invalid Procfile [{location:?}]")]
+    #[error("invalid Procfile [{location}]")]
     ParseProcfile {
         #[location]
         location: Location,
@@ -1327,7 +1327,7 @@ pub(crate) enum ReadConfigFromDirError {
     },
 
     #[error(
-        "no configuration file found in {path}; create a caution.hcl or Procfile file [{location:?}]"
+        "no configuration file found in {path}; create a caution.hcl or Procfile file [{location}]"
     )]
     ConfigNotFound {
         path: PathBuf,
@@ -1349,7 +1349,7 @@ struct ApiClient {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum ApiClientNewError {
-    #[error("failed to resolve config directory [{location:?}]")]
+    #[error("failed to resolve config directory [{location}]")]
     ConfigDir {
         #[location]
         location: Location,
@@ -1360,13 +1360,13 @@ pub(crate) enum ApiClientNewError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum ConfigDirError {
-    #[error("could not find config directory [{location:?}]")]
+    #[error("could not find config directory [{location}]")]
     NotFound {
         #[location]
         location: Location,
     },
 
-    #[error("failed to create config directory [{location:?}]")]
+    #[error("failed to create config directory [{location}]")]
     Create {
         #[location]
         location: Location,
@@ -1378,14 +1378,14 @@ pub(crate) enum ConfigDirError {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum GetDeploymentPathError {
     #[error(
-        "cannot access current directory. Please run this command from a valid directory [{location:?}]"
+        "cannot access current directory. Please run this command from a valid directory [{location}]"
     )]
     MissingCwd { location: Location },
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum SaveConfigError {
-    #[error("failed to serialize config [{location:?}]")]
+    #[error("failed to serialize config [{location}]")]
     Serialize {
         #[location]
         location: Location,
@@ -1393,7 +1393,7 @@ pub(crate) enum SaveConfigError {
         source: BoxError,
     },
 
-    #[error("failed to open config file '{path}' [{location:?}]")]
+    #[error("failed to open config file '{path}' [{location}]")]
     Open {
         #[context(borrow = Path)]
         path: PathBuf,
@@ -1403,7 +1403,7 @@ pub(crate) enum SaveConfigError {
         source: BoxError,
     },
 
-    #[error("failed to write config file [{location:?}]")]
+    #[error("failed to write config file [{location}]")]
     Write {
         #[location]
         location: Location,
@@ -1414,7 +1414,7 @@ pub(crate) enum SaveConfigError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum LoadConfigError {
-    #[error("not logged in. Run 'login' command first [{location:?}]")]
+    #[error("not logged in. Run 'login' command first [{location}]")]
     ReadConfig {
         #[location]
         location: Location,
@@ -1422,7 +1422,7 @@ pub(crate) enum LoadConfigError {
         source: BoxError,
     },
 
-    #[error("failed to parse config file '{path}' [{location:?}]")]
+    #[error("failed to parse config file '{path}' [{location}]")]
     Parse {
         #[context(borrow = Path)]
         path: PathBuf,
@@ -1435,7 +1435,7 @@ pub(crate) enum LoadConfigError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum EnsureAuthenticatedError {
-    #[error("QR login failed [{location:?}]")]
+    #[error("QR login failed [{location}]")]
     LoginQr {
         #[location]
         location: Location,
@@ -1443,7 +1443,7 @@ pub(crate) enum EnsureAuthenticatedError {
         source: BoxError,
     },
 
-    #[error("login failed [{location:?}]")]
+    #[error("login failed [{location}]")]
     Login {
         #[location]
         location: Location,
@@ -1451,7 +1451,7 @@ pub(crate) enum EnsureAuthenticatedError {
         source: BoxError,
     },
 
-    #[error("failed to load config after authenticating [{location:?}]")]
+    #[error("failed to load config after authenticating [{location}]")]
     LoadConfig {
         #[location]
         location: Location,
@@ -1462,7 +1462,7 @@ pub(crate) enum EnsureAuthenticatedError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum RequireExistingAuthenticatedConfigError {
-    #[error("failed to load config [{location:?}]")]
+    #[error("failed to load config [{location}]")]
     LoadConfig {
         #[location]
         location: Location,
@@ -1470,13 +1470,13 @@ pub(crate) enum RequireExistingAuthenticatedConfigError {
         source: BoxError,
     },
 
-    #[error("session expired. Run 'login' command first [{location:?}]")]
+    #[error("session expired. Run 'login' command first [{location}]")]
     SessionExpired {
         #[location]
         location: Location,
     },
 
-    #[error("session is for a different server. Run 'login' command first [{location:?}]")]
+    #[error("session is for a different server. Run 'login' command first [{location}]")]
     DifferentServer {
         #[location]
         location: Location,
@@ -1485,7 +1485,7 @@ pub(crate) enum RequireExistingAuthenticatedConfigError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum SaveDeploymentError {
-    #[error("failed to get deployment path [{location:?}]")]
+    #[error("failed to get deployment path [{location}]")]
     GetDeploymentPath {
         #[location]
         location: Location,
@@ -1493,7 +1493,7 @@ pub(crate) enum SaveDeploymentError {
         source: BoxError,
     },
 
-    #[error("failed to serialize deployment info [{location:?}]")]
+    #[error("failed to serialize deployment info [{location}]")]
     Serialize {
         #[location]
         location: Location,
@@ -1501,7 +1501,7 @@ pub(crate) enum SaveDeploymentError {
         source: BoxError,
     },
 
-    #[error("failed to write deployment info to '{path}' [{location:?}]")]
+    #[error("failed to write deployment info to '{path}' [{location}]")]
     Write {
         #[context(borrow = Path)]
         path: PathBuf,
@@ -1514,7 +1514,7 @@ pub(crate) enum SaveDeploymentError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum LoadDeploymentError {
-    #[error("failed to get deployment path [{location:?}]")]
+    #[error("failed to get deployment path [{location}]")]
     GetDeploymentPath {
         #[location]
         location: Location,
@@ -1522,7 +1522,7 @@ pub(crate) enum LoadDeploymentError {
         source: BoxError,
     },
 
-    #[error("no deployment found. Run 'init' first [{location:?}]")]
+    #[error("no deployment found. Run 'init' first [{location}]")]
     ReadFile {
         #[location]
         location: Location,
@@ -1530,7 +1530,7 @@ pub(crate) enum LoadDeploymentError {
         source: BoxError,
     },
 
-    #[error("failed to parse deployment info [{location:?}]")]
+    #[error("failed to parse deployment info [{location}]")]
     Parse {
         #[location]
         location: Location,
@@ -1541,7 +1541,7 @@ pub(crate) enum LoadDeploymentError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum PublicKeyForIdentityError {
-    #[error("failed to read SSH public key '{path}' [{location:?}]")]
+    #[error("failed to read SSH public key '{path}' [{location}]")]
     ReadFile {
         #[context(borrow = Path)]
         path: PathBuf,
@@ -1551,7 +1551,7 @@ pub(crate) enum PublicKeyForIdentityError {
         source: BoxError,
     },
 
-    #[error("failed to run ssh-keygen to derive SSH public key [{location:?}]")]
+    #[error("failed to run ssh-keygen to derive SSH public key [{location}]")]
     RunSshKeygen {
         #[location]
         location: Location,
@@ -1559,7 +1559,7 @@ pub(crate) enum PublicKeyForIdentityError {
         source: BoxError,
     },
 
-    #[error("failed to derive SSH public key [{location:?}]")]
+    #[error("failed to derive SSH public key [{location}]")]
     DeriveFailed {
         stderr: String,
         #[location]
@@ -1569,7 +1569,7 @@ pub(crate) enum PublicKeyForIdentityError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum SshFingerprintError {
-    #[error("invalid SSH public key [{location:?}]")]
+    #[error("invalid SSH public key [{location}]")]
     Decode {
         #[location]
         location: Location,
@@ -1580,7 +1580,7 @@ pub(crate) enum SshFingerprintError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum SignSshPayloadError {
-    #[error("failed to create SSH signing temp dir [{location:?}]")]
+    #[error("failed to create SSH signing temp dir [{location}]")]
     TempDir {
         #[location]
         location: Location,
@@ -1588,7 +1588,7 @@ pub(crate) enum SignSshPayloadError {
         source: BoxError,
     },
 
-    #[error("failed to write SSH signing payload [{location:?}]")]
+    #[error("failed to write SSH signing payload [{location}]")]
     WritePayload {
         #[location]
         location: Location,
@@ -1596,7 +1596,7 @@ pub(crate) enum SignSshPayloadError {
         source: BoxError,
     },
 
-    #[error("failed to run ssh-keygen for SSH request signing [{location:?}]")]
+    #[error("failed to run ssh-keygen for SSH request signing [{location}]")]
     RunSshKeygen {
         #[location]
         location: Location,
@@ -1604,14 +1604,14 @@ pub(crate) enum SignSshPayloadError {
         source: BoxError,
     },
 
-    #[error("failed to sign request with SSH key [{location:?}]")]
+    #[error("failed to sign request with SSH key [{location}]")]
     SignFailed {
         stderr: String,
         #[location]
         location: Location,
     },
 
-    #[error("failed to read SSH signature '{path}' [{location:?}]")]
+    #[error("failed to read SSH signature '{path}' [{location}]")]
     ReadSignature {
         #[context(borrow = Path)]
         path: PathBuf,
@@ -1624,7 +1624,7 @@ pub(crate) enum SignSshPayloadError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum CheckGitRepoError {
-    #[error("failed to execute git command. Is git installed? [{location:?}]")]
+    #[error("failed to execute git command. Is git installed? [{location}]")]
     RunGitCommand {
         #[location]
         location: Location,
@@ -1633,7 +1633,7 @@ pub(crate) enum CheckGitRepoError {
     },
 
     #[error(
-        "not in a git repository. Please run this command from within a git repository [{location:?}]"
+        "not in a git repository. Please run this command from within a git repository [{location}]"
     )]
     NotGitRepo {
         #[location]
@@ -1643,7 +1643,7 @@ pub(crate) enum CheckGitRepoError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum SetGitRemoteError {
-    #[error("failed to check existing git remote [{location:?}]")]
+    #[error("failed to check existing git remote [{location}]")]
     Check {
         #[location]
         location: Location,
@@ -1651,7 +1651,7 @@ pub(crate) enum SetGitRemoteError {
         source: BoxError,
     },
 
-    #[error("failed to update git remote 'caution' [{location:?}]")]
+    #[error("failed to update git remote 'caution' [{location}]")]
     Update {
         #[location]
         location: Location,
@@ -1659,7 +1659,7 @@ pub(crate) enum SetGitRemoteError {
         source: BoxError,
     },
 
-    #[error("failed to add git remote 'caution' [{location:?}]")]
+    #[error("failed to add git remote 'caution' [{location}]")]
     Add {
         #[location]
         location: Location,
@@ -1670,7 +1670,7 @@ pub(crate) enum SetGitRemoteError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum CreateConfigFileInDirIfNeededError {
-    #[error("failed to create caution.hcl [{location:?}]")]
+    #[error("failed to create caution.hcl [{location}]")]
     WriteConfig {
         #[location]
         location: Location,
@@ -1681,7 +1681,7 @@ pub(crate) enum CreateConfigFileInDirIfNeededError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum GitUrlToArchiveUrlsError {
-    #[error("failed to parse git URL [{location:?}]")]
+    #[error("failed to parse git URL [{location}]")]
     ParseUrl {
         #[location]
         location: Location,
@@ -1689,25 +1689,25 @@ pub(crate) enum GitUrlToArchiveUrlsError {
         source: BoxError,
     },
 
-    #[error("invalid git URL format [{location:?}]")]
+    #[error("invalid git URL format [{location}]")]
     InvalidUrlFormat {
         #[location]
         location: Location,
     },
 
-    #[error("invalid git SSH URL format [{location:?}]")]
+    #[error("invalid git SSH URL format [{location}]")]
     InvalidSSHFormat {
         #[location]
         location: Location,
     },
 
-    #[error("git URL has no host [{location:?}]")]
+    #[error("git URL has no host [{location}]")]
     NoHost {
         #[location]
         location: Location,
     },
 
-    #[error("unsupported git URL format: {url} [{location:?}]")]
+    #[error("unsupported git URL format: {url} [{location}]")]
     UnsupportedFormat {
         url: String,
         #[location]
@@ -1717,7 +1717,7 @@ pub(crate) enum GitUrlToArchiveUrlsError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum SignedRequestError {
-    #[error("failed to get FIDO2 sign challenge [{location:?}]")]
+    #[error("failed to get FIDO2 sign challenge [{location}]")]
     GetSignChallenge {
         #[location]
         location: Location,
@@ -1725,14 +1725,14 @@ pub(crate) enum SignedRequestError {
         source: BoxError,
     },
 
-    #[error("failed to get sign challenge: {error} [{location:?}]")]
+    #[error("failed to get sign challenge: {error} [{location}]")]
     ChallengeFailure {
         error: String,
         #[location]
         location: Location,
     },
 
-    #[error("failed to parse FIDO2 sign response [{location:?}]")]
+    #[error("failed to parse FIDO2 sign response [{location}]")]
     ParseSignResponse {
         #[location]
         location: Location,
@@ -1740,7 +1740,7 @@ pub(crate) enum SignedRequestError {
         source: BoxError,
     },
 
-    #[error("failed to get FIDO2 assertion [{location:?}]")]
+    #[error("failed to get FIDO2 assertion [{location}]")]
     GetAssertion {
         #[location]
         location: Location,
@@ -1748,7 +1748,7 @@ pub(crate) enum SignedRequestError {
         source: BoxError,
     },
 
-    #[error("failed to send signed request [{location:?}]")]
+    #[error("failed to send signed request [{location}]")]
     SendRequest {
         #[location]
         location: Location,
@@ -1759,7 +1759,7 @@ pub(crate) enum SignedRequestError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum SignedPostError {
-    #[error("failed to serialize request body [{location:?}]")]
+    #[error("failed to serialize request body [{location}]")]
     SerializeBody {
         #[location]
         location: Location,
@@ -1767,7 +1767,7 @@ pub(crate) enum SignedPostError {
         source: BoxError,
     },
 
-    #[error("failed to serialize request body for display [{location:?}]")]
+    #[error("failed to serialize request body for display [{location}]")]
     SerializePretty {
         #[location]
         location: Location,
@@ -1775,7 +1775,7 @@ pub(crate) enum SignedPostError {
         source: BoxError,
     },
 
-    #[error("signed request failed [{location:?}]")]
+    #[error("signed request failed [{location}]")]
     SignedRequest {
         #[location]
         location: Location,
@@ -1786,7 +1786,7 @@ pub(crate) enum SignedPostError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum SignedDeleteError {
-    #[error("signed request failed [{location:?}]")]
+    #[error("signed request failed [{location}]")]
     SignedRequest {
         #[location]
         location: Location,
@@ -1797,7 +1797,7 @@ pub(crate) enum SignedDeleteError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum GetProtectedJsonError {
-    #[error("{failure_context} [{location:?}]")]
+    #[error("{failure_context} [{location}]")]
     SendRequest {
         #[context(borrow = str)]
         failure_context: String,
@@ -1807,7 +1807,7 @@ pub(crate) enum GetProtectedJsonError {
         source: BoxError,
     },
 
-    #[error("failed to read response body [{location:?}]")]
+    #[error("failed to read response body [{location}]")]
     ReadBody {
         #[location]
         location: Location,
@@ -1815,7 +1815,7 @@ pub(crate) enum GetProtectedJsonError {
         source: BoxError,
     },
 
-    #[error("{failure_context} [{location:?}]")]
+    #[error("{failure_context} [{location}]")]
     ParseJson {
         #[context(borrow = str)]
         failure_context: String,
@@ -1825,7 +1825,7 @@ pub(crate) enum GetProtectedJsonError {
         source: BoxError,
     },
 
-    #[error("{failure_context}: {api_response} [{location:?}]")]
+    #[error("{failure_context}: {api_response} [{location}]")]
     ApiFailure {
         #[context(borrow = str)]
         failure_context: String,
@@ -1834,7 +1834,7 @@ pub(crate) enum GetProtectedJsonError {
         location: Location,
     },
 
-    #[error("{failure_context} [{location:?}]")]
+    #[error("{failure_context} [{location}]")]
     ClaimUsername {
         #[context(borrow = str)]
         failure_context: String,
@@ -1847,32 +1847,32 @@ pub(crate) enum GetProtectedJsonError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum JoinCapacityWaitlistError {
-    #[error("--email must not be empty [{location:?}]")]
+    #[error("--email must not be empty [{location}]")]
     EmptyEmail {
         #[location]
         location: Location,
     },
 
-    #[error("--email is invalid [{location:?}]")]
+    #[error("--email is invalid [{location}]")]
     InvalidEmail {
         #[location]
         location: Location,
     },
 
-    #[error("--email must be an email address [{location:?}]")]
+    #[error("--email must be an email address [{location}]")]
     NoAtSymbol {
         #[location]
         location: Location,
     },
 
-    #[error("--vcpus must be between 1 and 46; contact support for larger requests [{location:?}]")]
+    #[error("--vcpus must be between 1 and 46; contact support for larger requests [{location}]")]
     InvalidVcpus {
         vcpus: u32,
         #[location]
         location: Location,
     },
 
-    #[error("authentication failed [{location:?}]")]
+    #[error("authentication failed [{location}]")]
     EnsureAuthenticated {
         #[location]
         location: Location,
@@ -1880,7 +1880,7 @@ pub(crate) enum JoinCapacityWaitlistError {
         source: BoxError,
     },
 
-    #[error("failed to determine organization [{location:?}]")]
+    #[error("failed to determine organization [{location}]")]
     GetOrgId {
         #[location]
         location: Location,
@@ -1888,7 +1888,7 @@ pub(crate) enum JoinCapacityWaitlistError {
         source: BoxError,
     },
 
-    #[error("failed to send capacity waitlist request [{location:?}]")]
+    #[error("failed to send capacity waitlist request [{location}]")]
     SendRequest {
         #[location]
         location: Location,
@@ -1896,14 +1896,14 @@ pub(crate) enum JoinCapacityWaitlistError {
         source: BoxError,
     },
 
-    #[error("failed to join capacity waitlist: {error} [{location:?}]")]
+    #[error("failed to join capacity waitlist: {error} [{location}]")]
     ApiFailure {
         error: String,
         #[location]
         location: Location,
     },
 
-    #[error("failed to parse capacity waitlist response [{location:?}]")]
+    #[error("failed to parse capacity waitlist response [{location}]")]
     ParseResponse {
         #[location]
         location: Location,
@@ -1914,7 +1914,7 @@ pub(crate) enum JoinCapacityWaitlistError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum FetchAppError {
-    #[error("authentication failed [{location:?}]")]
+    #[error("authentication failed [{location}]")]
     EnsureAuthenticated {
         #[location]
         location: Location,
@@ -1922,7 +1922,7 @@ pub(crate) enum FetchAppError {
         source: BoxError,
     },
 
-    #[error("failed to fetch app [{location:?}]")]
+    #[error("failed to fetch app [{location}]")]
     GetProtectedJson {
         #[location]
         location: Location,
@@ -1933,7 +1933,7 @@ pub(crate) enum FetchAppError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum GetCurrentAppError {
-    #[error("failed to load deployment [{location:?}]")]
+    #[error("failed to load deployment [{location}]")]
     LoadDeployment {
         #[location]
         location: Location,
@@ -1941,7 +1941,7 @@ pub(crate) enum GetCurrentAppError {
         source: BoxError,
     },
 
-    #[error("failed to fetch app [{location:?}]")]
+    #[error("failed to fetch app [{location}]")]
     FetchApp {
         #[location]
         location: Location,
@@ -1952,7 +1952,7 @@ pub(crate) enum GetCurrentAppError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum GetAttestationUrlError {
-    #[error("failed to get current app [{location:?}]")]
+    #[error("failed to get current app [{location}]")]
     GetCurrentApp {
         #[location]
         location: Location,
@@ -1961,7 +1961,7 @@ pub(crate) enum GetAttestationUrlError {
     },
 
     #[error(
-        "no public IP available. Run 'caution app get <id/null>' to check deployment status, or provide --url explicitly [{location:?}]"
+        "no public IP available. Run 'caution app get <id/null>' to check deployment status, or provide --url explicitly [{location}]"
     )]
     NoPublicIp {
         #[location]
@@ -1971,14 +1971,14 @@ pub(crate) enum GetAttestationUrlError {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum GetCacheDirError {
-    #[error("failed to determine home directory [{location:?}]")]
+    #[error("failed to determine home directory [{location}]")]
     HomeDir { location: Location },
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum ResolveProcfileBuildCommandError {
     #[error(
-        "Procfile has empty build command. Expected format: build: docker build -t myapp . [{location:?}]"
+        "Procfile has empty build command. Expected format: build: docker build -t myapp . [{location}]"
     )]
     EmptyBuildCommand {
         #[location]
@@ -1986,21 +1986,21 @@ pub(crate) enum ResolveProcfileBuildCommandError {
     },
 
     #[error(
-        "Procfile has empty containerfile path. Expected format: containerfile: Containerfile [{location:?}]"
+        "Procfile has empty containerfile path. Expected format: containerfile: Containerfile [{location}]"
     )]
     EmptyContainerfile {
         #[location]
         location: Location,
     },
 
-    #[error("Procfile field `containerfile:` points to missing file: {path} [{location:?}]")]
+    #[error("Procfile field `containerfile:` points to missing file: {path} [{location}]")]
     MissingContainerfile {
         path: String,
         #[location]
         location: Location,
     },
 
-    #[error("invalid containerfile path [{location:?}]")]
+    #[error("invalid containerfile path [{location}]")]
     InvalidContainerfile {
         #[location]
         location: Location,
@@ -2011,7 +2011,7 @@ pub(crate) enum ResolveProcfileBuildCommandError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum ResolveLocalBuildCommandFromDirError {
-    #[error("failed to read caution.hcl [{location:?}]")]
+    #[error("failed to read caution.hcl [{location}]")]
     ReadCautionHcl {
         #[location]
         location: Location,
@@ -2019,7 +2019,7 @@ pub(crate) enum ResolveLocalBuildCommandFromDirError {
         source: BoxError,
     },
 
-    #[error("invalid caution.hcl [{location:?}]")]
+    #[error("invalid caution.hcl [{location}]")]
     ParseCautionHcl {
         #[location]
         location: Location,
@@ -2027,7 +2027,7 @@ pub(crate) enum ResolveLocalBuildCommandFromDirError {
         source: BoxError,
     },
 
-    #[error("failed to read Procfile [{location:?}]")]
+    #[error("failed to read Procfile [{location}]")]
     ReadProcfile {
         #[location]
         location: Location,
@@ -2035,20 +2035,20 @@ pub(crate) enum ResolveLocalBuildCommandFromDirError {
         source: BoxError,
     },
 
-    #[error("no caution.hcl or Procfile found [{location:?}]")]
+    #[error("no caution.hcl or Procfile found [{location}]")]
     NoConfigFound {
         #[location]
         location: Location,
     },
 
-    #[error("caution.hcl `containerfile` points to missing file: {path} [{location:?}]")]
+    #[error("caution.hcl `containerfile` points to missing file: {path} [{location}]")]
     MissingContainerfile {
         path: String,
         #[location]
         location: Location,
     },
 
-    #[error("invalid containerfile path [{location:?}]")]
+    #[error("invalid containerfile path [{location}]")]
     InvalidContainerfile {
         #[location]
         location: Location,
@@ -2056,7 +2056,7 @@ pub(crate) enum ResolveLocalBuildCommandFromDirError {
         source: BoxError,
     },
 
-    #[error("failed to resolve build command [{location:?}]")]
+    #[error("failed to resolve build command [{location}]")]
     ProcfileResolve {
         #[location]
         location: Location,

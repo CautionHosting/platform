@@ -33,14 +33,14 @@ const BILLING_URL: &str = "https://dashboard.caution.co/#billing";
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum SendVerificationError {
-    #[error("invalid from address [{location:?}]")]
+    #[error("invalid from address [{location}]")]
     InvalidFromAddress {
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("invalid recipient address '{address}' [{location:?}]")]
+    #[error("invalid recipient address '{address}' [{location}]")]
     InvalidRecipient {
         #[context(borrow = str)]
         address: String,
@@ -49,16 +49,16 @@ enum SendVerificationError {
         #[source]
         source: BoxError,
     },
-    #[error("failed to build email message [{location:?}]")]
+    #[error("failed to build email message [{location}]")]
     BuildMessage {
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("SMTP transport not configured [{location:?}]")]
+    #[error("SMTP transport not configured [{location}]")]
     SmtpNotConfigured { location: dterror::Location },
-    #[error("failed to send email to '{address}' [{location:?}]")]
+    #[error("failed to send email to '{address}' [{location}]")]
     SendFailed {
         #[context(borrow = str)]
         address: String,
@@ -71,14 +71,14 @@ enum SendVerificationError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum SendEmailError {
-    #[error("invalid from address [{location:?}]")]
+    #[error("invalid from address [{location}]")]
     InvalidFromAddress {
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("invalid recipient address '{address}' [{location:?}]")]
+    #[error("invalid recipient address '{address}' [{location}]")]
     InvalidRecipient {
         #[context(borrow = str)]
         address: String,
@@ -87,16 +87,16 @@ enum SendEmailError {
         #[source]
         source: BoxError,
     },
-    #[error("failed to build email message [{location:?}]")]
+    #[error("failed to build email message [{location}]")]
     BuildMessage {
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("SMTP transport not configured [{location:?}]")]
+    #[error("SMTP transport not configured [{location}]")]
     SmtpNotConfigured { location: dterror::Location },
-    #[error("failed to send email to '{address}' [{location:?}]")]
+    #[error("failed to send email to '{address}' [{location}]")]
     SendFailed {
         #[context(borrow = str)]
         address: String,
@@ -109,21 +109,21 @@ enum SendEmailError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum MainError {
-    #[error("FROM_EMAIL environment variable is not set [{location:?}]")]
+    #[error("FROM_EMAIL environment variable is not set [{location}]")]
     MissingFromEmail {
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("FROM_EMAIL is not a valid email address [{location:?}]")]
+    #[error("FROM_EMAIL is not a valid email address [{location}]")]
     InvalidFromEmail {
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("failed to configure SMTP relay '{host}' [{location:?}]")]
+    #[error("failed to configure SMTP relay '{host}' [{location}]")]
     SmtpRelay {
         #[context(borrow = str)]
         host: String,
@@ -132,7 +132,7 @@ enum MainError {
         #[source]
         source: BoxError,
     },
-    #[error("failed to bind listener on '{addr}' [{location:?}]")]
+    #[error("failed to bind listener on '{addr}' [{location}]")]
     Bind {
         #[context(borrow = str)]
         addr: String,
@@ -141,7 +141,7 @@ enum MainError {
         #[source]
         source: BoxError,
     },
-    #[error("server error [{location:?}]")]
+    #[error("server error [{location}]")]
     Serve {
         #[location]
         location: Location,

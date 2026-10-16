@@ -26,7 +26,7 @@ struct Registrations {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("unable to load {kind} quorum holder registrations [{location:?}]")]
+#[error("unable to load {kind} quorum holder registrations [{location}]")]
 struct LoadError {
     kind: &'static str,
     #[location]

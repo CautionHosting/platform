@@ -17,7 +17,7 @@ pub struct AttestationPcrs {
 /// Errors produced by [`parse`] while decoding a COSE_Sign1 attestation document.
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum ParseError {
-    #[error("failed to parse COSE_Sign1 [{location:?}]")]
+    #[error("failed to parse COSE_Sign1 [{location}]")]
     ParseCoseSign1 {
         #[location]
         location: Location,
@@ -26,13 +26,13 @@ pub enum ParseError {
         source: BoxError,
     },
 
-    #[error("no payload in COSE_Sign1 [{location:?}]")]
+    #[error("no payload in COSE_Sign1 [{location}]")]
     NoPayload {
         #[location]
         location: Location,
     },
 
-    #[error("failed to parse attestation payload as CBOR [{location:?}]")]
+    #[error("failed to parse attestation payload as CBOR [{location}]")]
     DecodePayload {
         #[location]
         location: Location,
@@ -60,13 +60,13 @@ pub fn parse(attestation_bytes: &[u8]) -> Result<CborValue, ParseError> {
 /// Errors produced by [`extract_pcrs`] while reading PCR values from an attestation document.
 #[derive(Debug, thiserror::Error)]
 pub enum ExtractPcrsError {
-    #[error("attestation payload is not a CBOR map [{location:?}]")]
+    #[error("attestation payload is not a CBOR map [{location}]")]
     NotAMap { location: Location },
 
-    #[error("no PCRs found in attestation document [{location:?}]")]
+    #[error("no PCRs found in attestation document [{location}]")]
     MissingPcrsKey { location: Location },
 
-    #[error("PCR{index} not found in attestation document [{location:?}]")]
+    #[error("PCR{index} not found in attestation document [{location}]")]
     MissingPcr { index: i128, location: Location },
 }
 
@@ -110,16 +110,16 @@ pub fn extract_pcrs(attestation: &CborValue) -> Result<AttestationPcrs, ExtractP
 /// Errors produced by [`payload_json`] while losslessly converting a CBOR value to JSON.
 #[derive(Debug, thiserror::Error)]
 pub enum PayloadJsonError {
-    #[error("CBOR float cannot be represented as JSON [{location:?}]")]
+    #[error("CBOR float cannot be represented as JSON [{location}]")]
     FloatNotRepresentable { location: Location },
 
-    #[error("CBOR map key cannot be represented as a JSON object key [{location:?}]")]
+    #[error("CBOR map key cannot be represented as a JSON object key [{location}]")]
     UnrepresentableMapKey { location: Location },
 
-    #[error("CBOR map keys collide when represented as JSON [{location:?}]")]
+    #[error("CBOR map keys collide when represented as JSON [{location}]")]
     CollidingMapKeys { location: Location },
 
-    #[error("unsupported CBOR value [{location:?}]")]
+    #[error("unsupported CBOR value [{location}]")]
     UnsupportedValue { location: Location },
 }
 

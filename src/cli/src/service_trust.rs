@@ -35,7 +35,7 @@ impl Service {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("{message} [{location:?}]")]
+#[error("{message} [{location}]")]
 pub(crate) struct Error {
     #[context(borrow = str)]
     message: String,

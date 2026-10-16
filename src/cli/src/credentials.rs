@@ -19,7 +19,7 @@ const CREDENTIALS_API_PATH: &str = "/api/credentials";
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum CredentialsAddError {
-    #[error("authentication failed [{location:?}]")]
+    #[error("authentication failed [{location}]")]
     EnsureAuthenticated {
         #[location]
         location: Location,
@@ -29,7 +29,7 @@ pub enum CredentialsAddError {
     },
 
     /// Prompt label from the failing `prompt::*` call site.
-    #[error("failed to read credential input '{prompt_label}' [{location:?}]")]
+    #[error("failed to read credential input '{prompt_label}' [{location}]")]
     PromptInput {
         #[context(borrow = str)]
         prompt_label: String,
@@ -42,7 +42,7 @@ pub enum CredentialsAddError {
     },
 
     /// The GCP service account key file could not be read.
-    #[error("Failed to read service account key file [{location:?}]")]
+    #[error("Failed to read service account key file [{location}]")]
     GcpKeyFileRead {
         #[location]
         location: Location,
@@ -52,7 +52,7 @@ pub enum CredentialsAddError {
     },
 
     /// The GCP service account key file content is not valid JSON.
-    #[error("Invalid JSON in service account key file [{location:?}]")]
+    #[error("Invalid JSON in service account key file [{location}]")]
     GcpKeyFileBadJson {
         #[location]
         location: Location,
@@ -62,7 +62,7 @@ pub enum CredentialsAddError {
     },
 
     /// The baremetal SSH private key file could not be read.
-    #[error("Failed to read SSH key from {key_path} [{location:?}]")]
+    #[error("Failed to read SSH key from {key_path} [{location}]")]
     SshKeyRead {
         #[context(borrow = str)]
         key_path: String,
@@ -75,7 +75,7 @@ pub enum CredentialsAddError {
     },
 
     /// An HTTP request for the add-credential flow failed.
-    #[error("HTTP request failed [{location:?}]")]
+    #[error("HTTP request failed [{location}]")]
     Http {
         #[location]
         location: Location,
@@ -85,7 +85,7 @@ pub enum CredentialsAddError {
     },
 
     /// The API returned a non-success response; the text is what `api_error_message` extracted from it.
-    #[error("Failed to add credential: {api_response} [{location:?}]")]
+    #[error("Failed to add credential: {api_response} [{location}]")]
     ServerResponseFailure {
         api_response: String,
 
@@ -270,7 +270,7 @@ pub async fn add(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum CredentialsListError {
-    #[error("authentication failed [{location:?}]")]
+    #[error("authentication failed [{location}]")]
     EnsureAuthenticated {
         #[location]
         location: Location,
@@ -279,7 +279,7 @@ pub enum CredentialsListError {
         source: BoxError,
     },
 
-    #[error("Failed to list credentials [{location:?}]")]
+    #[error("Failed to list credentials [{location}]")]
     ListCredentials {
         #[location]
         location: Location,
@@ -337,7 +337,7 @@ pub async fn list(client: &ApiClient) -> Result<(), CredentialsListError> {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum CredentialsRemoveError {
-    #[error("authentication failed [{location:?}]")]
+    #[error("authentication failed [{location}]")]
     EnsureAuthenticated {
         #[location]
         location: Location,
@@ -347,7 +347,7 @@ pub enum CredentialsRemoveError {
     },
 
     /// The credential ID argument is not a valid UUID.
-    #[error("Invalid credential ID '{credential_id}' must be a valid UUID [{location:?}]")]
+    #[error("Invalid credential ID '{credential_id}' must be a valid UUID [{location}]")]
     ParseCredentialId {
         #[context(borrow = str)]
         credential_id: String,
@@ -359,7 +359,7 @@ pub enum CredentialsRemoveError {
         source: BoxError,
     },
 
-    #[error("Failed to fetch credential [{location:?}]")]
+    #[error("Failed to fetch credential [{location}]")]
     FetchCredential {
         #[location]
         location: Location,
@@ -369,7 +369,7 @@ pub enum CredentialsRemoveError {
     },
 
     /// The confirmation prompt could not be read.
-    #[error("could not confirm credential removal [{location:?}]")]
+    #[error("could not confirm credential removal [{location}]")]
     ConfirmDeletion {
         #[location]
         location: Location,
@@ -379,7 +379,7 @@ pub enum CredentialsRemoveError {
     },
 
     /// An HTTP request for the remove-credential flow failed.
-    #[error("HTTP request failed [{location:?}]")]
+    #[error("HTTP request failed [{location}]")]
     Http {
         #[location]
         location: Location,
@@ -389,7 +389,7 @@ pub enum CredentialsRemoveError {
     },
 
     /// The API returned a non-success response; the text is what `api_error_message` extracted from it.
-    #[error("Failed to remove credential: {api_response} [{location:?}]")]
+    #[error("Failed to remove credential: {api_response} [{location}]")]
     ServerResponseFailure {
         api_response: String,
 
@@ -463,7 +463,7 @@ pub async fn remove(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum CredentialsSetDefaultError {
-    #[error("authentication failed [{location:?}]")]
+    #[error("authentication failed [{location}]")]
     EnsureAuthenticated {
         #[location]
         location: Location,
@@ -473,7 +473,7 @@ pub enum CredentialsSetDefaultError {
     },
 
     /// The credential ID argument is not a valid UUID.
-    #[error("Invalid credential ID '{credential_id}' must be a valid UUID [{location:?}]")]
+    #[error("Invalid credential ID '{credential_id}' must be a valid UUID [{location}]")]
     ParseCredentialId {
         #[context(borrow = str)]
         credential_id: String,
@@ -486,7 +486,7 @@ pub enum CredentialsSetDefaultError {
     },
 
     /// An HTTP request for the set-default flow failed.
-    #[error("HTTP request failed [{location:?}]")]
+    #[error("HTTP request failed [{location}]")]
     Http {
         #[location]
         location: Location,
@@ -496,7 +496,7 @@ pub enum CredentialsSetDefaultError {
     },
 
     /// The API reported a 404 for the credential.
-    #[error("Credential '{credential_id}' not found [{location:?}]")]
+    #[error("Credential '{credential_id}' not found [{location}]")]
     CredentialNotFound {
         credential_id: String,
 
@@ -505,7 +505,7 @@ pub enum CredentialsSetDefaultError {
     },
 
     /// The API returned a non-success response; the text is what `api_error_message` extracted from it.
-    #[error("Failed to set default: {api_response} [{location:?}]")]
+    #[error("Failed to set default: {api_response} [{location}]")]
     ServerResponseFailure {
         api_response: String,
 

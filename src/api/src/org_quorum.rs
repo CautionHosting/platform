@@ -29,7 +29,7 @@ mod certificates;
 mod tests;
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("{message} [{location:?}]")]
+#[error("{message} [{location}]")]
 pub struct OrgQuorumError {
     status: StatusCode,
     message: &'static str,

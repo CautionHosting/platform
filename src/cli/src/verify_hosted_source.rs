@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("{message} [{location:?}]")]
+#[error("{message} [{location}]")]
 pub(crate) struct Error {
     #[context(borrow = str)]
     message: String,

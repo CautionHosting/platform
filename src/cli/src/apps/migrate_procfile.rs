@@ -31,7 +31,7 @@ pub(crate) struct MigrateProcfileArgs {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum MigrateProcfileError {
-    #[error("failed to read {path} [{location:?}]")]
+    #[error("failed to read {path} [{location}]")]
     Read {
         #[context(borrow = Path)]
         path: PathBuf,
@@ -43,7 +43,7 @@ pub(crate) enum MigrateProcfileError {
         source: BoxError,
     },
 
-    #[error("failed to parse Procfile [{location:?}]")]
+    #[error("failed to parse Procfile [{location}]")]
     Parse {
         #[location]
         location: Location,
@@ -52,7 +52,7 @@ pub(crate) enum MigrateProcfileError {
         source: BoxError,
     },
 
-    #[error("output file already exists: {path}; use --force to overwrite [{location:?}]")]
+    #[error("output file already exists: {path}; use --force to overwrite [{location}]")]
     OutputExists {
         path: PathBuf,
 
@@ -60,7 +60,7 @@ pub(crate) enum MigrateProcfileError {
         location: Location,
     },
 
-    #[error("failed to write {path} [{location:?}]")]
+    #[error("failed to write {path} [{location}]")]
     Write {
         #[context(borrow = Path)]
         path: PathBuf,

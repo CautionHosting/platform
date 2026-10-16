@@ -81,7 +81,7 @@ pub(crate) fn aws_credentials_error(profile: &str, action: &str) -> String {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum InitError {
-    #[error("invalid app name [{location:?}]")]
+    #[error("invalid app name [{location}]")]
     InvalidAppName {
         #[location]
         location: Location,
@@ -90,7 +90,7 @@ pub(crate) enum InitError {
         source: BoxError,
     },
 
-    #[error("failed to check git repository [{location:?}]")]
+    #[error("failed to check git repository [{location}]")]
     CheckGitRepo {
         #[location]
         location: Location,
@@ -99,7 +99,7 @@ pub(crate) enum InitError {
         source: BoxError,
     },
 
-    #[error("failed to get deployment path [{location:?}]")]
+    #[error("failed to get deployment path [{location}]")]
     GetDeploymentPath {
         #[location]
         location: Location,
@@ -108,7 +108,7 @@ pub(crate) enum InitError {
         source: BoxError,
     },
 
-    #[error("failed to inspect checkout link [{location:?}]")]
+    #[error("failed to inspect checkout link [{location}]")]
     InspectCheckoutLink {
         #[location]
         location: Location,
@@ -117,7 +117,7 @@ pub(crate) enum InitError {
         source: BoxError,
     },
 
-    #[error("failed to verify existing app link [{location:?}]")]
+    #[error("failed to verify existing app link [{location}]")]
     TryRelink {
         #[location]
         location: Location,
@@ -126,9 +126,7 @@ pub(crate) enum InitError {
         source: BoxError,
     },
 
-    #[error(
-        "failed to initialize bring-your-own-compute deployment from config file [{location:?}]"
-    )]
+    #[error("failed to initialize bring-your-own-compute deployment from config file [{location}]")]
     InitByoc {
         #[location]
         location: Location,
@@ -137,7 +135,7 @@ pub(crate) enum InitError {
         source: BoxError,
     },
 
-    #[error("bring-your-own-compute provisioning failed [{location:?}]")]
+    #[error("bring-your-own-compute provisioning failed [{location}]")]
     InitByocInteractive {
         #[location]
         location: Location,
@@ -146,7 +144,7 @@ pub(crate) enum InitError {
         source: BoxError,
     },
 
-    #[error("failed to create config file [{location:?}]")]
+    #[error("failed to create config file [{location}]")]
     CreateConfigFile {
         #[location]
         location: Location,
@@ -155,7 +153,7 @@ pub(crate) enum InitError {
         source: BoxError,
     },
 
-    #[error("failed to read configuration [{location:?}]")]
+    #[error("failed to read configuration [{location}]")]
     ReadConfig {
         #[location]
         location: Location,
@@ -164,7 +162,7 @@ pub(crate) enum InitError {
         source: BoxError,
     },
 
-    #[error("failed to resolve local build command [{location:?}]")]
+    #[error("failed to resolve local build command [{location}]")]
     ResolveBuildCommand {
         #[location]
         location: Location,
@@ -173,7 +171,7 @@ pub(crate) enum InitError {
         source: BoxError,
     },
 
-    #[error("{message} [{location:?}]")]
+    #[error("{message} [{location}]")]
     LinkedCheckout {
         message: String,
 
@@ -181,7 +179,7 @@ pub(crate) enum InitError {
         location: Location,
     },
 
-    #[error("failed to ensure authentication [{location:?}]")]
+    #[error("failed to ensure authentication [{location}]")]
     EnsureAuthenticated {
         #[location]
         location: Location,
@@ -190,7 +188,7 @@ pub(crate) enum InitError {
         source: BoxError,
     },
 
-    #[error("failed to send create app request [{location:?}]")]
+    #[error("failed to send create app request [{location}]")]
     SendCreateRequest {
         #[location]
         location: Location,
@@ -199,13 +197,13 @@ pub(crate) enum InitError {
         source: BoxError,
     },
 
-    #[error("account initialization failed [{location:?}]")]
+    #[error("account initialization failed [{location}]")]
     AccountInitializationFailed {
         #[location]
         location: Location,
     },
 
-    #[error("failed to create app (status {status}): {error} [{location:?}]")]
+    #[error("failed to create app (status {status}): {error} [{location}]")]
     CreateApp {
         status: reqwest::StatusCode,
 
@@ -215,7 +213,7 @@ pub(crate) enum InitError {
         location: Location,
     },
 
-    #[error("failed to parse create app response [{location:?}]")]
+    #[error("failed to parse create app response [{location}]")]
     ParseCreateResponse {
         #[location]
         location: Location,
@@ -224,7 +222,7 @@ pub(crate) enum InitError {
         source: BoxError,
     },
 
-    #[error("failed to save deployment info [{location:?}]")]
+    #[error("failed to save deployment info [{location}]")]
     SaveDeployment {
         #[location]
         location: Location,
@@ -233,7 +231,7 @@ pub(crate) enum InitError {
         source: BoxError,
     },
 
-    #[error("failed to set git remote [{location:?}]")]
+    #[error("failed to set git remote [{location}]")]
     SetGitRemote {
         #[location]
         location: Location,
@@ -245,7 +243,7 @@ pub(crate) enum InitError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum InitByocError {
-    #[error("failed to load authenticated configuration [{location:?}]")]
+    #[error("failed to load authenticated configuration [{location}]")]
     RequireAuthenticatedConfig {
         #[location]
         location: Location,
@@ -254,7 +252,7 @@ pub(crate) enum InitByocError {
         source: BoxError,
     },
 
-    #[error("failed to read config file [{location:?}]")]
+    #[error("failed to read config file [{location}]")]
     ReadConfigFile {
         #[location]
         location: Location,
@@ -264,7 +262,7 @@ pub(crate) enum InitByocError {
     },
 
     #[error(
-        "refusing encrypted BYOC config update for linked app {resource_id}: the CLI cannot verify or inject its resource ID into ciphertext. Decrypt the config and retry with `caution init --byoc --config <decrypted-json>`. [{location:?}]"
+        "refusing encrypted BYOC config update for linked app {resource_id}: the CLI cannot verify or inject its resource ID into ciphertext. Decrypt the config and retry with `caution init --byoc --config <decrypted-json>`. [{location}]"
     )]
     EncryptedConfigUpdateRefused {
         resource_id: String,
@@ -273,7 +271,7 @@ pub(crate) enum InitByocError {
         location: Location,
     },
 
-    #[error("failed to parse config file as JSON [{location:?}]")]
+    #[error("failed to parse config file as JSON [{location}]")]
     ParseConfigFile {
         #[location]
         location: Location,
@@ -282,7 +280,7 @@ pub(crate) enum InitByocError {
         source: BoxError,
     },
 
-    #[error("config file must have platform: \"aws\" (got: {platform:?}) [{location:?}]")]
+    #[error("config file must have platform: \"aws\" (got: {platform:?}) [{location}]")]
     InvalidPlatform {
         platform: Option<String>,
 
@@ -290,13 +288,13 @@ pub(crate) enum InitByocError {
         location: Location,
     },
 
-    #[error("config file must have managed_on_prem: true for BYOC deployments [{location:?}]")]
+    #[error("config file must have managed_on_prem: true for BYOC deployments [{location}]")]
     ManagedOnPremNotEnabled {
         #[location]
         location: Location,
     },
 
-    #[error("config file missing required field: {field} [{location:?}]")]
+    #[error("config file missing required field: {field} [{location}]")]
     MissingRequiredField {
         field: String,
 
@@ -304,13 +302,13 @@ pub(crate) enum InitByocError {
         location: Location,
     },
 
-    #[error("config field builder_instance_profile_name must be a string [{location:?}]")]
+    #[error("config field builder_instance_profile_name must be a string [{location}]")]
     BuilderInstanceProfileNotString {
         #[location]
         location: Location,
     },
 
-    #[error("failed to serialize config file [{location:?}]")]
+    #[error("failed to serialize config file [{location}]")]
     SerializeConfigFile {
         #[location]
         location: Location,
@@ -319,7 +317,7 @@ pub(crate) enum InitByocError {
         source: BoxError,
     },
 
-    #[error("failed to create config file [{location:?}]")]
+    #[error("failed to create config file [{location}]")]
     CreateConfigFile {
         #[location]
         location: Location,
@@ -328,7 +326,7 @@ pub(crate) enum InitByocError {
         source: BoxError,
     },
 
-    #[error("failed to read configuration [{location:?}]")]
+    #[error("failed to read configuration [{location}]")]
     ReadConfig {
         #[location]
         location: Location,
@@ -337,7 +335,7 @@ pub(crate) enum InitByocError {
         source: BoxError,
     },
 
-    #[error("failed to send bring-your-own-compute request [{location:?}]")]
+    #[error("failed to send bring-your-own-compute request [{location}]")]
     SendByocRequest {
         #[location]
         location: Location,
@@ -346,7 +344,7 @@ pub(crate) enum InitByocError {
         source: BoxError,
     },
 
-    #[error("failed to read response body [{location:?}]")]
+    #[error("failed to read response body [{location}]")]
     ReadResponseBody {
         #[location]
         location: Location,
@@ -356,7 +354,7 @@ pub(crate) enum InitByocError {
     },
 
     #[error(
-        "failed to {action} bring-your-own-compute resource (status {status}): {error} [{location:?}]"
+        "failed to {action} bring-your-own-compute resource (status {status}): {error} [{location}]"
     )]
     ByocRequestFailed {
         action: &'static str,
@@ -369,7 +367,7 @@ pub(crate) enum InitByocError {
         location: Location,
     },
 
-    #[error("failed to parse response [{location:?}]")]
+    #[error("failed to parse response [{location}]")]
     ParseResponse {
         #[location]
         location: Location,
@@ -378,7 +376,7 @@ pub(crate) enum InitByocError {
         source: BoxError,
     },
 
-    #[error("failed to save deployment info [{location:?}]")]
+    #[error("failed to save deployment info [{location}]")]
     SaveDeployment {
         #[location]
         location: Location,
@@ -387,7 +385,7 @@ pub(crate) enum InitByocError {
         source: BoxError,
     },
 
-    #[error("failed to set git remote [{location:?}]")]
+    #[error("failed to set git remote [{location}]")]
     SetGitRemote {
         #[location]
         location: Location,
@@ -399,13 +397,13 @@ pub(crate) enum InitByocError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum InitByocInteractiveError {
-    #[error("docker is required but not found. Please install Docker first. [{location:?}]")]
+    #[error("docker is required but not found. Please install Docker first. [{location}]")]
     DockerNotFound {
         #[location]
         location: Location,
     },
 
-    #[error("{message} [{location:?}]")]
+    #[error("{message} [{location}]")]
     AwsCredentialsNotFound {
         message: String,
 
@@ -413,7 +411,7 @@ pub(crate) enum InitByocInteractiveError {
         location: Location,
     },
 
-    #[error("failed to read confirmation prompt [{location:?}]")]
+    #[error("failed to read confirmation prompt [{location}]")]
     ConfirmPrompt {
         #[location]
         location: Location,
@@ -422,7 +420,7 @@ pub(crate) enum InitByocInteractiveError {
         source: BoxError,
     },
 
-    #[error("failed to ensure authentication [{location:?}]")]
+    #[error("failed to ensure authentication [{location}]")]
     EnsureAuthenticated {
         #[location]
         location: Location,
@@ -431,7 +429,7 @@ pub(crate) enum InitByocInteractiveError {
         source: BoxError,
     },
 
-    #[error("failed to pull provisioner image [{location:?}]")]
+    #[error("failed to pull provisioner image [{location}]")]
     PullProvisionerImage {
         #[location]
         location: Location,
@@ -440,7 +438,7 @@ pub(crate) enum InitByocInteractiveError {
         source: BoxError,
     },
 
-    #[error("failed to pull provisioner image: {stderr} [{location:?}]")]
+    #[error("failed to pull provisioner image: {stderr} [{location}]")]
     ProvisionerImagePullFailed {
         stderr: String,
 
@@ -448,7 +446,7 @@ pub(crate) enum InitByocInteractiveError {
         location: Location,
     },
 
-    #[error("failed to run provisioner container [{location:?}]")]
+    #[error("failed to run provisioner container [{location}]")]
     RunProvisionerContainer {
         #[location]
         location: Location,
@@ -457,7 +455,7 @@ pub(crate) enum InitByocInteractiveError {
         source: BoxError,
     },
 
-    #[error("provisioning failed (exit code: {exit_code:?}) [{location:?}]")]
+    #[error("provisioning failed (exit code: {exit_code:?}) [{location}]")]
     ProvisioningFailed {
         exit_code: Option<i32>,
 
@@ -465,7 +463,7 @@ pub(crate) enum InitByocInteractiveError {
         location: Location,
     },
 
-    #[error("provisioner returned empty output (expected JSON) [{location:?}]")]
+    #[error("provisioner returned empty output (expected JSON) [{location}]")]
     ProvisionerOutputEmpty {
         #[location]
         location: Location,
@@ -474,7 +472,7 @@ pub(crate) enum InitByocInteractiveError {
         source: BoxError,
     },
 
-    #[error("failed to parse provisioner output as JSON. raw output:\n{raw_output} [{location:?}]")]
+    #[error("failed to parse provisioner output as JSON. raw output:\n{raw_output} [{location}]")]
     ParseProvisionerOutput {
         raw_output: String,
 
@@ -485,13 +483,13 @@ pub(crate) enum InitByocInteractiveError {
         source: BoxError,
     },
 
-    #[error("missing deployment_id in provisioner output [{location:?}]")]
+    #[error("missing deployment_id in provisioner output [{location}]")]
     MissingDeploymentId {
         #[location]
         location: Location,
     },
 
-    #[error("failed to resolve local build command [{location:?}]")]
+    #[error("failed to resolve local build command [{location}]")]
     ResolveBuildCommand {
         #[location]
         location: Location,
@@ -500,7 +498,7 @@ pub(crate) enum InitByocInteractiveError {
         source: BoxError,
     },
 
-    #[error("failed to create app [{location:?}]")]
+    #[error("failed to create app [{location}]")]
     CreateAppRequest {
         #[location]
         location: Location,
@@ -509,7 +507,7 @@ pub(crate) enum InitByocInteractiveError {
         source: BoxError,
     },
 
-    #[error("failed to read response body [{location:?}]")]
+    #[error("failed to read response body [{location}]")]
     ReadResponseBody {
         #[location]
         location: Location,
@@ -518,7 +516,7 @@ pub(crate) enum InitByocInteractiveError {
         source: BoxError,
     },
 
-    #[error("failed to create app (status {status}): {error} [{location:?}]")]
+    #[error("failed to create app (status {status}): {error} [{location}]")]
     CreateAppFailed {
         status: reqwest::StatusCode,
 
@@ -528,7 +526,7 @@ pub(crate) enum InitByocInteractiveError {
         location: Location,
     },
 
-    #[error("failed to parse create app response [{location:?}]")]
+    #[error("failed to parse create app response [{location}]")]
     ParseCreateResponse {
         #[location]
         location: Location,
@@ -537,7 +535,7 @@ pub(crate) enum InitByocInteractiveError {
         source: BoxError,
     },
 
-    #[error("failed to serialize BYOC credentials [{location:?}]")]
+    #[error("failed to serialize BYOC credentials [{location}]")]
     SerializeCredentials {
         #[location]
         location: Location,
@@ -546,7 +544,7 @@ pub(crate) enum InitByocInteractiveError {
         source: BoxError,
     },
 
-    #[error("failed to register BYOC credentials [{location:?}]")]
+    #[error("failed to register BYOC credentials [{location}]")]
     RegisterCredentialsRequest {
         #[location]
         location: Location,
@@ -555,7 +553,7 @@ pub(crate) enum InitByocInteractiveError {
         source: BoxError,
     },
 
-    #[error("failed to register credentials (status {status}): {error} [{location:?}]")]
+    #[error("failed to register credentials (status {status}): {error} [{location}]")]
     RegisterCredentialsFailed {
         status: reqwest::StatusCode,
 
@@ -565,13 +563,13 @@ pub(crate) enum InitByocInteractiveError {
         location: Location,
     },
 
-    #[error("cannot find home directory [{location:?}]")]
+    #[error("cannot find home directory [{location}]")]
     HomeDirectoryNotFound {
         #[location]
         location: Location,
     },
 
-    #[error("failed to create local state directory [{location:?}]")]
+    #[error("failed to create local state directory [{location}]")]
     CreateStateDir {
         #[location]
         location: Location,
@@ -580,7 +578,7 @@ pub(crate) enum InitByocInteractiveError {
         source: BoxError,
     },
 
-    #[error("failed to serialize BYOC state [{location:?}]")]
+    #[error("failed to serialize BYOC state [{location}]")]
     SerializeByocState {
         #[location]
         location: Location,
@@ -589,7 +587,7 @@ pub(crate) enum InitByocInteractiveError {
         source: BoxError,
     },
 
-    #[error("failed to write BYOC state file [{location:?}]")]
+    #[error("failed to write BYOC state file [{location}]")]
     WriteByocState {
         #[location]
         location: Location,
@@ -598,7 +596,7 @@ pub(crate) enum InitByocInteractiveError {
         source: BoxError,
     },
 
-    #[error("failed to save deployment info [{location:?}]")]
+    #[error("failed to save deployment info [{location}]")]
     SaveDeployment {
         #[location]
         location: Location,
@@ -607,7 +605,7 @@ pub(crate) enum InitByocInteractiveError {
         source: BoxError,
     },
 
-    #[error("failed to create config file [{location:?}]")]
+    #[error("failed to create config file [{location}]")]
     CreateConfigFile {
         #[location]
         location: Location,
@@ -616,7 +614,7 @@ pub(crate) enum InitByocInteractiveError {
         source: BoxError,
     },
 
-    #[error("failed to set git remote [{location:?}]")]
+    #[error("failed to set git remote [{location}]")]
     SetGitRemote {
         #[location]
         location: Location,
@@ -628,27 +626,27 @@ pub(crate) enum InitByocInteractiveError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum TeardownError {
-    #[error("cannot find home directory [{location:?}]")]
+    #[error("cannot find home directory [{location}]")]
     HomeDirectoryNotFound {
         #[location]
         location: Location,
     },
 
-    #[error("missing deployment_id in state file [{location:?}]")]
+    #[error("missing deployment_id in state file [{location}]")]
     MissingDeploymentId {
         #[location]
         location: Location,
     },
 
     #[error(
-        "no bring-your-own-compute state found.\nrun this command from your app directory or ensure the BYOC state file exists in ~/.caution/<app>/. [{location:?}]"
+        "no bring-your-own-compute state found.\nrun this command from your app directory or ensure the BYOC state file exists in ~/.caution/<app>/. [{location}]"
     )]
     ByocStateNotFound {
         #[location]
         location: Location,
     },
 
-    #[error("failed to read confirmation prompt [{location:?}]")]
+    #[error("failed to read confirmation prompt [{location}]")]
     ConfirmPrompt {
         #[location]
         location: Location,
@@ -657,7 +655,7 @@ pub(crate) enum TeardownError {
         source: BoxError,
     },
 
-    #[error("{message} [{location:?}]")]
+    #[error("{message} [{location}]")]
     AwsCredentialsNotFound {
         message: String,
 
@@ -666,14 +664,14 @@ pub(crate) enum TeardownError {
     },
 
     #[error(
-        "caution app ID is unavailable; AWS teardown was not started and local BYOC state was preserved [{location:?}]"
+        "caution app ID is unavailable; AWS teardown was not started and local BYOC state was preserved [{location}]"
     )]
     ResourceIdUnavailable {
         #[location]
         location: Location,
     },
 
-    #[error("failed to ensure authentication [{location:?}]")]
+    #[error("failed to ensure authentication [{location}]")]
     EnsureAuthenticated {
         #[location]
         location: Location,
@@ -683,7 +681,7 @@ pub(crate) enum TeardownError {
     },
 
     #[error(
-        "caution app deletion is unresolved (status {status}): {error}. AWS teardown was not started and local BYOC state was preserved. [{location:?}]"
+        "caution app deletion is unresolved (status {status}): {error}. AWS teardown was not started and local BYOC state was preserved. [{location}]"
     )]
     AppDeletionUnresolved {
         status: reqwest::StatusCode,
@@ -695,7 +693,7 @@ pub(crate) enum TeardownError {
     },
 
     #[error(
-        "caution app deletion is unresolved. AWS teardown was not started and local BYOC state was preserved. [{location:?}]"
+        "caution app deletion is unresolved. AWS teardown was not started and local BYOC state was preserved. [{location}]"
     )]
     AppDeletionRequestFailed {
         #[location]
@@ -705,7 +703,7 @@ pub(crate) enum TeardownError {
         source: BoxError,
     },
 
-    #[error("failed to run teardown [{location:?}]")]
+    #[error("failed to run teardown [{location}]")]
     RunTeardownContainer {
         #[location]
         location: Location,
@@ -714,9 +712,7 @@ pub(crate) enum TeardownError {
         source: BoxError,
     },
 
-    #[error(
-        "aws teardown failed; local BYOC state was preserved for retry: {stderr} [{location:?}]"
-    )]
+    #[error("aws teardown failed; local BYOC state was preserved for retry: {stderr} [{location}]")]
     AwsTeardownFailed {
         stderr: String,
 
