@@ -2,10 +2,6 @@
 
 Command-line interface for [Caution](https://caution.co) — deploy and verify reproducible secure enclaves.
 
-> **Warning: Alpha Software**
->
-> This software is in early alpha. It may introduce backwards-incompatible changes, has not undergone security audits, and is not production ready. Use at your own risk.
-
 ## Installation
 
 We offer multiple ways to install the CLI.
