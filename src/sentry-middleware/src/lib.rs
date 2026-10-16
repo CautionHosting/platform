@@ -102,6 +102,10 @@ const MAX_BREADCRUMBS_PER_REQUEST: usize = 100;
 /// A [`tracing_subscriber::Layer`] that collects breadcrumbs from `tracing`
 /// events into the shared [`BREADCRUMBS`] map, keyed by the current request ID.
 ///
+/// Every level except `debug` and `trace` becomes a breadcrumb, so error events
+/// are included and a failing request carries its own error logs in its Sentry
+/// trail. Debug and trace are dropped as too noisy.
+///
 /// Events emitted outside of a request context (no active `REQUEST_ID`) are
 /// silently dropped. This is correct: there is no request to attach them to.
 #[derive(Debug, Clone, Default)]
@@ -120,11 +124,15 @@ where
     S: tracing::Subscriber,
 {
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: SubContext<'_, S>) {
-        // Only collect breadcrumbs from info and warn level events.
-        // Error-level events are captured as Sentry events by the Tower layer;
-        // debug/trace are too noisy.
+        // Collect breadcrumbs from every level except debug and trace, which are
+        // too noisy. Error events are included so the failing request's own
+        // error logs appear in its trail.
+        //
+        // The Sentry layer's own "Reporting error to Sentry" event is emitted
+        // after the request scope ends and after this request's breadcrumbs are
+        // drained, so it never reaches this layer as a breadcrumb.
         let level = event.metadata().level();
-        if !matches!(level, &tracing::Level::INFO | &tracing::Level::WARN) {
+        if matches!(level, &tracing::Level::DEBUG | &tracing::Level::TRACE) {
             return;
         }
 
@@ -518,7 +526,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::dsn_env_var;
+    use super::{REQUEST_ID, RequestBreadcrumbLayer, drain_breadcrumbs, dsn_env_var};
 
     #[test]
     fn dsn_env_var_uppercases_simple_names() {
@@ -536,5 +544,43 @@ mod tests {
     #[test]
     fn dsn_env_var_handles_empty_service() {
         assert_eq!(dsn_env_var(""), "SENTRY_DSN_");
+    }
+
+    #[test]
+    fn collects_every_level_but_debug_and_trace() {
+        use tracing_subscriber::prelude::*;
+
+        let subscriber = tracing_subscriber::registry().with(RequestBreadcrumbLayer::new());
+        let request_id = uuid::Uuid::new_v4();
+
+        tracing::subscriber::with_default(subscriber, || {
+            REQUEST_ID.sync_scope(request_id, || {
+                tracing::trace!(stage = "trace", "noise");
+                tracing::debug!(stage = "debug", "noise");
+                tracing::info!(stage = "prepare", payload_bytes = 128u64, "prepared");
+                tracing::warn!(stage = "validate", attempts = 2u64, "retrying");
+                tracing::error!(stage = "dispatch", "failed");
+            });
+        });
+
+        let crumbs = drain_breadcrumbs(&request_id);
+        assert_eq!(
+            crumbs.len(),
+            3,
+            "debug and trace are dropped; info, warn and error are kept"
+        );
+
+        assert_eq!(crumbs[0].level, sentry::Level::Info);
+        assert_eq!(crumbs[0].message.as_deref(), Some("prepared"));
+        assert_eq!(
+            crumbs[0].data.get("stage").and_then(|value| value.as_str()),
+            Some("prepare")
+        );
+
+        assert_eq!(crumbs[1].level, sentry::Level::Warning);
+        assert_eq!(crumbs[1].message.as_deref(), Some("retrying"));
+
+        assert_eq!(crumbs[2].level, sentry::Level::Error);
+        assert_eq!(crumbs[2].message.as_deref(), Some("failed"));
     }
 }

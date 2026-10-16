@@ -53,6 +53,7 @@ mod resources;
 mod service_observations;
 mod subscriptions;
 mod suspension;
+mod test_endpoints;
 mod types;
 mod users;
 mod validated_types;
@@ -498,45 +499,6 @@ async fn build_inputs() -> impl IntoResponse {
         locksmith: tools.locksmith,
         services: service_observations::snapshot().await,
     })
-}
-
-/// Failure deliberately produced by [`force_error_test`].
-///
-/// Leaf error with no underlying source: the whole point of the endpoint is to
-/// emit a synthetic 5xx so operators can confirm Sentry reporting end to end.
-#[derive(Debug, thiserror::Error)]
-#[error("deliberate test error from the force-error endpoint [{location}]")]
-pub(crate) struct ForceErrorTestError {
-    location: Location,
-}
-
-impl IntoResponse for ForceErrorTestError {
-    fn into_response(self) -> Response {
-        sentry_middleware::error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "deliberate test error",
-            self,
-        )
-    }
-}
-
-/// Public endpoint that always fails with a reported 5xx.
-///
-/// Registered only when `ENABLE_TEST_ENDPOINTS` is enabled. It exists to verify
-/// that a service's error path reaches Sentry without provoking a real fault,
-/// and refuses to run in production (see the guard in `main`).
-#[tracing::instrument(skip_all, err(Debug))]
-async fn force_error_test() -> Result<Json<serde_json::Value>, ForceErrorTestError> {
-    Err(ForceErrorTestError {
-        location: std::panic::Location::caller(),
-    })
-}
-
-/// Whether the debug/test endpoints are enabled via `ENABLE_TEST_ENDPOINTS`.
-fn test_endpoints_enabled() -> bool {
-    std::env::var("ENABLE_TEST_ENDPOINTS")
-        .map(|value| value == "true" || value == "1")
-        .unwrap_or(false)
 }
 
 #[tracing::instrument(skip_all)]
@@ -5075,7 +5037,7 @@ async fn main() -> Result<(), MainError> {
         );
     }
 
-    if test_endpoints_enabled() {
+    if test_endpoints::enabled() {
         let env = std::env::var("ENVIRONMENT").unwrap_or_default();
         if env == "production" {
             eprintln!(
@@ -5449,8 +5411,9 @@ async fn main() -> Result<(), MainError> {
 
     // Debug endpoint for exercising Sentry reporting. Off unless explicitly
     // enabled, and the startup guard refuses to run it in production.
-    if test_endpoints_enabled() {
-        public_routes = public_routes.route("/test/force-error", get(force_error_test));
+    if test_endpoints::enabled() {
+        public_routes =
+            public_routes.route("/test/force-error", get(test_endpoints::force_error_test));
     }
 
     // Background task: reap orphaned builder instances
