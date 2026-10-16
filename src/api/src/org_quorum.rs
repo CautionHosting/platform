@@ -112,6 +112,7 @@ pub struct OrgQuorumMember {
     pub webauthn_uv_credentials: i64,
 }
 
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub async fn list_participants(
     pool: &PgPool,
     org_id: Uuid,
@@ -318,6 +319,7 @@ enum Holder {
     WebAuthn(Vec<String>),
 }
 
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 async fn resolve_holders(
     pool: &PgPool,
     org_id: Uuid,
@@ -580,6 +582,7 @@ fn check_response(
     Ok(())
 }
 
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub async fn generate_org_quorum_bundle(
     pool: &PgPool,
     org_id: Uuid,

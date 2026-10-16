@@ -415,6 +415,7 @@ fn contains_non_line_terminal_control(message: &str) -> bool {
 impl russh::server::Handler for SshSession {
     type Error = SshHandlerError;
 
+    #[tracing::instrument(skip_all)]
     async fn channel_open_session(
         &mut self,
         _channel: Channel<Msg>,
@@ -424,6 +425,7 @@ impl russh::server::Handler for SshSession {
         Ok(true)
     }
 
+    #[tracing::instrument(skip_all, fields(user = %user))]
     async fn auth_publickey(
         &mut self,
         user: &str,
@@ -472,6 +474,7 @@ impl russh::server::Handler for SshSession {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     async fn exec_request(
         &mut self,
         channel: ChannelId,
@@ -583,6 +586,7 @@ impl russh::server::Handler for SshSession {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all)]
     async fn data(
         &mut self,
         channel: ChannelId,
@@ -604,6 +608,7 @@ impl russh::server::Handler for SshSession {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all)]
     async fn channel_eof(
         &mut self,
         channel: ChannelId,
@@ -618,6 +623,7 @@ impl russh::server::Handler for SshSession {
     }
 }
 
+#[tracing::instrument(skip_all)]
 fn parse_git_receive_pack(command: &str) -> Option<String> {
     let parts: Vec<&str> = command.split_whitespace().collect();
     if parts.len() != 2 || parts[0] != "git-receive-pack" {
@@ -635,6 +641,7 @@ fn parse_git_receive_pack(command: &str) -> Option<String> {
     Some(app_id.to_string())
 }
 
+#[tracing::instrument(skip_all)]
 fn ensure_git_repo_exists(repo_path: &str) -> Result<(), EnsureGitRepoExistsError> {
     use std::fs;
     use std::process::Command;
@@ -792,6 +799,7 @@ fn read_pushed_branch_ref(
     }
 }
 
+#[tracing::instrument(skip_all)]
 fn set_repo_head(repo_path: &str, branch: &str) -> Result<(), SetRepoHeadError> {
     use std::process::Command;
     use SetRepoHeadErrorCtx as Ctx;
@@ -820,6 +828,7 @@ fn set_repo_head(repo_path: &str, branch: &str) -> Result<(), SetRepoHeadError> 
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
 fn get_repo_head_branch(
     repo_path: &str,
 ) -> Result<Option<PushedBranchRef>, GetRepoHeadBranchError> {
@@ -868,6 +877,7 @@ fn resource_state_allows_noop_redeploy(state: &str) -> bool {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(skip_all, fields(user_id = %user_id, org_id = %org_id, app_id = %app_id))]
 async fn handle_git_push(
     pool: &PgPool,
     api_service_url: &str,
@@ -1452,6 +1462,7 @@ fn ssh_server_config(host_key: PrivateKey) -> russh::server::Config {
     }
 }
 
+#[tracing::instrument(skip_all, fields(bind_addr = %bind_addr))]
 pub async fn run_ssh_server(
     pool: PgPool,
     api_service_url: String,

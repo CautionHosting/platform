@@ -74,7 +74,7 @@ impl CostExplorerClient {
     }
 
     /// Get total costs for an organization within a date range
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub(crate) async fn get_org_costs(
         &self,
         org_id: &str,
@@ -164,7 +164,7 @@ impl CostExplorerClient {
     }
 
     /// Get costs for all organizations (returns HashMap of org_id -> cost)
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub(crate) async fn get_all_org_costs(
         &self,
         start_date: &str,

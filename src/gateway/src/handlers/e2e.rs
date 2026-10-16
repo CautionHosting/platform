@@ -30,11 +30,11 @@ pub enum E2eLoginError {
 impl IntoResponse for E2eLoginError {
     fn into_response(self) -> Response {
         tracing::error!(?self, "E2E login error");
-        (
+        sentry_middleware::error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "An internal error occurred",
+            self,
         )
-            .into_response()
     }
 }
 

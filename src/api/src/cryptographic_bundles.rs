@@ -90,7 +90,7 @@ pub enum ListQuorumBundlesError {
     },
 }
 
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub async fn list_quorum_bundles(
     pool: &PgPool,
     org_id: Uuid,
@@ -129,7 +129,7 @@ pub enum GetQuorumBundleError {
     },
 }
 
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id, bundle_id = %bundle_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id, bundle_id = %bundle_id))]
 pub async fn get_quorum_bundle(
     pool: &PgPool,
     org_id: Uuid,
@@ -168,7 +168,7 @@ pub enum CreateQuorumBundleError {
     },
 }
 
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub async fn create_quorum_bundle(
     pool: &PgPool,
     org_id: Uuid,
@@ -209,7 +209,7 @@ pub enum UpdateQuorumBundleError {
     },
 }
 
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id, bundle_id = %bundle_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id, bundle_id = %bundle_id))]
 pub async fn update_quorum_bundle(
     pool: &PgPool,
     org_id: Uuid,
@@ -253,7 +253,7 @@ pub enum DeleteQuorumBundleError {
     },
 }
 
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id, bundle_id = %bundle_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id, bundle_id = %bundle_id))]
 pub async fn delete_quorum_bundle(
     pool: &PgPool,
     org_id: Uuid,
@@ -286,7 +286,7 @@ pub enum ListSecretsBundlesError {
     },
 }
 
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub async fn list_secrets_bundles(
     pool: &PgPool,
     org_id: Uuid,
@@ -321,7 +321,7 @@ pub enum GetSecretsBundleError {
     },
 }
 
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id, bundle_id = %bundle_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id, bundle_id = %bundle_id))]
 pub async fn get_secrets_bundle(
     pool: &PgPool,
     org_id: Uuid,
@@ -356,7 +356,7 @@ pub enum CreateSecretsBundleError {
     },
 }
 
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub async fn create_secrets_bundle(
     pool: &PgPool,
     org_id: Uuid,
@@ -394,7 +394,7 @@ pub enum UpdateSecretsBundleError {
     },
 }
 
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id, bundle_id = %bundle_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id, bundle_id = %bundle_id))]
 pub async fn update_secrets_bundle(
     pool: &PgPool,
     org_id: Uuid,
@@ -432,7 +432,7 @@ pub enum DeleteSecretsBundleError {
     },
 }
 
-#[tracing::instrument(skip_all, err, fields(org_id = %org_id, bundle_id = %bundle_id))]
+#[tracing::instrument(skip_all, fields(org_id = %org_id, bundle_id = %bundle_id))]
 pub async fn delete_secrets_bundle(
     pool: &PgPool,
     org_id: Uuid,

@@ -18,6 +18,7 @@ fn rejected(message: &'static str) -> OrgQuorumError {
     OrgQuorumError::new(StatusCode::BAD_GATEWAY, message)
 }
 
+#[tracing::instrument(skip_all)]
 pub(super) async fn derive(
     client: &reqwest::Client,
     org_id: Uuid,
@@ -65,6 +66,7 @@ fn bundle_hash(data: &PublicCertificateBundle) -> Result<Vec<u8>, OrgQuorumError
     Ok(Sha256::digest(bytes).to_vec())
 }
 
+#[tracing::instrument(skip_all)]
 fn verify_proof(
     response: &PublicCertificateResponse,
     policy: &KeymakerPcrPolicy,
@@ -146,6 +148,7 @@ fn verify_certificates(
 
 // Keep admission eligibility separate from authenticated proof time. Production
 // uses the wall clock (None); historical contract fixtures provide a fixed clock.
+#[tracing::instrument(skip_all)]
 fn verify_certificates_with_eligibility_time(
     data: PublicCertificateBundle,
     organization_id: [u8; 16],

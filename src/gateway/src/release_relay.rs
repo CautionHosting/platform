@@ -140,6 +140,7 @@ fn verified_request(
     ))
 }
 
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn begin(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -212,6 +213,8 @@ pub async fn begin(
         json!({"token":token,"url":format!("{}/qr-release#{}",crate::handlers::get_rp_origin(),browser),"metadata":metadata}),
     ))
 }
+
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn read(Json(token): Json<Token>) -> Result<Json<Value>, StatusCode> {
     let pending = store()
         .lock()
@@ -222,6 +225,8 @@ pub async fn read(Json(token): Json<Token>) -> Result<Json<Value>, StatusCode> {
         .ok_or(StatusCode::GONE)?;
     Ok(Json(p.request.clone()))
 }
+
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn finish(Json(finish): Json<Finish>) -> Result<Json<Value>, StatusCode> {
     let mut pending = store()
         .lock()
@@ -236,6 +241,8 @@ pub async fn finish(Json(finish): Json<Finish>) -> Result<Json<Value>, StatusCod
     });
     Ok(Json(json!({"status":"relayed"})))
 }
+
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn status(Json(token): Json<Token>) -> Result<Json<Value>, StatusCode> {
     let mut pending = store()
         .lock()
@@ -250,6 +257,8 @@ pub async fn status(Json(token): Json<Token>) -> Result<Json<Value>, StatusCode>
     }
     Ok(Json(json!({"status":"pending"})))
 }
+
+#[tracing::instrument(skip_all)]
 pub async fn cancel(Json(token): Json<Token>) -> StatusCode {
     if let Ok(mut pending) = store().lock() {
         pending.remove(&token.token);

@@ -31,6 +31,7 @@ pub struct FinishResponse {
     uv_verified: bool,
 }
 
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %user_id, credential_id = %id))]
 pub async fn begin_recovery_verification(
     State(state): State<AppState>,
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
@@ -106,6 +107,7 @@ fn verify_assertion(
     Ok(result)
 }
 
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %user_id, credential_id = %id))]
 pub async fn finish_recovery_verification(
     State(state): State<AppState>,
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,

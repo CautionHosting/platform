@@ -1098,7 +1098,10 @@ mod tests {
     fn extract_resource_id_from_git_url_rejects_unsupported_formats() {
         let uuid = "550e8400-e29b-41d4-a716-446655440000";
         assert_eq!(
-            extract_resource_id_from_git_url(&format!("https://git.caution.co/public/{}.git", uuid)),
+            extract_resource_id_from_git_url(&format!(
+                "https://git.caution.co/public/{}.git",
+                uuid
+            )),
             None
         );
         assert_eq!(

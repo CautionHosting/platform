@@ -144,6 +144,7 @@ pub fn validate_explicit_containerfile_path(
     Ok(containerfile.to_string())
 }
 
+#[tracing::instrument(skip_all)]
 fn resolve_build_command_with_selected_containerfile(
     build_command: Option<&str>,
     containerfile: Option<&str>,
@@ -291,8 +292,12 @@ pub async fn build_user_image(
             }
         });
         let mut command = Command::new("docker");
-        command.args(["build", "--platform", "linux/amd64"])
-            .args(["-f", containerfile, "-t", image_tag]);
+        command.args(["build", "--platform", "linux/amd64"]).args([
+            "-f",
+            containerfile,
+            "-t",
+            image_tag,
+        ]);
         if config.no_cache {
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

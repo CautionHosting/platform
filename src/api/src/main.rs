@@ -219,7 +219,7 @@ pub(crate) enum CheckOrgAccessError {
     Forbidden { location: Location },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn check_org_access(
     db: &PgPool,
     user_id: Uuid,
@@ -267,7 +267,7 @@ pub(crate) enum GetUserPrimaryOrgError {
     NotFound { location: Location },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn get_user_primary_org(
     db: &PgPool,
     user_id: Uuid,
@@ -328,7 +328,7 @@ pub(crate) enum GetOrCreateProviderAccountError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn get_or_create_provider_account(
     db: &PgPool,
     org_id: Uuid,
@@ -422,7 +422,7 @@ pub(crate) enum GetOrCreateResourceTypeError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn get_or_create_resource_type(
     db: &PgPool,
 ) -> Result<Uuid, GetOrCreateResourceTypeError> {
@@ -463,6 +463,7 @@ async fn health_check() -> impl IntoResponse {
 
 const PLATFORM_REPO: &str = "https://git.caution.co/public/platform.git";
 
+#[tracing::instrument(skip_all)]
 async fn build_inputs() -> impl IntoResponse {
     #[derive(serde::Serialize)]
     struct BuildInputs {
@@ -555,7 +556,7 @@ impl WaitForHealthError {
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn wait_for_health(
     public_ip: &str,
     timeout_secs: u64,
@@ -705,7 +706,7 @@ mod deployment_health_tests {
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn wait_for_attestation_health(
     public_ip: &str,
     timeout_secs: u64,
@@ -784,7 +785,7 @@ pub(crate) enum GetCommitShaError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn get_commit_sha(
     app_name: &str,
     branch: &str,
@@ -829,7 +830,7 @@ pub(crate) enum SelectDeployCommitShaError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn select_deploy_commit_sha(
     branch: &str,
     resolved_commit_sha: &str,
@@ -882,11 +883,11 @@ impl IntoResponse for ListCloudCredentialsError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 async fn list_cloud_credentials(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -941,11 +942,11 @@ impl IntoResponse for CreateCloudCredentialError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 async fn create_cloud_credential(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1011,11 +1012,11 @@ impl IntoResponse for GetCloudCredentialError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(credential_id = %credential_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(credential_id = %credential_id))]
 async fn get_cloud_credential(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1078,11 +1079,11 @@ impl IntoResponse for DeleteCloudCredentialError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(credential_id = %credential_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(credential_id = %credential_id))]
 async fn delete_cloud_credential(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1148,11 +1149,11 @@ impl IntoResponse for SetDefaultCloudCredentialError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(credential_id = %credential_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(credential_id = %credential_id))]
 async fn set_default_cloud_credential(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1209,11 +1210,11 @@ impl IntoResponse for ListQuorumBundlesError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 async fn list_quorum_bundles(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1230,7 +1231,7 @@ async fn list_quorum_bundles(
     Ok(Json(items))
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 async fn create_quorum_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1253,6 +1254,7 @@ async fn create_quorum_bundle(
     Ok(Json(bundle))
 }
 
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 async fn create_org_user_quorum_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1269,6 +1271,7 @@ async fn create_org_user_quorum_bundle(
     ))
 }
 
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 async fn list_org_quorum_participants(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1321,11 +1324,11 @@ impl IntoResponse for GetQuorumBundleError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(bundle_id = %id))]
+#[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 async fn get_quorum_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1348,7 +1351,7 @@ async fn get_quorum_bundle(
     Ok(Json(bundle))
 }
 
-#[tracing::instrument(skip_all, err, fields(bundle_id = %id))]
+#[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 async fn update_quorum_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1415,11 +1418,11 @@ impl IntoResponse for DeleteQuorumBundleError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(bundle_id = %id))]
+#[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 async fn delete_quorum_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1476,11 +1479,11 @@ impl IntoResponse for ListSecretsBundlesError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 async fn list_secrets_bundles(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1528,11 +1531,11 @@ impl IntoResponse for CreateSecretsBundleError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 async fn create_secrets_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1587,11 +1590,11 @@ impl IntoResponse for GetSecretsBundleError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(bundle_id = %id))]
+#[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 async fn get_secrets_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1651,11 +1654,11 @@ impl IntoResponse for UpdateSecretsBundleError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(bundle_id = %id))]
+#[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 async fn update_secrets_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1716,11 +1719,11 @@ impl IntoResponse for DeleteSecretsBundleError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(bundle_id = %id))]
+#[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 async fn delete_secrets_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1893,14 +1896,14 @@ impl IntoResponse for CreateManagedOnpremResourceError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
 /// Create or update a managed on-prem resource.
 /// Accepts either plain JSON or GPG-encrypted config from the setup script.
 /// If resource_id is provided, updates the existing resource; otherwise creates a new one.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 async fn create_managed_onprem_resource(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -2157,7 +2160,7 @@ pub(crate) enum RecoverDeployFailureError {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn recover_deploy_failure(
     state: &Arc<AppState>,
     org_id: Uuid,
@@ -2223,7 +2226,7 @@ pub(crate) enum RestorePendingDeployRejectionError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn restore_pending_deploy_rejection(
     state: &Arc<AppState>,
     org_id: Uuid,
@@ -2403,7 +2406,7 @@ pub(crate) enum ResolveBuilderTargetError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn resolve_builder_target(
     default_config: &builder::BuilderConfig,
     managed_onprem: Option<&deployment::ManagedOnPremConfig>,
@@ -2497,11 +2500,11 @@ impl IntoResponse for GetBuilderConfigError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 async fn get_builder_config(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -2578,11 +2581,11 @@ impl IntoResponse for SetBuilderConfigError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 async fn set_builder_config(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -3142,19 +3145,35 @@ async fn deploy_handler(
     Extension(auth): Extension<AuthContext>,
     validated_types::Validated(req): validated_types::Validated<DeployRequest>,
 ) -> Response {
+    use sentry_middleware::{REQUEST_ID, capture_error_with_breadcrumbs, drain_breadcrumbs};
+
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
     let deploy_attempt_id = Uuid::new_v4();
+
+    // Capture the request ID and any breadcrumbs accumulated so far (pre-spawn
+    // phase: auth, validation, handler setup). We remove them from the shared
+    // map so SentryService's later drain is a no-op.
+    let request_id = REQUEST_ID.get();
+    let pre_spawn_breadcrumbs = drain_breadcrumbs(&request_id);
 
     // Spawn the deploy logic in a separate task
     let db_for_recovery = state.db.clone();
     let app_id_for_recovery = req.app_id;
     let org_id_for_recovery = req.org_id;
     tokio::spawn(async move {
-        let result = deploy_logic(state, auth, req, deploy_attempt_id, tx.clone()).await;
+        // Set REQUEST_ID so tracing events during the deploy phase are
+        // collected into the BREADCRUMBS map by RequestBreadcrumbLayer.
+        let result = REQUEST_ID
+            .scope(request_id, async {
+                deploy_logic(state, auth, req, deploy_attempt_id, tx.clone()).await
+            })
+            .await;
 
-        // Send final result as JSON
         match result {
             Ok(response) => {
+                // Clean up post-spawn breadcrumbs (no error to report).
+                drain_breadcrumbs(&request_id);
+
                 let json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
                 let _ = tx.send(Ok(bytes::Bytes::from(format!("{}\n", json)))).await;
             }
@@ -3176,6 +3195,13 @@ async fn deploy_handler(
                 {
                     tracing::error!("Failed to reset resource state after deploy error: {}", e);
                 }
+
+                // Collect all breadcrumbs (pre-spawn + post-spawn) and report
+                // the failure to Sentry with an isolated hub.
+                let post_spawn = drain_breadcrumbs(&request_id);
+                let mut all_breadcrumbs = pre_spawn_breadcrumbs;
+                all_breadcrumbs.extend(post_spawn);
+                capture_error_with_breadcrumbs(&error, all_breadcrumbs);
 
                 let (status, msg) = error.client_response();
                 let _ = tx.send(Ok(milestone_error(msg))).await;
@@ -3220,7 +3246,7 @@ pub(crate) enum RepoHasFileAtCommitError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn repo_has_file_at_commit(
     git_dir: &str,
     commit_sha: &str,
@@ -3291,7 +3317,7 @@ pub(crate) enum ResolveContainerfileForDeployError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn validate_explicit_containerfile_for_deploy(
     git_dir: &str,
     commit_sha: &str,
@@ -3360,7 +3386,7 @@ pub(crate) enum LoadBuildConfigForDeployError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn load_build_config_for_deploy(
     git_dir: &str,
     commit_sha: &str,
@@ -3420,7 +3446,7 @@ async fn load_build_config_for_deploy(
     Ok((procfile_content, config_file))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn resolve_containerfile_for_deploy(
     git_dir: &str,
     commit_sha: &str,
@@ -4831,6 +4857,7 @@ async fn deploy_logic(
 
 /// A deploy runs in a spawned task, so an API restart abandons its `pending`
 /// row. The API is a single process: at startup no deploy can be in flight.
+#[tracing::instrument(skip_all)]
 async fn reset_abandoned_pending_deploys(db: &PgPool) {
     match sqlx::query_scalar::<_, Uuid>(
         "UPDATE compute_resources
@@ -4852,6 +4879,7 @@ async fn reset_abandoned_pending_deploys(db: &PgPool) {
     }
 }
 
+#[tracing::instrument(skip_all)]
 async fn reconcile_terminating_resources(state: Arc<AppState>) {
     use futures::{StreamExt, stream};
 
@@ -4881,6 +4909,7 @@ async fn reconcile_terminating_resources(state: Arc<AppState>) {
         .await;
 }
 
+#[tracing::instrument(skip_all)]
 async fn reconcile_managed_dns(state: Arc<AppState>, managed_dns: managed_dns::ManagedDns) {
     use futures::{StreamExt, stream};
 
@@ -4979,7 +5008,19 @@ pub(crate) enum MainError {
 #[tokio::main]
 async fn main() -> Result<(), MainError> {
     use MainErrorCtx as Ctx;
-    tracing_subscriber::fmt::init();
+    use tracing_subscriber::prelude::*;
+
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "api=info".into()),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        // .with(sentry_middleware::sentry_tracing_layer())  -- enable for performance traces
+        .with(sentry_middleware::RequestBreadcrumbLayer::new())
+        .init();
+
+    let _sentry_guard = sentry_middleware::init_from_env();
 
     #[cfg(feature = "e2e-testing-unsafe")]
     {
@@ -5380,6 +5421,7 @@ async fn main() -> Result<(), MainError> {
         .merge(resource_routes)
         .merge(internal_routes)
         .merge(public_routes)
+        .layer(sentry_middleware::SentryLayer)
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 

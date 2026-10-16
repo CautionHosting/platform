@@ -87,6 +87,7 @@ impl RateLimiter {
         entry.0 <= self.max_requests
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn cleanup_task(self) {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
@@ -103,6 +104,7 @@ impl RateLimiter {
     }
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn rate_limit_middleware(
     State(rate_limiter): State<RateLimiter>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
