@@ -162,9 +162,7 @@ impl IntoResponse for PasskeyError {
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many pending passkey registrations. Please try again later.",
             ),
-            Self::CredentialNotFound { .. } => {
-                (StatusCode::NOT_FOUND, "Passkey not found.")
-            }
+            Self::CredentialNotFound { .. } => (StatusCode::NOT_FOUND, "Passkey not found."),
             Self::LastCredential { .. } => (
                 StatusCode::CONFLICT,
                 "You must keep at least one passkey on your account.",
@@ -173,9 +171,7 @@ impl IntoResponse for PasskeyError {
                 StatusCode::CONFLICT,
                 "This passkey is already on your account.",
             ),
-            Self::BadRequest { .. } => {
-                (StatusCode::BAD_REQUEST, "Invalid passkey request.")
-            }
+            Self::BadRequest { .. } => (StatusCode::BAD_REQUEST, "Invalid passkey request."),
             Self::Forbidden { .. } => (
                 StatusCode::FORBIDDEN,
                 "Passkey registration does not belong to this session.",
@@ -232,7 +228,7 @@ fn get_session_id_from_headers(headers: &HeaderMap) -> Option<String> {
         .or_else(|| crate::csrf::get_cookie(headers, "caution_session"))
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn list_passkeys_handler(
     State(state): State<AppState>,
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
@@ -302,7 +298,7 @@ pub async fn list_passkeys_handler(
     Ok(Json(passkeys))
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn begin_add_passkey_handler(
     State(state): State<AppState>,
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
@@ -375,7 +371,7 @@ pub async fn begin_add_passkey_handler(
     }))
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn finish_add_passkey_handler(
     State(state): State<AppState>,
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
@@ -479,7 +475,7 @@ pub async fn finish_add_passkey_handler(
     }))
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn delete_passkey_handler(
     State(state): State<AppState>,
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,

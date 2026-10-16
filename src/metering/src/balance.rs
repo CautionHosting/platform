@@ -114,6 +114,7 @@ pub(crate) async fn check_balance_thresholds(
 }
 
 /// Suspend only fully-managed resources for an org (not managed on-prem).
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub(crate) async fn suspend_fully_managed_org(state: &AppState, org_id: uuid::Uuid) {
     // Set credit_suspended_at
     if let Err(e) = sqlx::query(

@@ -463,6 +463,7 @@ async fn health_check() -> impl IntoResponse {
 
 const PLATFORM_REPO: &str = "https://git.caution.co/public/platform.git";
 
+#[tracing::instrument(skip_all)]
 async fn build_inputs() -> impl IntoResponse {
     #[derive(serde::Serialize)]
     struct BuildInputs {
@@ -886,7 +887,7 @@ impl IntoResponse for ListCloudCredentialsError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 async fn list_cloud_credentials(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -945,7 +946,7 @@ impl IntoResponse for CreateCloudCredentialError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 async fn create_cloud_credential(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1015,7 +1016,7 @@ impl IntoResponse for GetCloudCredentialError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(credential_id = %credential_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(credential_id = %credential_id))]
 async fn get_cloud_credential(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1082,7 +1083,7 @@ impl IntoResponse for DeleteCloudCredentialError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(credential_id = %credential_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(credential_id = %credential_id))]
 async fn delete_cloud_credential(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1152,7 +1153,7 @@ impl IntoResponse for SetDefaultCloudCredentialError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(credential_id = %credential_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(credential_id = %credential_id))]
 async fn set_default_cloud_credential(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1213,7 +1214,7 @@ impl IntoResponse for ListQuorumBundlesError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 async fn list_quorum_bundles(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1230,7 +1231,7 @@ async fn list_quorum_bundles(
     Ok(Json(items))
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 async fn create_quorum_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1253,6 +1254,7 @@ async fn create_quorum_bundle(
     Ok(Json(bundle))
 }
 
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 async fn create_org_user_quorum_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1269,6 +1271,7 @@ async fn create_org_user_quorum_bundle(
     ))
 }
 
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 async fn list_org_quorum_participants(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1325,7 +1328,7 @@ impl IntoResponse for GetQuorumBundleError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(bundle_id = %id))]
+#[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 async fn get_quorum_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1348,7 +1351,7 @@ async fn get_quorum_bundle(
     Ok(Json(bundle))
 }
 
-#[tracing::instrument(skip_all, fields(bundle_id = %id))]
+#[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 async fn update_quorum_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1419,7 +1422,7 @@ impl IntoResponse for DeleteQuorumBundleError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(bundle_id = %id))]
+#[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 async fn delete_quorum_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1480,7 +1483,7 @@ impl IntoResponse for ListSecretsBundlesError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 async fn list_secrets_bundles(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1532,7 +1535,7 @@ impl IntoResponse for CreateSecretsBundleError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 async fn create_secrets_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1591,7 +1594,7 @@ impl IntoResponse for GetSecretsBundleError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(bundle_id = %id))]
+#[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 async fn get_secrets_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1655,7 +1658,7 @@ impl IntoResponse for UpdateSecretsBundleError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(bundle_id = %id))]
+#[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 async fn update_secrets_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1720,7 +1723,7 @@ impl IntoResponse for DeleteSecretsBundleError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(bundle_id = %id))]
+#[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 async fn delete_secrets_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1900,7 +1903,7 @@ impl IntoResponse for CreateManagedOnpremResourceError {
 /// Create or update a managed on-prem resource.
 /// Accepts either plain JSON or GPG-encrypted config from the setup script.
 /// If resource_id is provided, updates the existing resource; otherwise creates a new one.
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 async fn create_managed_onprem_resource(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -2501,7 +2504,7 @@ impl IntoResponse for GetBuilderConfigError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(resource_id = %resource_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 async fn get_builder_config(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -2582,7 +2585,7 @@ impl IntoResponse for SetBuilderConfigError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(resource_id = %resource_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 async fn set_builder_config(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -3142,7 +3145,7 @@ async fn deploy_handler(
     Extension(auth): Extension<AuthContext>,
     validated_types::Validated(req): validated_types::Validated<DeployRequest>,
 ) -> Response {
-    use sentry_middleware::{capture_error_with_breadcrumbs, drain_breadcrumbs, REQUEST_ID};
+    use sentry_middleware::{REQUEST_ID, capture_error_with_breadcrumbs, drain_breadcrumbs};
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
     let deploy_attempt_id = Uuid::new_v4();
@@ -4854,6 +4857,7 @@ async fn deploy_logic(
 
 /// A deploy runs in a spawned task, so an API restart abandons its `pending`
 /// row. The API is a single process: at startup no deploy can be in flight.
+#[tracing::instrument(skip_all)]
 async fn reset_abandoned_pending_deploys(db: &PgPool) {
     match sqlx::query_scalar::<_, Uuid>(
         "UPDATE compute_resources
@@ -4875,6 +4879,7 @@ async fn reset_abandoned_pending_deploys(db: &PgPool) {
     }
 }
 
+#[tracing::instrument(skip_all)]
 async fn reconcile_terminating_resources(state: Arc<AppState>) {
     use futures::{StreamExt, stream};
 
@@ -4904,6 +4909,7 @@ async fn reconcile_terminating_resources(state: Arc<AppState>) {
         .await;
 }
 
+#[tracing::instrument(skip_all)]
 async fn reconcile_managed_dns(state: Arc<AppState>, managed_dns: managed_dns::ManagedDns) {
     use futures::{StreamExt, stream};
 

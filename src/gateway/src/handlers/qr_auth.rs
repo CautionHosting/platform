@@ -234,7 +234,10 @@ impl IntoResponse for QrLoginFinishError {
                     tracing::warn!(?self, "QR login finish: credential lookup/parse failure");
                 }
                 Self::IdentifyDiscoverableCredential { .. } => {
-                    tracing::error!(?self, "QR login finish: could not identify discoverable credential");
+                    tracing::error!(
+                        ?self,
+                        "QR login finish: could not identify discoverable credential"
+                    );
                 }
                 Self::FinishSecurityKeyAuthentication { .. }
                 | Self::FinishDiscoverableAuthentication { .. } => {
@@ -510,7 +513,7 @@ pub(crate) fn get_rp_origin() -> String {
         .to_string()
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn begin_sign_request_handler(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -553,7 +556,7 @@ fn qr_login_url(requestee_token: &str) -> String {
     qr_login_url_for_origin(&get_rp_origin(), requestee_token)
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn qr_login_begin_handler(
     State(state): State<AppState>,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
@@ -597,7 +600,7 @@ pub async fn qr_login_begin_handler(
     }))
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn qr_login_status_handler(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<QrLoginStatusQuery>,
@@ -680,7 +683,7 @@ pub async fn qr_login_status_handler(
     }))
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn qr_login_authenticate_handler(
     State(state): State<AppState>,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
@@ -771,7 +774,7 @@ pub async fn qr_login_authenticate_handler(
     }))
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn qr_login_authenticate_finish_handler(
     State(state): State<AppState>,
     Json(req): Json<crate::types::QrLoginAuthenticateFinishRequest>,
@@ -1134,7 +1137,7 @@ pub struct QrSignStatusQuery {
     pub token: String,
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn qr_sign_begin_handler(
     State(state): State<AppState>,
     connect_info: ConnectInfo<std::net::SocketAddr>,
@@ -1186,7 +1189,7 @@ pub async fn qr_sign_begin_handler(
     }))
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn qr_sign_status_handler(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<QrSignStatusQuery>,
@@ -1230,7 +1233,7 @@ pub async fn qr_sign_status_handler(
     }))
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn qr_sign_authenticate_handler(
     State(state): State<AppState>,
     connect_info: ConnectInfo<std::net::SocketAddr>,
@@ -1281,7 +1284,7 @@ pub async fn qr_sign_authenticate_handler(
     }))
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn qr_sign_authenticate_finish_handler(
     State(state): State<AppState>,
     Json(req): Json<crate::types::QrSignAuthenticateFinishRequest>,

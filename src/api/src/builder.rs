@@ -1716,6 +1716,7 @@ echo "Build complete: $EIF_SHA256 ($EIF_SIZE bytes)"
 /// Bill a user for builder instance time. Used as a fallback by the orphan reaper
 /// when real-time metering via tracked_resources was not active for the build.
 #[allow(clippy::too_many_arguments)]
+#[tracing::instrument(skip_all)]
 async fn bill_builder_usage(
     db: &PgPool,
     build_id: Uuid,
@@ -1781,6 +1782,7 @@ async fn bill_builder_usage(
     );
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn reap_orphaned_builders(
     db: &PgPool,
     ec2: &Ec2Client,
@@ -1956,6 +1958,7 @@ fn attached_to_active_org(tags: &HashMap<String, String>, active_orgs: &HashSet<
 /// are left for [`reap_orphaned_builders`]: terminating them here would
 /// strand the `eif_builds` row in `building` and wedge the app's build slot
 /// until the timeout reaper runs.
+#[tracing::instrument(skip_all)]
 pub async fn reap_unattributed_builders(db: &PgPool, ec2: &Ec2Client) {
     let active_orgs: HashSet<Uuid> =
         match sqlx::query_scalar("SELECT id FROM organizations WHERE is_active = true")

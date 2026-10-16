@@ -21,7 +21,7 @@ use super::super::{
 };
 use dterror::ResultExt;
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn begin_register_handler(
     State(state): State<AppState>,
     Json(req): Json<crate::types::RegisterBeginRequest>,
@@ -108,7 +108,7 @@ pub(crate) async fn begin_registration_challenge(
     }))
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub(crate) async fn finish_register_handler(
     State(state): State<AppState>,
     connect_info: ConnectInfo<std::net::SocketAddr>,

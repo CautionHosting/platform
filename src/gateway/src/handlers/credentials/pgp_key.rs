@@ -133,7 +133,7 @@ impl IntoResponse for AddPgpKeyError {
     }
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn add_pgp_key_handler(
     State(state): State<AppState>,
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
@@ -214,7 +214,7 @@ impl IntoResponse for ListPgpKeysError {
     }
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn list_pgp_keys_handler(
     State(state): State<AppState>,
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
@@ -255,9 +255,7 @@ pub enum RemovePgpKeyHandlerError {
 impl IntoResponse for RemovePgpKeyHandlerError {
     fn into_response(self) -> Response {
         let (status, body) = match &self {
-            Self::NotFound { .. } => {
-                (StatusCode::NOT_FOUND, "PGP public key not found")
-            }
+            Self::NotFound { .. } => (StatusCode::NOT_FOUND, "PGP public key not found"),
             Self::MissingSignedRequestAudit { .. } | Self::Database { .. } => {
                 tracing::error!(?self, "Failed to remove PGP public key");
                 (
@@ -270,7 +268,7 @@ impl IntoResponse for RemovePgpKeyHandlerError {
     }
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn remove_pgp_key_handler(
     State(state): State<AppState>,
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,

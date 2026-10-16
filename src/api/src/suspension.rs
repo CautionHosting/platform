@@ -87,7 +87,7 @@ impl IntoResponse for SuspendManagedResourcesError {
 /// Internal endpoint: suspend only fully-managed resources for an org (credit exhaustion).
 /// Unlike suspend_org_resources which suspends ALL resources, this only suspends resources
 /// that are NOT managed on-prem — credit exhaustion should not affect BYOC deployments.
-#[tracing::instrument(skip_all, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn suspend_managed_resources(
     State(state): State<Arc<AppState>>,
     Path(org_id): Path<Uuid>,
@@ -208,7 +208,7 @@ impl IntoResponse for SuspendOrgResourcesError {
 
 /// Internal endpoint: suspend all running resources for an org (stop EC2 instances).
 /// Called by the metering service during dunning enforcement.
-#[tracing::instrument(skip_all, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn suspend_org_resources(
     State(state): State<Arc<AppState>>,
     Path(org_id): Path<Uuid>,
@@ -334,7 +334,7 @@ impl IntoResponse for UnsuspendOrgResourcesError {
 
 /// Internal endpoint: unsuspend org — restart stopped resources and clear dunning state.
 /// Called when payment is resolved (credit deposit, new payment method, etc).
-#[tracing::instrument(skip_all, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn unsuspend_org_resources(
     State(state): State<Arc<AppState>>,
     Path(org_id): Path<Uuid>,

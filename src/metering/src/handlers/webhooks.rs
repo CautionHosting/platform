@@ -91,7 +91,7 @@ impl IntoResponse for PaddleWebhookError {
 }
 
 /// Handle incoming Paddle webhooks
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn paddle_webhook_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

@@ -79,6 +79,7 @@ struct Cache {
     snapshot: Snapshot,
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn snapshot() -> Snapshot {
     static CACHE: OnceLock<Arc<Mutex<Cache>>> = OnceLock::new();
     let cache = CACHE
@@ -107,6 +108,7 @@ where
     state.snapshot.clone()
 }
 
+#[tracing::instrument(skip_all)]
 async fn refresh() -> Vec<Service> {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -194,6 +196,7 @@ async fn fetch(request: reqwest::RequestBuilder, limit: usize) -> Result<Value, 
     .map_err(|_| failure("Request timed out"))?
 }
 
+#[tracing::instrument(skip_all, fields(service = %name))]
 async fn observe(
     client: Option<&reqwest::Client>,
     id: &'static str,

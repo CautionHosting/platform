@@ -252,6 +252,7 @@ async fn close_open_subscription_segment(
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn get_subscription_tiers(
     State(state): State<Arc<AppState>>,
     Extension(_auth): Extension<AuthContext>,
@@ -309,7 +310,7 @@ impl IntoResponse for GetSubscriptionError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn get_subscription(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -487,7 +488,7 @@ impl IntoResponse for CheckoutSubscriptionError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn checkout_subscription(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -696,7 +697,7 @@ async fn perform_checkout(
     })))
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn subscribe(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1039,7 +1040,7 @@ async fn change_paddle_subscription(
     })))
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn change_subscription_tier(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1283,7 +1284,7 @@ impl IntoResponse for CancelSubscriptionError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn cancel_subscription(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,

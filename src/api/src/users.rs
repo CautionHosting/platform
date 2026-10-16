@@ -72,7 +72,7 @@ impl IntoResponse for GetCurrentUserError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn get_current_user(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -149,7 +149,7 @@ impl IntoResponse for UpdateCurrentUserError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn update_current_user(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -361,7 +361,7 @@ impl IntoResponse for DeleteCurrentUserError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn delete_current_user(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,

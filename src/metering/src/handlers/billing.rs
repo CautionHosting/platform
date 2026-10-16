@@ -517,7 +517,7 @@ async fn run_subscription_maintenance_inner(
 }
 
 /// Manually trigger monthly billing (for testing or catch-up)
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn trigger_monthly_billing(
     State(state): State<Arc<AppState>>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), TriggerMonthlyBillingError> {
@@ -548,7 +548,7 @@ pub async fn trigger_monthly_billing(
 // =============================================================================
 
 /// Get billing estimate for an org - current spend + projected end-of-month
-#[tracing::instrument(skip_all, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn get_billing_estimate(
     Path(org_id): Path<String>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), GetBillingEstimateError> {

@@ -35,7 +35,7 @@ impl IntoResponse for GetUserUsageError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %user_id))]
 pub(crate) async fn get_user_usage(
     State(state): State<Arc<AppState>>,
     Path(user_id): Path<uuid::Uuid>,

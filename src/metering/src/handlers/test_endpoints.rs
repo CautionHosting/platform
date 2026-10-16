@@ -36,7 +36,9 @@ impl IntoResponse for TestSimulateUsageError {
                 tracing::error!(?self, "test simulate usage: no pricing");
                 (
                     StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": "no pricing configured for this resource type"})),
+                    Json(
+                        serde_json::json!({"error": "no pricing configured for this resource type"}),
+                    ),
                 )
             }
             Self::Database { .. } => {
@@ -83,7 +85,7 @@ pub(crate) struct TestSimulateUsageRequest {
 }
 
 /// Simulate resource usage for testing the billing pipeline
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub(crate) async fn test_simulate_usage(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TestSimulateUsageRequest>,
@@ -180,7 +182,7 @@ pub(crate) struct TestSimulatePaddleTransactionRequest {
 }
 
 /// Simulate a Paddle transaction webhook for testing email and billing flow
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub(crate) async fn test_simulate_paddle_transaction(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TestSimulatePaddleTransactionRequest>,

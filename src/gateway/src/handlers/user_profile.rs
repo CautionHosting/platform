@@ -66,9 +66,7 @@ impl IntoResponse for UsernameClaimError {
                 StatusCode::BAD_REQUEST,
                 "The requested username is invalid.",
             ),
-            Self::UsernameTaken { .. } => {
-                (StatusCode::CONFLICT, "This username is already taken.")
-            }
+            Self::UsernameTaken { .. } => (StatusCode::CONFLICT, "This username is already taken."),
             Self::AlreadyClaimed { .. } => {
                 (StatusCode::CONFLICT, "You have already set your username.")
             }
@@ -87,7 +85,7 @@ impl IntoResponse for UsernameClaimError {
 /// Returns the authenticated user's current username and whether it is
 /// still the auto-generated placeholder assigned at signup. Used by the
 /// dashboard to decide whether to show the one-time username claim prompt.
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn get_username_status_handler(
     State(state): State<AppState>,
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
@@ -108,7 +106,7 @@ pub async fn get_username_status_handler(
 /// real, immutable username exactly once. Subsequent attempts fail with
 /// `AlreadyClaimed` since `db::claim_username` only updates rows that are
 /// still marked as a placeholder.
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn claim_username_handler(
     State(state): State<AppState>,
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,

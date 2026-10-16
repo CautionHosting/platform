@@ -58,10 +58,7 @@ pub enum BackendUnreachable {
 /// Sentry layer reports it. The client-visible body is fixed and identical to
 /// the previous plain `(StatusCode::BAD_GATEWAY, msg)` response.
 fn backend_unavailable_response(error: BackendUnreachable, message: &'static str) -> Response {
-    sentry_middleware::attach(
-        (StatusCode::BAD_GATEWAY, message).into_response(),
-        error,
-    )
+    sentry_middleware::attach((StatusCode::BAD_GATEWAY, message).into_response(), error)
 }
 
 #[tracing::instrument(skip_all)]
@@ -128,7 +125,7 @@ fn is_internal_api_target(target_url: &reqwest::Url) -> bool {
 }
 
 /// Proxy webhooks to the metering service (no auth — verified by signature)
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 #[allow(clippy::result_large_err)]
 pub async fn metering_proxy_handler(
     State(state): State<AppState>,
@@ -209,7 +206,7 @@ pub async fn metering_proxy_handler(
     })
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 #[allow(clippy::result_large_err)]
 pub async fn proxy_handler(
     State(state): State<AppState>,

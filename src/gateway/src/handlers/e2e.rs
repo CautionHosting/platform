@@ -38,7 +38,7 @@ impl IntoResponse for E2eLoginError {
     }
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn e2e_login_handler(State(state): State<AppState>) -> Result<Response, E2eLoginError> {
     use E2eLoginErrorCtx as Ctx;
 

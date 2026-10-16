@@ -128,7 +128,7 @@ impl IntoResponse for GetUserStatusError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn get_user_status(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -219,7 +219,7 @@ impl IntoResponse for SendVerificationEmailError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn send_verification_email(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -367,7 +367,7 @@ impl IntoResponse for VerifyEmailError {
     }
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn verify_email(
     State(state): State<Arc<AppState>>,
     Query(params): Query<VerifyEmailQuery>,

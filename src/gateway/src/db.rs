@@ -151,6 +151,7 @@ pub fn generate_session_id() -> String {
 /// already claimed a username (no row matched `username_is_placeholder = true`).
 /// A unique-constraint violation on `users.username` is surfaced as
 /// `DbErrorKind::UsernameTaken`.
+#[tracing::instrument(skip_all)]
 pub async fn claim_username(pool: &PgPool, user_id: Uuid, username: &str) -> Result<bool, DbError> {
     let result = sqlx::query(
         "UPDATE users
@@ -264,6 +265,7 @@ pub async fn create_user(
     Ok(user_id)
 }
 
+#[tracing::instrument(skip_all)]
 async fn insert_user_with_legal_events(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     input: CreateUserInput<'_>,
@@ -1075,6 +1077,7 @@ pub async fn delete_auth_session(pool: &PgPool, session_id: &str) -> Result<(), 
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn run_cleanups(pool: &PgPool) {
     let tasks: &[(&str, &str)] = &[
         (
@@ -1452,6 +1455,7 @@ pub async fn complete_signed_request_audit(
 // PGP key operations
 // ---------------------------------------------------------------------------
 
+#[tracing::instrument(skip_all)]
 pub async fn add_pgp_key(
     pool: &PgPool,
     user_id: Uuid,

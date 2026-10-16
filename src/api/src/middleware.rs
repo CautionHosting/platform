@@ -78,7 +78,7 @@ impl IntoResponse for AuthMiddlewareError {
     }
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn auth_middleware(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -309,7 +309,7 @@ impl IntoResponse for OnboardingMiddlewareError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn onboarding_middleware(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -352,21 +352,22 @@ pub enum LegalMiddlewareError {
 
 impl IntoResponse for LegalMiddlewareError {
     fn into_response(self) -> Response {
-        let (status, body) = match &self {
-            LegalMiddlewareError::Evaluate { .. } => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to evaluate legal acceptance requirements",
-            ),
-            LegalMiddlewareError::AcceptanceRequired { document_type, .. } => return (
-                StatusCode::FORBIDDEN,
-                Json(LegalAcceptanceRequiredBody {
-                    code: "legal_acceptance_required",
-                    document_type: document_type.clone(),
-                    message: "You must accept the current legal document before continuing.",
-                }),
-            )
-                .into_response(),
-        };
+        let (status, body) =
+            match &self {
+                LegalMiddlewareError::Evaluate { .. } => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to evaluate legal acceptance requirements",
+                ),
+                LegalMiddlewareError::AcceptanceRequired { document_type, .. } => return (
+                    StatusCode::FORBIDDEN,
+                    Json(LegalAcceptanceRequiredBody {
+                        code: "legal_acceptance_required",
+                        document_type: document_type.clone(),
+                        message: "You must accept the current legal document before continuing.",
+                    }),
+                )
+                    .into_response(),
+            };
         sentry_middleware::error_response(status, body, self)
     }
 }
@@ -378,7 +379,7 @@ struct LegalAcceptanceRequiredBody {
     message: &'static str,
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn legal_middleware(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -442,7 +443,7 @@ impl IntoResponse for InternalAuthMiddlewareError {
 }
 
 /// Internal-only auth middleware — rejects session-based auth, requires service secret + user_id.
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn internal_auth_middleware(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

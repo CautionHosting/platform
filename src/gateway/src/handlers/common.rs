@@ -297,7 +297,10 @@ impl IntoResponse for LoginError {
                     tracing::warn!(?self, "Login finish: credential lookup/parse failure");
                 }
                 Self::IdentifyDiscoverableCredential { .. } => {
-                    tracing::error!(?self, "Login finish: could not identify discoverable credential");
+                    tracing::error!(
+                        ?self,
+                        "Login finish: could not identify discoverable credential"
+                    );
                 }
                 Self::FinishSecurityKeyAuthentication { .. }
                 | Self::FinishDiscoverableAuthentication { .. } => {

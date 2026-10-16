@@ -770,6 +770,7 @@ async fn shutdown_signal() {
     }
 }
 
+#[tracing::instrument(skip_all)]
 fn load_or_generate_host_key(path: &str) -> Result<PrivateKey, LoadHostKeyError> {
     use std::fs;
     use std::path::Path;

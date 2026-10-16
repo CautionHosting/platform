@@ -51,6 +51,7 @@ impl IntoResponse for DestroyNextResponse {
 }
 
 #[cfg(feature = "e2e-testing-unsafe")]
+#[tracing::instrument(skip_all, fields(force = %query.force))]
 pub async fn destroy_next_app(
     State(state): State<Arc<AppState>>,
     Query(query): Query<DestroyNextQuery>,

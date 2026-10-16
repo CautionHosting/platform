@@ -114,7 +114,7 @@ pub(crate) async fn advisory_unlock(pool: &sqlx::PgPool, lock_id: i64) {
         .await;
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn trigger_collection(
     State(state): State<Arc<AppState>>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), TriggerCollectionError> {

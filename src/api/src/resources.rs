@@ -108,7 +108,7 @@ impl IntoResponse for CreateResourceError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn create_resource(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -281,7 +281,7 @@ impl IntoResponse for ListResourcesError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn list_resources(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -373,7 +373,7 @@ impl IntoResponse for GetResourceError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(resource_id = %resource_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 pub async fn get_resource(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -493,7 +493,7 @@ impl IntoResponse for ProxyAttestationError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(resource_id = %resource_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 pub async fn proxy_attestation(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -617,7 +617,7 @@ impl IntoResponse for RenameResourceError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(resource_id = %resource_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 pub async fn rename_resource(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -800,7 +800,7 @@ impl IntoResponse for DeleteResourceError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(resource_id = %resource_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 pub async fn delete_resource(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,

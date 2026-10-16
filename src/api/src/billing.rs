@@ -350,7 +350,7 @@ impl IntoResponse for GetBillingUsageError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn get_billing_usage(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -668,7 +668,7 @@ impl IntoResponse for GetBillingInvoicesError {
 }
 
 /// Get billing invoices
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn get_billing_invoices(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1058,7 +1058,7 @@ impl IntoResponse for GetPaymentMethodsError {
 }
 
 /// Get all active payment methods
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn get_payment_methods(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1197,7 +1197,7 @@ impl IntoResponse for DeletePaymentMethodError {
 }
 
 /// Delete a specific payment method by ID
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id, method_id = %method_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id, method_id = %method_id))]
 pub async fn delete_payment_method(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1347,7 +1347,7 @@ impl IntoResponse for SetPrimaryPaymentMethodError {
 }
 
 /// Set a payment method as primary
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id, method_id = %method_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id, method_id = %method_id))]
 pub async fn set_primary_payment_method(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1445,7 +1445,7 @@ impl IntoResponse for GetPaddleClientTokenError {
 }
 
 /// Get Paddle client token and customer ID for frontend Paddle.js initialization
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn get_paddle_client_token(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1900,7 +1900,7 @@ impl IntoResponse for PaddleTransactionCompletedError {
 }
 
 /// Frontend callback after Paddle checkout completion — records payment method reference locally
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn paddle_transaction_completed(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -2316,7 +2316,7 @@ impl IntoResponse for GetCreditBalanceError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn get_credit_balance(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -2566,7 +2566,7 @@ impl IntoResponse for PurchaseCreditsError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn purchase_credits(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -2983,7 +2983,7 @@ impl IntoResponse for GetCreditLedgerError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn get_credit_ledger(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -3080,7 +3080,7 @@ impl IntoResponse for RedeemCreditCodeError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn redeem_credit_code(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,

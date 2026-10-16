@@ -476,6 +476,7 @@ impl EnclaveBuilder {
         Ok(())
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn get_cached_eif(&self) -> Option<Deployment> {
         let eif_path = self.work_dir.join("enclave.eif");
         let pcrs_path = self.work_dir.join("enclave.eif.pcrs");
@@ -568,6 +569,7 @@ impl EnclaveBuilder {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     pub async fn extract_static_binary(
         &self,
         image: &UserImage,
@@ -648,6 +650,7 @@ impl EnclaveBuilder {
     }
 
     /// Resolve framework_source archive URL to a commit SHA
+    #[tracing::instrument(skip_all)]
     async fn resolve_framework_commit(framework_source: &str) -> Option<String> {
         tracing::info!(
             "resolve_framework_commit: framework_source={}",

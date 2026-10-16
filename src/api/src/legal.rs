@@ -115,7 +115,7 @@ impl IntoResponse for ListActiveLegalDocumentsError {
 /// account, you agree to X and Y" notice, and signup records a consent
 /// event for exactly these documents — so what's presented and what's
 /// recorded always match, however many document types are configured.
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn list_active_legal_documents(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<PublicLegalDocumentSummary>>, ListActiveLegalDocumentsError> {
@@ -690,7 +690,7 @@ impl IntoResponse for AcceptLegalDocumentError {
 
 /// Accept/acknowledge the current active version of a legal document.
 /// Records an append-only event and returns the updated legal status.
-#[tracing::instrument(skip_all, fields(document_type = %payload.document_type))]
+#[tracing::instrument(skip_all, err(Debug), fields(document_type = %payload.document_type))]
 pub async fn accept_legal_document(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -881,7 +881,7 @@ impl IntoResponse for SendLegalNoticesError {
     }
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn send_legal_notices(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<SendLegalNoticesRequest>,

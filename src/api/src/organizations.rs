@@ -153,7 +153,7 @@ impl IntoResponse for ListOrganizationsError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn list_organizations(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -257,7 +257,7 @@ impl IntoResponse for CreateOrganizationError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn create_organization(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -351,7 +351,7 @@ impl IntoResponse for GetOrganizationError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn get_organization(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -418,7 +418,7 @@ impl IntoResponse for UpdateOrganizationError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn update_organization(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -502,7 +502,7 @@ impl IntoResponse for DeleteOrganizationError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn delete_organization(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -563,7 +563,7 @@ impl IntoResponse for GetOrgSettingsError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn get_org_settings(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -641,7 +641,7 @@ impl IntoResponse for UpdateOrgSettingsError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn update_org_settings(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -717,7 +717,7 @@ impl IntoResponse for ListMembersError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn list_members(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -795,7 +795,7 @@ impl IntoResponse for InviteMemberError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn invite_member(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -987,7 +987,7 @@ impl IntoResponse for ListActiveInvitationsError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn list_active_invitations(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1062,7 +1062,7 @@ impl IntoResponse for CancelInvitationError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn cancel_invitation(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1207,7 +1207,7 @@ impl IntoResponse for AddMemberError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn add_member(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1297,7 +1297,7 @@ impl IntoResponse for UpdateMemberError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn update_member(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1378,7 +1378,7 @@ impl IntoResponse for RemoveMemberError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn remove_member(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,

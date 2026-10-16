@@ -540,7 +540,7 @@ impl IntoResponse for SessionAuthError {
 }
 
 #[allow(clippy::result_large_err)]
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn fido2_auth_middleware(
     State(state): State<AppState>,
     mut req: Request,
@@ -638,11 +638,13 @@ pub enum UsernameGateError {
 impl IntoResponse for UsernameGateError {
     fn into_response(self) -> Response {
         let (status, body) = match &self {
-            Self::UsernameRequired { .. } => return (
-                StatusCode::FORBIDDEN,
-                axum::Json(serde_json::json!({ "error": "username_required" })),
-            )
-                .into_response(),
+            Self::UsernameRequired { .. } => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    axum::Json(serde_json::json!({ "error": "username_required" })),
+                )
+                    .into_response()
+            }
             Self::StatusLookup { .. } => {
                 tracing::error!(?self, "Failed to check username placeholder status");
                 (
@@ -663,7 +665,7 @@ impl IntoResponse for UsernameGateError {
 /// applies uniformly to web, CLI, and QR clients since it's enforced at the
 /// gateway rather than in UI.
 #[allow(clippy::result_large_err)]
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn username_claim_gate_middleware(
     State(state): State<AppState>,
     req: Request,
@@ -790,6 +792,7 @@ fn canonical_ssh_request(
     )
 }
 
+#[tracing::instrument(skip_all)]
 fn ssh_signed_request_error_response(error: VerifySshSignedRequestError) -> Response {
     if error.status.is_server_error() {
         tracing::error!("{:?}", error);
@@ -1230,7 +1233,7 @@ impl IntoResponse for Fido2SignError {
 }
 
 #[allow(clippy::result_large_err)]
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn fido2_sign_middleware(
     State(state): State<AppState>,
     mut req: Request,

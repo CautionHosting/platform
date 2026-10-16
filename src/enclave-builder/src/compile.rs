@@ -218,6 +218,7 @@ pub struct EnclaveSourceResult {
 }
 
 /// Convert archive URL to git repo URL for ls-remote
+#[tracing::instrument(skip_all)]
 fn archive_url_to_git_url(archive_url: &str) -> Option<String> {
     if let Some(archive_pos) = archive_url.find("/archive/") {
         let base = &archive_url[..archive_pos];
@@ -234,6 +235,7 @@ fn archive_url_to_git_url(archive_url: &str) -> Option<String> {
 }
 
 /// Extract ref name from archive URL
+#[tracing::instrument(skip_all)]
 fn extract_ref_from_archive_url(url: &str) -> Option<String> {
     if let Some(archive_pos) = url.find("/archive/") {
         let after_archive = &url[archive_pos + 9..];
@@ -376,6 +378,7 @@ pub(crate) async fn download_archive_bytes(
 }
 
 /// Resolve a branch/tag name to a commit SHA using git ls-remote
+#[tracing::instrument(skip_all)]
 pub async fn resolve_ref_to_commit(git_url: &str, ref_name: &str) -> Option<String> {
     tracing::info!(
         "resolve_ref_to_commit: git_url={}, ref_name={}",

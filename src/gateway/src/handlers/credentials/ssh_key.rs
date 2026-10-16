@@ -201,7 +201,7 @@ pub struct ListSshKeysResponse {
     pub keys: Vec<crate::db::SshKeyInfo>,
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn add_ssh_key_handler(
     State(state): State<AppState>,
     user_id_header: axum::http::HeaderMap,
@@ -255,7 +255,7 @@ pub async fn add_ssh_key_handler(
     }))
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn list_ssh_keys_handler(
     State(state): State<AppState>,
     user_id_header: axum::http::HeaderMap,
@@ -276,7 +276,7 @@ pub async fn list_ssh_keys_handler(
     Ok(Json(ListSshKeysResponse { keys }))
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn delete_ssh_key_handler(
     State(state): State<AppState>,
     user_id_header: axum::http::HeaderMap,

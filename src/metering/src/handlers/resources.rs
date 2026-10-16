@@ -93,7 +93,7 @@ pub(crate) struct TrackResourceRequest {
     metadata: Option<serde_json::Value>,
 }
 
-#[tracing::instrument(skip_all, fields(resource_id = %req.resource_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(resource_id = %req.resource_id))]
 pub(crate) async fn track_resource(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TrackResourceRequest>,
@@ -145,7 +145,7 @@ pub(crate) async fn track_resource(
     ))
 }
 
-#[tracing::instrument(skip_all, fields(resource_id = %resource_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 pub(crate) async fn untrack_resource(
     State(state): State<Arc<AppState>>,
     Path(resource_id): Path<String>,
@@ -178,7 +178,7 @@ pub(crate) async fn untrack_resource(
     ))
 }
 
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub(crate) async fn list_tracked_resources(
     State(state): State<Arc<AppState>>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ListTrackedResourcesError> {

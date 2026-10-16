@@ -553,7 +553,7 @@ pub(crate) async fn scoped_or_decoy_challenge(
 ///   - `login_allow_broadcast == false` -> discoverable: empty
 ///     `allowCredentials`, `mediation: "conditional"` (set automatically by
 ///     `start_discoverable_authentication`).
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn begin_login_handler(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,

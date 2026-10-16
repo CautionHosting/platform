@@ -1295,6 +1295,7 @@ async fn fetch_dns_resource(
     })
 }
 
+#[tracing::instrument(skip_all)]
 async fn record_dns_error(
     pool: &PgPool,
     resource_id: Uuid,

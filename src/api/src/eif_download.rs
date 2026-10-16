@@ -341,7 +341,7 @@ struct BuildDownloadRow {
     resource_name: Option<String>,
 }
 
-#[tracing::instrument(skip_all, fields(resource_id = %resource_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 pub(crate) async fn download_eif(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,

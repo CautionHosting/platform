@@ -572,7 +572,7 @@ impl IntoResponse for JoinWaitlistError {
     }
 }
 
-#[tracing::instrument(skip_all, fields(org_id = %org_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub(crate) async fn join_waitlist(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -642,6 +642,7 @@ pub(crate) async fn join_waitlist(
     }))
 }
 
+#[tracing::instrument(skip_all)]
 fn send_capacity_waitlist_alert(
     org_id: Uuid,
     user_id: Uuid,
