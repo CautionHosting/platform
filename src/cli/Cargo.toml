@@ -22,6 +22,7 @@ base64 = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
 tempfile = { workspace = true }
 uuid = { workspace = true }
 rand = { workspace = true }
@@ -68,5 +69,4 @@ e2e-testing-unsafe = ["locksmith/unsafe-e2e"]
 
 [dev-dependencies]
 axum.workspace = true
-tracing.workspace = true
 keyfork-shard = { version = "0.4", registry = "distrust", default-features = false, features = ["openpgp"] }

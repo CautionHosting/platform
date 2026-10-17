@@ -52,6 +52,29 @@ mkdir -p /opt/nitro
 echo "Downloading EIF from ${eif_s3_path}..."
 aws s3 cp "${eif_s3_path}" /opt/nitro/enclave.eif
 
+cat > /usr/local/bin/install-enclave-network-policy <<'NETWORK_POLICY'
+${network_policy_script}
+NETWORK_POLICY
+chmod 0755 /usr/local/bin/install-enclave-network-policy
+
+cat > /etc/systemd/system/caution-network-policy.service <<'POLICY_SERVICE'
+[Unit]
+Description=Enclave ingress and guest egress policy
+Before=vsock-network.service nitro-enclave.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/install-enclave-network-policy
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+POLICY_SERVICE
+
+systemctl daemon-reload
+systemctl enable caution-network-policy.service
+systemctl start caution-network-policy.service
+
 %{ if egress == "true" ~}
 echo "Setting up vsock network proxy for enclave..."
 # TAP_FRAMER_INSTALL_BEGIN
@@ -60,11 +83,16 @@ printf '%s  %s\n' '${tap_framer_sha256}' /opt/nitro/tap-framer.download | sha256
 install -m 0755 /opt/nitro/tap-framer.download /usr/local/bin/tap-framer
 rm /opt/nitro/tap-framer.download
 # TAP_FRAMER_INSTALL_END
+
 cat > /usr/local/bin/vsock-network-proxy.sh <<'PROXY_SCRIPT'
 #!/bin/bash
 set -e
 
 echo "Starting vsock network proxy..."
+SOCAT_PID=""
+DNSMASQ_PID=""
+trap 'kill "$SOCAT_PID" "$DNSMASQ_PID" 2>/dev/null || true; wait || true' EXIT
+trap 'exit 1' TERM INT
 
 echo 1 > /proc/sys/net/ipv4/ip_forward
 
@@ -72,17 +100,18 @@ echo 1 > /proc/sys/net/ipv4/ip_forward
 DEFAULT_IFACE=$(ip route show default | awk '{print $5}' | head -1)
 echo "Detected primary network interface: $DEFAULT_IFACE"
 
-ip tuntap add mode tap name enclave0
-ip addr add 10.0.100.1/24 dev enclave0
+if ! ip link show enclave0 >/dev/null 2>&1; then
+  ip tuntap add mode tap name enclave0
+fi
+ip addr replace 10.0.100.1/24 dev enclave0
 ip link set enclave0 up
 
 /usr/local/bin/tap-framer --listen 3 enclave0 &
 SOCAT_PID=$!
 echo "VSock bridge started (PID: $SOCAT_PID)"
 
-iptables -t nat -A POSTROUTING -s 10.0.100.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE
-iptables -A FORWARD -i enclave0 -o "$DEFAULT_IFACE" -j ACCEPT
-iptables -A FORWARD -i "$DEFAULT_IFACE" -o enclave0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+iptables -w -t nat -C POSTROUTING -s 10.0.100.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE 2>/dev/null ||
+  iptables -w -t nat -A POSTROUTING -s 10.0.100.0/24 -o "$DEFAULT_IFACE" -j MASQUERADE
 
 echo "NAT rules configured"
 
@@ -99,7 +128,10 @@ dnsmasq \
 DNSMASQ_PID=$!
 echo "DHCP/DNS server started (PID: $DNSMASQ_PID)"
 
-wait
+kill -0 "$SOCAT_PID" "$DNSMASQ_PID"
+systemd-notify --ready
+wait -n "$SOCAT_PID" "$DNSMASQ_PID"
+exit 1
 PROXY_SCRIPT
 
 chmod +x /usr/local/bin/vsock-network-proxy.sh
@@ -107,11 +139,14 @@ chmod +x /usr/local/bin/vsock-network-proxy.sh
 cat > /etc/systemd/system/vsock-network.service <<'EOF'
 [Unit]
 Description=VSock Network Proxy for Enclave
-After=network.target
+After=network.target caution-network-policy.service
+Requires=caution-network-policy.service
 Before=nitro-enclave.service
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=all
+ExecStartPre=/usr/local/bin/install-enclave-network-policy
 ExecStart=/usr/local/bin/vsock-network-proxy.sh
 Restart=always
 RestartSec=5s
@@ -123,8 +158,6 @@ EOF
 systemctl daemon-reload
 systemctl enable vsock-network.service
 systemctl start vsock-network.service
-
-sleep 3
 %{ else ~}
 echo "Enclave outbound egress disabled; skipping vsock network proxy"
 %{ endif ~}
@@ -208,8 +241,11 @@ chmod +x /usr/local/bin/capture-enclave-console.sh
 cat > /etc/systemd/system/nitro-enclave.service <<EOF
 [Unit]
 Description=Nitro Enclave Application
-After=nitro-enclaves-allocator.service
-Requires=nitro-enclaves-allocator.service
+After=nitro-enclaves-allocator.service caution-network-policy.service
+Requires=nitro-enclaves-allocator.service caution-network-policy.service
+%{ if egress == "true" ~}
+After=vsock-network.service
+%{ endif ~}
 
 [Service]
 Type=forking
@@ -252,7 +288,10 @@ EOF
 %{ endif ~}
 
 # Create vsock proxy services for internal platform ports
-standard_ports="49500 49501 49502"
+standard_ports="49501 49502"
+%{ if e2e_mode == "steve" ~}
+standard_ports="$standard_ports 49500"
+%{ endif ~}
 %{ if locksmith == "true" ~}
 standard_ports="$standard_ports 49504"
 %{ endif ~}
@@ -260,14 +299,17 @@ standard_ports="$standard_ports 49504"
 standard_ports="$standard_ports 443"
 %{ endif ~}
 for port in $standard_ports; do
+bind_address=""
+case "$port" in 49501|49502) bind_address=",bind=127.0.0.1" ;; esac
 cat > /etc/systemd/system/vsock-proxy-$port.service <<EOF
 [Unit]
 Description=VSock Proxy for Port $port
-After=nitro-enclave.service
+After=nitro-enclave.service caution-network-policy.service
+Requires=caution-network-policy.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/socat TCP-LISTEN:$port,reuseaddr,fork VSOCK-CONNECT:16:$port
+ExecStart=/usr/bin/socat TCP-LISTEN:$port$bind_address,reuseaddr,fork VSOCK-CONNECT:16:$port
 Restart=always
 RestartSec=5s
 
@@ -282,11 +324,12 @@ done
 cat > /etc/systemd/system/vsock-proxy-http.service <<EOF
 [Unit]
 Description=VSock Proxy for HTTP Gateway Port ${http_port}
-After=nitro-enclave.service
+After=nitro-enclave.service caution-network-policy.service
+Requires=caution-network-policy.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/socat TCP-LISTEN:${http_port},bind=127.0.0.1,reuseaddr,fork VSOCK-CONNECT:16:${http_port}
+ExecStart=/usr/bin/socat TCP-LISTEN:49503,bind=127.0.0.1,reuseaddr,fork VSOCK-CONNECT:16:${http_port}
 Restart=always
 RestartSec=5s
 
@@ -297,10 +340,12 @@ EOF
 
 # Create vsock proxy services for custom user ports
 %{ for port in ports ~}
+%{ if port != http_port ~}
 cat > /etc/systemd/system/vsock-proxy-${port}.service <<EOF
 [Unit]
 Description=VSock Proxy for Custom Port ${port}
-After=nitro-enclave.service
+After=nitro-enclave.service caution-network-policy.service
+Requires=caution-network-policy.service
 
 [Service]
 Type=simple
@@ -311,6 +356,7 @@ RestartSec=5s
 [Install]
 WantedBy=multi-user.target
 EOF
+%{ endif ~}
 %{ endfor ~}
 
 systemctl daemon-reload
@@ -325,7 +371,9 @@ done
 systemctl enable vsock-proxy-http.service
 %{ endif ~}
 %{ for port in ports ~}
+%{ if port != http_port ~}
 systemctl enable vsock-proxy-${port}.service
+%{ endif ~}
 %{ endfor ~}
 
 # A recoverable first launch must not prevent ingress/Caddy setup. Systemd
@@ -344,7 +392,9 @@ done
 systemctl start vsock-proxy-http.service
 %{ endif ~}
 %{ for port in ports ~}
+%{ if port != http_port ~}
 systemctl start vsock-proxy-${port}.service
+%{ endif ~}
 %{ endfor ~}
 
 # Install and configure host Caddy. In STEVE/default mode the host terminates TLS
@@ -363,164 +413,51 @@ mkdir -p /etc/caddy /var/lib/caddy /var/log/caddy
 chown caddy:caddy /var/lib/caddy /var/log/caddy
 
 %{ if e2e_mode == "tls" ~}
-echo "Configuring host Caddy for TLS-mode HTTP health/proxy only"
-cat > /etc/caddy/Caddyfile <<EOF
+cat > /etc/caddy/Caddyfile <<'CADDY_CONFIG'
 :80 {
-    handle /.well-known/caution/health {
-        respond "OK" 200
-    }
-
-    handle /attestation {
-        reverse_proxy localhost:49502
-    }
-
-    handle {
-        redir https://${domain}{uri} 308
-    }
+${http_routes}
 }
-EOF
+CADDY_CONFIG
 %{ else ~}
-%{ if e2e_mode == "steve" ~}
-CADDY_DEFAULT_UPSTREAM="reverse_proxy localhost:49500"
-%{ else ~}
-%{ if http_port != 0 ~}
-CADDY_DEFAULT_UPSTREAM="reverse_proxy localhost:${http_port}"
-%{ else ~}
-CADDY_DEFAULT_UPSTREAM='respond "No HTTP Gateway Configured" 502'
-%{ endif ~}
-%{ endif ~}
-
 %{ if domain != "" ~}
-echo "Configuring Caddy with Let's Encrypt for ${domain}"
-cat > /etc/caddy/Caddyfile <<EOF
+cat > /etc/caddy/Caddyfile <<'CADDY_CONFIG'
+{
+    auto_https disable_redirects
+}
 https://${domain} {
     tls {
         on_demand
+        issuer acme {
+            disable_tlsalpn_challenge
+        }
     }
-
-    handle /.well-known/caution/health {
-        respond "OK" 200
-    }
-
-    handle /e2p/* {
-        reverse_proxy localhost:49500
-    }
-    @e2p_encrypted {
-        method POST
-        header X-E2P-Key *
-        header X-E2P-Original-Method *
-        header Content-Type application/octet-stream
-    }
-    handle @e2p_encrypted {
-        reverse_proxy localhost:49500
-    }
-    handle /attestation {
-        reverse_proxy localhost:49502
-    }
-
-    handle {
-        $CADDY_DEFAULT_UPSTREAM
-    }
+${http_routes}
 }
-
-# HTTP fallback on port 80
 :80 {
-    handle /.well-known/caution/health {
-        respond "OK" 200
-    }
-
-    handle /e2p/* {
-        reverse_proxy localhost:49500
-    }
-    @e2p_encrypted {
-        method POST
-        header X-E2P-Key *
-        header X-E2P-Original-Method *
-        header Content-Type application/octet-stream
-    }
-    handle @e2p_encrypted {
-        reverse_proxy localhost:49500
-    }
-    handle /attestation {
-        reverse_proxy localhost:49502
-    }
-
-    handle {
-        $CADDY_DEFAULT_UPSTREAM
-    }
+${http_routes}
 }
-EOF
+CADDY_CONFIG
 %{ else ~}
 TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" -s)
 PUBLIC_IP=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4 -s)
-echo "Configuring Caddy with self-signed cert for $PUBLIC_IP and HTTP fallback"
-
 openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-  -keyout /etc/caddy/server.key \
-  -out /etc/caddy/server.crt \
-  -subj "/CN=$PUBLIC_IP" \
-  -addext "subjectAltName=IP:$PUBLIC_IP"
-
+  -keyout /etc/caddy/server.key -out /etc/caddy/server.crt \
+  -subj "/CN=$PUBLIC_IP" -addext "subjectAltName=IP:$PUBLIC_IP"
 chown caddy:caddy /etc/caddy/server.key /etc/caddy/server.crt
 chmod 644 /etc/caddy/server.crt
 chmod 600 /etc/caddy/server.key
-
-cat > /etc/caddy/Caddyfile <<EOF
+cat > /etc/caddy/Caddyfile <<'CADDY_CONFIG'
+{
+    auto_https disable_redirects
+}
 :443 {
     tls /etc/caddy/server.crt /etc/caddy/server.key
-
-    handle /.well-known/caution/health {
-        respond "OK" 200
-    }
-
-    handle /e2p/* {
-        reverse_proxy localhost:49500
-    }
-    @e2p_encrypted {
-        method POST
-        header X-E2P-Key *
-        header X-E2P-Original-Method *
-        header Content-Type application/octet-stream
-    }
-    handle @e2p_encrypted {
-        reverse_proxy localhost:49500
-    }
-    handle /attestation {
-        reverse_proxy localhost:49502
-    }
-
-    handle {
-        $CADDY_DEFAULT_UPSTREAM
-    }
+${http_routes}
 }
-
-# HTTP fallback on port 80
 :80 {
-    handle /.well-known/caution/health {
-        respond "OK" 200
-    }
-
-    handle /e2p/* {
-        reverse_proxy localhost:49500
-    }
-    @e2p_encrypted {
-        method POST
-        header X-E2P-Key *
-        header X-E2P-Original-Method *
-        header Content-Type application/octet-stream
-    }
-    handle @e2p_encrypted {
-        reverse_proxy localhost:49500
-    }
-    handle /attestation {
-        reverse_proxy localhost:49502
-    }
-
-    handle {
-        $CADDY_DEFAULT_UPSTREAM
-    }
+${http_routes}
 }
-EOF
+CADDY_CONFIG
 %{ endif ~}
 %{ endif ~}
 
@@ -528,7 +465,8 @@ EOF
 cat > /etc/systemd/system/caddy.service <<'CADDY_SERVICE'
 [Unit]
 Description=Caddy web server
-After=network.target
+After=network.target caution-network-policy.service
+Requires=caution-network-policy.service
 
 [Service]
 User=caddy

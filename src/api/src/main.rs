@@ -35,6 +35,7 @@ mod cloud_credentials;
 mod config;
 mod cryptographic_bundles;
 mod deployment;
+mod network_policy;
 mod ec2;
 mod eif_download;
 mod encryption;
@@ -2817,6 +2818,15 @@ pub(crate) enum DeployLogicError {
         #[source]
         source: BoxError,
     },
+    #[error("invalid network policy [{location}]")]
+    NetworkPolicy {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("recovery without HTTP requires explicit ingress sources [{location}]")]
+    RecoveryIngressRequired { location: Location },
 
     #[error("failed to inspect repository contents [{location}]")]
     RepoInspect {
@@ -3059,9 +3069,37 @@ impl DeployLogicError {
                 StatusCode::BAD_REQUEST,
                 "Requested commit_sha does not match the branch head",
             ),
-            DeployLogicError::BuildConfigGit { .. } => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            DeployLogicError::BuildConfigGit { source, .. } => {
+                match source.downcast_ref::<LoadBuildConfigForDeployError>() {
+                    Some(LoadBuildConfigForDeployError::HclParse { source, .. }) => {
+                        let message = match source.downcast_ref::<config::FromStrError>() {
+                            Some(config::FromStrError::NetworkPolicy { source, .. }) => source
+                                .downcast_ref::<config::NetworkPolicyError>()
+                                .map(config::NetworkPolicyError::client_message)
+                                .unwrap_or("Invalid caution.hcl network policy"),
+                            _ => "Invalid caution.hcl",
+                        };
+                        (StatusCode::BAD_REQUEST, message)
+                    }
+                    Some(LoadBuildConfigForDeployError::ProcfileParse { source, .. })
+                        if matches!(source.downcast_ref::<config::FromProcfileError>(),
+                            Some(config::FromProcfileError::NetworkPolicy { .. })) =>
+                    {
+                        (StatusCode::BAD_REQUEST, "Invalid network policy.")
+                    }
+                    _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+                }
             }
+            DeployLogicError::NetworkPolicy { source, .. } => (
+                StatusCode::BAD_REQUEST,
+                source.downcast_ref::<config::NetworkPolicyError>()
+                    .map(config::NetworkPolicyError::client_message)
+                    .unwrap_or("Invalid caution.hcl network policy"),
+            ),
+            DeployLogicError::RecoveryIngressRequired { .. } => (
+                StatusCode::BAD_REQUEST,
+                "Recovery without HTTP requires explicit network.recovery_ingress sources",
+            ),
             DeployLogicError::RepoInspect { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
@@ -3633,6 +3671,57 @@ mod deploy_containerfile_tests {
     }
 
     #[tokio::test]
+    async fn deploy_path_rejects_invalid_policy_without_procfile_fallback() {
+        let (repo_dir, commit_sha) = commit_test_repo(&[
+            (
+                "caution.hcl",
+                r#"enclave "main" {
+                    network {
+                        egress { cidr_ipv4 = "not-a-cidr" }
+                    }
+                }"#,
+            ),
+            ("Procfile", "run: /app\n"),
+        ]);
+        let git_dir = repo_dir.path().join(".git");
+        let error = load_build_config_for_deploy(git_dir.to_str().unwrap(), &commit_sha)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, super::LoadBuildConfigForDeployError::HclParse { .. }));
+        let error = super::DeployLogicError::BuildConfigGit {
+            source: Box::new(error),
+            location: std::panic::Location::caller(),
+        };
+        let (status, body) = error.client_response();
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(body.starts_with("Invalid caution.hcl") || body.starts_with("Invalid network"));
+        assert!(!body.contains("main.rs"));
+        assert!(!body.contains(repo_dir.path().to_str().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn deploy_path_rejects_invalid_procfile_policy_as_client_error() {
+        for procfile in [
+            "run: /app\nports: 22\n",
+            "run: /app\nports: 80, 8080\nhttp_port: 8080\n",
+        ] {
+            let (repo_dir, commit_sha) = commit_test_repo(&[("Procfile", procfile)]);
+            let git_dir = repo_dir.path().join(".git");
+            let source = load_build_config_for_deploy(git_dir.to_str().unwrap(), &commit_sha)
+                .await
+                .unwrap_err();
+            let error = super::DeployLogicError::BuildConfigGit {
+                source: Box::new(source),
+                location: std::panic::Location::caller(),
+            };
+            assert_eq!(
+                error.client_response(),
+                (axum::http::StatusCode::BAD_REQUEST, "Invalid network policy.")
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn deploy_path_auto_detects_committed_containerfile() {
         let (repo_dir, commit_sha) = commit_test_repo(&[
             ("Procfile", "run: /app\n"),
@@ -4181,27 +4270,20 @@ async fn deploy_logic(
 
     let no_cache = ec_build.and_then(|b| b.cache).map(|c| !c).unwrap_or(false);
     let app_sources = ec_build.map(|b| b.app_sources.clone()).unwrap_or_default();
-    let egress = ec_network.map(|n| n.egress_enabled()).unwrap_or(false);
-
-    let ingress_ports: Vec<u16> = ec_network
-        .map(|n| {
-            let mut ports: Vec<u16> = n
-                .ingress
-                .iter()
-                .flat_map(|rule| match &rule.port_spec {
-                    Some(config::PortSpec::Exact { port }) => vec![*port],
-                    Some(config::PortSpec::FromTo {
-                        start_port,
-                        end_port,
-                    }) => (*start_port..=*end_port).collect::<Vec<u16>>(),
-                    _ => Vec::new(),
-                })
-                .collect();
-            ports.sort();
-            ports.dedup();
-            ports
-        })
-        .unwrap_or_default();
+    let network = ec_network.cloned().unwrap_or_else(|| config::NetworkConfig {
+        ingress: Vec::new(),
+        egress: Vec::new(),
+        recovery_ingress: None,
+        http: None,
+    });
+    let network_policy = network.policy().with_context(Ctx::network_policy())?;
+    if config_file.has_vault_env() && network.http.is_none() && network.recovery_ingress.is_none() {
+        return Err(DeployLogicError::RecoveryIngressRequired {
+            location: std::panic::Location::caller(),
+        });
+    }
+    let egress = network_policy.egress_enabled();
+    let ingress_ports = network_policy.ports();
 
     let managed_onprem_credential = if let Some(credential) = cred
         .as_ref()
@@ -4500,6 +4582,8 @@ async fn deploy_logic(
         "cpus": cpu_count,
         "debug": debug_enabled,
         "ports": ingress_ports,
+        "network": network,
+        "network_policy": network_policy,
         "http_port": http_port,
     });
     let eif_size_bytes = eif_size_bytes_db as u64;
@@ -4613,6 +4697,7 @@ async fn deploy_logic(
         debug_mode: debug_enabled,
         restart: enclave_opt.and_then(|e| e.restart).unwrap_or_default(),
         ports: ingress_ports.clone(),
+        network,
         http_port,
         e2e,
         e2e_mode: e2e_mode_value.to_string(),

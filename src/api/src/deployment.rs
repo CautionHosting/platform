@@ -9,7 +9,7 @@
     reason = "generated {Error}Ctx mirrors trip redundant_field_names"
 )]
 
-use dterror::{BoxError, CtxError, Location};
+use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -420,6 +420,7 @@ pub struct NitroDeploymentRequest {
     #[serde(default)]
     pub restart: caution_config::RestartConfig,
     pub ports: Vec<u16>,
+    pub network: caution_config::NetworkConfig,
     pub http_port: Option<u16>,
     #[serde(default)]
     pub e2e: bool,
@@ -871,8 +872,12 @@ mod tests {
             disk_gb: 30,
             debug_mode: false,
             restart: Default::default(),
-            ports: vec![],
-            http_port: None,
+            ports: vec![8080],
+            network: serde_json::from_value(serde_json::json!({
+                "ingress": [{"cidr_ipv4": "0.0.0.0/0", "port": 8080}],
+                "http": {"port": 8080}
+            })).unwrap(),
+            http_port: Some(8080),
             e2e: false,
             e2e_mode: E2E_MODE_DISABLED.to_string(),
             locksmith: false,
@@ -882,6 +887,47 @@ mod tests {
             region: Some("us-west-2".to_string()),
             credentials: None,
             managed_onprem: Some(managed_onprem_config()),
+        }
+    }
+
+    #[tokio::test]
+    async fn generated_network_policy_preserves_sources_in_both_deployment_modes() {
+        for managed in [false, true] {
+            let mut value = serde_json::to_value(deployment_request("/tmp/enclave.eif", None)).unwrap();
+            value["ports"] = serde_json::json!([8080, 9000, 9001]);
+            value["http_port"] = serde_json::json!(8080);
+            value["e2e"] = serde_json::json!(true);
+            value["e2e_mode"] = serde_json::json!("steve");
+            value["locksmith"] = serde_json::json!(true);
+            value["network"] = serde_json::json!({
+                "ingress": [
+                    {"cidr_ipv4": "198.51.100.0/24", "port": 8080},
+                    {"cidr_ipv4": "203.0.113.4/32", "start_port": 9000, "end_port": 9001}
+                ],
+                "http": {"port": 8080, "e2e_encryption": {"mode": "steve"}}
+            });
+            let mut request: NitroDeploymentRequest = serde_json::from_value(value).unwrap();
+            if !managed { request.managed_onprem = None; }
+            let directory = TempDir::new().unwrap();
+            if managed {
+                generate_managed_onprem_deployment_tf(directory.path(), &request, "s3://bucket/enclave.eif").await.unwrap();
+            } else {
+                generate_nitro_deployment_main_tf(directory.path(), &request, "s3://bucket/enclave.eif").await.unwrap();
+            }
+            let text = std::fs::read_to_string(directory.path().join("main.tf")).unwrap();
+            let body: hcl::Body = hcl::from_str(&text).unwrap();
+            let group = body.blocks().find(|block| block.identifier() == "resource" && block.labels().first().is_some_and(|label| label.as_str() == "aws_security_group")).unwrap();
+            let ingress: Vec<_> = group.body.blocks().filter(|block| block.identifier() == "ingress").collect();
+            let attributes = |block: &hcl::Block| -> serde_json::Value { hcl::from_str(&hcl::to_string(&block.body).unwrap()).unwrap() };
+            for block in ingress {
+                let rule = attributes(block);
+                if rule["from_port"] == 80 { continue; }
+                assert_ne!(rule["from_port"], 8080, "HTTP upstream must be private");
+                assert_ne!(rule["cidr_blocks"], serde_json::json!(["0.0.0.0/0"]), "application source restrictions must survive rendering: {rule}");
+            }
+            assert!(!group.body.blocks().any(|block| block.identifier() == "dynamic"), "lossy dynamic ingress must not remain");
+            assert!(text.contains("198.51.100.0/24"));
+            assert!(text.contains("203.0.113.4/32"));
         }
     }
 
@@ -910,33 +956,16 @@ mod tests {
     }
 
     #[test]
-    fn test_caddy_routes_encrypted_e2p_requests_before_default_upstream() {
-        let user_data = std::fs::read_to_string(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../..")
-                .join("terraform/modules/aws/nitro-enclave/user-data.sh"),
-        )
-        .unwrap();
-        let e2p_header_matcher = r#"@e2p_encrypted {
-        method POST
-        header X-E2P-Key *
-        header X-E2P-Original-Method *
-        header Content-Type application/octet-stream
-    }
-    handle @e2p_encrypted {
-        reverse_proxy localhost:49500
-    }"#;
-
-        assert_eq!(user_data.matches(e2p_header_matcher).count(), 4);
-
-        for block in user_data.split("handle /e2p/* {").skip(1).take(4) {
-            let encrypted_route = block.find("handle @e2p_encrypted").unwrap();
-            let default_upstream = block.find("$CADDY_DEFAULT_UPSTREAM").unwrap();
-            assert!(
-                encrypted_route < default_upstream,
-                "encrypted E2P requests must be routed before the app catch-all"
-            );
+    fn test_caddy_management_routes_precede_source_scoped_application() {
+        let request = deployment_request("/tmp/enclave.eif", None);
+        let policy = request.network.policy().unwrap();
+        let routes = crate::network_policy::http_routes(&policy, Some(8080), "steve", None);
+        let app = routes.find("handle @caution_http_sources").unwrap();
+        for management in ["handle /attestation", "handle /.well-known/caution/health"] {
+            assert!(routes.find(management).unwrap() < app);
         }
+        assert!(routes[app..].contains("reverse_proxy localhost:49500"));
+        assert!(!routes.contains("header X-E2P"));
     }
 
     #[test]
@@ -1229,7 +1258,11 @@ mod tests {
         .unwrap();
 
         assert!(user_data.contains(r#"%{ if e2e_mode == "steve" ~}"#));
-        assert!(user_data.contains(r#"CADDY_DEFAULT_UPSTREAM="reverse_proxy localhost:49500""#));
+        assert!(user_data.contains("${http_routes}"));
+        let request = deployment_request("/tmp/enclave.eif", None);
+        let routes = crate::network_policy::http_routes(&request.network.policy().unwrap(), Some(8080), "steve", None);
+        assert!(routes.contains("reverse_proxy localhost:49500"));
+        assert!(!routes.contains("localhost:8080"));
     }
 
     #[test]
@@ -1244,13 +1277,11 @@ mod tests {
         assert!(user_data.contains(r#"standard_ports="$standard_ports 443""#));
         assert!(user_data.contains(r#"%{ if http_port != 0 && e2e_mode == "disabled" ~}"#));
         assert!(user_data.contains("TLS :443 is forwarded into the enclave"));
-        assert!(user_data.contains("respond \"OK\" 200"));
-        assert!(user_data.contains("redir https://${domain}{uri} 308"));
-        let redir_pos = user_data.find("redir https://${domain}{uri} 308").unwrap();
-        let http_site_pos = user_data[..redir_pos].rfind(":80 {").unwrap();
-        let tls_mode_http_site = &user_data[http_site_pos..redir_pos];
-        assert!(tls_mode_http_site.contains("handle /attestation"));
-        assert!(tls_mode_http_site.contains("reverse_proxy localhost:49502"));
+        let request = deployment_request("/tmp/enclave.eif", None);
+        let routes = crate::network_policy::http_routes(&request.network.policy().unwrap(), Some(8080), "tls", Some("app.example.com"));
+        assert!(routes.contains("respond \"OK\" 200"));
+        assert!(routes.find("handle /attestation").unwrap() < routes.find("redir https://app.example.com{uri} 308").unwrap());
+        assert!(routes.contains("reverse_proxy localhost:49502"));
         assert!(!user_data.contains("reverse_proxy https://127.0.0.1:443"));
         assert!(!user_data.contains("header_up Host ${domain}"));
         assert!(!user_data.contains("tls_server_name ${domain}"));
@@ -1273,7 +1304,7 @@ mod tests {
             3
         );
         assert!(user_data.contains(
-            "ExecStart=/usr/bin/socat TCP-LISTEN:${http_port},bind=127.0.0.1,reuseaddr,fork VSOCK-CONNECT:16:${http_port}"
+            "ExecStart=/usr/bin/socat TCP-LISTEN:49503,bind=127.0.0.1,reuseaddr,fork VSOCK-CONNECT:16:${http_port}"
         ));
     }
 
@@ -2626,6 +2657,9 @@ async fn provision_nitro_enclave(
         std::fs::write(work_dir.join("user-data.sh"), user_data_template),
         Ctx::write_user_data(),
     )?;
+    std::fs::write(work_dir.join("network-policy.sh.tftpl"),
+        include_str!("../../../terraform/modules/aws/nitro-enclave/network-policy.sh.tftpl"))
+        .with_context(Ctx::write_user_data())?;
 
     // Always use Caution's env credentials for init (S3 state backend access)
     let data_dir =
@@ -2794,6 +2828,9 @@ async fn provision_managed_onprem(
         std::fs::write(work_dir.join("user-data.sh"), user_data_template),
         Ctx::write_user_data(),
     )?;
+    std::fs::write(work_dir.join("network-policy.sh.tftpl"),
+        include_str!("../../../terraform/modules/aws/nitro-enclave/network-policy.sh.tftpl"))
+        .with_context(Ctx::write_user_data())?;
 
     let data_dir =
         std::env::var("CAUTION_DATA_DIR").unwrap_or_else(|_| "/var/cache/caution".to_string());
@@ -3003,44 +3040,85 @@ fn compute_enclave_sizing(
     Ok((sizing.cpu_count, sizing.instance_type))
 }
 
-fn platform_internal_ingress(e2e: bool, locksmith: bool) -> Vec<hcl::Block> {
-    let mut blocks = Vec::new();
+#[tracing::instrument(skip_all)]
+fn bootstrap_reference() -> hcl::Expression {
+    hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("local"))
+        .attr("enclave_user_data").build().into()
+}
 
-    if e2e {
-        blocks.push(
-            hcl::Block::builder("ingress")
-                .add_attribute(("from_port", 49500u64))
-                .add_attribute(("to_port", 49500u64))
-                .add_attribute(("protocol", "tcp"))
-                .add_attribute((
-                    "cidr_blocks",
-                    hcl::Expression::Array(vec![hcl::Expression::String("0.0.0.0/0".into())]),
-                ))
-                .add_attribute(("description", "Allow STEVE encrypted transport"))
-                .build(),
-        );
-    }
+#[tracing::instrument(skip_all)]
+fn bootstrap_size_limit() -> hcl::Block {
+    hcl::Block::builder("lifecycle")
+        .add_block(hcl::Block::builder("precondition")
+            .add_attribute(hcl::Attribute::new("condition", hcl::expr::BinaryOp::new(
+                hcl::expr::FuncCall::builder("length").arg(bootstrap_reference()).build(),
+                hcl::expr::BinaryOperator::LessEq,
+                hcl::Expression::Number(21844u64.into()),
+            )))
+            .add_attribute(("error_message", "Compressed enclave bootstrap exceeds the EC2 16 KiB user-data limit; reduce the network policy."))
+            .build())
+        .build()
+}
 
-    if locksmith {
-        blocks.push(
-            hcl::Block::builder("ingress")
-                .add_attribute(("from_port", 49504u64))
-                .add_attribute(("to_port", 49504u64))
-                .add_attribute(("protocol", "tcp"))
-                .add_attribute((
-                    "cidr_blocks",
-                    hcl::Expression::Array(vec![hcl::Expression::String("0.0.0.0/0".into())]),
-                ))
-                .add_attribute(("description", "Allow Locksmith shard receiver"))
-                .build(),
-        );
-    }
-
-    blocks
+#[tracing::instrument(skip_all)]
+fn bootstrap_locals(
+    request: &NitroDeploymentRequest,
+    cpu_count: u32,
+    eif_s3_path: &str,
+    policy: &caution_config::network_policy::NetworkPolicy,
+) -> hcl::Block {
+    let object = |values: Vec<(&str, hcl::Expression)>| hcl::Expression::Object(values.into_iter()
+        .map(|(key, value)| (hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(key)), value))
+        .collect());
+    let mode = effective_e2e_mode(request.e2e, &request.e2e_mode);
+    let (ingress, guard) = crate::network_policy::ingress_input_rules(
+        policy, request.http_port, mode, request.locksmith,
+    );
+    let firewall = hcl::expr::FuncCall::builder("templatefile")
+        .arg(hcl::Expression::String("./network-policy.sh.tftpl".into()))
+        .arg(object(vec![
+            ("egress_forward_rules", crate::network_policy::egress_forward_rules(policy).into()),
+            ("egress_dns_rules", crate::network_policy::egress_dns_rules(policy).into()),
+            ("ingress_input_rules", ingress.into()),
+            ("ingress_ipv6_rules", guard.replace("CAUTION_INGRESS_GUARD", "CAUTION_INGRESS").into()),
+            ("ingress_guard_rules", guard.into()),
+        ])).build();
+    let variables = object(vec![
+        ("eif_s3_path", hcl::Expression::String(eif_s3_path.into())),
+        ("tap_framer_sha256", SOURCE_TAP_FRAMER_SHA256.trim().into()),
+        ("memory_mb", hcl::Expression::Number(request.memory_mb.into())),
+        ("cpu_count", hcl::Expression::Number(cpu_count.into())),
+        ("debug_mode", request.debug_mode.to_string().into()),
+        ("restart_policy", request.restart.policy.as_str().into()),
+        ("restart_delay_seconds", hcl::Expression::Number(request.restart.delay_seconds.into())),
+        ("ports", hcl::Expression::from(policy.ports().into_iter().filter(|port| Some(*port) != request.http_port).collect::<Vec<_>>())),
+        ("http_port", hcl::Expression::Number(u64::from(request.http_port.unwrap_or(0)).into())),
+        ("e2e", request.e2e.to_string().into()),
+        ("e2e_mode", mode.into()),
+        ("locksmith", request.locksmith.to_string().into()),
+        ("egress", request.egress.to_string().into()),
+        ("ssh_keys", hcl::Expression::from(request.ssh_keys.clone())),
+        ("domain", request.domain.as_deref().unwrap_or("").into()),
+        ("network_policy_script", firewall.into()),
+        ("http_routes", crate::network_policy::http_routes(policy, request.http_port.map(|_| 49503), mode, request.domain.as_deref()).into()),
+    ]);
+    hcl::Block::builder("locals")
+        .add_attribute(hcl::Attribute::new("enclave_user_data", hcl::expr::FuncCall::builder("base64gzip")
+            .arg(hcl::expr::FuncCall::builder("templatefile")
+                .arg(hcl::Expression::String("./user-data.sh".into()))
+                .arg(variables).build()).build()))
+        .build()
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum GenerateMainTfError {
+    #[error("invalid deployment network policy [{location}]")]
+    NetworkPolicy {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
     #[error("deployment region is required [{location}]")]
     MissingRegion { location: Location },
     #[error("could not compute enclave sizing [{location}]")]
@@ -3073,6 +3151,7 @@ async fn generate_nitro_deployment_main_tf(
     eif_s3_path: &str,
 ) -> std::result::Result<(), GenerateMainTfError> {
     use GenerateMainTfErrorCtx as Ctx;
+    let policy = request.network.policy().with_context(Ctx::network_policy())?;
 
     let aws_region = request
         .credentials
@@ -3763,78 +3842,11 @@ async fn generate_nitro_deployment_main_tf(
         );
     }
 
-    // HTTP ingress
-    sg_builder = sg_builder.add_block(
-        hcl::Block::builder("ingress")
-            .add_attribute(("from_port", 80u64))
-            .add_attribute(("to_port", 80u64))
-            .add_attribute(("protocol", "tcp"))
-            .add_attribute((
-                "cidr_blocks",
-                hcl::Expression::Array(vec![hcl::Expression::String("0.0.0.0/0".into())]),
-            ))
-            .add_attribute(("description", "Allow HTTP"))
-            .build(),
-    );
-
-    // HTTPS ingress
-    sg_builder = sg_builder.add_block(
-        hcl::Block::builder("ingress")
-            .add_attribute(("from_port", 443u64))
-            .add_attribute(("to_port", 443u64))
-            .add_attribute(("protocol", "tcp"))
-            .add_attribute((
-                "cidr_blocks",
-                hcl::Expression::Array(vec![hcl::Expression::String("0.0.0.0/0".into())]),
-            ))
-            .add_attribute(("description", "Allow HTTPS"))
-            .build(),
-    );
-
-    // platform internal ingress blocks
-    for block in platform_internal_ingress(request.e2e, request.locksmith) {
+    for block in crate::network_policy::ingress_blocks(
+        &policy, request.http_port, effective_e2e_mode(request.e2e, &request.e2e_mode), request.locksmith,
+    ) {
         sg_builder = sg_builder.add_block(block);
     }
-
-    // dynamic "ingress" block
-    sg_builder = sg_builder.add_block(
-        hcl::Block::builder("dynamic")
-            .add_label("ingress")
-            .add_attribute((
-                "for_each",
-                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("var"))
-                    .attr("ports")
-                    .build(),
-            ))
-            .add_block(
-                hcl::Block::builder("content")
-                    .add_attribute((
-                        "from_port",
-                        hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("ingress"))
-                            .attr("value")
-                            .build(),
-                    ))
-                    .add_attribute((
-                        "to_port",
-                        hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("ingress"))
-                            .attr("value")
-                            .build(),
-                    ))
-                    .add_attribute(("protocol", "tcp"))
-                    .add_attribute((
-                        "cidr_blocks",
-                        hcl::Expression::Array(vec![hcl::Expression::String("0.0.0.0/0".into())]),
-                    ))
-                    .add_attribute(hcl::Attribute::new(
-                        "description",
-                        hcl::expr::TemplateExpr::from(
-                            "Allow user port ${ingress.value}".to_string(),
-                        ),
-                    ))
-                    .build(),
-            )
-            .build(),
-    );
 
     // egress block
     sg_builder = sg_builder.add_block(
@@ -3937,9 +3949,6 @@ async fn generate_nitro_deployment_main_tf(
         )
         .add_attribute(("user_data_replace_on_change", true));
 
-    // user_data = base64encode(templatefile("./user-data.sh", { ... }))
-    let ssh_keys_json =
-        serde_json::to_string(&request.ssh_keys).unwrap_or_else(|_| "[]".to_string());
     let domain_str = request.domain.as_deref().unwrap_or("");
     let url_output = if let Some(ref d) = request.domain {
         format!("https://{d}")
@@ -3947,133 +3956,10 @@ async fn generate_nitro_deployment_main_tf(
         "https://${aws_eip.enclave.public_ip}".to_string()
     };
 
-    instance_builder = instance_builder.add_attribute(hcl::Attribute::new(
-        "user_data",
-        hcl::expr::FuncCall::builder("base64encode")
-            .arg(
-                hcl::expr::FuncCall::builder("templatefile")
-                    .arg(hcl::Expression::String("./user-data.sh".into()))
-                    .arg(hcl::Expression::Object(
-                        vec![
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "eif_s3_path",
-                                )),
-                                hcl::Expression::String(eif_s3_path.into()),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "tap_framer_sha256",
-                                )),
-                                hcl::Expression::String(SOURCE_TAP_FRAMER_SHA256.trim().into()),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "memory_mb",
-                                )),
-                                hcl::Expression::Number(request.memory_mb.into()),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "cpu_count",
-                                )),
-                                hcl::Expression::Number(cpu_count_rounded.into()),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "debug_mode",
-                                )),
-                                hcl::Expression::String(
-                                    if request.debug_mode { "true" } else { "false" }.into(),
-                                ),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "restart_policy",
-                                )),
-                                hcl::Expression::String(request.restart.policy.as_str().into()),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "restart_delay_seconds",
-                                )),
-                                hcl::Expression::Number(request.restart.delay_seconds.into()),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "ports",
-                                )),
-                                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked(
-                                    "var",
-                                ))
-                                .attr("ports")
-                                .build()
-                                .into(),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "http_port",
-                                )),
-                                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked(
-                                    "var",
-                                ))
-                                .attr("http_port")
-                                .build()
-                                .into(),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked("e2e")),
-                                hcl::Expression::String(
-                                    if request.e2e { "true" } else { "false" }.into(),
-                                ),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "e2e_mode",
-                                )),
-                                hcl::Expression::String(
-                                    effective_e2e_mode(request.e2e, &request.e2e_mode).into(),
-                                ),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "locksmith",
-                                )),
-                                hcl::Expression::String(
-                                    if request.locksmith { "true" } else { "false" }.into(),
-                                ),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "egress",
-                                )),
-                                hcl::Expression::String(
-                                    if request.egress { "true" } else { "false" }.into(),
-                                ),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "ssh_keys",
-                                )),
-                                hcl::Expression::from(
-                                    serde_json::from_str::<Vec<String>>(&ssh_keys_json)
-                                        .unwrap_or_default(),
-                                ),
-                            ),
-                            (
-                                hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                    "domain",
-                                )),
-                                hcl::Expression::String(domain_str.into()),
-                            ),
-                        ]
-                        .into_iter()
-                        .collect(),
-                    ))
-                    .build(),
-            )
-            .build(),
-    ));
+    body = body.add_block(bootstrap_locals(request, cpu_count_rounded, eif_s3_path, &policy));
+    instance_builder = instance_builder
+        .add_attribute(hcl::Attribute::new("user_data_base64", bootstrap_reference()))
+        .add_block(bootstrap_size_limit());
 
     // instance tags
     instance_builder = instance_builder.add_attribute((
@@ -4281,6 +4167,13 @@ fn provider_credential_variable(name: &str, sensitive: bool) -> hcl::Block {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum GenerateOnpremTfError {
+    #[error("invalid deployment network policy [{location}]")]
+    NetworkPolicy {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
     #[error("missing managed_onprem config [{location}]")]
     MissingConfig { location: Location },
     #[error("could not compute enclave sizing [{location}]")]
@@ -4313,6 +4206,7 @@ async fn generate_managed_onprem_deployment_tf(
     eif_s3_path: &str,
 ) -> std::result::Result<(), GenerateOnpremTfError> {
     use GenerateOnpremTfErrorCtx as Ctx;
+    let policy = request.network.policy().with_context(Ctx::network_policy())?;
 
     let onprem =
         request
@@ -4534,53 +4428,11 @@ async fn generate_managed_onprem_deployment_tf(
         sg_builder = sg_builder.add_block(cidr_ingress_block(22, "Allow SSH"));
     }
 
-    sg_builder = sg_builder
-        .add_block(cidr_ingress_block(80, "Allow HTTP"))
-        .add_block(cidr_ingress_block(443, "Allow HTTPS"));
-
-    for block in platform_internal_ingress(request.e2e, request.locksmith) {
+    for block in crate::network_policy::ingress_blocks(
+        &policy, request.http_port, effective_e2e_mode(request.e2e, &request.e2e_mode), request.locksmith,
+    ) {
         sg_builder = sg_builder.add_block(block);
     }
-
-    // dynamic "ingress" over var.ports
-    sg_builder = sg_builder.add_block(
-        hcl::Block::builder("dynamic")
-            .add_label("ingress")
-            .add_attribute((
-                "for_each",
-                hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("var"))
-                    .attr("ports")
-                    .build(),
-            ))
-            .add_block(
-                hcl::Block::builder("content")
-                    .add_attribute((
-                        "from_port",
-                        hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("ingress"))
-                            .attr("value")
-                            .build(),
-                    ))
-                    .add_attribute((
-                        "to_port",
-                        hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("ingress"))
-                            .attr("value")
-                            .build(),
-                    ))
-                    .add_attribute(("protocol", "tcp"))
-                    .add_attribute((
-                        "cidr_blocks",
-                        hcl::Expression::Array(vec![hcl::Expression::String("0.0.0.0/0".into())]),
-                    ))
-                    .add_attribute(hcl::Attribute::new(
-                        "description",
-                        hcl::expr::TemplateExpr::from(
-                            "Allow user port ${ingress.value}".to_string(),
-                        ),
-                    ))
-                    .build(),
-            )
-            .build(),
-    );
 
     // egress block
     sg_builder = sg_builder.add_block(
@@ -4619,8 +4471,7 @@ async fn generate_managed_onprem_deployment_tf(
     body = body.add_block(sg_builder.build());
 
     // resource "aws_launch_template" "enclave"
-    let ssh_keys_json =
-        serde_json::to_string(&request.ssh_keys).unwrap_or_else(|_| "[]".to_string());
+    body = body.add_block(bootstrap_locals(request, cpu_count_rounded, eif_s3_path, &policy));
 
     let lt_builder = hcl::Block::builder("resource")
         .add_label("aws_launch_template")
@@ -4674,135 +4525,8 @@ async fn generate_managed_onprem_deployment_tf(
                 )
                 .build(),
         )
-        .add_attribute(hcl::Attribute::new(
-            "user_data",
-            hcl::expr::FuncCall::builder("base64encode")
-                .arg(
-                    hcl::expr::FuncCall::builder("templatefile")
-                        .arg(hcl::Expression::String("./user-data.sh".into()))
-                        .arg(hcl::Expression::Object(
-                            vec![
-                                (
-                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                        "eif_s3_path",
-                                    )),
-                                    hcl::Expression::String(eif_s3_path.into()),
-                                ),
-                                (
-                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                        "tap_framer_sha256",
-                                    )),
-                                    hcl::Expression::String(SOURCE_TAP_FRAMER_SHA256.trim().into()),
-                                ),
-                                (
-                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                        "memory_mb",
-                                    )),
-                                    hcl::Expression::Number(request.memory_mb.into()),
-                                ),
-                                (
-                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                        "cpu_count",
-                                    )),
-                                    hcl::Expression::Number(cpu_count_rounded.into()),
-                                ),
-                                (
-                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                        "debug_mode",
-                                    )),
-                                    hcl::Expression::String(
-                                        if request.debug_mode { "true" } else { "false" }.into(),
-                                    ),
-                                ),
-                                (
-                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                        "restart_policy",
-                                    )),
-                                    hcl::Expression::String(request.restart.policy.as_str().into()),
-                                ),
-                                (
-                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                        "restart_delay_seconds",
-                                    )),
-                                    hcl::Expression::Number(request.restart.delay_seconds.into()),
-                                ),
-                                (
-                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                        "ports",
-                                    )),
-                                    hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked(
-                                        "var",
-                                    ))
-                                    .attr("ports")
-                                    .build()
-                                    .into(),
-                                ),
-                                (
-                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                        "http_port",
-                                    )),
-                                    hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked(
-                                        "var",
-                                    ))
-                                    .attr("http_port")
-                                    .build()
-                                    .into(),
-                                ),
-                                (
-                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                        "e2e",
-                                    )),
-                                    hcl::Expression::String(
-                                        if request.e2e { "true" } else { "false" }.into(),
-                                    ),
-                                ),
-                                (
-                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                        "e2e_mode",
-                                    )),
-                                    hcl::Expression::String(
-                                        effective_e2e_mode(request.e2e, &request.e2e_mode).into(),
-                                    ),
-                                ),
-                                (
-                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                        "locksmith",
-                                    )),
-                                    hcl::Expression::String(
-                                        if request.locksmith { "true" } else { "false" }.into(),
-                                    ),
-                                ),
-                                (
-                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                        "egress",
-                                    )),
-                                    hcl::Expression::String(
-                                        if request.egress { "true" } else { "false" }.into(),
-                                    ),
-                                ),
-                                (
-                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                        "ssh_keys",
-                                    )),
-                                    hcl::Expression::from(
-                                        serde_json::from_str::<Vec<String>>(&ssh_keys_json)
-                                            .unwrap_or_default(),
-                                    ),
-                                ),
-                                (
-                                    hcl::expr::ObjectKey::Identifier(hcl::Identifier::unchecked(
-                                        "domain",
-                                    )),
-                                    hcl::Expression::String(domain_str.into()),
-                                ),
-                            ]
-                            .into_iter()
-                            .collect(),
-                        ))
-                        .build(),
-                )
-                .build(),
-        ))
+        .add_attribute(hcl::Attribute::new("user_data", bootstrap_reference()))
+        .add_block(bootstrap_size_limit())
         .add_block(
             hcl::Block::builder("tag_specifications")
                 .add_attribute(("resource_type", "instance"))
@@ -5005,3 +4729,7 @@ async fn generate_managed_onprem_deployment_tf(
 #[cfg(test)]
 #[path = "deployment_tap_tests.rs"]
 mod tap_tests;
+
+#[cfg(test)]
+#[path = "deployment_network_tests.rs"]
+mod network_tests;

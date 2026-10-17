@@ -768,6 +768,104 @@ pub(crate) fn configured_enclave(
         .and_then(|enclaves| enclaves.values().next())
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+enum ReadReproductionConfigError {
+    #[error("could not read reproduction configuration '{path}' [{location}]")]
+    Read {
+        path: PathBuf,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not parse reproduction configuration '{path}' [{location}]")]
+    Parse {
+        path: PathBuf,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
+fn read_reproduction_config_from_dir(
+    dir: &Path,
+) -> Result<Option<caution_config::ConfigurationFile>, ReadReproductionConfigError> {
+    read_build_config_from_dir(dir, true)
+}
+
+#[tracing::instrument(skip_all, err)]
+fn read_build_config_from_dir(
+    dir: &Path,
+    historical: bool,
+) -> Result<Option<caution_config::ConfigurationFile>, ReadReproductionConfigError> {
+    use ReadReproductionConfigErrorCtx as Ctx;
+    let hcl = dir.join("caution.hcl");
+    if hcl.exists() {
+        let content = fs::read_to_string(&hcl).with_context(Ctx::read(hcl.clone()))?;
+        return (if historical {
+            caution_config::ConfigurationFile::from_historical_hcl(&content)
+                .with_context(Ctx::parse(hcl))
+        } else {
+            caution_config::ConfigurationFile::from_str(&content).with_context(Ctx::parse(hcl))
+        }).map(Some);
+    }
+    let procfile = dir.join("Procfile");
+    if historical && !procfile.exists() {
+        // Preserve absence separately from a readable empty configuration: old
+        // manifest-selected inputs (notably Locksmith) depend on that distinction.
+        fs::read_dir(dir).with_context(Ctx::read(dir.to_path_buf()))?;
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&procfile).with_context(Ctx::read(procfile.clone()))?;
+    (if historical {
+        caution_config::ConfigurationFile::from_historical_procfile(&content)
+            .with_context(Ctx::parse(procfile))
+    } else {
+        caution_config::ConfigurationFile::from_procfile(&content)
+            .with_context(Ctx::parse(procfile))
+    }).map(Some)
+}
+
+#[tracing::instrument(skip_all)]
+fn resolve_reproduction_locksmith(
+    source_config: Option<&caution_config::ConfigurationFile>,
+    recorded_locksmith: bool,
+) -> bool {
+    source_config.map(|config| config.has_vault_env()).unwrap_or(recorded_locksmith)
+}
+
+#[tracing::instrument(skip_all)]
+fn historical_ingress_ports(network: Option<&caution_config::NetworkConfig>) -> Vec<u16> {
+    let mut ports: Vec<_> = network
+        .into_iter()
+        .flat_map(|network| &network.ingress)
+        .flat_map(|rule| match rule.port_spec {
+            Some(caution_config::PortSpec::Exact { port }) => Some(port..=port),
+            Some(caution_config::PortSpec::FromTo {
+                start_port,
+                end_port,
+            }) => Some(start_port..=end_port),
+            None => None,
+        })
+        .flatten()
+        .collect();
+    ports.sort();
+    ports.dedup();
+    ports
+}
+
+#[tracing::instrument(skip_all, err)]
+fn configured_ingress_ports(
+    network: Option<&caution_config::NetworkConfig>,
+) -> Result<Vec<u16>, caution_config::NetworkPolicyError> {
+    network
+        .map(|network| network.policy().map(|policy| policy.ports()))
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
 fn config_egress_enabled(cfg: &caution_config::ConfigurationFile) -> bool {
     configured_enclave(cfg)
         .and_then(|enc| enc.network.as_ref())
@@ -844,6 +942,13 @@ struct StagedSource {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum BuildLocalError {
+    #[error("failed to normalize configured ingress ports [{location}]")]
+    NetworkPolicy {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
     #[error("failed to read deployment config")]
     ReadConfig {
         #[location]
@@ -1000,18 +1105,8 @@ pub(crate) async fn build_local(client: &ApiClient, no_cache: bool) -> Result<()
         .map(|b| b.app_sources.clone())
         .filter(|s| !s.is_empty());
 
-    let ports: Vec<u16> = enclave
-        .and_then(|e| e.network.as_ref())
-        .map(|n| {
-            n.ingress
-                .iter()
-                .filter_map(|rule| match &rule.port_spec {
-                    Some(caution_config::PortSpec::Exact { port }) => Some(*port),
-                    _ => None,
-                })
-                .collect::<Vec<u16>>()
-        })
-        .unwrap_or_default();
+    let ports = configured_ingress_ports(enclave.and_then(|e| e.network.as_ref()))
+        .with_context(Ctx::network_policy())?;
 
     let http_port = enclave
         .and_then(|config| config.network.as_ref())
@@ -1111,6 +1206,13 @@ pub(crate) async fn build_local(client: &ApiClient, no_cache: bool) -> Result<()
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum BuildAndGetPcrsError {
+    #[error("failed to normalize configured ingress ports [{location}]")]
+    NetworkPolicy {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
     #[error("failed to resolve platform framework source [{location}]")]
     FrameworkSource {
         #[location]
@@ -1279,9 +1381,9 @@ async fn build_and_get_pcrs(
     };
     let no_cache = if let Some(source) = local_source {
         no_cache
-            || client
-                .read_config_from_dir(&source.path)
+            || read_build_config_from_dir(&source.path, external_manifest.is_some())
                 .ok()
+                .flatten()
                 .and_then(|cfg| {
                     cfg.enclave
                         .and_then(|e| e.into_iter().next().map(|(_, v)| v))
@@ -1422,11 +1524,11 @@ async fn build_and_get_pcrs(
         };
 
     let measured_config = if let Some(ref app_dir) = app_source_dir {
-        Some(
-            client
-                .read_config_from_dir(app_dir)
-                .with_context(Ctx::read_config_dir())?,
-        )
+        if external_manifest.is_some() {
+            read_reproduction_config_from_dir(app_dir).with_context(Ctx::read_config_dir())?
+        } else {
+            Some(client.read_config_from_dir(app_dir).with_context(Ctx::read_config_dir())?)
+        }
     } else if external_manifest.is_none() {
         Some(client.read_config().with_context(Ctx::read_config())?)
     } else {
@@ -1504,7 +1606,7 @@ async fn build_and_get_pcrs(
 
     let loader = Spinner::new("Reproducing enclave image", SpinnerStyle::Processing);
     let image_ref = if let Some(ref app_dir) = app_source_dir {
-        build_docker_image_from_dir(client, app_dir, no_cache)
+        build_docker_image_from_dir(client, app_dir, no_cache, external_manifest.is_some())
             .await
             .with_context(Ctx::build_docker_image_from_dir())?
     } else {
@@ -1610,41 +1712,26 @@ async fn build_and_get_pcrs(
             (binary, run_cmd, source_urls, branch, commit, None)
         };
 
-    let ports: Vec<u16> = {
-        let config_dir = app_source_dir.as_deref().unwrap_or(Path::new("."));
-        client
-            .read_config_from_dir(config_dir)
-            .ok()
-            .and_then(|cfg| {
-                cfg.enclave
-                    .and_then(|e| e.into_iter().next().map(|(_, v)| v))
-            })
-            .and_then(|e| e.network)
-            .map(|n| {
-                n.ingress
-                    .iter()
-                    .filter_map(|rule| match &rule.port_spec {
-                        Some(caution_config::PortSpec::Exact { port }) => Some(*port),
-                        _ => None,
-                    })
-                    .collect::<Vec<u16>>()
-            })
-            .unwrap_or_default()
+    let has_source_config = measured_config.is_some();
+    let reproduction_config = match measured_config {
+        Some(cfg) => cfg,
+        None => read_build_config_from_dir(
+            app_source_dir.as_deref().unwrap_or(Path::new(".")),
+            external_manifest.is_some(),
+        )
+        .with_context(Ctx::read_config_dir())?
+        .unwrap_or(caution_config::ConfigurationFile { caution: None, enclave: None }),
+    };
+    let reproduction_network =
+        configured_enclave(&reproduction_config).and_then(|enclave| enclave.network.as_ref());
+    let ports = if external_manifest.is_some() {
+        historical_ingress_ports(reproduction_network)
+    } else {
+        configured_ingress_ports(reproduction_network).with_context(Ctx::network_policy())?
     };
     output::verbose(client.verbose, format!("Ports: {:?}", ports));
 
-    let http_config = {
-        let config_dir = app_source_dir.as_deref().unwrap_or(Path::new("."));
-        client
-            .read_config_from_dir(config_dir)
-            .ok()
-            .and_then(|cfg| {
-                cfg.enclave
-                    .and_then(|e| e.into_iter().next().map(|(_, v)| v))
-            })
-            .and_then(|config| config.network)
-            .and_then(|network| network.http)
-    };
+    let http_config = reproduction_network.and_then(|network| network.http.as_ref());
     let http_port = http_config.as_ref().map(|http| http.port);
     output::verbose(client.verbose, format!("HTTP port: {:?}", http_port));
 
@@ -1696,43 +1783,22 @@ async fn build_and_get_pcrs(
         });
     output::verbose(client.verbose, format!("E2E encryption: {}", e2e));
 
-    let locksmith = if let Some(ref app_dir) = app_source_dir {
-        client
-            .read_config_from_dir(app_dir)
-            .ok()
-            .map(|cfg| cfg.has_vault_env())
-            .unwrap_or_else(|| {
-                external_manifest
-                    .as_ref()
-                    .map(|manifest| manifest.locksmith || manifest.locksmith_commit.is_some())
-                    .unwrap_or(false)
-            })
-    } else if let Some(ref manifest) = external_manifest {
-        manifest.locksmith || manifest.locksmith_commit.is_some()
-    } else {
-        client
-            .read_config()
-            .ok()
-            .map(|cfg| cfg.has_vault_env())
-            .unwrap_or(false)
-    };
+    let locksmith = resolve_reproduction_locksmith(
+        (has_source_config && (app_source_dir.is_some() || external_manifest.is_none()))
+            .then_some(&reproduction_config),
+        external_manifest.as_ref().is_some_and(|manifest| {
+            manifest.locksmith || manifest.locksmith_commit.is_some()
+        }),
+    );
     output::verbose(client.verbose, format!("Locksmith secrets: {}", locksmith));
 
-    let egress = if let Some(ref app_dir) = app_source_dir {
-        client
-            .read_config_from_dir(app_dir)
-            .ok()
-            .map(|cfg| config_egress_enabled(&cfg))
-            .unwrap_or(false)
+    let egress = if app_source_dir.is_some() {
+        config_egress_enabled(&reproduction_config)
     } else if external_manifest.is_some() {
         // Egress is intentionally never read from the manifest; default-deny.
         false
     } else {
-        client
-            .read_config()
-            .ok()
-            .map(|cfg| config_egress_enabled(&cfg))
-            .unwrap_or(false)
+        config_egress_enabled(&reproduction_config)
     };
     output::verbose(client.verbose, format!("Egress: {}", egress));
 
@@ -2915,7 +2981,7 @@ async fn build_local_docker_image(
     use BuildLocalDockerImageErrorCtx as Ctx;
 
     let work_dir = std::env::current_dir().with_context(Ctx::current_dir())?;
-    build_docker_image_from_dir(client, &work_dir, no_cache)
+    build_docker_image_from_dir(client, &work_dir, no_cache, false)
         .await
         .with_context(Ctx::build_image())
 }
@@ -3242,6 +3308,14 @@ fn extract_tar_archive_to_dir<R: std::io::Read>(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum BuildDockerImageFromDirError {
+    #[error("could not read image build configuration [{location}]")]
+    ReadConfig {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
     #[error("failed to inspect docker image [{location}]")]
     InspectImage {
         #[location]
@@ -3270,10 +3344,65 @@ enum BuildDockerImageFromDirError {
     },
 }
 
+#[tracing::instrument(skip_all, err)]
+fn read_image_build_config(
+    work_dir: &Path,
+    no_cache: bool,
+    historical: bool,
+) -> Result<BuildConfig, BuildDockerImageFromDirError> {
+    use BuildDockerImageFromDirErrorCtx as Ctx;
+    let containerfile = read_build_config_from_dir(work_dir, historical)
+        .with_context(Ctx::read_config())?
+        .and_then(|config| config.enclave)
+        .and_then(|e| e.into_iter().next().map(|(_, v)| v))
+        .and_then(|e| e.build)
+        .and_then(|b| b.containerfile);
+
+    let procfile_path = work_dir.join("Procfile");
+    let config = if procfile_path.exists() {
+        let content = std::fs::read_to_string(&procfile_path).with_context(Ctx::read_procfile())?;
+        let mut build_command = None;
+        let mut oci_tarball = None;
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = line.split_once(':') {
+                let key = key.trim().to_lowercase();
+                let value = value.trim().to_string();
+                match key.as_str() {
+                    "build" => build_command = Some(value),
+                    "oci_tarball" => oci_tarball = Some(value),
+                    _ => {}
+                }
+            }
+        }
+
+        BuildConfig {
+            build_command,
+            containerfile,
+            oci_tarball,
+            no_cache,
+        }
+    } else {
+        BuildConfig {
+            build_command: None,
+            containerfile,
+            oci_tarball: None,
+            no_cache,
+        }
+    };
+
+    Ok(config)
+}
+
 async fn build_docker_image_from_dir(
     client: &ApiClient,
     work_dir: &std::path::Path,
     no_cache: bool,
+    historical: bool,
 ) -> Result<String, BuildDockerImageFromDirError> {
     use BuildDockerImageFromDirErrorCtx as Ctx;
     use tokio::process::Command;
@@ -3318,50 +3447,7 @@ async fn build_docker_image_from_dir(
         format!("Building Docker image with tag: {}", tag),
     );
 
-    let containerfile = client
-        .read_config_from_dir(work_dir)
-        .ok()
-        .and_then(|c| c.enclave)
-        .and_then(|e| e.into_iter().next().map(|(_, v)| v))
-        .and_then(|e| e.build)
-        .and_then(|b| b.containerfile);
-
-    let procfile_path = work_dir.join("Procfile");
-    let config = if procfile_path.exists() {
-        let content = std::fs::read_to_string(&procfile_path).with_context(Ctx::read_procfile())?;
-        let mut build_command = None;
-        let mut oci_tarball = None;
-
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some((key, value)) = line.split_once(':') {
-                let key = key.trim().to_lowercase();
-                let value = value.trim().to_string();
-                match key.as_str() {
-                    "build" => build_command = Some(value),
-                    "oci_tarball" => oci_tarball = Some(value),
-                    _ => {}
-                }
-            }
-        }
-
-        BuildConfig {
-            build_command,
-            containerfile,
-            oci_tarball,
-            no_cache,
-        }
-    } else {
-        BuildConfig {
-            build_command: None,
-            containerfile,
-            oci_tarball: None,
-            no_cache,
-        }
-    };
+    let config = read_image_build_config(work_dir, no_cache, historical)?;
 
     output::verbose(client.verbose, format!("work_dir = {:?}", work_dir));
     output::verbose(client.verbose, format!("BuildConfig = {:?}", config));
@@ -4388,6 +4474,168 @@ mod tests {
         assert!(message.contains("--no-cache"));
         assert!(message.contains("Keep the manifest's framework pin"));
         assert!(message.contains("do not bypass PCR verification"));
+    }
+
+    #[test]
+    fn historical_reproduction_config_preserves_procfile_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Procfile"),
+            "run: /app\nhttp_port: 8080\ncontainerfile: Historical.Containerfile\nbuild: make old-image\noci_tarball: historical.tar\n",
+        )
+        .unwrap();
+        assert!(read_image_build_config(dir.path(), false, false).is_err());
+        let build =
+            read_image_build_config(dir.path(), true, true).expect("historical image build");
+        assert_eq!(
+            build.containerfile.as_deref(),
+            Some("Historical.Containerfile")
+        );
+        assert!(build.no_cache);
+        assert_eq!(build.build_command.as_deref(), Some("make old-image"));
+        assert_eq!(build.oci_tarball.as_deref(), Some("historical.tar"));
+        let cfg = read_reproduction_config_from_dir(dir.path()).expect("historical Procfile").unwrap();
+        let enclave = configured_enclave(&cfg).unwrap();
+        let network = enclave.network.as_ref().unwrap();
+        assert!(historical_ingress_ports(Some(network)).is_empty());
+        assert_eq!(network.http.as_ref().unwrap().port, 8080);
+        assert!(!config_egress_enabled(&cfg));
+        assert_eq!(
+            enclave.build.as_ref().unwrap().containerfile.as_deref(),
+            Some("Historical.Containerfile")
+        );
+    }
+
+    #[test]
+    fn historical_reproduction_config_preserves_raw_hcl_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = r#"enclave "main" {
+            build { containerfile = "Historical.Containerfile" }
+            network {
+                ingress {
+                    cidr_ipv4 = "192.0.2.0/24"
+                    start_port = 8080
+                    end_port = 8082
+                    ip_protocol = "udp"
+                }
+                ingress {
+                    cidr_ipv4 = "198.51.100.0/24"
+                    port = 8080
+                }
+                egress {
+                    cidr_ipv4 = "0.0.0.0/0"
+                    ip_protocol = "-1"
+                }
+                http { port = 8080 }
+            }
+        }"#;
+        assert!(matches!(
+            caution_config::ConfigurationFile::from_str(input),
+            Err(caution_config::FromStrError::NetworkPolicy { .. })
+        ));
+        std::fs::write(dir.path().join("caution.hcl"), input).unwrap();
+        assert!(read_image_build_config(dir.path(), false, false).is_err());
+        let build =
+            read_image_build_config(dir.path(), false, true).expect("historical image build");
+        assert_eq!(
+            build.containerfile.as_deref(),
+            Some("Historical.Containerfile")
+        );
+        let cfg = read_reproduction_config_from_dir(dir.path()).expect("historical HCL").unwrap();
+        let network = configured_enclave(&cfg).unwrap().network.as_ref().unwrap();
+        let ports = historical_ingress_ports(Some(network));
+        assert_eq!(ports, (8080..=8082).collect::<Vec<u16>>());
+        assert!(config_egress_enabled(&cfg));
+        assert_eq!(network.http.as_ref().unwrap().port, 8080);
+    }
+
+    #[test]
+    fn historical_reproduction_allows_source_without_a_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Containerfile"), "FROM scratch\n").unwrap();
+        let cfg = read_reproduction_config_from_dir(dir.path()).unwrap();
+        assert!(cfg.is_none());
+        assert!(resolve_reproduction_locksmith(cfg.as_ref(), true));
+        assert!(!resolve_reproduction_locksmith(cfg.as_ref(), false));
+        let empty_config = caution_config::ConfigurationFile::from_historical_hcl("").unwrap();
+        assert!(!resolve_reproduction_locksmith(Some(&empty_config), true));
+        assert!(historical_ingress_ports(None).is_empty());
+        let build = read_image_build_config(dir.path(), false, true).unwrap();
+        assert!(build.containerfile.is_none());
+        assert!(read_image_build_config(dir.path(), false, false).is_err());
+        assert!(read_reproduction_config_from_dir(&dir.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn historical_reproduction_read_does_not_fall_back_from_invalid_hcl() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("caution.hcl"), "invalid {").unwrap();
+        std::fs::write(dir.path().join("Procfile"), "run: /app\n").unwrap();
+        assert!(matches!(
+            read_reproduction_config_from_dir(dir.path()),
+            Err(ReadReproductionConfigError::Parse { .. })
+        ));
+        assert!(read_image_build_config(dir.path(), false, true).is_err());
+    }
+
+    #[test]
+    fn historical_port_expansion_ignores_current_quotas_and_reserved_ports() {
+        let cfg = caution_config::ConfigurationFile::from_historical_hcl(
+            r#"
+            enclave "main" {
+                network {
+                    ingress {
+                        cidr_ipv4 = "0.0.0.0/0"
+                        start_port = 49000
+                        end_port = 50000
+                    }
+                    ingress {
+                        cidr_ipv4 = "0.0.0.0/0"
+                        port = 49500
+                    }
+                }
+            }
+        "#,
+        )
+        .unwrap();
+        let network = configured_enclave(&cfg).unwrap().network.as_ref().unwrap();
+        assert!(configured_ingress_ports(Some(network)).is_err());
+        assert_eq!(
+            historical_ingress_ports(Some(network)),
+            (49000..=50000).collect::<Vec<u16>>()
+        );
+    }
+
+    #[test]
+    fn shared_ingress_ports_match_policy_for_ranges_duplicates_and_http() {
+        let cfg = caution_config::ConfigurationFile::from_str(r#"
+            enclave "main" {
+                network {
+                    ingress {
+                        cidr_ipv4 = "192.0.2.0/24"
+                        start_port = 8080
+                        end_port = 8082
+                    }
+                    ingress {
+                        cidr_ipv4 = "198.51.100.1/32"
+                        port = 8081
+                    }
+                    http { port = 8081 }
+                }
+            }
+        "#).expect("config");
+        let network = configured_enclave(&cfg).and_then(|enclave| enclave.network.as_ref());
+        assert_eq!(configured_ingress_ports(network).expect("ports"), [8080, 8081, 8082]);
+        assert_eq!(configured_ingress_ports(network).expect("ports"), network.expect("network").policy().expect("policy").ports());
+        assert!(configured_ingress_ports(None).expect("no network").is_empty());
+    }
+
+    #[test]
+    fn shared_ingress_ports_propagate_invalid_programmatic_rules() {
+        let network: caution_config::NetworkConfig = serde_json::from_value(serde_json::json!({
+            "ingress": [{"cidr_ipv4":"192.0.2.0/24", "port":8080, "ip_protocol":"udp"}]
+        })).expect("raw config");
+        assert!(matches!(configured_ingress_ports(Some(&network)), Err(caution_config::NetworkPolicyError::InvalidProtocol { .. })));
     }
 
     #[test]
