@@ -81,11 +81,11 @@ impl IntoResponse for AuthMiddlewareError {
                 (StatusCode::UNAUTHORIZED, "No authentication provided")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn auth_middleware(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -203,15 +203,13 @@ pub enum ValidateSessionError {
     Invalid { location: Location },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn validate_session(db: &PgPool, session_id: &str) -> Result<Uuid, ValidateSessionError> {
     use ValidateSessionErrorCtx as Ctx;
 
     let result: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT u.id
+        "SELECT s.user_id
          FROM auth_sessions s
-         INNER JOIN fido2_credentials c ON s.credential_id = c.credential_id
-         INNER JOIN users u ON c.user_id = u.id
          WHERE s.session_id = $1 AND s.expires_at > NOW()",
     )
     .bind(session_id)
@@ -259,7 +257,7 @@ pub enum EnsureUserHasOrgError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn ensure_user_has_org(db: &PgPool, user_id: Uuid) -> Result<(), EnsureUserHasOrgError> {
     use EnsureUserHasOrgErrorCtx as Ctx;
 
@@ -329,11 +327,11 @@ impl IntoResponse for OnboardingMiddlewareError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn onboarding_middleware(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -376,22 +374,23 @@ pub enum LegalMiddlewareError {
 
 impl IntoResponse for LegalMiddlewareError {
     fn into_response(self) -> Response {
-        match self {
-            LegalMiddlewareError::Evaluate { .. } => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to evaluate legal acceptance requirements",
-            )
-                .into_response(),
-            LegalMiddlewareError::AcceptanceRequired { document_type, .. } => (
-                StatusCode::FORBIDDEN,
-                Json(LegalAcceptanceRequiredBody {
-                    code: "legal_acceptance_required",
-                    document_type,
-                    message: "You must accept the current legal document before continuing.",
-                }),
-            )
-                .into_response(),
-        }
+        let (status, body) =
+            match &self {
+                LegalMiddlewareError::Evaluate { .. } => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to evaluate legal acceptance requirements",
+                ),
+                LegalMiddlewareError::AcceptanceRequired { document_type, .. } => return (
+                    StatusCode::FORBIDDEN,
+                    Json(LegalAcceptanceRequiredBody {
+                        code: "legal_acceptance_required",
+                        document_type: document_type.clone(),
+                        message: "You must accept the current legal document before continuing.",
+                    }),
+                )
+                    .into_response(),
+            };
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
@@ -402,7 +401,7 @@ struct LegalAcceptanceRequiredBody {
     message: &'static str,
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn legal_middleware(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -461,12 +460,12 @@ impl IntoResponse for InternalAuthMiddlewareError {
                 (StatusCode::UNAUTHORIZED, "Invalid internal service secret")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
 /// Internal-only auth middleware — rejects session-based auth, requires service secret + user_id.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn internal_auth_middleware(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

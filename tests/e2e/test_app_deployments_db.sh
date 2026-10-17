@@ -37,3 +37,7 @@ PLATFORM_GIT_SHA=0000000000000000000000000000000000000000 \
 # The metering service's reconcile SQL runs against the same schema.
 cargo test -p metering handlers::collection::tests --locked \
     -- --ignored --test-threads=1 --nocapture
+# Replay after lifecycle fixtures have populated the schema, using the normal runner.
+docker exec -e MIGRATION_DB_HOST=127.0.0.1 -e MIGRATION_DB_NAME=caution_app_deployments_test \
+    -e PGPASSWORD=postgres "$CONTAINER" sh /migrate.sh > "$WORK/migrations-replay.log" 2>&1 \
+    || { cat "$WORK/migrations-replay.log"; exit 1; }

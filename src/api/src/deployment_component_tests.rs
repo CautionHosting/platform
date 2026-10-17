@@ -1,0 +1,82 @@
+// SPDX-FileCopyrightText: 2026 Caution SEZC
+// SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+
+use super::*;
+#[tokio::test]
+async fn all_host_provisioners_pin_the_recorded_digest_and_reject_invalid_digests() {
+    let mut request = super::tests::deployment_request("s3://fixture/app.eif", Some("app.eif"));
+    let legacy = serde_json::to_value(&request).unwrap();
+    assert!(legacy.get("tap_framer_sha256").is_none());
+    assert!(
+        serde_json::from_value::<NitroDeploymentRequest>(legacy)
+            .unwrap()
+            .tap_framer_sha256
+            .is_none()
+    );
+    let digest = "a".repeat(64);
+    request.tap_framer_sha256 = Some(digest.clone());
+    let saved = serde_json::to_vec(&request).unwrap();
+    let mut request: NitroDeploymentRequest = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(request.tap_framer_sha256.as_deref(), Some(digest.as_str()));
+    let managed = tempfile::tempdir().unwrap();
+    generate_nitro_deployment_main_tf(managed.path(), &request, "s3://fixture/app.eif")
+        .await
+        .unwrap();
+    let byoc = tempfile::tempdir().unwrap();
+    generate_managed_onprem_deployment_tf(byoc.path(), &request, "s3://fixture/app.eif")
+        .await
+        .unwrap();
+    let mut candidates = Vec::new();
+    for linked in [false, true] {
+        let mut candidate: NitroDeploymentRequest = serde_json::from_slice(&saved).unwrap();
+        if linked {
+            candidate.credentials = Some(AwsCredentials {
+                access_key_id: "AKIALINKED".into(),
+                secret_access_key: "fixture".into(),
+                region: "us-west-2".into(),
+            });
+        } else {
+            candidate.managed_onprem = None;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        generate_deployment_main_tf(
+            directory.path(),
+            &candidate,
+            Uuid::nil(),
+            &super::tests::sample_network(),
+            "s3://fixture/app.eif",
+        )
+        .await
+        .unwrap();
+        candidates.push(directory);
+    }
+    for dir in [&managed, &byoc].into_iter().chain(candidates.iter()) {
+        let generated = std::fs::read_to_string(dir.path().join("main.tf")).unwrap();
+        generated.parse::<hcl::Body>().unwrap();
+        assert!(generated.contains(&format!("tap_framer_sha256 = \"{digest}\"")));
+    }
+    request.tap_framer_sha256 = Some("$(unsafe)".into());
+    let rejected = tempfile::tempdir().unwrap();
+    assert!(
+        generate_nitro_deployment_main_tf(rejected.path(), &request, "s3://fixture/app.eif")
+            .await
+            .is_err()
+    );
+    assert!(
+        generate_managed_onprem_deployment_tf(rejected.path(), &request, "s3://fixture/app.eif")
+            .await
+            .is_err()
+    );
+    assert!(
+        generate_deployment_main_tf(
+            rejected.path(),
+            &request,
+            Uuid::nil(),
+            &super::tests::sample_network(),
+            "s3://fixture/app.eif",
+        )
+        .await
+        .is_err()
+    );
+    assert!(!rejected.path().join("main.tf").exists());
+}

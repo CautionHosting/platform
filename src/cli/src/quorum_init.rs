@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use crate::{ApiClient, output, prompt};
 use clap::Args;
 use dterror::{BoxError, CtxError, Location, ResultExt};
@@ -26,7 +34,7 @@ use uuid::Uuid;
 pub(crate) const DIRECT_WEBAUTHN_ERROR: &str = "WebAuthn holders require Platform-mediated Keymaker creation because Platform resolves their credential bindings internally. Remove the Keymaker URL override or select only PGP holders.";
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("{message} [{location:?}]")]
+#[error("{message} [{location}]")]
 pub(crate) struct InitError {
     #[context(borrow = str)]
     message: String,
@@ -174,12 +182,18 @@ impl PgpKeySelector {
     fn resolve(&self, member: &Member) -> Result<Uuid, InitError> {
         let mut matches = member.pgp_keys.iter().filter(|key| match self {
             Self::Id(id) => key.id == *id,
-            Self::Fingerprint(fingerprint) => normalized_fingerprint(&key.fingerprint).as_ref() == Some(fingerprint),
+            Self::Fingerprint(fingerprint) => {
+                normalized_fingerprint(&key.fingerprint).as_ref() == Some(fingerprint)
+            }
         });
         match (matches.next(), matches.next()) {
             (Some(key), None) => Ok(key.id),
-            (None, _) => Err(InitError::invalid("PGP key does not belong to the selected user’s active registered keys")),
-            _ => Err(InitError::invalid("ambiguous registered PGP key; select a unique registration UUID")),
+            (None, _) => Err(InitError::invalid(
+                "PGP key does not belong to the selected user’s active registered keys",
+            )),
+            _ => Err(InitError::invalid(
+                "ambiguous registered PGP key; select a unique registration UUID",
+            )),
         }
     }
 }
@@ -188,7 +202,9 @@ impl std::str::FromStr for PgpSelection {
     type Err = InitError;
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         let (user, key) = text.split_once('=').ok_or_else(|| {
-            InitError::invalid("--pgp-key requires USER=KEY (registration UUID or full PGP fingerprint)")
+            InitError::invalid(
+                "--pgp-key requires USER=KEY (registration UUID or full PGP fingerprint)",
+            )
         })?;
         Ok(Self {
             user: user.parse()?,
@@ -219,11 +235,17 @@ struct Member {
 impl Member {
     fn custody_error(&self) -> Option<&'static str> {
         if self.webauthn_credentials < 1 {
-            Some("selected WebAuthn holder has no registered credentials; use external PGP or register a passkey")
+            Some(
+                "selected WebAuthn holder has no registered credentials; use external PGP or register a passkey",
+            )
         } else if self.webauthn_credentials > 64 {
-            Some("selected WebAuthn holder has more than 64 credentials; reduce the credential count or use external PGP")
+            Some(
+                "selected WebAuthn holder has more than 64 credentials; reduce the credential count or use external PGP",
+            )
         } else if self.webauthn_uv_credentials < 1 {
-            Some("selected WebAuthn holder must verify a passkey for quorum approval with PIN/biometrics in Dashboard Authentication, or use external PGP")
+            Some(
+                "selected WebAuthn holder must verify a passkey for quorum approval with PIN/biometrics in Dashboard Authentication, or use external PGP",
+            )
         } else {
             None
         }
@@ -434,13 +456,28 @@ fn check_quorum_parameters(
 }
 
 fn pgp_selection_menu(member: &Member, explicit: Option<bool>) -> String {
-    let choice = if explicit == Some(false) { "PGP key" } else { "approval method" };
-    let mut menu = format!("Select {choice} for {}:", crate::share_release::terminal_label(&member.username));
+    let choice = if explicit == Some(false) {
+        "PGP key"
+    } else {
+        "approval method"
+    };
+    let mut menu = format!(
+        "Select {choice} for {}:",
+        crate::share_release::terminal_label(&member.username)
+    );
     for (index, key) in member.pgp_keys.iter().enumerate() {
-        menu.push_str(&format!("\n  {}: PGP {} ({})", index + 1, crate::share_release::terminal_label(&key.fingerprint), key.id));
+        menu.push_str(&format!(
+            "\n  {}: PGP {} ({})",
+            index + 1,
+            crate::share_release::terminal_label(&key.fingerprint),
+            key.id
+        ));
     }
     if member.custody_error().is_none() && explicit.is_none() {
-        menu.push_str(&format!("\n  0: Passkey · Caution Enclave-held key ({} registered passkeys, one share)", member.webauthn_credentials));
+        menu.push_str(&format!(
+            "\n  0: Passkey · Caution Enclave-held key ({} registered passkeys, one share)",
+            member.webauthn_credentials
+        ));
     }
     menu
 }
@@ -449,8 +486,15 @@ fn participant_summary(member: &Member, participant: &Participant) -> String {
     let name = crate::share_release::terminal_label(&member.username);
     match participant.pgp_key_id {
         Some(id) => {
-            let key = member.pgp_keys.iter().find(|key| key.id == id).expect("resolved registered key");
-            format!("{name} · External PGP · {}", crate::share_release::terminal_label(&key.fingerprint))
+            let key = member
+                .pgp_keys
+                .iter()
+                .find(|key| key.id == id)
+                .expect("resolved registered key");
+            format!(
+                "{name} · External PGP · {}",
+                crate::share_release::terminal_label(&key.fingerprint)
+            )
         }
         None => format!("{name} · Passkey · Caution Enclave-held key"),
     }
@@ -504,7 +548,9 @@ fn select_participants_with_choice(
             ));
         }
         if explicit.get(&user_id) == Some(&true) {
-            return Err(InitError::invalid("--pgp-key conflicts with explicit WebAuthn approval"));
+            return Err(InitError::invalid(
+                "--pgp-key conflicts with explicit WebAuthn approval",
+            ));
         }
         overrides.insert(user_id, selection.key.resolve(member)?);
     }
@@ -534,14 +580,15 @@ fn select_participants_with_choice(
         }
         if key_id.is_none() && !webauthn {
             if member.pgp_keys.is_empty() && member.custody_error().is_some() {
-                return Err(InitError::invalid(
-                    member.custody_error().unwrap(),
-                ));
+                return Err(InitError::invalid(member.custody_error().unwrap()));
             }
             if member.pgp_keys.len() == 1 {
                 key_id = Some(member.pgp_keys[0].id);
             } else if interactive {
-                eprintln!("{}", pgp_selection_menu(member, explicit.get(user_id).copied()));
+                eprintln!(
+                    "{}",
+                    pgp_selection_menu(member, explicit.get(user_id).copied())
+                );
                 let index = choose("Selection: ")?;
                 if index == 0 && member.custody_error().is_none() && !explicit.contains_key(user_id)
                 {
@@ -614,10 +661,10 @@ async fn checked_response(
 }
 
 fn check_name_label(name: Option<&str>, labels: &HashMap<String, String>) -> Result<(), InitError> {
-    if let (Some(name), Some(label)) = (name, labels.get("name")) {
-        if name != label {
-            return Err(InitError::invalid("--name and label 'name' must match"));
-        }
+    if let (Some(name), Some(label)) = (name, labels.get("name"))
+        && name != label
+    {
+        return Err(InitError::invalid("--name and label 'name' must match"));
     }
     Ok(())
 }
@@ -776,7 +823,6 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
         eprintln!(
             "Your passkey authorizes release of one share. The private key stays inside the key-service enclave. The share is re-encrypted to the verified application enclave."
         );
-
     }
     if interactive
         && !prompt::confirm("Create this quorum? [y/N] ")
@@ -922,8 +968,7 @@ pub(crate) async fn run(client: &ApiClient, options: Options) -> Result<(), Init
     })?;
     let json = serde_json::to_string_pretty(&response)
         .with_context(Ctx::new("unable to encode proofed bundle"))?;
-    fs::create_dir_all(".caution")
-        .with_context(Ctx::new("unable to create .caution directory"))?;
+    fs::create_dir_all(".caution").with_context(Ctx::new("unable to create .caution directory"))?;
     // Save the accepted policy before the bundle; readers never trust policy from a response.
     save_policy_if_absent(saved_policy_path, &policy_text, &policy)?;
     fs::write(".caution/quorum-bundle.json", &json)

@@ -9,6 +9,10 @@ terraform {
   }
 }
 
+locals {
+  enclave_user_data = base64gzip(templatefile("./user-data.sh", { eif_s3_path = "s3://bucket/enclave.eif", tap_framer_sha256 = "e50265d7f57ce2ade393714b2c52f3173d288b348598f5a85aad1a775f49f283", memory_mb = 512, cpu_count = 2, debug_mode = "false", restart_policy = "on-failure", restart_delay_seconds = 10, ports = [], http_port = 8080, e2e = "true", e2e_mode = "steve", locksmith = "true", egress = "false", ssh_keys = ["ssh-ed25519 AAAA test"], domain = "app.example.com", network_policy_script = templatefile("./network-policy.sh.tftpl", { egress_forward_rules = "", egress_dns_rules = "", ingress_input_rules = "-A CAUTION_INGRESS -m conntrack --ctstate ESTABLISHED --ctdir REPLY -j RETURN\n-A CAUTION_INGRESS -s 0.0.0.0/0 -p tcp --dport 443:443 -j ACCEPT\n-A CAUTION_INGRESS -s 0.0.0.0/0 -p tcp --dport 49500:49500 -j ACCEPT\n-A CAUTION_INGRESS -s 0.0.0.0/0 -p tcp --dport 49504:49504 -j ACCEPT\n-A CAUTION_INGRESS -p tcp --dport 443:443 -j DROP\n-A CAUTION_INGRESS -p tcp --dport 49500:49500 -j DROP\n-A CAUTION_INGRESS -p tcp --dport 49500:49600 -j DROP\n-A CAUTION_INGRESS -p tcp --dport 49504:49504 -j DROP\n", ingress_ipv6_rules = "-A CAUTION_INGRESS -m conntrack --ctstate ESTABLISHED --ctdir REPLY -j RETURN\n-A CAUTION_INGRESS -p tcp --dport 443:443 -j DROP\n-A CAUTION_INGRESS -p tcp --dport 49500:49500 -j DROP\n-A CAUTION_INGRESS -p tcp --dport 49500:49600 -j DROP\n-A CAUTION_INGRESS -p tcp --dport 49504:49504 -j DROP\n", ingress_guard_rules = "-A CAUTION_INGRESS_GUARD -m conntrack --ctstate ESTABLISHED --ctdir REPLY -j RETURN\n-A CAUTION_INGRESS_GUARD -p tcp --dport 443:443 -j DROP\n-A CAUTION_INGRESS_GUARD -p tcp --dport 49500:49500 -j DROP\n-A CAUTION_INGRESS_GUARD -p tcp --dport 49500:49600 -j DROP\n-A CAUTION_INGRESS_GUARD -p tcp --dport 49504:49504 -j DROP\n" }), http_routes = "route {\nhandle /.well-known/caution/health {\nrespond \"OK\" 200\n}\nhandle /attestation {\nreverse_proxy localhost:49502\n}\n@caution_http_sources remote_ip 0.0.0.0/0\nhandle @caution_http_sources {\nreverse_proxy localhost:49500\n}\nhandle {\nrespond \"Forbidden\" 403\n}\n}\n" }))
+}
+
 provider "aws" {
   region = "us-west-2"
 
@@ -172,7 +176,7 @@ resource "aws_security_group" "enclave" {
     cidr_blocks = [
       "0.0.0.0/0"
     ]
-    description = "Allow HTTP"
+    description = "Platform HTTP management"
   }
 
   ingress {
@@ -182,7 +186,7 @@ resource "aws_security_group" "enclave" {
     cidr_blocks = [
       "0.0.0.0/0"
     ]
-    description = "Allow HTTPS"
+    description = "Application HTTPS ingress"
   }
 
   ingress {
@@ -203,20 +207,6 @@ resource "aws_security_group" "enclave" {
       "0.0.0.0/0"
     ]
     description = "Allow Locksmith shard receiver"
-  }
-
-  dynamic "ingress" {
-    for_each = var.ports
-
-    content {
-      from_port = ingress.value
-      to_port = ingress.value
-      protocol = "tcp"
-      cidr_blocks = [
-        "0.0.0.0/0"
-      ]
-      description = "Allow user port ${ingress.value}"
-    }
   }
 
   egress {
@@ -261,7 +251,15 @@ resource "aws_instance" "enclave" {
   }
 
   user_data_replace_on_change = true
-  user_data = base64encode(templatefile("./user-data.sh", { eif_s3_path = "s3://bucket/enclave.eif", tap_framer_sha256 = "e50265d7f57ce2ade393714b2c52f3173d288b348598f5a85aad1a775f49f283", memory_mb = 512, cpu_count = 2, debug_mode = "false", restart_policy = "on-failure", restart_delay_seconds = 10, ports = var.ports, http_port = var.http_port, e2e = "true", e2e_mode = "steve", locksmith = "true", egress = "false", ssh_keys = ["ssh-ed25519 AAAA test"], domain = "app.example.com" }))
+  user_data_base64 = local.enclave_user_data
+
+  lifecycle {
+    precondition {
+      condition = length(local.enclave_user_data) <= 21844
+      error_message = "Compressed enclave bootstrap exceeds the EC2 16 KiB user-data limit; reduce the network policy."
+    }
+  }
+
   tags = {
     Name = "00000000-0000-0000-0000-000000000000"
     ResourceId = "00000000-0000-0000-0000-000000000000"

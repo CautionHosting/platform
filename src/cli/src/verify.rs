@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 //! The `caution verify` build and attestation domain: local-source staging,
 //! archive preflight reachability checks, build reproducibility, and attested
 //! TLS verification. Extracted from the monolith; see also `secrets`, `cache`,
@@ -65,7 +73,7 @@ pub(crate) fn classify_archive_preflight(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum AppendAttestationResponseChunkError {
-    #[error("Attestation response exceeds 1 MiB limit [{location:?}]")]
+    #[error("Attestation response exceeds 1 MiB limit [{location}]")]
     ExceedsLimit {
         #[location]
         location: Location,
@@ -94,7 +102,7 @@ pub(crate) fn append_attestation_response_chunk(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum BoundedAttestationResponseJsonError {
-    #[error("failed to read attestation response [{location:?}]")]
+    #[error("failed to read attestation response [{location}]")]
     ReadChunk {
         #[location]
         location: Location,
@@ -103,7 +111,7 @@ pub(crate) enum BoundedAttestationResponseJsonError {
         source: BoxError,
     },
 
-    #[error("attestation response exceeds the allowed size [{location:?}]")]
+    #[error("attestation response exceeds the allowed size [{location}]")]
     AppendChunk {
         #[location]
         location: Location,
@@ -112,7 +120,7 @@ pub(crate) enum BoundedAttestationResponseJsonError {
         source: BoxError,
     },
 
-    #[error("failed to parse attestation response as JSON [{location:?}]")]
+    #[error("failed to parse attestation response as JSON [{location}]")]
     ParseJson {
         #[location]
         location: Location,
@@ -251,14 +259,14 @@ pub(crate) enum TlsConnection {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum TlsConnectionError {
-    #[error("TLS verification requires an attestation URL host [{location:?}]")]
+    #[error("TLS verification requires an attestation URL host [{location}]")]
     NoHost {
         #[location]
         location: Location,
     },
 
     #[error(
-        "TLS verification requires either the configured HTTPS domain or a raw deployment IP [{location:?}]"
+        "TLS verification requires either the configured HTTPS domain or a raw deployment IP [{location}]"
     )]
     InvalidHost {
         #[location]
@@ -314,7 +322,7 @@ pub(crate) fn dns_answer_is_absent(error: &io::Error) -> bool {
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum DnsContainsDeploymentIpError {
     #[error(
-        "configured TLS domain {domain} does not resolve to deployment IP {deployment_ip} [{location:?}]"
+        "configured TLS domain {domain} does not resolve to deployment IP {deployment_ip} [{location}]"
     )]
     NotResolved {
         domain: String,
@@ -364,7 +372,7 @@ pub(crate) fn verify_deprecation_warnings(from_local: bool, save_pcrs: bool) -> 
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum TlsExpectationFromConfigError {
-    #[error("tls mode requires a configured domain [{location:?}]")]
+    #[error("tls mode requires a configured domain [{location}]")]
     NoDomain {
         #[location]
         location: Location,
@@ -404,7 +412,7 @@ pub(crate) fn tls_expectation_from_config(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum AttestationUserDataError {
-    #[error("Nitro payload is not a CBOR map [{location:?}]")]
+    #[error("Nitro payload is not a CBOR map [{location}]")]
     NotMap {
         #[location]
         location: Location,
@@ -414,7 +422,7 @@ pub(crate) enum AttestationUserDataError {
         source: Option<BoxError>,
     },
 
-    #[error("Nitro user_data is neither bytes nor null [{location:?}]")]
+    #[error("Nitro user_data is neither bytes nor null [{location}]")]
     NotBytes {
         #[location]
         location: Location,
@@ -458,7 +466,7 @@ pub(crate) fn display_user_data(user_data: &[u8]) -> (bool, String) {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum AttestationInspectionJsonError {
-    #[error("failed to serialize parsed attestation payload [{location:?}]")]
+    #[error("failed to serialize parsed attestation payload [{location}]")]
     Payload {
         #[location]
         location: Location,
@@ -467,7 +475,7 @@ pub(crate) enum AttestationInspectionJsonError {
         source: BoxError,
     },
 
-    #[error("failed to serialize parsed attestation [{location:?}]")]
+    #[error("failed to serialize parsed attestation [{location}]")]
     SerializeJson {
         #[location]
         location: Location,
@@ -497,7 +505,7 @@ pub(crate) fn attestation_inspection_json(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum ValidateAttestedTlsError {
-    #[error("verified Nitro user_data is not valid TLS metadata [{location:?}]")]
+    #[error("verified Nitro user_data is not valid TLS metadata [{location}]")]
     ParseUserData {
         #[location]
         location: Location,
@@ -506,15 +514,13 @@ pub(crate) enum ValidateAttestedTlsError {
         source: BoxError,
     },
 
-    #[error("attested TLS mode is not tls [{location:?}]")]
+    #[error("attested TLS mode is not tls [{location}]")]
     ModeNotTls {
         #[location]
         location: Location,
     },
 
-    #[error(
-        "attested TLS domain does not match configured domain {expected_domain} [{location:?}]"
-    )]
+    #[error("attested TLS domain does not match configured domain {expected_domain} [{location}]")]
     DomainMismatch {
         expected_domain: String,
 
@@ -522,13 +528,13 @@ pub(crate) enum ValidateAttestedTlsError {
         location: Location,
     },
 
-    #[error("attested TLS certfp is not lowercase SHA-256 hex [{location:?}]")]
+    #[error("attested TLS certfp is not lowercase SHA-256 hex [{location}]")]
     InvalidCertfp {
         #[location]
         location: Location,
     },
 
-    #[error("attested TLS certfp does not match the live leaf certificate [{location:?}]")]
+    #[error("attested TLS certfp does not match the live leaf certificate [{location}]")]
     CertfpMismatch {
         #[location]
         location: Location,
@@ -588,7 +594,7 @@ fn peer_certificate_der(response: &reqwest::Response) -> Option<Vec<u8>> {
 
 #[derive(Debug, thiserror::Error)]
 enum TrustedStateBackupPathError {
-    #[error("Trusted-state path has no parent: {path} [{location:?}]")]
+    #[error("Trusted-state path has no parent: {path} [{location}]")]
     NoParent { path: String, location: Location },
 }
 
@@ -616,7 +622,7 @@ fn trusted_state_backup_path(path: &Path) -> Result<PathBuf, TrustedStateBackupP
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum PersistTrustedHashesError {
-    #[error("failed to persist trusted hashes [{location:?}]")]
+    #[error("failed to persist trusted hashes [{location}]")]
     Failure {
         #[location]
         location: Location,
@@ -639,10 +645,10 @@ pub(crate) fn persist_trusted_hashes(
 /// Failure modes for [`ensure_state_dirs`].
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum EnsureStateDirsError {
-    #[error("Trusted-state directory {path} is not a plain directory [{location:?}]")]
+    #[error("Trusted-state directory {path} is not a plain directory [{location}]")]
     NotADirectory { path: String, location: Location },
 
-    #[error("failed to inspect the trusted-state directory {path} [{location:?}]")]
+    #[error("failed to inspect the trusted-state directory {path} [{location}]")]
     Inspect {
         #[context(borrow = str)]
         path: String,
@@ -654,7 +660,7 @@ pub(crate) enum EnsureStateDirsError {
         source: BoxError,
     },
 
-    #[error("failed to create the trusted-state directory {path} [{location:?}]")]
+    #[error("failed to create the trusted-state directory {path} [{location}]")]
     Create {
         #[context(borrow = str)]
         path: String,
@@ -740,7 +746,7 @@ pub(crate) enum PersistTrustedHashesWithBackupErrorKind {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("failed to persist trusted hashes at {path:?} ({kind:?}) [{location:?}]")]
+#[error("failed to persist trusted hashes at {path:?} ({kind:?}) [{location}]")]
 pub(crate) struct PersistTrustedHashesWithBackupError {
     #[context(borrow = Path)]
     path: PathBuf,
@@ -869,6 +875,104 @@ pub(crate) fn configured_enclave(
         .and_then(|enclaves| enclaves.values().next())
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+enum ReadReproductionConfigError {
+    #[error("could not read reproduction configuration '{path}' [{location}]")]
+    Read {
+        path: PathBuf,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("could not parse reproduction configuration '{path}' [{location}]")]
+    Parse {
+        path: PathBuf,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
+fn read_reproduction_config_from_dir(
+    dir: &Path,
+) -> Result<Option<caution_config::ConfigurationFile>, ReadReproductionConfigError> {
+    read_build_config_from_dir(dir, true)
+}
+
+#[tracing::instrument(skip_all, err)]
+fn read_build_config_from_dir(
+    dir: &Path,
+    historical: bool,
+) -> Result<Option<caution_config::ConfigurationFile>, ReadReproductionConfigError> {
+    use ReadReproductionConfigErrorCtx as Ctx;
+    let hcl = dir.join("caution.hcl");
+    if hcl.exists() {
+        let content = fs::read_to_string(&hcl).with_context(Ctx::read(hcl.clone()))?;
+        return (if historical {
+            caution_config::ConfigurationFile::from_historical_hcl(&content)
+                .with_context(Ctx::parse(hcl))
+        } else {
+            caution_config::ConfigurationFile::from_str(&content).with_context(Ctx::parse(hcl))
+        }).map(Some);
+    }
+    let procfile = dir.join("Procfile");
+    if historical && !procfile.exists() {
+        // Preserve absence separately from a readable empty configuration: old
+        // manifest-selected inputs (notably Locksmith) depend on that distinction.
+        fs::read_dir(dir).with_context(Ctx::read(dir.to_path_buf()))?;
+        return Ok(None);
+    }
+    let content = fs::read_to_string(&procfile).with_context(Ctx::read(procfile.clone()))?;
+    (if historical {
+        caution_config::ConfigurationFile::from_historical_procfile(&content)
+            .with_context(Ctx::parse(procfile))
+    } else {
+        caution_config::ConfigurationFile::from_procfile(&content)
+            .with_context(Ctx::parse(procfile))
+    }).map(Some)
+}
+
+#[tracing::instrument(skip_all)]
+fn resolve_reproduction_locksmith(
+    source_config: Option<&caution_config::ConfigurationFile>,
+    recorded_locksmith: bool,
+) -> bool {
+    source_config.map(|config| config.has_vault_env()).unwrap_or(recorded_locksmith)
+}
+
+#[tracing::instrument(skip_all)]
+fn historical_ingress_ports(network: Option<&caution_config::NetworkConfig>) -> Vec<u16> {
+    let mut ports: Vec<_> = network
+        .into_iter()
+        .flat_map(|network| &network.ingress)
+        .flat_map(|rule| match rule.port_spec {
+            Some(caution_config::PortSpec::Exact { port }) => Some(port..=port),
+            Some(caution_config::PortSpec::FromTo {
+                start_port,
+                end_port,
+            }) => Some(start_port..=end_port),
+            None => None,
+        })
+        .flatten()
+        .collect();
+    ports.sort();
+    ports.dedup();
+    ports
+}
+
+#[tracing::instrument(skip_all, err)]
+fn configured_ingress_ports(
+    network: Option<&caution_config::NetworkConfig>,
+) -> Result<Vec<u16>, caution_config::NetworkPolicyError> {
+    network
+        .map(|network| network.policy().map(|policy| policy.ports()))
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
 fn config_egress_enabled(cfg: &caution_config::ConfigurationFile) -> bool {
     configured_enclave(cfg)
         .and_then(|enc| enc.network.as_ref())
@@ -878,7 +982,7 @@ fn config_egress_enabled(cfg: &caution_config::ConfigurationFile) -> bool {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum MeasuredBuildCacheKeyError {
-    #[error("failed to serialize deployment config for cache key [{location:?}]")]
+    #[error("failed to serialize deployment config for cache key [{location}]")]
     SerializeConfig {
         #[location]
         location: Location,
@@ -945,6 +1049,13 @@ struct StagedSource {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum BuildLocalError {
+    #[error("failed to normalize configured ingress ports [{location}]")]
+    NetworkPolicy {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
     #[error("failed to read deployment config")]
     ReadConfig {
         #[location]
@@ -1101,18 +1212,8 @@ pub(crate) async fn build_local(client: &ApiClient, no_cache: bool) -> Result<()
         .map(|b| b.app_sources.clone())
         .filter(|s| !s.is_empty());
 
-    let ports: Vec<u16> = enclave
-        .and_then(|e| e.network.as_ref())
-        .map(|n| {
-            n.ingress
-                .iter()
-                .filter_map(|rule| match &rule.port_spec {
-                    Some(caution_config::PortSpec::Exact { port }) => Some(*port),
-                    _ => None,
-                })
-                .collect::<Vec<u16>>()
-        })
-        .unwrap_or_default();
+    let ports = configured_ingress_ports(enclave.and_then(|e| e.network.as_ref()))
+        .with_context(Ctx::network_policy())?;
 
     let http_port = enclave
         .and_then(|config| config.network.as_ref())
@@ -1212,7 +1313,14 @@ pub(crate) async fn build_local(client: &ApiClient, no_cache: bool) -> Result<()
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum BuildAndGetPcrsError {
-    #[error("failed to resolve platform framework source [{location:?}]")]
+    #[error("failed to normalize configured ingress ports [{location}]")]
+    NetworkPolicy {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("failed to resolve platform framework source [{location}]")]
     FrameworkSource {
         #[location]
         location: Location,
@@ -1221,7 +1329,7 @@ pub(crate) enum BuildAndGetPcrsError {
         source: BoxError,
     },
 
-    #[error("failed to serialize manifest for cache key [{location:?}]")]
+    #[error("failed to serialize manifest for cache key [{location}]")]
     SerializeManifest {
         #[location]
         location: Location,
@@ -1231,14 +1339,14 @@ pub(crate) enum BuildAndGetPcrsError {
     },
 
     #[error(
-        "manifest does not contain app_source - cannot reproduce without source URL [{location:?}]"
+        "manifest does not contain app_source - cannot reproduce without source URL [{location}]"
     )]
     MissingAppSource {
         #[location]
         location: Location,
     },
 
-    #[error("app source preflight failed [{location:?}]")]
+    #[error("app source preflight failed [{location}]")]
     PreflightAppSourceRef {
         #[location]
         location: Location,
@@ -1247,7 +1355,7 @@ pub(crate) enum BuildAndGetPcrsError {
         source: BoxError,
     },
 
-    #[error("failed to download app source [{location:?}]")]
+    #[error("failed to download app source [{location}]")]
     DownloadAppSource {
         #[location]
         location: Location,
@@ -1256,7 +1364,7 @@ pub(crate) enum BuildAndGetPcrsError {
         source: BoxError,
     },
 
-    #[error("failed to read caution configuration from directory [{location:?}]")]
+    #[error("failed to read caution configuration from directory [{location}]")]
     ReadConfigDir {
         #[location]
         location: Location,
@@ -1265,7 +1373,7 @@ pub(crate) enum BuildAndGetPcrsError {
         source: BoxError,
     },
 
-    #[error("failed to read caution configuration [{location:?}]")]
+    #[error("failed to read caution configuration [{location}]")]
     ReadConfig {
         #[location]
         location: Location,
@@ -1274,7 +1382,7 @@ pub(crate) enum BuildAndGetPcrsError {
         source: BoxError,
     },
 
-    #[error("failed to derive TLS expectation from configuration [{location:?}]")]
+    #[error("failed to derive TLS expectation from configuration [{location}]")]
     TlsExpectation {
         #[location]
         location: Location,
@@ -1283,7 +1391,7 @@ pub(crate) enum BuildAndGetPcrsError {
         source: BoxError,
     },
 
-    #[error("failed to compute measured build cache key [{location:?}]")]
+    #[error("failed to compute measured build cache key [{location}]")]
     MeasuredBuildCacheKey {
         #[location]
         location: Location,
@@ -1292,7 +1400,7 @@ pub(crate) enum BuildAndGetPcrsError {
         source: BoxError,
     },
 
-    #[error("failed to resolve cache directory [{location:?}]")]
+    #[error("failed to resolve cache directory [{location}]")]
     GetCacheDir {
         #[location]
         location: Location,
@@ -1301,7 +1409,7 @@ pub(crate) enum BuildAndGetPcrsError {
         source: BoxError,
     },
 
-    #[error("failed to construct enclave builder [{location:?}]")]
+    #[error("failed to construct enclave builder [{location}]")]
     NewBuilder {
         #[location]
         location: Location,
@@ -1310,7 +1418,7 @@ pub(crate) enum BuildAndGetPcrsError {
         source: BoxError,
     },
 
-    #[error("source archive preflight failed [{location:?}]")]
+    #[error("source archive preflight failed [{location}]")]
     PreflightArchive {
         #[location]
         location: Location,
@@ -1319,7 +1427,7 @@ pub(crate) enum BuildAndGetPcrsError {
         source: BoxError,
     },
 
-    #[error("failed to build Docker image from directory [{location:?}]")]
+    #[error("failed to build Docker image from directory [{location}]")]
     BuildDockerImageFromDir {
         #[location]
         location: Location,
@@ -1328,7 +1436,7 @@ pub(crate) enum BuildAndGetPcrsError {
         source: BoxError,
     },
 
-    #[error("failed to build local Docker image [{location:?}]")]
+    #[error("failed to build local Docker image [{location}]")]
     BuildLocalDockerImage {
         #[location]
         location: Location,
@@ -1337,7 +1445,7 @@ pub(crate) enum BuildAndGetPcrsError {
         source: BoxError,
     },
 
-    #[error("failed to build run command string [{location:?}]")]
+    #[error("failed to build run command string [{location}]")]
     RunCommandString {
         #[location]
         location: Location,
@@ -1347,7 +1455,7 @@ pub(crate) enum BuildAndGetPcrsError {
     },
 
     #[error(
-        "failed to reproduce enclave using framework '{framework_source}'. For missing TAP-framer sources or incompatible template staging, install a CLI containing platform PR #464 and retry the same verification with --no-cache. Keep the manifest's framework pin; do not bypass PCR verification [{location}]"
+        "failed to reproduce enclave using framework '{framework_source}'. If the failure concerns missing component sources or unexpanded component template markers, upgrade to a CLI supporting standalone component Containerfile rendering and selected-revision source staging, then retry the same verification with --no-cache. Keep the manifest's framework pin; do not bypass PCR verification [{location}]"
     )]
     BuildEnclave {
         #[context(borrow = str)]
@@ -1380,9 +1488,9 @@ async fn build_and_get_pcrs(
     };
     let no_cache = if let Some(source) = local_source {
         no_cache
-            || client
-                .read_config_from_dir(&source.path)
+            || read_build_config_from_dir(&source.path, external_manifest.is_some())
                 .ok()
+                .flatten()
                 .and_then(|cfg| {
                     cfg.enclave
                         .and_then(|e| e.into_iter().next().map(|(_, v)| v))
@@ -1523,11 +1631,11 @@ async fn build_and_get_pcrs(
         };
 
     let measured_config = if let Some(ref app_dir) = app_source_dir {
-        Some(
-            client
-                .read_config_from_dir(app_dir)
-                .with_context(Ctx::read_config_dir())?,
-        )
+        if external_manifest.is_some() {
+            read_reproduction_config_from_dir(app_dir).with_context(Ctx::read_config_dir())?
+        } else {
+            Some(client.read_config_from_dir(app_dir).with_context(Ctx::read_config_dir())?)
+        }
     } else if external_manifest.is_none() {
         Some(client.read_config().with_context(Ctx::read_config())?)
     } else {
@@ -1605,7 +1713,7 @@ async fn build_and_get_pcrs(
 
     let loader = Spinner::new("Reproducing enclave image", SpinnerStyle::Processing);
     let image_ref = if let Some(ref app_dir) = app_source_dir {
-        build_docker_image_from_dir(client, app_dir, no_cache)
+        build_docker_image_from_dir(client, app_dir, no_cache, external_manifest.is_some())
             .await
             .with_context(Ctx::build_docker_image_from_dir())?
     } else {
@@ -1711,41 +1819,26 @@ async fn build_and_get_pcrs(
             (binary, run_cmd, source_urls, branch, commit, None)
         };
 
-    let ports: Vec<u16> = {
-        let config_dir = app_source_dir.as_deref().unwrap_or(Path::new("."));
-        client
-            .read_config_from_dir(config_dir)
-            .ok()
-            .and_then(|cfg| {
-                cfg.enclave
-                    .and_then(|e| e.into_iter().next().map(|(_, v)| v))
-            })
-            .and_then(|e| e.network)
-            .map(|n| {
-                n.ingress
-                    .iter()
-                    .filter_map(|rule| match &rule.port_spec {
-                        Some(caution_config::PortSpec::Exact { port }) => Some(*port),
-                        _ => None,
-                    })
-                    .collect::<Vec<u16>>()
-            })
-            .unwrap_or_default()
+    let has_source_config = measured_config.is_some();
+    let reproduction_config = match measured_config {
+        Some(cfg) => cfg,
+        None => read_build_config_from_dir(
+            app_source_dir.as_deref().unwrap_or(Path::new(".")),
+            external_manifest.is_some(),
+        )
+        .with_context(Ctx::read_config_dir())?
+        .unwrap_or(caution_config::ConfigurationFile { caution: None, enclave: None }),
+    };
+    let reproduction_network =
+        configured_enclave(&reproduction_config).and_then(|enclave| enclave.network.as_ref());
+    let ports = if external_manifest.is_some() {
+        historical_ingress_ports(reproduction_network)
+    } else {
+        configured_ingress_ports(reproduction_network).with_context(Ctx::network_policy())?
     };
     output::verbose(client.verbose, format!("Ports: {:?}", ports));
 
-    let http_config = {
-        let config_dir = app_source_dir.as_deref().unwrap_or(Path::new("."));
-        client
-            .read_config_from_dir(config_dir)
-            .ok()
-            .and_then(|cfg| {
-                cfg.enclave
-                    .and_then(|e| e.into_iter().next().map(|(_, v)| v))
-            })
-            .and_then(|config| config.network)
-            .and_then(|network| network.http)
-    };
+    let http_config = reproduction_network.and_then(|network| network.http.as_ref());
     let http_port = http_config.as_ref().map(|http| http.port);
     output::verbose(client.verbose, format!("HTTP port: {:?}", http_port));
 
@@ -1797,43 +1890,22 @@ async fn build_and_get_pcrs(
         });
     output::verbose(client.verbose, format!("E2E encryption: {}", e2e));
 
-    let locksmith = if let Some(ref app_dir) = app_source_dir {
-        client
-            .read_config_from_dir(app_dir)
-            .ok()
-            .map(|cfg| cfg.has_vault_env())
-            .unwrap_or_else(|| {
-                external_manifest
-                    .as_ref()
-                    .map(|manifest| manifest.locksmith || manifest.locksmith_commit.is_some())
-                    .unwrap_or(false)
-            })
-    } else if let Some(ref manifest) = external_manifest {
-        manifest.locksmith || manifest.locksmith_commit.is_some()
-    } else {
-        client
-            .read_config()
-            .ok()
-            .map(|cfg| cfg.has_vault_env())
-            .unwrap_or(false)
-    };
+    let locksmith = resolve_reproduction_locksmith(
+        (has_source_config && (app_source_dir.is_some() || external_manifest.is_none()))
+            .then_some(&reproduction_config),
+        external_manifest.as_ref().is_some_and(|manifest| {
+            manifest.locksmith || manifest.locksmith_commit.is_some()
+        }),
+    );
     output::verbose(client.verbose, format!("Locksmith secrets: {}", locksmith));
 
-    let egress = if let Some(ref app_dir) = app_source_dir {
-        client
-            .read_config_from_dir(app_dir)
-            .ok()
-            .map(|cfg| config_egress_enabled(&cfg))
-            .unwrap_or(false)
+    let egress = if app_source_dir.is_some() {
+        config_egress_enabled(&reproduction_config)
     } else if external_manifest.is_some() {
         // Egress is intentionally never read from the manifest; default-deny.
         false
     } else {
-        client
-            .read_config()
-            .ok()
-            .map(|cfg| config_egress_enabled(&cfg))
-            .unwrap_or(false)
+        config_egress_enabled(&reproduction_config)
     };
     output::verbose(client.verbose, format!("Egress: {}", egress));
 
@@ -1933,7 +2005,7 @@ pub(crate) enum ReadPcrsFromFileErrorKind {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("failed to read PCRs file at {path} ({kind:?}) [{location:?}]")]
+#[error("failed to read PCRs file at {path} ({kind:?}) [{location}]")]
 pub(crate) struct ReadPcrsFromFileError {
     #[context(borrow = str)]
     path: String,
@@ -1997,7 +2069,7 @@ fn read_pcrs_from_file(path: &str) -> Result<enclave_builder::PcrValues, ReadPcr
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum VerifyTlsBindingError {
-    #[error("failed to read TLS user_data from the attestation [{location:?}]")]
+    #[error("failed to read TLS user_data from the attestation [{location}]")]
     UserData {
         #[location]
         location: Location,
@@ -2006,13 +2078,13 @@ enum VerifyTlsBindingError {
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 
-    #[error("verified Nitro attestation is missing TLS user_data [{location:?}]")]
+    #[error("verified Nitro attestation is missing TLS user_data [{location}]")]
     MissingUserData {
         #[location]
         location: Location,
     },
 
-    #[error("failed to determine the TLS connection mode [{location:?}]")]
+    #[error("failed to determine the TLS connection mode [{location}]")]
     TlsConnection {
         #[location]
         location: Location,
@@ -2021,13 +2093,13 @@ enum VerifyTlsBindingError {
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 
-    #[error("HTTPS attestation response did not expose its leaf certificate [{location:?}]")]
+    #[error("HTTPS attestation response did not expose its leaf certificate [{location}]")]
     MissingLeaf {
         #[location]
         location: Location,
     },
 
-    #[error("failed to validate the attested TLS metadata [{location:?}]")]
+    #[error("failed to validate the attested TLS metadata [{location}]")]
     Validate {
         #[location]
         location: Location,
@@ -2036,7 +2108,7 @@ enum VerifyTlsBindingError {
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 
-    #[error("failed to resolve configured TLS domain {domain} [{location:?}]")]
+    #[error("failed to resolve configured TLS domain {domain} [{location}]")]
     ResolveDns {
         domain: String,
 
@@ -2047,7 +2119,7 @@ enum VerifyTlsBindingError {
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 
-    #[error("failed to check the deployment IP against configured TLS domain [{location:?}]")]
+    #[error("failed to check the deployment IP against configured TLS domain [{location}]")]
     DnsCheck {
         #[location]
         location: Location,
@@ -2056,7 +2128,7 @@ enum VerifyTlsBindingError {
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 
-    #[error("failed to create pinned TLS verification client [{location:?}]")]
+    #[error("failed to create pinned TLS verification client [{location}]")]
     BuildClient {
         #[location]
         location: Location,
@@ -2065,7 +2137,7 @@ enum VerifyTlsBindingError {
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 
-    #[error("TLS health request failed for {domain} [{location:?}]")]
+    #[error("TLS health request failed for {domain} [{location}]")]
     HealthRequest {
         domain: String,
 
@@ -2076,7 +2148,7 @@ enum VerifyTlsBindingError {
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 
-    #[error("TLS health request returned {status} [{location:?}]")]
+    #[error("TLS health request returned {status} [{location}]")]
     HealthStatus {
         status: reqwest::StatusCode,
 
@@ -2084,7 +2156,7 @@ enum VerifyTlsBindingError {
         location: Location,
     },
 
-    #[error("TLS health response did not expose its leaf certificate [{location:?}]")]
+    #[error("TLS health response did not expose its leaf certificate [{location}]")]
     MissingHealthLeaf {
         #[location]
         location: Location,
@@ -2207,14 +2279,14 @@ fn check_hosted_tls(hosted: bool, tls: &TlsVerification) -> Result<(), VerifyErr
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum VerifyError {
-    #[error("hosted service verification failed [{location:?}]")]
+    #[error("hosted service verification failed [{location}]")]
     HostedService {
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("failed to resolve attestation URL [{location:?}]")]
+    #[error("failed to resolve attestation URL [{location}]")]
     GetAttestationUrl {
         #[location]
         location: Location,
@@ -2223,7 +2295,7 @@ pub(crate) enum VerifyError {
         source: BoxError,
     },
 
-    #[error("attestation endpoint is not a valid URL [{location:?}]")]
+    #[error("attestation endpoint is not a valid URL [{location}]")]
     ParseAttestationUrl {
         #[location]
         location: Location,
@@ -2232,7 +2304,7 @@ pub(crate) enum VerifyError {
         source: BoxError,
     },
 
-    #[error("failed to create attestation client [{location:?}]")]
+    #[error("failed to create attestation client [{location}]")]
     BuildAttestationClient {
         #[location]
         location: Location,
@@ -2241,7 +2313,7 @@ pub(crate) enum VerifyError {
         source: BoxError,
     },
 
-    #[error("failed to fetch attestation document (timed out or unreachable) [{location:?}]")]
+    #[error("failed to fetch attestation document (timed out or unreachable) [{location}]")]
     FetchAttestation {
         #[location]
         location: Location,
@@ -2250,7 +2322,7 @@ pub(crate) enum VerifyError {
         source: BoxError,
     },
 
-    #[error("failed to fetch attestation: {status} [{location:?}]")]
+    #[error("failed to fetch attestation: {status} [{location}]")]
     FetchAttestationStatus {
         status: reqwest::StatusCode,
 
@@ -2258,7 +2330,7 @@ pub(crate) enum VerifyError {
         location: Location,
     },
 
-    #[error("failed to read bounded attestation response [{location:?}]")]
+    #[error("failed to read bounded attestation response [{location}]")]
     BoundedAttestationResponse {
         #[location]
         location: Location,
@@ -2267,7 +2339,7 @@ pub(crate) enum VerifyError {
         source: BoxError,
     },
 
-    #[error("no attestation document in response. Fields: {fields} [{location:?}]")]
+    #[error("no attestation document in response. Fields: {fields} [{location}]")]
     MissingAttestationDocument {
         #[context(borrow = str)]
         fields: String,
@@ -2276,7 +2348,7 @@ pub(crate) enum VerifyError {
         location: Location,
     },
 
-    #[error("failed to decode attestation document [{location:?}]")]
+    #[error("failed to decode attestation document [{location}]")]
     DecodeAttestation {
         #[location]
         location: Location,
@@ -2285,7 +2357,7 @@ pub(crate) enum VerifyError {
         source: BoxError,
     },
 
-    #[error("failed to parse attestation document [{location:?}]")]
+    #[error("failed to parse attestation document [{location}]")]
     ParseAttestation {
         #[location]
         location: Location,
@@ -2294,7 +2366,7 @@ pub(crate) enum VerifyError {
         source: BoxError,
     },
 
-    #[error("failed to build attestation inspection JSON [{location:?}]")]
+    #[error("failed to build attestation inspection JSON [{location}]")]
     InspectionJson {
         #[location]
         location: Location,
@@ -2303,7 +2375,7 @@ pub(crate) enum VerifyError {
         source: BoxError,
     },
 
-    #[error("failed to write attestation inspection data [{location:?}]")]
+    #[error("failed to write attestation inspection data [{location}]")]
     WriteInspectionData {
         #[location]
         location: Location,
@@ -2312,7 +2384,7 @@ pub(crate) enum VerifyError {
         source: BoxError,
     },
 
-    #[error("failed to extract PCRs from attestation document [{location:?}]")]
+    #[error("failed to extract PCRs from attestation document [{location}]")]
     ExtractPcrs {
         #[location]
         location: Location,
@@ -2321,7 +2393,7 @@ pub(crate) enum VerifyError {
         source: BoxError,
     },
 
-    #[error("failed to decode attestation user data [{location:?}]")]
+    #[error("failed to decode attestation user data [{location}]")]
     AttestationUserData {
         #[location]
         location: Location,
@@ -2330,7 +2402,7 @@ pub(crate) enum VerifyError {
         source: BoxError,
     },
 
-    #[error("attestation response contains an invalid manifest [{location:?}]")]
+    #[error("attestation response contains an invalid manifest [{location}]")]
     ParseManifest {
         #[location]
         location: Location,
@@ -2339,13 +2411,13 @@ pub(crate) enum VerifyError {
         source: BoxError,
     },
 
-    #[error("manifest required when using --app-source-url [{location:?}]")]
+    #[error("manifest required when using --app-source-url [{location}]")]
     MissingAppSourceUrlManifest {
         #[location]
         location: Location,
     },
 
-    #[error("failed to read PCRs from file [{location:?}]")]
+    #[error("failed to read PCRs from file [{location}]")]
     ReadPcrsFromFile {
         #[location]
         location: Location,
@@ -2354,7 +2426,7 @@ pub(crate) enum VerifyError {
         source: BoxError,
     },
 
-    #[error("failed to stage source tarball [{location:?}]")]
+    #[error("failed to stage source tarball [{location}]")]
     StageTarballSource {
         #[location]
         location: Location,
@@ -2363,7 +2435,7 @@ pub(crate) enum VerifyError {
         source: BoxError,
     },
 
-    #[error("failed to stage Git source [{location:?}]")]
+    #[error("failed to stage Git source [{location}]")]
     StageGitSource {
         #[location]
         location: Location,
@@ -2372,7 +2444,7 @@ pub(crate) enum VerifyError {
         source: BoxError,
     },
 
-    #[error("failed to build and retrieve reference PCRs [{location:?}]")]
+    #[error("failed to build and retrieve reference PCRs [{location}]")]
     BuildAndGetPcrs {
         #[location]
         location: Location,
@@ -2381,13 +2453,13 @@ pub(crate) enum VerifyError {
         source: BoxError,
     },
 
-    #[error("cannot verify attestation: enclave is in debug mode [{location:?}]")]
+    #[error("cannot verify attestation: enclave is in debug mode [{location}]")]
     DebugMode {
         #[location]
         location: Location,
     },
 
-    #[error("failed to decode expected PCR hex [{location:?}]")]
+    #[error("failed to decode expected PCR hex [{location}]")]
     BadPcrHex {
         #[location]
         location: Location,
@@ -2396,7 +2468,7 @@ pub(crate) enum VerifyError {
         source: BoxError,
     },
 
-    #[error("could not build bootproof nitro attestation [{location:?}]")]
+    #[error("could not build bootproof nitro attestation [{location}]")]
     BuildNitro {
         #[location]
         location: Location,
@@ -2405,7 +2477,7 @@ pub(crate) enum VerifyError {
         source: BoxError,
     },
 
-    #[error("could not get time since epoch [{location:?}]")]
+    #[error("could not get time since epoch [{location}]")]
     SystemTime {
         #[location]
         location: Location,
@@ -2414,7 +2486,7 @@ pub(crate) enum VerifyError {
         source: BoxError,
     },
 
-    #[error("TLS certificate binding failed [{location:?}]")]
+    #[error("TLS certificate binding failed [{location}]")]
     VerifyTlsBinding {
         #[location]
         location: Location,
@@ -2423,7 +2495,7 @@ pub(crate) enum VerifyError {
         source: BoxError,
     },
 
-    #[error("failed to prepare the trusted state directories [{location:?}]")]
+    #[error("failed to prepare the trusted state directories [{location}]")]
     EnsureStateDirs {
         #[location]
         location: Location,
@@ -2432,7 +2504,7 @@ pub(crate) enum VerifyError {
         source: BoxError,
     },
 
-    #[error("failed to persist trusted hashes [{location:?}]")]
+    #[error("failed to persist trusted hashes [{location}]")]
     PersistTrustedHashes {
         #[location]
         location: Location,
@@ -2441,7 +2513,7 @@ pub(crate) enum VerifyError {
         source: BoxError,
     },
 
-    #[error("{details} [{location:?}]")]
+    #[error("{details} [{location}]")]
     VerificationFailed {
         #[context(borrow = str)]
         details: String,
@@ -3029,7 +3101,7 @@ async fn verify_result(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum BuildLocalDockerImageError {
-    #[error("failed to get current directory [{location:?}]")]
+    #[error("failed to get current directory [{location}]")]
     CurrentDir {
         #[location]
         location: Location,
@@ -3038,7 +3110,7 @@ enum BuildLocalDockerImageError {
         source: BoxError,
     },
 
-    #[error("failed to build the Docker image from the current directory [{location:?}]")]
+    #[error("failed to build the Docker image from the current directory [{location}]")]
     BuildImage {
         #[location]
         location: Location,
@@ -3055,14 +3127,14 @@ async fn build_local_docker_image(
     use BuildLocalDockerImageErrorCtx as Ctx;
 
     let work_dir = std::env::current_dir().with_context(Ctx::current_dir())?;
-    build_docker_image_from_dir(client, &work_dir, no_cache)
+    build_docker_image_from_dir(client, &work_dir, no_cache, false)
         .await
         .with_context(Ctx::build_image())
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum StageGitSourceError {
-    #[error("failed to locate Git repository [{location:?}]")]
+    #[error("failed to locate Git repository [{location}]")]
     LocateRepo {
         #[location]
         location: Location,
@@ -3072,7 +3144,7 @@ enum StageGitSourceError {
     },
 
     #[error(
-        "Default source verification must be run inside a Git repository: {stderr} [{location:?}]"
+        "Default source verification must be run inside a Git repository: {stderr} [{location}]"
     )]
     NotAGitRepo {
         stderr: String,
@@ -3081,7 +3153,7 @@ enum StageGitSourceError {
         location: Location,
     },
 
-    #[error("failed to resolve local Git commit {commit_ish} [{location:?}]")]
+    #[error("failed to resolve local Git commit {commit_ish} [{location}]")]
     ResolveCommit {
         commit_ish: String,
 
@@ -3093,7 +3165,7 @@ enum StageGitSourceError {
     },
 
     #[error(
-        "failed to resolve manifest app commit {commit_ish} in local repository. Fetch it locally or use --from-tarball. Git error: {stderr} [{location:?}]"
+        "failed to resolve manifest app commit {commit_ish} in local repository. Fetch it locally or use --from-tarball. Git error: {stderr} [{location}]"
     )]
     ResolveManifestCommit {
         commit_ish: String,
@@ -3103,7 +3175,7 @@ enum StageGitSourceError {
         location: Location,
     },
 
-    #[error("failed to resolve local Git commit {commit_ish}: {stderr} [{location:?}]")]
+    #[error("failed to resolve local Git commit {commit_ish}: {stderr} [{location}]")]
     ResolveLocalCommit {
         commit_ish: String,
         stderr: String,
@@ -3112,7 +3184,7 @@ enum StageGitSourceError {
         location: Location,
     },
 
-    #[error("failed to archive local Git commit {commit} [{location:?}]")]
+    #[error("failed to archive local Git commit {commit} [{location}]")]
     ArchiveCommit {
         commit: String,
 
@@ -3123,7 +3195,7 @@ enum StageGitSourceError {
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 
-    #[error("git archive failed for {commit}: {stderr} [{location:?}]")]
+    #[error("git archive failed for {commit}: {stderr} [{location}]")]
     ArchiveFailed {
         commit: String,
         stderr: String,
@@ -3132,7 +3204,7 @@ enum StageGitSourceError {
         location: Location,
     },
 
-    #[error("failed to create temp source dir [{location:?}]")]
+    #[error("failed to create temp source dir [{location}]")]
     CreateTemp {
         #[location]
         location: Location,
@@ -3141,7 +3213,7 @@ enum StageGitSourceError {
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 
-    #[error("failed to extract staged Git source [{location:?}]")]
+    #[error("failed to extract staged Git source [{location}]")]
     Extract {
         #[location]
         location: Location,
@@ -3246,7 +3318,7 @@ async fn stage_git_source(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum StageTarballSourceError {
-    #[error("failed to read tarball: {path} [{location:?}]")]
+    #[error("failed to read tarball: {path} [{location}]")]
     Read {
         path: String,
 
@@ -3257,7 +3329,7 @@ enum StageTarballSourceError {
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 
-    #[error("failed to create temp source dir [{location:?}]")]
+    #[error("failed to create temp source dir [{location}]")]
     CreateTemp {
         #[location]
         location: Location,
@@ -3266,7 +3338,7 @@ enum StageTarballSourceError {
         source: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 
-    #[error("failed to extract source tarball [{location:?}]")]
+    #[error("failed to extract source tarball [{location}]")]
     Extract {
         #[location]
         location: Location,
@@ -3308,7 +3380,7 @@ fn stage_tarball_source(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum ExtractTarballBytesToDirError {
-    #[error("Failed to extract archive [{location:?}]")]
+    #[error("Failed to extract archive [{location}]")]
     Extract {
         #[location]
         location: Location,
@@ -3336,7 +3408,7 @@ fn extract_tarball_bytes_to_dir(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum ExtractTarArchiveToDirError {
-    #[error("Failed to read archive entries [{location:?}]")]
+    #[error("Failed to read archive entries [{location}]")]
     ReadEntries {
         #[location]
         location: Location,
@@ -3345,7 +3417,7 @@ enum ExtractTarArchiveToDirError {
         source: BoxError,
     },
 
-    #[error("Failed to read archive entry [{location:?}]")]
+    #[error("Failed to read archive entry [{location}]")]
     ReadEntry {
         #[location]
         location: Location,
@@ -3354,7 +3426,7 @@ enum ExtractTarArchiveToDirError {
         source: BoxError,
     },
 
-    #[error("Failed to extract entry [{location:?}]")]
+    #[error("Failed to extract entry [{location}]")]
     ExtractEntry {
         #[location]
         location: Location,
@@ -3382,7 +3454,15 @@ fn extract_tar_archive_to_dir<R: std::io::Read>(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum BuildDockerImageFromDirError {
-    #[error("failed to inspect docker image [{location:?}]")]
+    #[error("could not read image build configuration [{location}]")]
+    ReadConfig {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to inspect docker image [{location}]")]
     InspectImage {
         #[location]
         location: Location,
@@ -3391,7 +3471,7 @@ enum BuildDockerImageFromDirError {
         source: BoxError,
     },
 
-    #[error("failed to read Procfile [{location:?}]")]
+    #[error("failed to read Procfile [{location}]")]
     ReadProcfile {
         #[location]
         location: Location,
@@ -3400,7 +3480,7 @@ enum BuildDockerImageFromDirError {
         source: BoxError,
     },
 
-    #[error("failed to build user image [{location:?}]")]
+    #[error("failed to build user image [{location}]")]
     BuildUserImage {
         #[location]
         location: Location,
@@ -3410,10 +3490,65 @@ enum BuildDockerImageFromDirError {
     },
 }
 
+#[tracing::instrument(skip_all, err)]
+fn read_image_build_config(
+    work_dir: &Path,
+    no_cache: bool,
+    historical: bool,
+) -> Result<BuildConfig, BuildDockerImageFromDirError> {
+    use BuildDockerImageFromDirErrorCtx as Ctx;
+    let containerfile = read_build_config_from_dir(work_dir, historical)
+        .with_context(Ctx::read_config())?
+        .and_then(|config| config.enclave)
+        .and_then(|e| e.into_iter().next().map(|(_, v)| v))
+        .and_then(|e| e.build)
+        .and_then(|b| b.containerfile);
+
+    let procfile_path = work_dir.join("Procfile");
+    let config = if procfile_path.exists() {
+        let content = std::fs::read_to_string(&procfile_path).with_context(Ctx::read_procfile())?;
+        let mut build_command = None;
+        let mut oci_tarball = None;
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = line.split_once(':') {
+                let key = key.trim().to_lowercase();
+                let value = value.trim().to_string();
+                match key.as_str() {
+                    "build" => build_command = Some(value),
+                    "oci_tarball" => oci_tarball = Some(value),
+                    _ => {}
+                }
+            }
+        }
+
+        BuildConfig {
+            build_command,
+            containerfile,
+            oci_tarball,
+            no_cache,
+        }
+    } else {
+        BuildConfig {
+            build_command: None,
+            containerfile,
+            oci_tarball: None,
+            no_cache,
+        }
+    };
+
+    Ok(config)
+}
+
 async fn build_docker_image_from_dir(
     client: &ApiClient,
     work_dir: &std::path::Path,
     no_cache: bool,
+    historical: bool,
 ) -> Result<String, BuildDockerImageFromDirError> {
     use BuildDockerImageFromDirErrorCtx as Ctx;
     use tokio::process::Command;
@@ -3458,50 +3593,7 @@ async fn build_docker_image_from_dir(
         format!("Building Docker image with tag: {}", tag),
     );
 
-    let containerfile = client
-        .read_config_from_dir(work_dir)
-        .ok()
-        .and_then(|c| c.enclave)
-        .and_then(|e| e.into_iter().next().map(|(_, v)| v))
-        .and_then(|e| e.build)
-        .and_then(|b| b.containerfile);
-
-    let procfile_path = work_dir.join("Procfile");
-    let config = if procfile_path.exists() {
-        let content = std::fs::read_to_string(&procfile_path).with_context(Ctx::read_procfile())?;
-        let mut build_command = None;
-        let mut oci_tarball = None;
-
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some((key, value)) = line.split_once(':') {
-                let key = key.trim().to_lowercase();
-                let value = value.trim().to_string();
-                match key.as_str() {
-                    "build" => build_command = Some(value),
-                    "oci_tarball" => oci_tarball = Some(value),
-                    _ => {}
-                }
-            }
-        }
-
-        BuildConfig {
-            build_command,
-            containerfile,
-            oci_tarball,
-            no_cache,
-        }
-    } else {
-        BuildConfig {
-            build_command: None,
-            containerfile,
-            oci_tarball: None,
-            no_cache,
-        }
-    };
+    let config = read_image_build_config(work_dir, no_cache, historical)?;
 
     output::verbose(client.verbose, format!("work_dir = {:?}", work_dir));
     output::verbose(client.verbose, format!("BuildConfig = {:?}", config));
@@ -3519,13 +3611,13 @@ async fn build_docker_image_from_dir(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum DownloadAndExtractAppSourceError {
-    #[error("failed to determine home directory [{location:?}]")]
+    #[error("failed to determine home directory [{location}]")]
     NoHomeDir {
         #[location]
         location: Location,
     },
 
-    #[error("failed to create downloads cache directory [{location:?}]")]
+    #[error("failed to create downloads cache directory [{location}]")]
     CreateCacheDir {
         #[location]
         location: Location,
@@ -3534,7 +3626,7 @@ enum DownloadAndExtractAppSourceError {
         source: BoxError,
     },
 
-    #[error("failed to clean up partial extraction [{location:?}]")]
+    #[error("failed to clean up partial extraction [{location}]")]
     Cleanup {
         #[location]
         location: Location,
@@ -3543,7 +3635,7 @@ enum DownloadAndExtractAppSourceError {
         source: BoxError,
     },
 
-    #[error("failed to create HTTP client [{location:?}]")]
+    #[error("failed to create HTTP client [{location}]")]
     BuildClient {
         #[location]
         location: Location,
@@ -3552,7 +3644,7 @@ enum DownloadAndExtractAppSourceError {
         source: BoxError,
     },
 
-    #[error("failed to download app source [{location:?}]")]
+    #[error("failed to download app source [{location}]")]
     Download {
         #[location]
         location: Location,
@@ -3561,7 +3653,7 @@ enum DownloadAndExtractAppSourceError {
         source: BoxError,
     },
 
-    #[error("failed to download app source: HTTP {status} [{location:?}]")]
+    #[error("failed to download app source: HTTP {status} [{location}]")]
     DownloadStatus {
         status: reqwest::StatusCode,
 
@@ -3569,7 +3661,7 @@ enum DownloadAndExtractAppSourceError {
         location: Location,
     },
 
-    #[error("failed to read archive bytes [{location:?}]")]
+    #[error("failed to read archive bytes [{location}]")]
     ReadBytes {
         #[location]
         location: Location,
@@ -3578,7 +3670,7 @@ enum DownloadAndExtractAppSourceError {
         source: BoxError,
     },
 
-    #[error("failed to extract downloaded app source [{location:?}]")]
+    #[error("failed to extract downloaded app source [{location}]")]
     Extract {
         #[location]
         location: Location,
@@ -3664,13 +3756,13 @@ async fn download_and_extract_app_source(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum DownloadAndExtractAppSourceWithFallbacksError {
-    #[error("no source URLs provided [{location:?}]")]
+    #[error("no source URLs provided [{location}]")]
     NoUrls {
         #[location]
         location: Location,
     },
 
-    #[error("all source URLs failed [{location:?}]")]
+    #[error("all source URLs failed [{location}]")]
     AllFailed {
         #[location]
         location: Location,
@@ -3775,7 +3867,7 @@ pub(crate) fn git_command(args: &[&str]) -> std::process::Command {
 /// Try configured mirrors in order, then stop before the expensive build.
 #[derive(Debug, thiserror::Error, CtxError)]
 enum PreflightArchiveUrlError {
-    #[error("archive preflight failed [{location:?}]")]
+    #[error("archive preflight failed [{location}]")]
     Preflight {
         #[location]
         location: Location,
@@ -3804,7 +3896,7 @@ async fn preflight_archive_url(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum PreflightArchiveUrlsError {
-    #[error("no archive URLs provided for {label} [{location:?}]")]
+    #[error("no archive URLs provided for {label} [{location}]")]
     NoUrls {
         label: String,
 
@@ -3812,7 +3904,7 @@ pub(crate) enum PreflightArchiveUrlsError {
         location: Location,
     },
 
-    #[error("failed to create archive preflight client [{location:?}]")]
+    #[error("failed to create archive preflight client [{location}]")]
     BuildClient {
         #[location]
         location: Location,
@@ -3827,7 +3919,7 @@ pub(crate) enum PreflightArchiveUrlsError {
              The deployed enclave references a {lower} commit that the remote \
              no longer serves — it may have been garbage-collected, or the \
              manifest is stale. This build cannot be reproduced from the \
-             remote manifest. [{location:?}]"
+             remote manifest. [{location}]"
     )]
     MissingSingle {
         label: String,
@@ -3841,7 +3933,7 @@ pub(crate) enum PreflightArchiveUrlsError {
 
     #[error(
         "{label} preflight failed (HTTP {code}):\n  {url}\n\n\
-             Refusing to start the reproduction build. [{location:?}]"
+             Refusing to start the reproduction build. [{location}]"
     )]
     FailedSingle {
         label: String,
@@ -3854,7 +3946,7 @@ pub(crate) enum PreflightArchiveUrlsError {
 
     #[error(
         "{label} preflight failed after {attempts} attempts:\n  {url}\n  \
-             {error}\n\nRefusing to start the reproduction build. [{location:?}]"
+             {error}\n\nRefusing to start the reproduction build. [{location}]"
     )]
     FailedAfterAttempts {
         label: String,
@@ -3868,7 +3960,7 @@ pub(crate) enum PreflightArchiveUrlsError {
 
     #[error(
         "all {label} archive preflights failed:\n  {failures}\n\n\
-             Refusing to start the reproduction build. [{location:?}]"
+             Refusing to start the reproduction build. [{location}]"
     )]
     AllFailed {
         label: String,
@@ -4024,7 +4116,7 @@ enum PreflightAppSourceRefError {
              - Push the branch:        git push <remote> {branch}\n  \
              - Verify a local checkout: caution verify\n  \
              - Verify a source tarball: caution verify --from-tarball <path> \
-             [{location:?}]"
+             [{location}]"
     )]
     MissingBranch {
         branch: String,
@@ -4153,7 +4245,7 @@ pub(crate) fn classify_app_source_refs(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum DownloadAndExtractAppSourceWithGitFallbackError {
-    #[error("failed to create temp directory [{location:?}]")]
+    #[error("failed to create temp directory [{location}]")]
     CreateTempDir {
         #[location]
         location: Location,
@@ -4162,7 +4254,7 @@ enum DownloadAndExtractAppSourceWithGitFallbackError {
         source: BoxError,
     },
 
-    #[error("failed to clone repository [{location:?}]")]
+    #[error("failed to clone repository [{location}]")]
     CloneRepo {
         #[location]
         location: Location,
@@ -4171,7 +4263,7 @@ enum DownloadAndExtractAppSourceWithGitFallbackError {
         source: BoxError,
     },
 
-    #[error("failed to checkout commit [{location:?}]")]
+    #[error("failed to checkout commit [{location}]")]
     CheckoutCommit {
         #[location]
         location: Location,
@@ -4180,7 +4272,7 @@ enum DownloadAndExtractAppSourceWithGitFallbackError {
         source: BoxError,
     },
 
-    #[error("failed to checkout commit after unshallow [{location:?}]")]
+    #[error("failed to checkout commit after unshallow [{location}]")]
     CheckoutAfterUnshallow {
         #[location]
         location: Location,
@@ -4189,7 +4281,7 @@ enum DownloadAndExtractAppSourceWithGitFallbackError {
         source: BoxError,
     },
 
-    #[error("failed to reset git checkout [{location:?}]")]
+    #[error("failed to reset git checkout [{location}]")]
     ResetCheckout {
         #[location]
         location: Location,
@@ -4198,7 +4290,7 @@ enum DownloadAndExtractAppSourceWithGitFallbackError {
         source: BoxError,
     },
 
-    #[error("failed to create git checkout directory [{location:?}]")]
+    #[error("failed to create git checkout directory [{location}]")]
     CreateCloneDir {
         #[location]
         location: Location,
@@ -4207,7 +4299,7 @@ enum DownloadAndExtractAppSourceWithGitFallbackError {
         source: BoxError,
     },
 
-    #[error("failed to run git init [{location:?}]")]
+    #[error("failed to run git init [{location}]")]
     GitInit {
         #[location]
         location: Location,
@@ -4216,7 +4308,7 @@ enum DownloadAndExtractAppSourceWithGitFallbackError {
         source: BoxError,
     },
 
-    #[error("git init failed: {stderr} [{location:?}]")]
+    #[error("git init failed: {stderr} [{location}]")]
     GitInitFailed {
         stderr: String,
 
@@ -4224,7 +4316,7 @@ enum DownloadAndExtractAppSourceWithGitFallbackError {
         location: Location,
     },
 
-    #[error("failed to fetch branch [{location:?}]")]
+    #[error("failed to fetch branch [{location}]")]
     FetchBranch {
         #[location]
         location: Location,
@@ -4233,7 +4325,7 @@ enum DownloadAndExtractAppSourceWithGitFallbackError {
         source: BoxError,
     },
 
-    #[error("failed to fetch commit [{location:?}]")]
+    #[error("failed to fetch commit [{location}]")]
     FetchCommit {
         #[location]
         location: Location,
@@ -4242,7 +4334,7 @@ enum DownloadAndExtractAppSourceWithGitFallbackError {
         source: BoxError,
     },
 
-    #[error("git fetch failed: {details} [{location:?}]")]
+    #[error("git fetch failed: {details} [{location}]")]
     FetchFailed {
         details: String,
 
@@ -4250,7 +4342,7 @@ enum DownloadAndExtractAppSourceWithGitFallbackError {
         location: Location,
     },
 
-    #[error("git checkout failed: {stderr} [{location:?}]")]
+    #[error("git checkout failed: {stderr} [{location}]")]
     CheckoutFailed {
         stderr: String,
 
@@ -4258,7 +4350,7 @@ enum DownloadAndExtractAppSourceWithGitFallbackError {
         location: Location,
     },
 
-    #[error("no source URLs available and no git fallback configured [{location:?}]")]
+    #[error("no source URLs available and no git fallback configured [{location}]")]
     NoSource {
         #[location]
         location: Location,
@@ -4501,7 +4593,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reproduction_failure_preserves_cause_and_gives_tap_framer_compatibility_guidance() {
+    fn reproduction_failure_preserves_cause_and_gives_component_compatibility_guidance() {
         let framework = "https://example.com/platform/archive/selected-commit.tar.gz";
         let error = Err::<(), _>(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -4524,10 +4616,175 @@ mod tests {
         );
         let message = error.to_string();
         assert!(message.contains(framework));
-        assert!(message.contains("PR #464"));
+        assert!(message.contains("If the failure concerns"));
+        assert!(message.contains("standalone component Containerfile rendering"));
+        assert!(message.contains("selected-revision source staging"));
+        assert!(!message.contains("PR #"));
         assert!(message.contains("--no-cache"));
         assert!(message.contains("Keep the manifest's framework pin"));
         assert!(message.contains("do not bypass PCR verification"));
+    }
+
+    #[test]
+    fn historical_reproduction_config_preserves_procfile_inputs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Procfile"),
+            "run: /app\nhttp_port: 8080\ncontainerfile: Historical.Containerfile\nbuild: make old-image\noci_tarball: historical.tar\n",
+        )
+        .unwrap();
+        assert!(read_image_build_config(dir.path(), false, false).is_err());
+        let build =
+            read_image_build_config(dir.path(), true, true).expect("historical image build");
+        assert_eq!(
+            build.containerfile.as_deref(),
+            Some("Historical.Containerfile")
+        );
+        assert!(build.no_cache);
+        assert_eq!(build.build_command.as_deref(), Some("make old-image"));
+        assert_eq!(build.oci_tarball.as_deref(), Some("historical.tar"));
+        let cfg = read_reproduction_config_from_dir(dir.path()).expect("historical Procfile").unwrap();
+        let enclave = configured_enclave(&cfg).unwrap();
+        let network = enclave.network.as_ref().unwrap();
+        assert!(historical_ingress_ports(Some(network)).is_empty());
+        assert_eq!(network.http.as_ref().unwrap().port, 8080);
+        assert!(!config_egress_enabled(&cfg));
+        assert_eq!(
+            enclave.build.as_ref().unwrap().containerfile.as_deref(),
+            Some("Historical.Containerfile")
+        );
+    }
+
+    #[test]
+    fn historical_reproduction_config_preserves_raw_hcl_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = r#"enclave "main" {
+            build { containerfile = "Historical.Containerfile" }
+            network {
+                ingress {
+                    cidr_ipv4 = "192.0.2.0/24"
+                    start_port = 8080
+                    end_port = 8082
+                    ip_protocol = "udp"
+                }
+                ingress {
+                    cidr_ipv4 = "198.51.100.0/24"
+                    port = 8080
+                }
+                egress {
+                    cidr_ipv4 = "0.0.0.0/0"
+                    ip_protocol = "-1"
+                }
+                http { port = 8080 }
+            }
+        }"#;
+        assert!(matches!(
+            caution_config::ConfigurationFile::from_str(input),
+            Err(caution_config::FromStrError::NetworkPolicy { .. })
+        ));
+        std::fs::write(dir.path().join("caution.hcl"), input).unwrap();
+        assert!(read_image_build_config(dir.path(), false, false).is_err());
+        let build =
+            read_image_build_config(dir.path(), false, true).expect("historical image build");
+        assert_eq!(
+            build.containerfile.as_deref(),
+            Some("Historical.Containerfile")
+        );
+        let cfg = read_reproduction_config_from_dir(dir.path()).expect("historical HCL").unwrap();
+        let network = configured_enclave(&cfg).unwrap().network.as_ref().unwrap();
+        let ports = historical_ingress_ports(Some(network));
+        assert_eq!(ports, (8080..=8082).collect::<Vec<u16>>());
+        assert!(config_egress_enabled(&cfg));
+        assert_eq!(network.http.as_ref().unwrap().port, 8080);
+    }
+
+    #[test]
+    fn historical_reproduction_allows_source_without_a_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Containerfile"), "FROM scratch\n").unwrap();
+        let cfg = read_reproduction_config_from_dir(dir.path()).unwrap();
+        assert!(cfg.is_none());
+        assert!(resolve_reproduction_locksmith(cfg.as_ref(), true));
+        assert!(!resolve_reproduction_locksmith(cfg.as_ref(), false));
+        let empty_config = caution_config::ConfigurationFile::from_historical_hcl("").unwrap();
+        assert!(!resolve_reproduction_locksmith(Some(&empty_config), true));
+        assert!(historical_ingress_ports(None).is_empty());
+        let build = read_image_build_config(dir.path(), false, true).unwrap();
+        assert!(build.containerfile.is_none());
+        assert!(read_image_build_config(dir.path(), false, false).is_err());
+        assert!(read_reproduction_config_from_dir(&dir.path().join("missing")).is_err());
+    }
+
+    #[test]
+    fn historical_reproduction_read_does_not_fall_back_from_invalid_hcl() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("caution.hcl"), "invalid {").unwrap();
+        std::fs::write(dir.path().join("Procfile"), "run: /app\n").unwrap();
+        assert!(matches!(
+            read_reproduction_config_from_dir(dir.path()),
+            Err(ReadReproductionConfigError::Parse { .. })
+        ));
+        assert!(read_image_build_config(dir.path(), false, true).is_err());
+    }
+
+    #[test]
+    fn historical_port_expansion_ignores_current_quotas_and_reserved_ports() {
+        let cfg = caution_config::ConfigurationFile::from_historical_hcl(
+            r#"
+            enclave "main" {
+                network {
+                    ingress {
+                        cidr_ipv4 = "0.0.0.0/0"
+                        start_port = 49000
+                        end_port = 50000
+                    }
+                    ingress {
+                        cidr_ipv4 = "0.0.0.0/0"
+                        port = 49500
+                    }
+                }
+            }
+        "#,
+        )
+        .unwrap();
+        let network = configured_enclave(&cfg).unwrap().network.as_ref().unwrap();
+        assert!(configured_ingress_ports(Some(network)).is_err());
+        assert_eq!(
+            historical_ingress_ports(Some(network)),
+            (49000..=50000).collect::<Vec<u16>>()
+        );
+    }
+
+    #[test]
+    fn shared_ingress_ports_match_policy_for_ranges_duplicates_and_http() {
+        let cfg = caution_config::ConfigurationFile::from_str(r#"
+            enclave "main" {
+                network {
+                    ingress {
+                        cidr_ipv4 = "192.0.2.0/24"
+                        start_port = 8080
+                        end_port = 8082
+                    }
+                    ingress {
+                        cidr_ipv4 = "198.51.100.1/32"
+                        port = 8081
+                    }
+                    http { port = 8081 }
+                }
+            }
+        "#).expect("config");
+        let network = configured_enclave(&cfg).and_then(|enclave| enclave.network.as_ref());
+        assert_eq!(configured_ingress_ports(network).expect("ports"), [8080, 8081, 8082]);
+        assert_eq!(configured_ingress_ports(network).expect("ports"), network.expect("network").policy().expect("policy").ports());
+        assert!(configured_ingress_ports(None).expect("no network").is_empty());
+    }
+
+    #[test]
+    fn shared_ingress_ports_propagate_invalid_programmatic_rules() {
+        let network: caution_config::NetworkConfig = serde_json::from_value(serde_json::json!({
+            "ingress": [{"cidr_ipv4":"192.0.2.0/24", "port":8080, "ip_protocol":"udp"}]
+        })).expect("raw config");
+        assert!(matches!(configured_ingress_ports(Some(&network)), Err(caution_config::NetworkPolicyError::InvalidProtocol { .. })));
     }
 
     #[test]

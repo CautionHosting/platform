@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use rand::Rng;
@@ -38,6 +46,23 @@ pub(crate) struct DbError {
     location: Location,
     #[source]
     source: Option<BoxError>,
+}
+
+impl DbError {
+    /// Build a `CredentialNotFound` error for the given operation. Used by
+    /// callers that resolve a credential and find no row (or, for scoped lookups,
+    /// no row for the expected account) rather than a genuine query failure. The
+    /// fields are private to this module, so this constructor is the sanctioned
+    /// way to produce the error from outside `db.rs`.
+    #[track_caller]
+    pub(crate) fn not_found(operation: &str) -> Self {
+        DbError {
+            kind: DbErrorKind::CredentialNotFound,
+            operation: operation.to_string(),
+            location: std::panic::Location::caller(),
+            source: None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -126,6 +151,7 @@ pub fn generate_session_id() -> String {
 /// already claimed a username (no row matched `username_is_placeholder = true`).
 /// A unique-constraint violation on `users.username` is surfaced as
 /// `DbErrorKind::UsernameTaken`.
+#[tracing::instrument(skip_all)]
 pub async fn claim_username(pool: &PgPool, user_id: Uuid, username: &str) -> Result<bool, DbError> {
     let result = sqlx::query(
         "UPDATE users
@@ -163,7 +189,7 @@ pub async fn claim_username(pool: &PgPool, user_id: Uuid, username: &str) -> Res
 }
 
 /// Returns `(username, username_is_placeholder)` for the given user.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn get_username_status(pool: &PgPool, user_id: Uuid) -> Result<(String, bool), DbError> {
     let row: (String, bool) =
         sqlx::query_as("SELECT username, username_is_placeholder FROM users WHERE id = $1")
@@ -239,6 +265,7 @@ pub async fn create_user(
     Ok(user_id)
 }
 
+#[tracing::instrument(skip_all)]
 async fn insert_user_with_legal_events(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     input: CreateUserInput<'_>,
@@ -588,6 +615,72 @@ where
     Ok(())
 }
 
+/// Returns `true` if the given `credential_id` is already registered to any user
+/// with a **different** public key than `public_key`. This detects the forged-rawId
+/// attack where a malicious client crafts a registration response reusing another
+/// user's credential ID with their own key pair. A legitimate re-registration of
+/// the same physical authenticator produces an identical serialized SecurityKey,
+/// so the public keys match and no conflict is reported.
+#[tracing::instrument(skip_all, err)]
+pub async fn credential_conflicts_with_other_user<'e, E>(
+    executor: E,
+    credential_id: &[u8],
+    public_key: &[u8],
+) -> Result<bool, DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let conflict: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM fido2_credentials
+            WHERE credential_id = $1 AND public_key != $2
+        )",
+    )
+    .bind(credential_id)
+    .bind(public_key)
+    .fetch_one(executor)
+    .await
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "credential_conflicts_with_other_user",
+    ))?;
+
+    Ok(conflict)
+}
+
+/// Returns `true` if `user_id` has already registered the given `credential_id`.
+/// Under the composite `(user_id, credential_id)` unique constraint this is the
+/// same-account duplicate case: a user re-adding a key they already own. It is
+/// distinct from [`credential_conflicts_with_other_user`], which only flags a
+/// different public key (the forged-rawId attack) and deliberately allows the
+/// legitimate multi-account sharing of one physical key across accounts.
+#[tracing::instrument(skip_all, err)]
+pub async fn credential_exists_for_user<'e, E>(
+    executor: E,
+    user_id: Uuid,
+    credential_id: &[u8],
+) -> Result<bool, DbError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM fido2_credentials
+            WHERE user_id = $1 AND credential_id = $2
+        )",
+    )
+    .bind(user_id)
+    .bind(credential_id)
+    .fetch_one(executor)
+    .await
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "credential_exists_for_user",
+    ))?;
+
+    Ok(exists)
+}
+
 fn registration_uv_verified(bytes: &[u8]) -> bool {
     use webauthn_rs::prelude::{Credential, SecurityKey};
     serde_json::from_slice::<SecurityKey>(bytes)
@@ -599,41 +692,33 @@ fn registration_uv_verified(bytes: &[u8]) -> bool {
 /// trusting a JSON flag on an otherwise malformed credential. Repeatable and
 /// safe during rolling upgrades; never clears evidence from later assertions.
 pub async fn backfill_credential_uv(pool: &PgPool) -> Result<(), DbError> {
-    let rows: Vec<(Uuid, Vec<u8>)> = sqlx::query_as(
-        "SELECT id, public_key FROM fido2_credentials WHERE uv_verified = false",
-    )
-    .fetch_all(pool)
-    .await
-    .with_context(DbErrorCtx::new(DbErrorKind::QueryFailed, "load registration UV evidence"))?;
+    let rows: Vec<(Uuid, Vec<u8>)> =
+        sqlx::query_as("SELECT id, public_key FROM fido2_credentials WHERE uv_verified = false")
+            .fetch_all(pool)
+            .await
+            .with_context(DbErrorCtx::new(
+                DbErrorKind::QueryFailed,
+                "load registration UV evidence",
+            ))?;
     for (id, bytes) in rows {
         if registration_uv_verified(&bytes) {
-            sqlx::query("UPDATE fido2_credentials SET uv_verified = true WHERE id = $1 AND public_key = $2")
-                .bind(id).bind(bytes).execute(pool).await
-                .with_context(DbErrorCtx::new(DbErrorKind::QueryFailed, "backfill registration UV evidence"))?;
+            sqlx::query(
+                "UPDATE fido2_credentials SET uv_verified = true WHERE id = $1 AND public_key = $2",
+            )
+            .bind(id)
+            .bind(bytes)
+            .execute(pool)
+            .await
+            .with_context(DbErrorCtx::new(
+                DbErrorKind::QueryFailed,
+                "backfill registration UV evidence",
+            ))?;
         }
     }
     Ok(())
 }
 
-pub async fn credential_exists<'e, E>(executor: E, credential_id: &[u8]) -> Result<bool, DbError>
-where
-    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
-{
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM fido2_credentials WHERE credential_id = $1)",
-    )
-    .bind(credential_id)
-    .fetch_one(executor)
-    .await
-    .with_context(DbErrorCtx::new(
-        DbErrorKind::QueryFailed,
-        "credential_exists",
-    ))?;
-
-    Ok(exists)
-}
-
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn get_all_credential_public_keys(pool: &PgPool) -> Result<Vec<Vec<u8>>, DbError> {
     let keys: Vec<Vec<u8>> = sqlx::query_scalar("SELECT public_key FROM fido2_credentials")
         .fetch_all(pool)
@@ -646,20 +731,25 @@ pub async fn get_all_credential_public_keys(pool: &PgPool) -> Result<Vec<Vec<u8>
     Ok(keys)
 }
 
-#[tracing::instrument(skip_all, err)]
+/// Look up a credential's public key scoped to `(user_id, credential_id)` so a
+/// shared key (same rawId under multiple accounts) resolves to the correct row.
+#[tracing::instrument(skip_all)]
 pub async fn get_credential_public_key(
     pool: &PgPool,
+    user_id: Uuid,
     credential_id: &[u8],
 ) -> Result<Vec<u8>, DbError> {
-    let public_key: Option<Vec<u8>> =
-        sqlx::query_scalar("SELECT public_key FROM fido2_credentials WHERE credential_id = $1")
-            .bind(credential_id)
-            .fetch_optional(pool)
-            .await
-            .with_context(DbErrorCtx::new(
-                DbErrorKind::QueryFailed,
-                "get_credential_public_key",
-            ))?;
+    let public_key: Option<Vec<u8>> = sqlx::query_scalar(
+        "SELECT public_key FROM fido2_credentials WHERE user_id = $1 AND credential_id = $2",
+    )
+    .bind(user_id)
+    .bind(credential_id)
+    .fetch_optional(pool)
+    .await
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "get_credential_public_key",
+    ))?;
 
     public_key.ok_or_else(|| DbError {
         kind: DbErrorKind::CredentialNotFound,
@@ -669,40 +759,34 @@ pub async fn get_credential_public_key(
     })
 }
 
-#[tracing::instrument(skip_all, err)]
-pub async fn get_user_id_by_credential(
+/// Resolve the set of accounts that own a credential. A single physical key may
+/// be registered to multiple accounts (composite `(user_id, credential_id)` unique
+/// constraint), so `credential_id` maps to zero or more users — this returns all
+/// of them, sorted for determinism. An empty `Vec` means the credential is not
+/// registered to any account (callers map that to a "not found" outcome rather
+/// than an error); `Err` is reserved for genuine query failures.
+///
+/// Callers decide how to use the set: login/QR finish scope it to the account
+/// the challenge was begun for (membership check), session/sign flows require
+/// exactly one owner, and release-approval checks that the requester is among
+/// the owners of every relevant credential.
+#[tracing::instrument(skip_all)]
+pub async fn get_user_ids_by_credential(
     pool: &PgPool,
     credential_id: &[u8],
-) -> Result<Uuid, DbError> {
-    let user_id: Option<Uuid> =
-        sqlx::query_scalar("SELECT user_id FROM fido2_credentials WHERE credential_id = $1")
-            .bind(credential_id)
-            .fetch_optional(pool)
-            .await
-            .with_context(DbErrorCtx::new(
-                DbErrorKind::QueryFailed,
-                "get_user_id_by_credential",
-            ))?;
+) -> Result<Vec<Uuid>, DbError> {
+    let user_ids: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT user_id FROM fido2_credentials WHERE credential_id = $1 ORDER BY user_id",
+    )
+    .bind(credential_id)
+    .fetch_all(pool)
+    .await
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "get_user_ids_by_credential",
+    ))?;
 
-    user_id.ok_or_else(|| DbError {
-        kind: DbErrorKind::CredentialNotFound,
-        operation: "get_user_id_by_credential".into(),
-        location: std::panic::Location::caller(),
-        source: None,
-    })
-}
-
-pub async fn get_all_credential_ids(pool: &PgPool) -> Result<Vec<Vec<u8>>, DbError> {
-    let rows: Vec<(Vec<u8>,)> =
-        sqlx::query_as("SELECT credential_id FROM fido2_credentials ORDER BY created_at DESC")
-            .fetch_all(pool)
-            .await
-            .with_context(DbErrorCtx::new(
-                DbErrorKind::QueryFailed,
-                "get_all_credential_ids",
-            ))?;
-
-    Ok(rows.into_iter().map(|r| r.0).collect())
+    Ok(user_ids)
 }
 
 /// Look up a user by their (normalized) username. Returns `None` rather than
@@ -727,7 +811,7 @@ pub async fn get_user_id_by_username(
 
 /// Fetch the serialized `SecurityKey` public keys for every credential
 /// belonging to a user, for building a username-scoped `allowCredentials` list.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn get_credential_public_keys_by_user_id(
     pool: &PgPool,
     user_id: Uuid,
@@ -746,36 +830,22 @@ pub async fn get_credential_public_keys_by_user_id(
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
-/// Distinct users owning any of the given credential IDs; unknown IDs are ignored.
-#[tracing::instrument(skip_all, err)]
-pub async fn get_credential_owners(
-    pool: &PgPool,
-    credential_ids: &[Vec<u8>],
-) -> Result<Vec<Uuid>, DbError> {
-    sqlx::query_scalar(
-        "SELECT DISTINCT user_id FROM fido2_credentials WHERE credential_id = ANY($1)",
-    )
-    .bind(credential_ids)
-    .fetch_all(pool)
-    .await
-    .with_context(DbErrorCtx::new(
-        DbErrorKind::QueryFailed,
-        "get_credential_owners",
-    ))
-}
-
 /// Opportunistically mark a credential as resident (discoverable) after it was
 /// successfully used in a discoverable (username-less) login assertion. Only
 /// touches rows where residency is still unknown (`NULL`) — never overwrites
 /// an explicit `false` recorded from a registration-time `credProps` reading.
+/// Scoped to `(user_id, credential_id)` so a shared key's residency backfill
+/// never flips the other account's copy.
 pub async fn mark_credential_resident_if_unknown(
     pool: &PgPool,
+    user_id: Uuid,
     credential_id: &[u8],
 ) -> Result<(), DbError> {
     sqlx::query(
         "UPDATE fido2_credentials SET resident = true, updated_at = NOW()
-         WHERE credential_id = $1 AND resident IS NULL",
+         WHERE user_id = $1 AND credential_id = $2 AND resident IS NULL",
     )
+    .bind(user_id)
     .bind(credential_id)
     .execute(pool)
     .await
@@ -898,8 +968,13 @@ pub async fn record_credential_use(
     Ok(())
 }
 
+/// Update a credential's public key and signature counter after a successful
+/// assertion. Scoped to `(user_id, credential_id)` because a single physical key
+/// may be registered to multiple accounts; without the `user_id` this would
+/// overwrite the other account's copy of a shared key.
 pub async fn update_fido2_credential(
     pool: &PgPool,
+    user_id: Uuid,
     credential_id: &[u8],
     public_key: &[u8],
     sign_count: u32,
@@ -907,10 +982,11 @@ pub async fn update_fido2_credential(
     sqlx::query(
         "UPDATE fido2_credentials 
          SET public_key = $1, sign_count = $2, updated_at = NOW() 
-         WHERE credential_id = $3",
+         WHERE user_id = $3 AND credential_id = $4",
     )
     .bind(public_key)
     .bind(sign_count as i64)
+    .bind(user_id)
     .bind(credential_id)
     .execute(pool)
     .await
@@ -926,17 +1002,19 @@ pub async fn create_auth_session<'e, E>(
     executor: E,
     session_id: &str,
     credential_id: &[u8],
+    user_id: Uuid,
     expires_at: OffsetDateTime,
 ) -> Result<(), DbError>
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
     sqlx::query(
-        "INSERT INTO auth_sessions (session_id, credential_id, created_at, expires_at, last_used_at)
-         VALUES ($1, $2, NOW(), $3, NOW())"
+        "INSERT INTO auth_sessions (session_id, credential_id, user_id, created_at, expires_at, last_used_at)
+         VALUES ($1, $2, $3, NOW(), $4, NOW())"
     )
     .bind(session_id)
     .bind(credential_id)
+    .bind(user_id)
     .bind(expires_at)
     .execute(executor)
     .await
@@ -948,13 +1026,13 @@ where
     Ok(())
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn validate_auth_session(
     pool: &PgPool,
     session_id: &str,
-) -> Result<Option<Vec<u8>>, DbError> {
+) -> Result<Option<(Vec<u8>, Uuid)>, DbError> {
     let session: Option<DbSession> = sqlx::query_as(
-        "SELECT session_id, credential_id, expires_at, created_at, last_used_at
+        "SELECT session_id, credential_id, user_id, expires_at, created_at, last_used_at
          FROM auth_sessions
          WHERE session_id = $1",
     )
@@ -983,7 +1061,7 @@ pub async fn validate_auth_session(
         tracing::warn!("Failed to update last_used_at for session: {}", e);
     }
 
-    Ok(Some(session.credential_id))
+    Ok(Some((session.credential_id, session.user_id)))
 }
 
 pub async fn delete_auth_session(pool: &PgPool, session_id: &str) -> Result<(), DbError> {
@@ -999,6 +1077,7 @@ pub async fn delete_auth_session(pool: &PgPool, session_id: &str) -> Result<(), 
     Ok(())
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn run_cleanups(pool: &PgPool) {
     let tasks: &[(&str, &str)] = &[
         (
@@ -1268,7 +1347,7 @@ impl RecordSignedRequestAuditError {
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn record_signed_request_audit(
     pool: &PgPool,
     audit: &NewSignedRequestAudit<'_>,
@@ -1343,7 +1422,7 @@ impl CompleteSignedRequestAuditError {
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn complete_signed_request_audit(
     pool: &PgPool,
     audit_id: Uuid,
@@ -1376,6 +1455,7 @@ pub async fn complete_signed_request_audit(
 // PGP key operations
 // ---------------------------------------------------------------------------
 
+#[tracing::instrument(skip_all)]
 pub async fn add_pgp_key(
     pool: &PgPool,
     user_id: Uuid,
@@ -1750,7 +1830,7 @@ pub async fn get_auth_session(
     session_id: &str,
 ) -> Result<Option<crate::types::DbSession>, DbError> {
     let session = sqlx::query_as(
-        "SELECT session_id, credential_id, expires_at, created_at, last_used_at
+        "SELECT session_id, credential_id, user_id, expires_at, created_at, last_used_at
          FROM auth_sessions WHERE session_id = $1",
     )
     .bind(session_id)
@@ -1955,11 +2035,22 @@ mod credential_uv_tests {
     use super::*;
     #[test]
     fn registration_evidence_requires_a_valid_credential_and_verified_uv() {
-        let mut value: serde_json::Value = serde_json::from_str(include_str!("../../api/src/org_quorum/test-credential.json")).unwrap();
-        assert!(!registration_uv_verified(&serde_json::to_vec(&value).unwrap()));
+        let mut value: serde_json::Value = serde_json::from_str(include_str!(
+            "../../api/src/org_quorum/test-credential.json"
+        ))
+        .unwrap();
+        assert!(!registration_uv_verified(
+            &serde_json::to_vec(&value).unwrap()
+        ));
         value["cred"]["user_verified"] = serde_json::json!(true);
-        assert!(registration_uv_verified(&serde_json::to_vec(&value).unwrap()));
-        for malformed in [b"invalid".as_slice(), br#"{"cred":{"user_verified":true}}"#, b"{}"] {
+        assert!(registration_uv_verified(
+            &serde_json::to_vec(&value).unwrap()
+        ));
+        for malformed in [
+            b"invalid".as_slice(),
+            br#"{"cred":{"user_verified":true}}"#,
+            b"{}",
+        ] {
             assert!(!registration_uv_verified(malformed));
         }
     }
@@ -1975,37 +2066,207 @@ mod credential_owner_tests {
 
     #[sqlx::test(migrations = false)]
     #[ignore = "requires DATABASE_URL pointing to disposable Postgres"]
-    async fn owners_are_distinct_and_unknown_ids_are_ignored(pool: PgPool) {
+    async fn user_ids_by_credential_returns_all_owners(pool: PgPool) {
+        // The composite (user_id, credential_id) constraint allows the SAME
+        // credential_id under multiple users. get_user_ids_by_credential must
+        // return every account that owns a shared key (sorted), and an empty
+        // Vec for a credential no one owns — never an error. This is the query
+        // that backs login/QR finish, session resolution, and release approval.
         sqlx::raw_sql(
             "CREATE TABLE fido2_credentials (
-                user_id UUID NOT NULL, credential_id BYTEA UNIQUE NOT NULL)",
+                user_id UUID NOT NULL, credential_id BYTEA NOT NULL,
+                UNIQUE(user_id, credential_id))",
         )
         .execute(&pool)
         .await
         .unwrap();
         let (alice, bob) = (Uuid::new_v4(), Uuid::new_v4());
-        for (user, id) in [(alice, b"a1".as_slice()), (alice, b"a2"), (bob, b"b1")] {
+        // One physical key (same credential_id) registered to both accounts.
+        for user in [alice, bob] {
             sqlx::query("INSERT INTO fido2_credentials (user_id, credential_id) VALUES ($1, $2)")
                 .bind(user)
-                .bind(id)
+                .bind(b"shared")
                 .execute(&pool)
                 .await
                 .unwrap();
         }
-        let owners = |ids: &[&[u8]]| {
-            let ids: Vec<Vec<u8>> = ids.iter().map(|id| id.to_vec()).collect();
-            let pool = pool.clone();
-            async move {
-                let mut owners = get_credential_owners(&pool, &ids).await.unwrap();
-                owners.sort();
-                owners
-            }
-        };
-        assert_eq!(owners(&[b"a1", b"a2", b"unknown"]).await, [alice]);
-        let mut both = vec![alice, bob];
-        both.sort();
-        assert_eq!(owners(&[b"a1", b"b1"]).await, both);
-        assert!(owners(&[b"unknown"]).await.is_empty());
-        assert!(owners(&[]).await.is_empty());
+        // A single-owner key for contrast.
+        let carol = Uuid::new_v4();
+        sqlx::query("INSERT INTO fido2_credentials (user_id, credential_id) VALUES ($1, $2)")
+            .bind(carol)
+            .bind(b"solo")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // The shared key resolves to BOTH owners, sorted for determinism.
+        let mut shared = get_user_ids_by_credential(&pool, b"shared").await.unwrap();
+        shared.sort();
+        let mut expected = vec![alice, bob];
+        expected.sort();
+        assert_eq!(shared, expected);
+
+        // The single-owner key resolves to exactly that owner.
+        assert_eq!(
+            get_user_ids_by_credential(&pool, b"solo").await.unwrap(),
+            [carol]
+        );
+
+        // A credential no one owns returns an empty Vec (not an error).
+        assert!(get_user_ids_by_credential(&pool, b"unknown")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires DATABASE_URL pointing to disposable Postgres"]
+    async fn credential_conflict_detects_forged_rawid(pool: PgPool) {
+        // The forged-rawId attack: Mallory registers a NEW key but crafts the
+        // rawId to match Alice's existing credential. The public keys differ,
+        // so credential_conflicts_with_other_user must return true.
+        sqlx::raw_sql(
+            "CREATE TABLE fido2_credentials (
+                user_id UUID NOT NULL, credential_id BYTEA NOT NULL,
+                public_key BYTEA NOT NULL,
+                UNIQUE(user_id, credential_id))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let alice = Uuid::new_v4();
+        let mallory = Uuid::new_v4();
+        let alice_key = b"alice-public-key-json";
+        let mallory_key = b"mallory-public-key-json";
+
+        // Alice registers her key.
+        sqlx::query(
+            "INSERT INTO fido2_credentials (user_id, credential_id, public_key) VALUES ($1, $2, $3)",
+        )
+        .bind(alice)
+        .bind(b"alice-credential-id")
+        .bind(alice_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Mallory attempts to register with Alice's credential ID but her own key.
+        let conflict =
+            credential_conflicts_with_other_user(&pool, b"alice-credential-id", mallory_key)
+                .await
+                .unwrap();
+        assert!(
+            conflict,
+            "forged rawId with different public key must be detected as a conflict"
+        );
+
+        // Same physical key (identical public key) is NOT a conflict — this is
+        // the legitimate multi-account sharing case.
+        let no_conflict =
+            credential_conflicts_with_other_user(&pool, b"alice-credential-id", alice_key)
+                .await
+                .unwrap();
+        assert!(
+            !no_conflict,
+            "same public key (same physical authenticator) must not be flagged as a conflict"
+        );
+
+        // A completely new credential ID has no conflict.
+        let fresh = credential_conflicts_with_other_user(&pool, b"brand-new-id", mallory_key)
+            .await
+            .unwrap();
+        assert!(
+            !fresh,
+            "a new credential ID must not be flagged as a conflict"
+        );
+
+        // After Mallory's key is somehow inserted (e.g., via a race), the
+        // conflict check for Alice's key still detects it.
+        sqlx::query(
+            "INSERT INTO fido2_credentials (user_id, credential_id, public_key) VALUES ($1, $2, $3)",
+        )
+        .bind(mallory)
+        .bind(b"alice-credential-id")
+        .bind(mallory_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let still_conflicts =
+            credential_conflicts_with_other_user(&pool, b"alice-credential-id", alice_key)
+                .await
+                .unwrap();
+        assert!(
+            still_conflicts,
+            "once a conflicting key exists, the original owner's re-registration must also be flagged"
+        );
+    }
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires DATABASE_URL pointing to disposable Postgres"]
+    async fn credential_exists_for_user_distinguishes_same_account_from_sharing(pool: PgPool) {
+        // The same-account duplicate case is what the composite (user_id,
+        // credential_id) constraint rejects at INSERT time. A re-add of a key the
+        // user already owns must be detected up front (so the handler returns 409)
+        // rather than surfacing as a constraint-violation 500 from save.
+        sqlx::raw_sql(
+            "CREATE TABLE fido2_credentials (
+                user_id UUID NOT NULL, credential_id BYTEA NOT NULL,
+                public_key BYTEA NOT NULL,
+                UNIQUE(user_id, credential_id))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let alice = Uuid::new_v4();
+        let bob = Uuid::new_v4();
+        let alice_key = b"alice-public-key-json";
+        // Alice owns credential C1.
+        sqlx::query(
+            "INSERT INTO fido2_credentials (user_id, credential_id, public_key) VALUES ($1, $2, $3)",
+        )
+        .bind(alice)
+        .bind(b"c1")
+        .bind(alice_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Same account re-add: Alice already owns C1 -> true. This is the case
+        // that must map to a 409, not fall through to a constraint-violation 500.
+        assert!(
+            credential_exists_for_user(&pool, alice, b"c1")
+                .await
+                .unwrap(),
+            "a user re-adding a key they already own must be detected as a same-account duplicate"
+        );
+
+        // A different account that does NOT own C1 -> false. Bob adding C1 is the
+        // legitimate multi-account sharing path (same physical key), which must be
+        // allowed, not rejected.
+        assert!(
+            !credential_exists_for_user(&pool, bob, b"c1").await.unwrap(),
+            "a different account that does not own the credential must not be flagged"
+        );
+
+        // A brand-new credential nobody owns -> false (fresh registration allowed).
+        assert!(
+            !credential_exists_for_user(&pool, alice, b"brand-new")
+                .await
+                .unwrap(),
+            "a credential no one owns must read as not present for any user"
+        );
+
+        // The two checks are independent: the same-account duplicate (identical
+        // public key) is NOT a forged-rawId conflict, so the handler relies on
+        // credential_exists_for_user to catch it after the conflict check passes.
+        assert!(
+            !credential_conflicts_with_other_user(&pool, b"c1", alice_key)
+                .await
+                .unwrap(),
+            "identical public key must not be a cross-user conflict; the same-account check is what rejects it"
+        );
     }
 }

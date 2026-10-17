@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use crate::types;
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use sqlx::PgPool;
@@ -56,7 +64,7 @@ pub enum InitializeUserAccountError {
 
 /// Creates the default organization and owner membership for a user, then
 /// registers the shared root AWS provider account.
-#[tracing::instrument(skip_all, err, fields(user_id = %user_id))]
+#[tracing::instrument(skip_all, fields(user_id = %user_id))]
 pub async fn initialize_user_account(
     pool: &PgPool,
     user_id: Uuid,
@@ -121,7 +129,7 @@ pub enum ValidateSetupError {
 }
 
 /// Verifies the AWS credentials required for child-account provisioning are set.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub fn validate_setup() -> Result<(), ValidateSetupError> {
     if std::env::var("AWS_ACCESS_KEY_ID").is_err() {
         return Err(ValidateSetupError::MissingAccessKeyId {
@@ -154,7 +162,7 @@ pub(crate) enum CreateProviderAccountError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn create_provider_account(
     pool: &PgPool,
     org_id: Uuid,

@@ -7,6 +7,9 @@
 
 set -euo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/lib/config.sh"
+require_prices_fixture "$(dirname "${BASH_SOURCE[0]}")/fixtures/prices-paddle-subscriptions.json" api metering
+
 GATEWAY_URL="${GATEWAY_URL:-http://127.0.0.1:8000}"
 METERING_URL="${METERING_URL:-http://127.0.0.1:8083}"
 DB_CONTAINER="${DB_CONTAINER:-postgres-test}"

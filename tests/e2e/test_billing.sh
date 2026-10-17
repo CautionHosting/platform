@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 #
 # E2E billing test for the Caution platform (Paddle billing).
-# Requires: make up-test-billing (starts services including metering + email)
+# Requires: make test-e2e-billing (mounts fixtures/prices-billing.json in API + metering)
+# Direct invocation requires the same fixture in both running services.
 #
 # Tests the full billing lifecycle:
 #   1. Wait for services (gateway, metering, email)
@@ -46,6 +47,9 @@
 
 set -euo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/lib/config.sh"
+require_prices_fixture "$(dirname "${BASH_SOURCE[0]}")/fixtures/prices-billing.json" api metering
+
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8000}"
 METERING_URL="${METERING_URL:-http://metering:8083}"
 METERING_EXTERNAL_URL="${METERING_EXTERNAL_URL:-http://localhost:8083}"
@@ -71,6 +75,15 @@ mkdir -p "$LOG_DIR"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 cleanup() {
+    local exit_status=$?
+    trap - EXIT
+    set +e
+
+    if [ "$exit_status" -ne 0 ] && [ "$STEPS_FAILED" -eq 0 ]; then
+        STEPS_FAILED=$((STEPS_FAILED + 1))
+        STEP_RESULTS+=("[FAIL] Step $STEP_NUM: Unexpected exit (status $exit_status)")
+    fi
+
     echo ""
     echo "=== Cleanup ==="
 
@@ -100,6 +113,7 @@ cleanup() {
     echo "========================================"
     echo ""
     echo "Full log: $LOG_FILE"
+    exit "$exit_status"
 }
 trap cleanup EXIT
 
@@ -1506,10 +1520,10 @@ INSERT INTO usage_ledger (
     ('$ORG_ID', 'dashboard-cost-sync', 'aws', 'aws_cost_explorer', 13, 'usd', 1, 0,
      NOW(), '{}'),
     ('$ORG_ID', 'dashboard-renamed', 'aws', 'compute', 0, 'hours', 1, 0,
-     NOW(), '{"resource_name":"dashboard-name-a"}'),
+     NOW(), '{\"resource_name\":\"dashboard-name-a\"}'),
     ('$ORG_ID', 'dashboard-renamed', 'aws', 'compute', 0, 'hours', 1, 0,
-     NOW(), '{"resource_name":"dashboard-name-b"}');
-" >/dev/null 2>&1
+     NOW(), '{\"resource_name\":\"dashboard-name-b\"}');
+" >/dev/null
 
 DASHBOARD_USAGE=$(curl -sf "$GATEWAY_URL/api/billing/usage" -H "X-Session-ID: $SESSION_ID")
 if jq -e '
@@ -1562,10 +1576,12 @@ INSERT INTO usage_ledger (
      date_trunc('month', NOW()) - INTERVAL '1 second', '{}');
 " >/dev/null 2>&1
 
+# Independent oracle: latest ledger rate is $0.40 + 25% = $0.50;
+# prices-billing.json fixes fallback markup at 25%: $0.192 * 1.25 = $0.24.
 EXPECTED_PROJECTION=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -A -c "
 SELECT 2 + EXTRACT(EPOCH FROM (
     date_trunc('month', NOW()) + INTERVAL '1 month' - date_trunc('month', NOW())
-)) / 3600 * (0.5 + 0.192);
+)) / 3600 * (0.5 + 0.24);
 " 2>/dev/null | head -1 | tr -d ' \n')
 DASHBOARD_USAGE=$(curl -sf "$GATEWAY_URL/api/billing/usage" -H "X-Session-ID: $SESSION_ID")
 if jq -e --argjson expected "$EXPECTED_PROJECTION" '

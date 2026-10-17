@@ -35,7 +35,7 @@ use crate::prompt;
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum PromptForPinError {
-    #[error("failed to read PIN [{location:?}]")]
+    #[error("failed to read PIN [{location}]")]
     ReadPin {
         #[location]
         location: Location,
@@ -70,7 +70,7 @@ fn prompt_for_pin_with_cancellation(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum PromptLineError {
-    #[error("failed to read input from stdin [{location:?}]")]
+    #[error("failed to read input from stdin [{location}]")]
     Io {
         #[location]
         location: Location,
@@ -128,7 +128,7 @@ enum LoginUsernameError {
          Re-authenticate with `caution login --username <name>`."
     )]
     NonInteractive,
-    #[error("failed to prompt for username [{location:?}]")]
+    #[error("failed to prompt for username [{location}]")]
     Prompt {
         #[location]
         location: Location,
@@ -188,7 +188,7 @@ pub(crate) enum RegisterUsernameError {
          Re-run with `caution register --username <name>`."
     )]
     NonInteractive,
-    #[error("failed to prompt for a username [{location:?}]")]
+    #[error("failed to prompt for a username [{location}]")]
     Prompt {
         #[location]
         location: Location,
@@ -245,7 +245,7 @@ fn is_pin_related_error(error: &dyn std::error::Error) -> bool {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum RenderQrCodeError {
-    #[error("failed to generate QR code [{location:?}]")]
+    #[error("failed to generate QR code [{location}]")]
     Generate {
         #[location]
         location: Location,
@@ -474,14 +474,14 @@ pub(crate) struct AssertionResult {
 pub(crate) enum ClaimUsernameError {
     #[error(
         "This account needs a username set before continuing, but stdin is not \
-         interactive. Re-run this command from a terminal to choose one. [{location:?}]"
+         interactive. Re-run this command from a terminal to choose one. [{location}]"
     )]
     NonInteractive {
         #[location]
         location: Location,
     },
 
-    #[error("failed to prompt for a username [{location:?}]")]
+    #[error("failed to prompt for a username [{location}]")]
     Prompt {
         #[location]
         location: Location,
@@ -490,7 +490,7 @@ pub(crate) enum ClaimUsernameError {
         source: BoxError,
     },
 
-    #[error("failed to submit username claim [{location:?}]")]
+    #[error("failed to submit username claim [{location}]")]
     SignedPost {
         #[location]
         location: Location,
@@ -501,7 +501,7 @@ pub(crate) enum ClaimUsernameError {
 
     #[error(
         "Your account already has a username set: {message:?}. Re-run the command \
-         that required a username. [{location:?}]"
+         that required a username. [{location}]"
     )]
     UsernameAlreadySet {
         message: String,
@@ -510,7 +510,7 @@ pub(crate) enum ClaimUsernameError {
         location: Location,
     },
 
-    #[error("Failed to claim username: {message} [{location:?}]")]
+    #[error("Failed to claim username: {message} [{location}]")]
     Failed {
         message: String,
 
@@ -592,7 +592,7 @@ pub(crate) async fn claim_username_interactively(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum RegisterError {
-    #[error("failed to build HTTP client [{location:?}]")]
+    #[error("failed to build HTTP client [{location}]")]
     BuildClient {
         #[location]
         location: Location,
@@ -601,7 +601,7 @@ pub(crate) enum RegisterError {
         source: BoxError,
     },
 
-    #[error("Failed to send registration begin request [{location:?}]")]
+    #[error("Failed to send registration begin request [{location}]")]
     SendBegin {
         #[location]
         location: Location,
@@ -610,7 +610,7 @@ pub(crate) enum RegisterError {
         source: BoxError,
     },
 
-    #[error("failed to read registration error body [{location:?}]")]
+    #[error("failed to read registration error body [{location}]")]
     ReadErrorBody {
         #[location]
         location: Location,
@@ -619,7 +619,7 @@ pub(crate) enum RegisterError {
         source: BoxError,
     },
 
-    #[error("Registration begin failed: {message} [{location:?}]")]
+    #[error("Registration begin failed: {message} [{location}]")]
     BeginFailed {
         message: String,
 
@@ -627,7 +627,7 @@ pub(crate) enum RegisterError {
         location: Location,
     },
 
-    #[error("Failed to parse registration begin response [{location:?}]")]
+    #[error("Failed to parse registration begin response [{location}]")]
     ParseBegin {
         #[location]
         location: Location,
@@ -636,7 +636,7 @@ pub(crate) enum RegisterError {
         source: BoxError,
     },
 
-    #[error("failed to create credential on security key [{location:?}]")]
+    #[error("failed to create credential on security key [{location}]")]
     MakeCredential {
         #[location]
         location: Location,
@@ -645,7 +645,7 @@ pub(crate) enum RegisterError {
         source: BoxError,
     },
 
-    #[error("Failed to send registration finish request [{location:?}]")]
+    #[error("Failed to send registration finish request [{location}]")]
     SendFinish {
         #[location]
         location: Location,
@@ -654,13 +654,13 @@ pub(crate) enum RegisterError {
         source: BoxError,
     },
 
-    #[error("No session cookie in response [{location:?}]")]
+    #[error("No session cookie in response [{location}]")]
     NoSessionCookie {
         #[location]
         location: Location,
     },
 
-    #[error("failed to parse registration finish response [{location:?}]")]
+    #[error("failed to parse registration finish response [{location}]")]
     ParseFinish {
         #[location]
         location: Location,
@@ -669,7 +669,7 @@ pub(crate) enum RegisterError {
         source: BoxError,
     },
 
-    #[error("failed to save config [{location:?}]")]
+    #[error("failed to save config [{location}]")]
     SaveConfig {
         #[location]
         location: Location,
@@ -678,7 +678,7 @@ pub(crate) enum RegisterError {
         source: BoxError,
     },
 
-    #[error("Registration failed: {message} [{location:?}]")]
+    #[error("Registration failed: {message} [{location}]")]
     Failed {
         message: String,
 
@@ -797,7 +797,7 @@ pub(crate) async fn register(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum LoginError {
-    #[error("failed to resolve login username [{location:?}]")]
+    #[error("failed to resolve login username [{location}]")]
     ResolveUsername {
         #[location]
         location: Location,
@@ -806,7 +806,7 @@ pub(crate) enum LoginError {
         source: BoxError,
     },
 
-    #[error("failed to perform login [{location:?}]")]
+    #[error("failed to perform login [{location}]")]
     PerformLogin {
         #[location]
         location: Location,
@@ -886,7 +886,7 @@ pub(crate) async fn login(client: &ApiClient, username: Option<String>) -> Resul
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum LoginQrError {
-    #[error("failed to request QR login token [{location:?}]")]
+    #[error("failed to request QR login token [{location}]")]
     SendBegin {
         #[location]
         location: Location,
@@ -895,7 +895,7 @@ pub(crate) enum LoginQrError {
         source: BoxError,
     },
 
-    #[error("failed to read QR login error body [{location:?}]")]
+    #[error("failed to read QR login error body [{location}]")]
     ReadErrorBody {
         #[location]
         location: Location,
@@ -904,7 +904,7 @@ pub(crate) enum LoginQrError {
         source: BoxError,
     },
 
-    #[error("Failed to start QR login: {message} [{location:?}]")]
+    #[error("Failed to start QR login: {message} [{location}]")]
     BeginFailed {
         message: String,
 
@@ -912,7 +912,7 @@ pub(crate) enum LoginQrError {
         location: Location,
     },
 
-    #[error("failed to parse QR login begin response [{location:?}]")]
+    #[error("failed to parse QR login begin response [{location}]")]
     ParseBegin {
         #[location]
         location: Location,
@@ -921,7 +921,7 @@ pub(crate) enum LoginQrError {
         source: BoxError,
     },
 
-    #[error("failed to render QR code [{location:?}]")]
+    #[error("failed to render QR code [{location}]")]
     RenderQr {
         #[location]
         location: Location,
@@ -930,13 +930,13 @@ pub(crate) enum LoginQrError {
         source: BoxError,
     },
 
-    #[error("QR login timed out. Please try again. [{location:?}]")]
+    #[error("QR login timed out. Please try again. [{location}]")]
     TimedOut {
         #[location]
         location: Location,
     },
 
-    #[error("failed to poll QR login status [{location:?}]")]
+    #[error("failed to poll QR login status [{location}]")]
     PollSend {
         #[location]
         location: Location,
@@ -945,7 +945,7 @@ pub(crate) enum LoginQrError {
         source: BoxError,
     },
 
-    #[error("failed to parse QR login status response [{location:?}]")]
+    #[error("failed to parse QR login status response [{location}]")]
     PollParse {
         #[location]
         location: Location,
@@ -954,19 +954,19 @@ pub(crate) enum LoginQrError {
         source: BoxError,
     },
 
-    #[error("Completed but no session_id returned [{location:?}]")]
+    #[error("Completed but no session_id returned [{location}]")]
     MissingSessionId {
         #[location]
         location: Location,
     },
 
-    #[error("Completed but no expires_at returned [{location:?}]")]
+    #[error("Completed but no expires_at returned [{location}]")]
     MissingExpiresAt {
         #[location]
         location: Location,
     },
 
-    #[error("failed to save config [{location:?}]")]
+    #[error("failed to save config [{location}]")]
     SaveConfig {
         #[location]
         location: Location,
@@ -975,7 +975,7 @@ pub(crate) enum LoginQrError {
         source: BoxError,
     },
 
-    #[error("QR login token expired. Please try again. [{location:?}]")]
+    #[error("QR login token expired. Please try again. [{location}]")]
     TokenExpired {
         #[location]
         location: Location,
@@ -1118,7 +1118,7 @@ pub(crate) async fn login_qr(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum LogoutError {
-    #[error("failed to remove local config [{location:?}]")]
+    #[error("failed to remove local config [{location}]")]
     RemoveConfig {
         #[location]
         location: Location,
@@ -1168,7 +1168,7 @@ pub(crate) async fn logout(client: &ApiClient) -> Result<(), LogoutError> {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum CheckOnboardingStatusError {
-    #[error("failed to get user status [{location:?}]")]
+    #[error("failed to get user status [{location}]")]
     GetStatus {
         #[location]
         location: Location,
@@ -1191,7 +1191,7 @@ async fn check_onboarding_status(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum PrimaryOrganizationIdError {
-    #[error("failed to get organizations [{location:?}]")]
+    #[error("failed to get organizations [{location}]")]
     GetOrganizations {
         #[location]
         location: Location,
@@ -1200,7 +1200,7 @@ pub(crate) enum PrimaryOrganizationIdError {
         source: BoxError,
     },
 
-    #[error("no organizations found [{location:?}]")]
+    #[error("no organizations found [{location}]")]
     NoOrganizations {
         #[location]
         location: Location,
@@ -1232,7 +1232,7 @@ pub(crate) async fn primary_organization_id(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum PrintAccountIdError {
-    #[error("failed to load authenticated config [{location:?}]")]
+    #[error("failed to load authenticated config [{location}]")]
     LoadConfig {
         #[location]
         location: Location,
@@ -1241,7 +1241,7 @@ pub(crate) enum PrintAccountIdError {
         source: BoxError,
     },
 
-    #[error("failed to determine primary organization id [{location:?}]")]
+    #[error("failed to determine primary organization id [{location}]")]
     PrimaryOrganizationId {
         #[location]
         location: Location,
@@ -1250,7 +1250,7 @@ pub(crate) enum PrintAccountIdError {
         source: BoxError,
     },
 
-    #[error("failed to print account id [{location:?}]")]
+    #[error("failed to print account id [{location}]")]
     Print {
         #[location]
         location: Location,
@@ -1275,7 +1275,7 @@ pub(crate) async fn print_account_id(client: &ApiClient) -> Result<(), PrintAcco
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum CheckOrgSecuritySettingsError {
-    #[error("failed to determine primary organization id [{location:?}]")]
+    #[error("failed to determine primary organization id [{location}]")]
     PrimaryOrganizationId {
         #[location]
         location: Location,
@@ -1284,7 +1284,7 @@ enum CheckOrgSecuritySettingsError {
         source: BoxError,
     },
 
-    #[error("failed to get security settings [{location:?}]")]
+    #[error("failed to get security settings [{location}]")]
     GetSettings {
         #[location]
         location: Location,
@@ -1315,7 +1315,7 @@ async fn check_org_security_settings(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum MakeCredentialError {
-    #[error("failed to create credential on security key [{location:?}]")]
+    #[error("failed to create credential on security key [{location}]")]
     Credential {
         #[location]
         location: Location,
@@ -1324,7 +1324,7 @@ enum MakeCredentialError {
         source: BoxError,
     },
 
-    #[error("failed to prompt for PIN [{location:?}]")]
+    #[error("failed to prompt for PIN [{location}]")]
     PromptForPin {
         #[location]
         location: Location,
@@ -1387,7 +1387,7 @@ fn make_credential(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum TryMakeCredentialError {
-    #[error("failed to decode user ID [{location:?}]")]
+    #[error("failed to decode user ID [{location}]")]
     DecodeUserId {
         #[location]
         location: Location,
@@ -1396,7 +1396,7 @@ enum TryMakeCredentialError {
         source: BoxError,
     },
 
-    #[error("failed to decode challenge [{location:?}]")]
+    #[error("failed to decode challenge [{location}]")]
     DecodeChallenge {
         #[location]
         location: Location,
@@ -1405,7 +1405,7 @@ enum TryMakeCredentialError {
         source: BoxError,
     },
 
-    #[error("failed to create authenticator service [{location:?}]")]
+    #[error("failed to create authenticator service [{location}]")]
     AuthenticatorService {
         #[location]
         location: Location,
@@ -1414,7 +1414,7 @@ enum TryMakeCredentialError {
         source: BoxError,
     },
 
-    #[error("failed to serialize client data JSON [{location:?}]")]
+    #[error("failed to serialize client data JSON [{location}]")]
     SerializeClientData {
         #[location]
         location: Location,
@@ -1423,7 +1423,7 @@ enum TryMakeCredentialError {
         source: BoxError,
     },
 
-    #[error("failed to start registration [{location:?}]")]
+    #[error("failed to start registration [{location}]")]
     StartRegistration {
         #[location]
         location: Location,
@@ -1432,7 +1432,7 @@ enum TryMakeCredentialError {
         source: BoxError,
     },
 
-    #[error("failed to prompt for a credential selection [{location:?}]")]
+    #[error("failed to prompt for a credential selection [{location}]")]
     PromptSelection {
         #[location]
         location: Location,
@@ -1441,13 +1441,13 @@ enum TryMakeCredentialError {
         source: BoxError,
     },
 
-    #[error("credential selection out of range [{location:?}]")]
+    #[error("credential selection out of range [{location}]")]
     SelectionOutOfRange {
         #[location]
         location: Location,
     },
 
-    #[error("failed to report credential selection [{location:?}]")]
+    #[error("failed to report credential selection [{location}]")]
     SendSelection {
         #[location]
         location: Location,
@@ -1456,7 +1456,7 @@ enum TryMakeCredentialError {
         source: BoxError,
     },
 
-    #[error("failed to prompt for PIN [{location:?}]")]
+    #[error("failed to prompt for PIN [{location}]")]
     PromptForPin {
         #[location]
         location: Location,
@@ -1465,7 +1465,7 @@ enum TryMakeCredentialError {
         source: BoxError,
     },
 
-    #[error("failed to send PIN to authenticator [{location:?}]")]
+    #[error("failed to send PIN to authenticator [{location}]")]
     SendPin {
         #[location]
         location: Location,
@@ -1474,13 +1474,13 @@ enum TryMakeCredentialError {
         source: BoxError,
     },
 
-    #[error("PIN is required but none provided [{location:?}]")]
+    #[error("PIN is required but none provided [{location}]")]
     PinRequiredNoneProvided {
         #[location]
         location: Location,
     },
 
-    #[error("PIN/UV error: {error:?} [{location:?}]")]
+    #[error("PIN/UV error: {error:?} [{location}]")]
     PinUvError {
         error: StatusPinUv,
 
@@ -1488,7 +1488,7 @@ enum TryMakeCredentialError {
         location: Location,
     },
 
-    #[error("registration failed [{location:?}]")]
+    #[error("registration failed [{location}]")]
     RegistrationFailed {
         #[location]
         location: Location,
@@ -1497,7 +1497,7 @@ enum TryMakeCredentialError {
         source: BoxError,
     },
 
-    #[error("invalid authenticator data length: {length} [{location:?}]")]
+    #[error("invalid authenticator data length: {length} [{location}]")]
     InvalidAuthenticatorDataLength {
         length: usize,
 
@@ -1505,13 +1505,13 @@ enum TryMakeCredentialError {
         location: Location,
     },
 
-    #[error("authenticator data too short for credential ID [{location:?}]")]
+    #[error("authenticator data too short for credential ID [{location}]")]
     AuthenticatorDataTooShort {
         #[location]
         location: Location,
     },
 
-    #[error("failed to serialize attestation object [{location:?}]")]
+    #[error("failed to serialize attestation object [{location}]")]
     SerializeAttestationObject {
         #[location]
         location: Location,
@@ -1768,7 +1768,7 @@ fn try_make_credential(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum PerformLoginError {
-    #[error("failed to build HTTP client [{location:?}]")]
+    #[error("failed to build HTTP client [{location}]")]
     BuildClient {
         #[location]
         location: Location,
@@ -1777,7 +1777,7 @@ enum PerformLoginError {
         source: BoxError,
     },
 
-    #[error("failed to send login begin request [{location:?}]")]
+    #[error("failed to send login begin request [{location}]")]
     SendBegin {
         #[location]
         location: Location,
@@ -1786,7 +1786,7 @@ enum PerformLoginError {
         source: BoxError,
     },
 
-    #[error("failed to read login error body [{location:?}]")]
+    #[error("failed to read login error body [{location}]")]
     ReadErrorBody {
         #[location]
         location: Location,
@@ -1795,7 +1795,7 @@ enum PerformLoginError {
         source: BoxError,
     },
 
-    #[error("Login begin failed: {message} [{location:?}]")]
+    #[error("Login begin failed: {message} [{location}]")]
     BeginFailed {
         message: String,
 
@@ -1803,7 +1803,7 @@ enum PerformLoginError {
         location: Location,
     },
 
-    #[error("failed to parse login begin response [{location:?}]")]
+    #[error("failed to parse login begin response [{location}]")]
     ParseBegin {
         #[location]
         location: Location,
@@ -1812,7 +1812,7 @@ enum PerformLoginError {
         source: BoxError,
     },
 
-    #[error("failed to get assertion [{location:?}]")]
+    #[error("failed to get assertion [{location}]")]
     GetAssertion {
         #[location]
         location: Location,
@@ -1821,7 +1821,7 @@ enum PerformLoginError {
         source: BoxError,
     },
 
-    #[error("failed to parse credential from assertion [{location:?}]")]
+    #[error("failed to parse credential from assertion [{location}]")]
     ParseCredential {
         #[location]
         location: Location,
@@ -1830,7 +1830,7 @@ enum PerformLoginError {
         source: BoxError,
     },
 
-    #[error("failed to serialize credential [{location:?}]")]
+    #[error("failed to serialize credential [{location}]")]
     SerializeCredential {
         #[location]
         location: Location,
@@ -1839,7 +1839,7 @@ enum PerformLoginError {
         source: BoxError,
     },
 
-    #[error("failed to send login finish request [{location:?}]")]
+    #[error("failed to send login finish request [{location}]")]
     SendFinish {
         #[location]
         location: Location,
@@ -1848,13 +1848,13 @@ enum PerformLoginError {
         source: BoxError,
     },
 
-    #[error("no session cookie in response [{location:?}]")]
+    #[error("no session cookie in response [{location}]")]
     NoSessionCookie {
         #[location]
         location: Location,
     },
 
-    #[error("failed to parse login finish response [{location:?}]")]
+    #[error("failed to parse login finish response [{location}]")]
     ParseFinish {
         #[location]
         location: Location,
@@ -1863,7 +1863,7 @@ enum PerformLoginError {
         source: BoxError,
     },
 
-    #[error("failed to save config [{location:?}]")]
+    #[error("failed to save config [{location}]")]
     SaveConfig {
         #[location]
         location: Location,
@@ -1872,7 +1872,7 @@ enum PerformLoginError {
         source: BoxError,
     },
 
-    #[error("Login failed: {message} [{location:?}]")]
+    #[error("Login failed: {message} [{location}]")]
     Failed {
         message: String,
 
@@ -1986,7 +1986,7 @@ async fn perform_login(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum SignedRequestQrError {
-    #[error("failed to send QR sign begin request [{location:?}]")]
+    #[error("failed to send QR sign begin request [{location}]")]
     SendBegin {
         #[location]
         location: Location,
@@ -1995,7 +1995,7 @@ pub(crate) enum SignedRequestQrError {
         source: BoxError,
     },
 
-    #[error("failed to read QR sign error body [{location:?}]")]
+    #[error("failed to read QR sign error body [{location}]")]
     ReadErrorBody {
         #[location]
         location: Location,
@@ -2004,7 +2004,7 @@ pub(crate) enum SignedRequestQrError {
         source: BoxError,
     },
 
-    #[error("Failed to start QR signing: {message} [{location:?}]")]
+    #[error("Failed to start QR signing: {message} [{location}]")]
     BeginFailed {
         message: String,
 
@@ -2012,7 +2012,7 @@ pub(crate) enum SignedRequestQrError {
         location: Location,
     },
 
-    #[error("failed to parse QR sign begin response [{location:?}]")]
+    #[error("failed to parse QR sign begin response [{location}]")]
     ParseBegin {
         #[location]
         location: Location,
@@ -2021,7 +2021,7 @@ pub(crate) enum SignedRequestQrError {
         source: BoxError,
     },
 
-    #[error("failed to render QR code [{location:?}]")]
+    #[error("failed to render QR code [{location}]")]
     RenderQr {
         #[location]
         location: Location,
@@ -2030,13 +2030,13 @@ pub(crate) enum SignedRequestQrError {
         source: BoxError,
     },
 
-    #[error("QR signing timed out. Please try again. [{location:?}]")]
+    #[error("QR signing timed out. Please try again. [{location}]")]
     TimedOut {
         #[location]
         location: Location,
     },
 
-    #[error("failed to poll QR sign status [{location:?}]")]
+    #[error("failed to poll QR sign status [{location}]")]
     PollSend {
         #[location]
         location: Location,
@@ -2045,7 +2045,7 @@ pub(crate) enum SignedRequestQrError {
         source: BoxError,
     },
 
-    #[error("failed to parse QR sign status response [{location:?}]")]
+    #[error("failed to parse QR sign status response [{location}]")]
     PollParse {
         #[location]
         location: Location,
@@ -2054,25 +2054,25 @@ pub(crate) enum SignedRequestQrError {
         source: BoxError,
     },
 
-    #[error("completed but no fido2_response returned [{location:?}]")]
+    #[error("completed but no fido2_response returned [{location}]")]
     MissingFido2Response {
         #[location]
         location: Location,
     },
 
-    #[error("completed but no challenge_id returned [{location:?}]")]
+    #[error("completed but no challenge_id returned [{location}]")]
     MissingChallengeId {
         #[location]
         location: Location,
     },
 
-    #[error("QR signing token expired. Please try again. [{location:?}]")]
+    #[error("QR signing token expired. Please try again. [{location}]")]
     TokenExpired {
         #[location]
         location: Location,
     },
 
-    #[error("failed to send signed request [{location:?}]")]
+    #[error("failed to send signed request [{location}]")]
     SendRequest {
         #[location]
         location: Location,
@@ -2219,7 +2219,7 @@ pub(crate) async fn signed_request_qr(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum GetAssertionError {
-    #[error("failed to get assertion [{location:?}]")]
+    #[error("failed to get assertion [{location}]")]
     Assertion {
         #[location]
         location: Location,
@@ -2228,7 +2228,7 @@ pub(crate) enum GetAssertionError {
         source: BoxError,
     },
 
-    #[error("failed to prompt for PIN [{location:?}]")]
+    #[error("failed to prompt for PIN [{location}]")]
     PromptForPin {
         #[location]
         location: Location,
@@ -2319,14 +2319,14 @@ fn get_assertion_inner(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum TryGetAssertionError {
-    #[error("native approval cancelled [{location:?}]")]
+    #[error("native approval cancelled [{location}]")]
     Cancelled {
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("failed to decode challenge [{location:?}]")]
+    #[error("failed to decode challenge [{location}]")]
     DecodeChallenge {
         #[location]
         location: Location,
@@ -2335,7 +2335,7 @@ enum TryGetAssertionError {
         source: BoxError,
     },
 
-    #[error("failed to create authenticator service [{location:?}]")]
+    #[error("failed to create authenticator service [{location}]")]
     AuthenticatorService {
         #[location]
         location: Location,
@@ -2344,7 +2344,7 @@ enum TryGetAssertionError {
         source: BoxError,
     },
 
-    #[error("failed to serialize client data JSON [{location:?}]")]
+    #[error("failed to serialize client data JSON [{location}]")]
     SerializeClientData {
         #[location]
         location: Location,
@@ -2353,7 +2353,7 @@ enum TryGetAssertionError {
         source: BoxError,
     },
 
-    #[error("failed to start assertion [{location:?}]")]
+    #[error("failed to start assertion [{location}]")]
     StartAssertion {
         #[location]
         location: Location,
@@ -2362,7 +2362,7 @@ enum TryGetAssertionError {
         source: BoxError,
     },
 
-    #[error("failed to prompt for a credential selection [{location:?}]")]
+    #[error("failed to prompt for a credential selection [{location}]")]
     PromptSelection {
         #[location]
         location: Location,
@@ -2371,13 +2371,13 @@ enum TryGetAssertionError {
         source: BoxError,
     },
 
-    #[error("credential selection out of range [{location:?}]")]
+    #[error("credential selection out of range [{location}]")]
     SelectionOutOfRange {
         #[location]
         location: Location,
     },
 
-    #[error("failed to report credential selection [{location:?}]")]
+    #[error("failed to report credential selection [{location}]")]
     SendSelection {
         #[location]
         location: Location,
@@ -2386,7 +2386,7 @@ enum TryGetAssertionError {
         source: BoxError,
     },
 
-    #[error("failed to prompt for PIN [{location:?}]")]
+    #[error("failed to prompt for PIN [{location}]")]
     PromptForPin {
         #[location]
         location: Location,
@@ -2395,7 +2395,7 @@ enum TryGetAssertionError {
         source: BoxError,
     },
 
-    #[error("failed to send PIN to authenticator [{location:?}]")]
+    #[error("failed to send PIN to authenticator [{location}]")]
     SendPin {
         #[location]
         location: Location,
@@ -2404,13 +2404,13 @@ enum TryGetAssertionError {
         source: BoxError,
     },
 
-    #[error("PIN is required but none provided [{location:?}]")]
+    #[error("PIN is required but none provided [{location}]")]
     PinRequiredNoneProvided {
         #[location]
         location: Location,
     },
 
-    #[error("PIN/UV error: {error:?} [{location:?}]")]
+    #[error("PIN/UV error: {error:?} [{location}]")]
     PinUvError {
         error: StatusPinUv,
 
@@ -2419,14 +2419,14 @@ enum TryGetAssertionError {
     },
 
     #[error(
-        "no passkey found on this device for this server. If you haven't registered yet, run: caution register. If you registered with a different key, try that one instead. [{location:?}]"
+        "no passkey found on this device for this server. If you haven't registered yet, run: caution register. If you registered with a different key, try that one instead. [{location}]"
     )]
     NoCredentials {
         #[location]
         location: Location,
     },
 
-    #[error("assertion failed [{location:?}]")]
+    #[error("assertion failed [{location}]")]
     AssertionFailed {
         #[location]
         location: Location,
@@ -2435,13 +2435,13 @@ enum TryGetAssertionError {
         source: BoxError,
     },
 
-    #[error("no credential returned from assertion [{location:?}]")]
+    #[error("no credential returned from assertion [{location}]")]
     NoCredential {
         #[location]
         location: Location,
     },
 
-    #[error("failed to serialize response JSON [{location:?}]")]
+    #[error("failed to serialize response JSON [{location}]")]
     SerializeResponse {
         #[location]
         location: Location,

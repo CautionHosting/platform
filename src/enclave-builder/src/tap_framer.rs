@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2026 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Caution-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use dterror::ResultExt;
 use std::path::{Path, PathBuf};
 
@@ -67,6 +75,7 @@ pub async fn export_binary(work_dir: &Path, output_eif: &Path) -> Result<(), Art
     if !containerfile.contains("COPY src/tap-framer/")
         && !containerfile.contains("COPY components/tap-framer/")
         && !containerfile.contains("COPY tap-framer/")
+        && !containerfile.contains("COPY prebuilt/tap-framer /binaries/tap-framer")
     {
         return match tokio::fs::remove_file(&sidecar).await {
             Ok(()) => Ok(()),

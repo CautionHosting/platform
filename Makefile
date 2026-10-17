@@ -12,6 +12,19 @@ DB_VOLUME := caution-postgres-data
 CAUTION_DATA_DIR ?= $(PWD)/caution-cache
 CONTAINER_DATA_DIR := /var/cache/caution
 
+# Only the API consumes the prepared component selection.
+API_IMAGE ?= caution-api
+API_COMPONENT_ENV := -e PLATFORM_GIT_SHA -e COMPONENT_BUILD_MODE -e COMPONENT_SET_SHA256 -e COMPONENTS_S3_BUCKET -e ENCLAVEOS_COMMIT -e BOOTPROOF_COMMIT -e STEVE_COMMIT -e LOCKSMITH_COMMIT
+COMPONENT_ENV_FILE ?= $(HOME)/.config/caution/components.env
+TEST_COMPONENT_BUILD_MODE ?= prebuilt
+TEST_COMPONENT_ENV_FILE ?= $(HOME)/.config/caution/components-e2e.env
+
+define load_api_components
+test -s "$(1)" || { echo "Missing component selection $(1); run make prepare-components first" >&2; exit 1; }; \
+set -a; API_COMPONENT_IMAGE=; . "$(1)"; set +a; \
+test -n "$$API_COMPONENT_IMAGE" || { echo "Empty API_COMPONENT_IMAGE in $(1); run make prepare-components first" >&2; exit 1; };
+endef
+
 define refuse_mixed_service_management
 	@if command -v systemctl >/dev/null 2>&1; then \
 		active_services=""; \
@@ -69,8 +82,8 @@ fetch/opentofu-$(TOFU_VERSION).tar.gz:
 
 build-api: fetch/opentofu-$(TOFU_VERSION).tar.gz
 	@echo "Building API service..."
-	@docker build -t caution-api --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) --build-arg TOFU_VERSION=$(TOFU_VERSION) -f ./containerfiles/Containerfile.api .
-	@echo "API service image built: caution-api"
+	@docker build -t $(API_IMAGE) --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) --build-arg TOFU_VERSION=$(TOFU_VERSION) -f ./containerfiles/Containerfile.api .
+	@echo "API service image built: $(API_IMAGE)"
 
 build-email:
 	@echo "Building Email service..."
@@ -86,12 +99,12 @@ build-gateway-dev:
 
 build-api-dev: fetch/opentofu-$(TOFU_VERSION).tar.gz
 	@echo "Building API service (dev)..."
-	@docker build -t caution-api $(DEV_BUILD_ARGS) --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) --build-arg TOFU_VERSION=$(TOFU_VERSION) -f ./containerfiles/Containerfile.api .
+	@docker build -t $(API_IMAGE) $(DEV_BUILD_ARGS) --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) --build-arg TOFU_VERSION=$(TOFU_VERSION) -f ./containerfiles/Containerfile.api .
 	@echo "API dev service image built: caution-api"
 
 build-api-e2e: fetch/opentofu-$(TOFU_VERSION).tar.gz
 	@echo "Building API service (e2e test mode)..."
-	@docker build -t caution-api $(DEV_BUILD_ARGS) --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) --build-arg TOFU_VERSION=$(TOFU_VERSION) --build-arg EXTRA_FEATURES="e2e-testing-unsafe" -f ./containerfiles/Containerfile.api .
+	@docker build -t $(API_IMAGE) $(DEV_BUILD_ARGS) --build-arg PLATFORM_GIT_SHA=$(shell git rev-parse HEAD) --build-arg TOFU_VERSION=$(TOFU_VERSION) --build-arg EXTRA_FEATURES="e2e-testing-unsafe" -f ./containerfiles/Containerfile.api .
 	@echo "API e2e image build complete"
 
 build-email-dev:
@@ -495,10 +508,14 @@ migrate: postgres
 	@echo "Migrations complete"
 
 run-api: guard-direct-api network postgres
-	@docker rm -f api 2>/dev/null || true
-	@mkdir -p $(CAUTION_DATA_DIR)/git-repos $(CAUTION_DATA_DIR)/build $(CAUTION_DATA_DIR)/terraform
-	@mkdir -p "$(KEYMAKER_POLICY_DIR)"
-	@docker run -d \
+	@$(call load_api_components,$(HOME)/.config/caution/components.env) \
+		docker run --rm --network $(NETWORK) --dns 8.8.8.8 --dns 8.8.4.4 \
+		--env-file $(HOME)/.config/caution/.env -e AWS_REGION=us-west-2 $(API_COMPONENT_ENV) \
+		"$$API_COMPONENT_IMAGE" --check-components && \
+		{ docker rm -f api 2>/dev/null || true; } && \
+		mkdir -p $(CAUTION_DATA_DIR)/git-repos $(CAUTION_DATA_DIR)/build $(CAUTION_DATA_DIR)/terraform && \
+		mkdir -p "$(KEYMAKER_POLICY_DIR)" && \
+		docker run -d \
 		--name api \
 		--network $(NETWORK) \
 		--dns 8.8.8.8 \
@@ -514,7 +531,7 @@ run-api: guard-direct-api network postgres
 		-v $(PWD)/terraform:/app/terraform:ro \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
-		caution-api
+		$(API_COMPONENT_ENV) "$$API_COMPONENT_IMAGE"
 	@echo "API service started (internal port 8080)"
 
 run-gateway: guard-direct-gateway network
@@ -573,9 +590,24 @@ run-drift-detector: network
 # Main targets
 # =============================================================================
 
-up: migrate
-	@echo "Building all images in parallel..."
-	@$(MAKE) build-api build-gateway build-email build-metering
+.PHONY: setup test-bootstrap
+
+setup:
+	@bash scripts/setup-platform.sh
+
+# Keep service lifecycle in Make/systemd. Only component preparation is new.
+up:
+	@mkdir -p "$(HOME)/.config/caution"
+	+@flock "$(HOME)/.config/caution/components.up.lock" $(MAKE) up-components
+
+.PHONY: up-components prepare-components test-prepare-components
+up-components:
+	@git diff --quiet HEAD -- || { echo "Commit tracked changes before make up"; exit 1; }
+	@$(MAKE) build-api API_IMAGE=caution-api-components
+	@$(MAKE) build-gateway build-email build-metering
+	@$(MAKE) prepare-components API_IMAGE=caution-api-components
+	@$(MAKE) migrate
+	systemctl --user daemon-reload
 	systemctl restart --user caution-email caution-metering caution-api caution-gateway
 	@echo "  All services running"
 	@echo "  Gateway: http://localhost:8000"
@@ -585,6 +617,12 @@ up: migrate
 	@echo "  Postgres: localhost:5432"
 	@echo ""
 	@echo "Database is persistent - safe to run 'make down' without losing data"
+
+prepare-components: network
+	@python3 scripts/prepare-components.py --image "$(API_IMAGE)" --network "$(NETWORK)" --selection-file "$(COMPONENT_ENV_FILE)"
+
+test-prepare-components:
+	@python3 tests/test_prepare_components.py
 
 down:
 	@docker rm -f gateway api email metering 2>/dev/null || true
@@ -712,10 +750,22 @@ migrate-test: postgres-test
 	@echo "Test migrations complete"
 
 run-api-test: network
-	@docker rm -f api 2>/dev/null || true
-	@mkdir -p $(CAUTION_DATA_DIR)/git-repos $(CAUTION_DATA_DIR)/build $(CAUTION_DATA_DIR)/terraform
-	@mkdir -p "$(KEYMAKER_POLICY_DIR)"
-	@docker run -d \
+	@case "$(TEST_COMPONENT_BUILD_MODE)" in \
+		prebuilt) \
+			$(call load_api_components,$(TEST_COMPONENT_ENV_FILE)) \
+			test "$$COMPONENT_BUILD_MODE" = prebuilt || { echo "E2E selection must be prebuilt; run make prepare-components COMPONENT_ENV_FILE=$(TEST_COMPONENT_ENV_FILE) COMPONENT_BUILD_MODE=prebuilt" >&2; exit 1; }; \
+			component_flags='$(API_COMPONENT_ENV)';; \
+		source) \
+			API_COMPONENT_IMAGE="$(API_IMAGE)"; \
+			component_flags='-e COMPONENT_BUILD_MODE=source -e COMPONENT_SET_SHA256= -e COMPONENTS_S3_BUCKET=';; \
+		*) echo "TEST_COMPONENT_BUILD_MODE must be prebuilt or source" >&2; exit 1;; \
+		esac; \
+		docker run --rm --network $(NETWORK) --dns 8.8.8.8 --dns 8.8.4.4 \
+		--env-file .env --env-file $(HOME)/.config/caution/.env \
+		-e AWS_REGION=us-west-2 $$component_flags "$$API_COMPONENT_IMAGE" --check-components && \
+		{ docker rm -f api 2>/dev/null || true; } && \
+		mkdir -p $(CAUTION_DATA_DIR)/git-repos $(CAUTION_DATA_DIR)/build $(CAUTION_DATA_DIR)/terraform "$(KEYMAKER_POLICY_DIR)" && \
+		docker run -d \
 		--name api \
 		--network $(NETWORK) \
 		--dns 8.8.8.8 \
@@ -724,6 +774,7 @@ run-api-test: network
 		--group-add $$(stat -c '%g' /var/run/docker.sock) \
 		--env-file .env \
 		--env-file $(HOME)/.config/caution/.env \
+		$$component_flags \
 		-e AWS_REGION=us-west-2 \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-e TF_PLUGIN_CACHE_DIR=$(CONTAINER_DATA_DIR)/terraform \
@@ -739,7 +790,7 @@ run-api-test: network
 		-v "$(KEYMAKER_POLICY_DIR):/run/config:ro" \
 		-v "$(PRICES_FILE):/app/prices.json:ro" \
 		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
-		caution-api
+		"$$API_COMPONENT_IMAGE"
 	@echo "API service started in test mode"
 
 # E2E tests reach the gateway on localhost, whatever relying party the host .env configures.
@@ -793,6 +844,7 @@ up-test: down migrate-test
 	@echo "Building test images (e2e-testing-unsafe mode)..."
 	@$(MAKE) build-api-e2e build-email-dev
 	@$(MAKE) build-gateway-e2e
+	@$(MAKE) prepare-components COMPONENT_ENV_FILE="$(TEST_COMPONENT_ENV_FILE)" COMPONENT_BUILD_MODE="$(TEST_COMPONENT_BUILD_MODE)"
 	@$(MAKE) run-email-test run-api-test
 	@echo "Waiting for API to be ready..."
 	@sleep 2
@@ -809,6 +861,7 @@ up-test-billing: down-test-billing migrate-test
 	@echo "Building test images for billing e2e..."
 	@$(MAKE) build-api-e2e build-email-dev build-metering
 	@$(MAKE) build-gateway-e2e
+	@$(MAKE) prepare-components COMPONENT_ENV_FILE="$(TEST_COMPONENT_ENV_FILE)" COMPONENT_BUILD_MODE="$(TEST_COMPONENT_BUILD_MODE)"
 	@$(MAKE) run-email-test run-metering-test run-api-test
 	@echo "Waiting for API to be ready..."
 	@sleep 2
@@ -848,12 +901,31 @@ test-unit:
 test-nitro-restart:
 	python3 tests/test_nitro_restart.py
 
+.PHONY: test-network-policy
+test-network-policy: test-nitro-restart
+	cargo test -p api --bin api network_policy -- --include-ignored
+	python3 tests/test_network_policy.py -v
+
+# Real source/prebuilt EIF equality; fixture must live on an isolated build host.
+.PHONY: test-prebuilt-components
+test-prebuilt-components:
+	@test -n "$(COMPONENT_E2E_ROOT)" || { echo "COMPONENT_E2E_ROOT is required (disposable build host only)"; exit 1; }
+	COMPONENT_E2E_ROOT="$(COMPONENT_E2E_ROOT)" cargo test --locked -p enclave-builder --test prebuilt_components -- --ignored --nocapture
+
 test-live-caddy-nitro:
 	@test -n "$(CADDY_E2E_URL)" || { echo "CADDY_E2E_URL is required"; exit 1; }
 	CADDY_E2E_URL="$(CADDY_E2E_URL)" cargo test -p enclave-builder --test caddy_nitro_live -- --ignored --nocapture
 
 test-cli-install:
 	@bash tests/test_cli_install.sh
+
+test-bootstrap:
+	@python3 -m unittest discover -s tests -p test_infra_bootstrap.py -v
+
+.PHONY: test-e2e-contracts
+test-e2e-contracts:
+	@python3 tests/e2e/test_acceptance_contracts.py
+	@python3 tests/e2e/test_platform_ports_contracts.py
 
 test-e2e:
 	@$(MAKE) build-cli
@@ -1027,6 +1099,7 @@ test-e2e-org-user-quorum:
 		$(MAKE) down-test; \
 		$(MAKE) migrate-test; \
 		$(MAKE) build-api-e2e build-email-dev build-gateway-e2e; \
+		$(MAKE) prepare-components COMPONENT_ENV_FILE="$(TEST_COMPONENT_ENV_FILE)" COMPONENT_BUILD_MODE="$(TEST_COMPONENT_BUILD_MODE)"; \
 		$(MAKE) run-email-test run-api-test; \
 		$(MAKE) run-gateway-test; \
 		export RUN_ORG_USER_QUORUM_E2E=1; \
@@ -1083,7 +1156,7 @@ test-e2e-byoc:
 		exit $$status'
 
 test-e2e-billing:
-	@$(MAKE) up-test-billing
+	@$(MAKE) up-test-billing PRICES_FILE="$(PWD)/tests/e2e/fixtures/prices-billing.json"
 	@echo "Running billing e2e tests..."
 	@bash tests/e2e/test_billing.sh; \
 	status=$$?; \
@@ -1172,7 +1245,7 @@ test-paddle-sandbox:
 	@echo "Uses PADDLE_API_KEY and PADDLE_API_URL from .env"
 	cargo test --package metering -- sandbox --nocapture
 
-test: test-unit test-cli-install
+test: test-unit test-cli-install test-bootstrap test-e2e-contracts test-prepare-components
 
 .PHONY: test-share-release-browser
 test-share-release-browser:

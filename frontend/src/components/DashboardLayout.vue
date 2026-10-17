@@ -345,7 +345,7 @@
           >Docs</a
         >
         <a
-          href="https://codeberg.org/caution"
+          href="https://git.caution.co/public"
           target="_blank"
           rel="noopener noreferrer"
           >Source code</a

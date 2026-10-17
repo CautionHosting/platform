@@ -63,12 +63,6 @@ pub enum PasskeyError {
         location: Location,
     },
 
-    #[error("This passkey is already registered. [{location}]")]
-    CredentialAlreadyRegistered {
-        #[location]
-        location: Location,
-    },
-
     #[error("Too many pending passkey registrations. Please try again later. [{location}]")]
     TooManyPending {
         #[location]
@@ -83,6 +77,18 @@ pub enum PasskeyError {
 
     #[error("You must keep at least one passkey on your account. [{location}]")]
     LastCredential {
+        #[location]
+        location: Location,
+    },
+
+    #[error("This security key is already registered to another account. [{location}]")]
+    CredentialAlreadyRegistered {
+        #[location]
+        location: Location,
+    },
+
+    #[error("This passkey is already on your account. [{location}]")]
+    CredentialAlreadyOnAccount {
         #[location]
         location: Location,
     },
@@ -131,56 +137,52 @@ pub enum PasskeyError {
 
 impl IntoResponse for PasskeyError {
     fn into_response(self) -> Response {
-        match self {
+        let (status, body) = match &self {
             Self::UserVerificationRequired { .. } => (
                 StatusCode::BAD_REQUEST,
                 "This passkey must verify a PIN or biometric for quorum approval.",
-            ).into_response(),
+            ),
             error @ Self::Auth { .. } => {
                 tracing::warn!(?error, "Passkey management: authentication failed");
-                generic_auth_failure_response().into_response()
+                let response = generic_auth_failure_response().into_response();
+                return sentry_middleware::attach(response, self);
             }
             Self::NoRegistrationState { .. } => (
                 StatusCode::GONE,
                 "No matching passkey registration state found. Please start over.",
-            )
-                .into_response(),
+            ),
             Self::ChallengeExpired { .. } => (
                 StatusCode::GONE,
                 "Passkey registration challenge has expired. Please try again.",
-            )
-                .into_response(),
-            Self::CredentialAlreadyRegistered { .. } => {
-                (StatusCode::CONFLICT, "This passkey is already registered.").into_response()
-            }
+            ),
+            Self::CredentialAlreadyRegistered { .. } => (
+                StatusCode::CONFLICT,
+                "This security key is already registered to another account.",
+            ),
             Self::TooManyPending { .. } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many pending passkey registrations. Please try again later.",
-            )
-                .into_response(),
-            Self::CredentialNotFound { .. } => {
-                (StatusCode::NOT_FOUND, "Passkey not found.").into_response()
-            }
+            ),
+            Self::CredentialNotFound { .. } => (StatusCode::NOT_FOUND, "Passkey not found."),
             Self::LastCredential { .. } => (
                 StatusCode::CONFLICT,
                 "You must keep at least one passkey on your account.",
-            )
-                .into_response(),
-            Self::BadRequest { .. } => {
-                (StatusCode::BAD_REQUEST, "Invalid passkey request.").into_response()
-            }
+            ),
+            Self::CredentialAlreadyOnAccount { .. } => (
+                StatusCode::CONFLICT,
+                "This passkey is already on your account.",
+            ),
+            Self::BadRequest { .. } => (StatusCode::BAD_REQUEST, "Invalid passkey request."),
             Self::Forbidden { .. } => (
                 StatusCode::FORBIDDEN,
                 "Passkey registration does not belong to this session.",
-            )
-                .into_response(),
+            ),
             Self::MissingWebAuthnHandle { .. } => {
                 tracing::error!("user is missing a WebAuthn handle");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "An internal error occurred",
                 )
-                    .into_response()
             }
             Self::Internal { ref source, .. } => {
                 tracing::error!(?source, "Passkey management error");
@@ -188,9 +190,9 @@ impl IntoResponse for PasskeyError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "An internal error occurred",
                 )
-                    .into_response()
             }
-        }
+        };
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
@@ -227,7 +229,7 @@ fn get_session_id_from_headers(headers: &HeaderMap) -> Option<String> {
         .or_else(|| crate::csrf::get_cookie(headers, "caution_session"))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn list_passkeys_handler(
     State(state): State<AppState>,
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
@@ -240,6 +242,7 @@ pub async fn list_passkeys_handler(
         db::validate_auth_session(&state.db, &session_id)
             .await
             .with_context(Ctx::internal())?
+            .map(|(cred, _)| cred)
     } else {
         None
     };
@@ -296,7 +299,7 @@ pub async fn list_passkeys_handler(
     Ok(Json(passkeys))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn begin_add_passkey_handler(
     State(state): State<AppState>,
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
@@ -326,21 +329,13 @@ pub async fn begin_add_passkey_handler(
             })?;
     let user_unique_id = Uuid::from_slice(&user_handle).with_context(Ctx::internal())?;
 
-    let existing_cred_ids = db::get_all_credential_ids(&state.db)
-        .await
-        .with_context(Ctx::internal())?;
-    let exclude_credentials: Vec<CredentialID> = existing_cred_ids
-        .into_iter()
-        .map(CredentialID::from)
-        .collect();
-
     let (mut ccr, reg_state) = state
         .webauthn
         .start_securitykey_registration(
             user_unique_id,
             &registration_user.username,
             &registration_user.username,
-            Some(exclude_credentials).filter(|v| !v.is_empty()),
+            None,
             None,
             None,
         )
@@ -377,7 +372,7 @@ pub async fn begin_add_passkey_handler(
     }))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn finish_add_passkey_handler(
     State(state): State<AppState>,
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
@@ -423,14 +418,6 @@ pub async fn finish_add_passkey_handler(
         .with_context(Ctx::internal())?;
 
     let credential_id = seckey.cred_id().clone();
-    if db::credential_exists(&state.db, &credential_id)
-        .await
-        .with_context(Ctx::internal())?
-    {
-        return Err(PasskeyError::CredentialAlreadyRegistered {
-            location: std::panic::Location::caller(),
-        });
-    }
 
     let passkey_json = serde_json::to_vec(&seckey).with_context(Ctx::internal())?;
     let transports = req
@@ -438,6 +425,34 @@ pub async fn finish_add_passkey_handler(
         .cloned()
         .filter(|value| value.is_array());
     let resident = read_credprops_rk(&reg_response);
+
+    if db::credential_conflicts_with_other_user(&state.db, &credential_id, &passkey_json)
+        .await
+        .with_context(Ctx::internal())?
+    {
+        tracing::warn!(
+            credential_id = %hex::encode(&credential_id),
+            user_id = %user_id,
+            "Passkey registration rejected: credential ID already registered to another user with a different key"
+        );
+        return Err(PasskeyError::CredentialAlreadyRegistered {
+            location: std::panic::Location::caller(),
+        });
+    }
+
+    if db::credential_exists_for_user(&state.db, user_id, &credential_id)
+        .await
+        .with_context(Ctx::internal())?
+    {
+        tracing::warn!(
+            credential_id = %hex::encode(&credential_id),
+            user_id = %user_id,
+            "Passkey registration rejected: credential ID already registered to this account"
+        );
+        return Err(PasskeyError::CredentialAlreadyOnAccount {
+            location: std::panic::Location::caller(),
+        });
+    }
 
     db::save_fido2_credential(
         &state.db,
@@ -461,7 +476,7 @@ pub async fn finish_add_passkey_handler(
     }))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn delete_passkey_handler(
     State(state): State<AppState>,
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
@@ -501,4 +516,59 @@ pub async fn delete_passkey_handler(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status_of(err: PasskeyError) -> StatusCode {
+        err.into_response().status()
+    }
+
+    #[test]
+    fn same_account_duplicate_maps_to_conflict_not_internal() {
+        // Regression guard: re-adding a credential the caller already owns on
+        // their own account must surface as 409 Conflict, not fall through to a
+        // constraint-violation 500 from save_fido2_credential.
+        let err = PasskeyError::CredentialAlreadyOnAccount {
+            location: std::panic::Location::caller(),
+        };
+        assert_eq!(status_of(err), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn cross_account_conflict_maps_to_conflict() {
+        // The forged-rawId / other-account case keeps its 409 as well.
+        let err = PasskeyError::CredentialAlreadyRegistered {
+            location: std::panic::Location::caller(),
+        };
+        assert_eq!(status_of(err), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn same_account_duplicate_body_is_distinct_from_cross_account() {
+        // The two 409s carry distinct client messages so a user re-adding their
+        // own key is not told the key belongs to "another account".
+        let on_account = PasskeyError::CredentialAlreadyOnAccount {
+            location: std::panic::Location::caller(),
+        }
+        .into_response();
+        let body = axum::body::to_bytes(on_account.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), b"This passkey is already on your account.");
+
+        let other_account = PasskeyError::CredentialAlreadyRegistered {
+            location: std::panic::Location::caller(),
+        }
+        .into_response();
+        let body = axum::body::to_bytes(other_account.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            body.as_ref(),
+            b"This security key is already registered to another account."
+        );
+    }
 }

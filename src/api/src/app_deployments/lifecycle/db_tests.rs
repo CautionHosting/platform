@@ -7,6 +7,7 @@
 
 mod byoc;
 mod history;
+mod metering;
 mod reconciliation;
 
 use super::*;
@@ -2722,19 +2723,23 @@ async fn deploy(
     app: Uuid,
     deployment_id: Uuid,
 ) -> String {
-    let response = crate::deploy_handler(
-        axum::extract::State(state.clone()),
-        axum::Extension(crate::AuthContext::session(user)),
-        crate::validated_types::Validated(crate::validated_types::DeployRequest {
-            org_id: org,
-            app_id: app,
-            branch: "main".to_string(),
-            commit_sha: None,
-            builder_size: None,
-            deployment_id: Some(deployment_id),
-        }),
-    )
-    .await;
+    let response = sentry_middleware::REQUEST_ID
+        .scope(
+            Uuid::new_v4(),
+            crate::deploy_handler(
+                axum::extract::State(state.clone()),
+                axum::Extension(crate::AuthContext::session(user)),
+                crate::validated_types::Validated(crate::validated_types::DeployRequest {
+                    org_id: org,
+                    app_id: app,
+                    branch: "main".to_string(),
+                    commit_sha: None,
+                    builder_size: None,
+                    deployment_id: Some(deployment_id),
+                }),
+            ),
+        )
+        .await;
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();

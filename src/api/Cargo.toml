@@ -26,6 +26,7 @@ uuid = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 dterror = { workspace = true }
+sentry-middleware = { path = "../sentry-middleware" }
 regex = { workspace = true }
 base64 = { workspace = true }
 async-trait = { workspace = true }
@@ -40,13 +41,13 @@ url = { workspace = true }
 locksmith.workspace = true
 keymaker-models.workspace = true
 public-certificate-models.workspace = true
-bootproof-sdk = { git = "https://codeberg.org/caution/bootproof.git", rev = "2590edb0f23cae6589bc73cc8324673023ac1deb" }
+bootproof-sdk = { git = "https://git.caution.co/public/bootproof.git", rev = "2590edb0f23cae6589bc73cc8324673023ac1deb" }
 serde_cbor = "0.11"
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
 
 # Enclave dependencies
 sha2 = { workspace = true }
-enclave-builder = { path = "../enclave-builder" }
+enclave-builder = { path = "../enclave-builder", features = ["s3-components"] }
 
 # Encryption for credentials
 aes-gcm = { workspace = true }
@@ -60,9 +61,6 @@ aws-sdk-s3 = "1.15"
 hmac = { workspace = true }
 hex = { workspace = true }
 subtle = { workspace = true }
-
-# Cache directory
-dirs = { workspace = true }
 
 # GPG decryption for managed on-prem
 sequoia-openpgp = { workspace = true }

@@ -24,6 +24,9 @@
 
 set -euo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/lib/config.sh"
+APPS_DNS_SUFFIX=$(resolve_apps_dns_suffix)
+
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8000}"
 API_URL="${API_URL:-http://127.0.0.1:8080}"
 CAUTION_BIN="${CAUTION_BIN:-caution}"
@@ -321,23 +324,17 @@ if ! echo "$INIT_OUTPUT" | grep -Eq "Deployment target: capacity=BYOC, aws_accou
     step_fail "caution init --byoc (exact deployment target not reported)"
 fi
 
-# The API names DNS targets under CAUTION_APPS_DNS_SUFFIX (default apps.caution.sh),
-# which dev boxes override; normalized as managed_dns.rs does.
-APPS_DNS_SUFFIX=$(docker inspect api --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
-    | sed -n 's/^CAUTION_APPS_DNS_SUFFIX=//p' | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
-APPS_DNS_SUFFIX="${APPS_DNS_SUFFIX%.}"
-APPS_DNS_SUFFIX="${APPS_DNS_SUFFIX:-apps.caution.sh}"
-if ! echo "$INIT_OUTPUT" | grep -Eq "DNS target: [^[:space:]]+\.$(echo "$APPS_DNS_SUFFIX" | sed 's/\./\\./g')"; then
-    echo "$INIT_OUTPUT"
-    step_fail "caution init --byoc (managed DNS target not reported)"
-fi
-
-# Extract resource ID from .caution/deployment.json
+# Extract resource ID before checking the exact managed DNS target.
 if [ -f ".caution/deployment.json" ]; then
-    RESOURCE_ID=$(jq -r '.resource_id' .caution/deployment.json)
+    RESOURCE_ID=$(jq -er '.resource_id | strings | select(length > 0)' .caution/deployment.json)
 else
     echo "$INIT_OUTPUT"
     step_fail "caution init --byoc (no .caution/deployment.json)"
+fi
+
+if ! grep -Fxq "DNS target: $RESOURCE_ID.$APPS_DNS_SUFFIX" <<<"$INIT_OUTPUT"; then
+    echo "$INIT_OUTPUT"
+    step_fail "caution init --byoc (expected DNS target: $RESOURCE_ID.$APPS_DNS_SUFFIX)"
 fi
 
 # Verify git remote was set
@@ -419,27 +416,23 @@ step_pass "Deployment (app running with customer-bucket builder path)"
 
 STEP_NUM=8
 log "Running caution verify..."
+APP_IP=$(docker exec "${TEST_DB_HOST:-postgres-test}" psql -U postgres \
+    -d "${TEST_DB_NAME:-caution_test}" -At -v ON_ERROR_STOP=1 \
+    -c "SELECT public_ip FROM compute_resources WHERE id = '$RESOURCE_ID' AND state = 'running' AND destroyed_at IS NULL;")
+if [ -z "$APP_IP" ]; then
+    step_fail "Could not determine running app IP for verification"
+fi
 set +e
-VERIFY_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" verify --no-cache 2>&1)
+VERIFY_OUTPUT=$("$CAUTION_BIN" -u "$GATEWAY_URL" verify --attestation-url "http://$APP_IP/attestation" --no-cache 2>&1)
 VERIFY_STATUS=$?
 set -e
 echo "$VERIFY_OUTPUT"
 
 if [ $VERIFY_STATUS -ne 0 ]; then
-    # Check PCR comparison results
-    PCR_MISMATCHES=$(echo "$VERIFY_OUTPUT" | grep -c "MISMATCH" || true)
-    PCR_MATCHES=$(echo "$VERIFY_OUTPUT" | grep -c ": match" || true)
-
-    if [ "$PCR_MATCHES" -gt 0 ] && [ "$PCR_MISMATCHES" -eq 0 ]; then
-        # All PCRs match but attestation crypto failed (e.g. CA bundle issue)
-        step_warn "caution verify (PCRs match but attestation crypto failed)"
-    elif echo "$VERIFY_OUTPUT" | grep -q "PCR2: match"; then
-        # Application hash (PCR2) matches but kernel hashes differ
-        # (likely stale reproduction cache or enclaveos update)
-        step_warn "caution verify (app PCR2 matches, kernel PCR0/1 differ — stale cache?)"
-    else
-        step_fail "caution verify"
-    fi
+    step_fail "caution verify (exit code $VERIFY_STATUS)"
+elif ! grep -Fq 'Base Nitro attestation and expected PCR0/1/2 verified' <<<"$VERIFY_OUTPUT" \
+    || ! grep -Fq 'Attestation verification PASSED' <<<"$VERIFY_OUTPUT"; then
+    step_fail "caution verify (missing complete verification result)"
 else
     step_pass "caution verify (attestation verified)"
 fi

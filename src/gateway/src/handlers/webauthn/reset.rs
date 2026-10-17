@@ -62,12 +62,6 @@ pub enum ResetRegisterError {
         location: Location,
     },
 
-    #[error("This security key is already registered. Each key can only be registered once. [{location}]")]
-    CredentialAlreadyRegistered {
-        #[location]
-        location: Location,
-    },
-
     #[error("Too many pending registrations. Please try again later. [{location}]")]
     TooManyPending {
         #[location]
@@ -76,6 +70,12 @@ pub enum ResetRegisterError {
 
     #[error("User is missing a WebAuthn handle and cannot re-register [{location}]")]
     MissingWebauthnHandle {
+        #[location]
+        location: Location,
+    },
+
+    #[error("This security key is already registered to another account. [{location}]")]
+    CredentialAlreadyRegistered {
         #[location]
         location: Location,
     },
@@ -101,7 +101,7 @@ pub enum ResetRegisterError {
 
 impl IntoResponse for ResetRegisterError {
     fn into_response(self) -> Response {
-        let (status, message) = match self {
+        let (status, message) = match &self {
             Self::InvalidToken { .. } | Self::InvalidTokenPayload { .. } => (
                 StatusCode::BAD_REQUEST,
                 "This token is invalid, expired, or has already been used.".to_string(),
@@ -125,14 +125,13 @@ impl IntoResponse for ResetRegisterError {
                     "An internal error occurred".to_string(),
                 )
             }
-            Self::CredentialAlreadyRegistered { .. } => (
-                StatusCode::CONFLICT,
-                "This security key is already registered. Each key can only be registered once."
-                    .to_string(),
-            ),
             Self::TooManyPending { .. } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many pending registrations. Please try again later.".to_string(),
+            ),
+            Self::CredentialAlreadyRegistered { .. } => (
+                StatusCode::CONFLICT,
+                "This security key is already registered to another account.".to_string(),
             ),
             Self::Internal { .. } => {
                 tracing::error!(?self, "Reset registration error");
@@ -142,7 +141,7 @@ impl IntoResponse for ResetRegisterError {
                 )
             }
         };
-        (status, message).into_response()
+        sentry_middleware::error_response(status, message, self)
     }
 }
 
@@ -153,7 +152,7 @@ pub struct ResetRegisterBeginRequest {
 
 /// Begin a WebAuthn registration ceremony using a valid reset token.
 /// The token identifies an existing user whose credentials were cleared by an admin.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn begin_reset_register_handler(
     State(state): State<AppState>,
     Json(req): Json<ResetRegisterBeginRequest>,
@@ -239,7 +238,7 @@ pub async fn begin_reset_register_handler(
 
 /// Finish a WebAuthn registration ceremony initiated via reset token.
 /// Marks the token as used and saves the new credential.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn finish_reset_register_handler(
     State(state): State<AppState>,
     Json(req): Json<serde_json::Value>,
@@ -286,18 +285,23 @@ pub async fn finish_reset_register_handler(
         .filter(|value| value.is_array());
     let resident = read_credprops_rk(&reg_response);
 
-    // Atomic: credential check + INSERT + token mark-used + session creation in a
-    // single transaction. If any step fails the entire operation rolls back.
-    let mut tx = state.db.begin().await.with_context(Ctx::internal())?;
-
-    if db::credential_exists(&mut *tx, &credential_id)
+    if db::credential_conflicts_with_other_user(&state.db, &credential_id, &passkey_json)
         .await
         .with_context(Ctx::internal())?
     {
+        tracing::warn!(
+            credential_id = %hex::encode(&credential_id),
+            user_id = %pending.user_id,
+            "Reset registration rejected: credential ID already registered to another user with a different key"
+        );
         return Err(ResetRegisterError::CredentialAlreadyRegistered {
             location: std::panic::Location::caller(),
         });
     }
+
+    // Atomic: credential INSERT + token mark-used + session creation in a
+    // single transaction. If any step fails the entire operation rolls back.
+    let mut tx = state.db.begin().await.with_context(Ctx::internal())?;
 
     db::save_fido2_credential(
         &mut *tx,
@@ -341,9 +345,15 @@ pub async fn finish_reset_register_handler(
     let csrf_token = crate::csrf::derive_csrf_token(&session_id, &state.csrf_secret);
     let expires_at = time::OffsetDateTime::now_utc() + Duration::hours(state.session_timeout_hours);
 
-    db::create_auth_session(&mut *tx, &session_id, &credential_id, expires_at)
-        .await
-        .with_context(Ctx::internal())?;
+    db::create_auth_session(
+        &mut *tx,
+        &session_id,
+        &credential_id,
+        pending.user_id,
+        expires_at,
+    )
+    .await
+    .with_context(Ctx::internal())?;
 
     tx.commit().await.with_context(Ctx::internal())?;
 

@@ -1,0 +1,102 @@
+#!/bin/bash
+# SPDX-FileCopyrightText: 2026 Caution SEZC
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+
+set -euo pipefail
+
+# The installed policy is immutable for this host. Serialize invocations on its
+# inode so one successful invocation cannot remove another's temporary guards.
+exec 9<"$0"
+flock -x 9
+
+remove_jump() {
+    local tool=$1 chain=$2
+    shift 2
+    while "$tool" --wait -C "$chain" "$@" 2>/dev/null; do
+        "$tool" --wait -D "$chain" "$@"
+    done
+}
+
+# Never clean these up on failure. No tunnel or public proxy starts until both
+# families and the full policy succeed; failed reinstallation stays guarded.
+for tool in iptables ip6tables; do
+    "$tool" --wait -I INPUT 1 -i enclave0 -m comment --comment CAUTION_GUARD -j DROP
+    "$tool" --wait -I FORWARD 1 -i enclave0 -m comment --comment CAUTION_GUARD -j DROP
+    "$tool" --wait -I FORWARD 1 -o enclave0 -m comment --comment CAUTION_GUARD -j DROP
+done
+
+# Guard direct ingress too, preserving host transfer replies and unrelated ports.
+for tool in iptables ip6tables; do
+    "$tool-restore" --wait --noflush <<'RULES'
+*filter
+:CAUTION_INGRESS_GUARD - [0:0]
+-F CAUTION_INGRESS_GUARD
+${ingress_guard_rules}
+COMMIT
+RULES
+    "$tool" --wait -I INPUT 1 ! -i lo -p tcp -j CAUTION_INGRESS_GUARD
+done
+
+remove_jump iptables INPUT ! -i lo -p tcp -j CAUTION_INGRESS
+remove_jump ip6tables INPUT ! -i lo -p tcp -j CAUTION_INGRESS
+remove_jump iptables INPUT -i enclave0 -j CAUTION_INPUT
+remove_jump iptables FORWARD -i enclave0 -j CAUTION_EGRESS
+remove_jump iptables FORWARD -o enclave0 -j CAUTION_RETURN
+remove_jump ip6tables INPUT -i enclave0 -j CAUTION_IPV6
+remove_jump ip6tables FORWARD -i enclave0 -j CAUTION_IPV6
+remove_jump ip6tables FORWARD -o enclave0 -j CAUTION_IPV6
+
+ip6tables-restore --wait --noflush <<'RULES'
+*filter
+:CAUTION_IPV6 - [0:0]
+:CAUTION_INGRESS - [0:0]
+-F CAUTION_IPV6
+-F CAUTION_INGRESS
+-A CAUTION_IPV6 -j DROP
+${ingress_ipv6_rules}
+COMMIT
+RULES
+
+iptables-restore --wait --noflush <<'RULES'
+*filter
+:CAUTION_EGRESS - [0:0]
+:CAUTION_RETURN - [0:0]
+:CAUTION_INPUT - [0:0]
+:CAUTION_INGRESS - [0:0]
+-F CAUTION_EGRESS
+-F CAUTION_RETURN
+-F CAUTION_INPUT
+-F CAUTION_INGRESS
+-A CAUTION_EGRESS -m conntrack --ctstate INVALID -j DROP
+-A CAUTION_INPUT -m conntrack --ctstate INVALID -j DROP
+-A CAUTION_RETURN -m conntrack --ctstate INVALID -j DROP
+-A CAUTION_EGRESS -d 169.254.0.0/16 -j DROP
+${egress_forward_rules}
+-A CAUTION_EGRESS -j DROP
+-A CAUTION_INPUT -d 10.0.100.1/32 -p udp --sport 68 --dport 67 -j ACCEPT
+-A CAUTION_INPUT -d 255.255.255.255/32 -p udp --sport 68 --dport 67 -j ACCEPT
+${egress_dns_rules}
+-A CAUTION_INPUT -j DROP
+-A CAUTION_RETURN -m conntrack --ctstate ESTABLISHED,RELATED --ctdir REPLY -j ACCEPT
+-A CAUTION_RETURN -j DROP
+${ingress_input_rules}
+COMMIT
+RULES
+
+# Install behind both guards. Guest-local restrictions precede ingress ACCEPTs:
+# an allowed external source must never authorize guest access to the parent.
+iptables --wait -I INPUT 3 -i enclave0 -j CAUTION_INPUT
+iptables --wait -I INPUT 4 ! -i lo -p tcp -j CAUTION_INGRESS
+iptables --wait -I FORWARD 3 -o enclave0 -j CAUTION_RETURN
+iptables --wait -I FORWARD 3 -i enclave0 -j CAUTION_EGRESS
+ip6tables --wait -I INPUT 3 -i enclave0 -j CAUTION_IPV6
+ip6tables --wait -I INPUT 4 ! -i lo -p tcp -j CAUTION_INGRESS
+ip6tables --wait -I FORWARD 3 -o enclave0 -j CAUTION_IPV6
+ip6tables --wait -I FORWARD 3 -i enclave0 -j CAUTION_IPV6
+
+for tool in iptables ip6tables; do
+    remove_jump "$tool" INPUT ! -i lo -p tcp -j CAUTION_INGRESS_GUARD
+    remove_jump "$tool" INPUT -i enclave0 -m comment --comment CAUTION_GUARD -j DROP
+    remove_jump "$tool" FORWARD -i enclave0 -m comment --comment CAUTION_GUARD -j DROP
+    remove_jump "$tool" FORWARD -o enclave0 -m comment --comment CAUTION_GUARD -j DROP
+done

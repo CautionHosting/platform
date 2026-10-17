@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use crate::db;
 use crate::types::*;
 use axum::{
@@ -20,7 +28,7 @@ use webauthn_rs_proto::UserVerificationPolicy;
 use super::{
     check_username_scope, generic_auth_failure_response, normalize_login_username,
     scoped_or_decoy_challenge, DomainError, SignRequestError, SignRequestErrorCtx as Ctx,
-    MAX_PENDING_CHALLENGES,
+    UsernameScope, MAX_PENDING_CHALLENGES,
 };
 use dterror::ResultExt;
 
@@ -199,44 +207,55 @@ pub enum QrLoginFinishError {
 
 impl IntoResponse for QrLoginFinishError {
     fn into_response(self) -> Response {
-        match self {
-            // Session/challenge lifecycle errors are folded into the same
-            // generic 401 as credential-verification failures (same oracle
-            // rationale as `LoginError::into_response`).
-            Self::InvalidSession { .. } | Self::ChallengeExpired { .. } => {
-                tracing::debug!(?self, "QR login finish: session/challenge error");
-                generic_auth_failure_response().into_response()
+        // Session/challenge lifecycle errors and credential-verification
+        // failures all collapse to the same generic 401 response (same oracle
+        // rationale as `LoginError::into_response`).
+        let is_auth_failure = matches!(
+            self,
+            Self::InvalidSession { .. }
+                | Self::ChallengeExpired { .. }
+                | Self::UnexpectedCredentialOwner { .. }
+                | Self::DbGetPublicKeyForCredential { .. }
+                | Self::ParseSecurityKey { .. }
+                | Self::IdentifyDiscoverableCredential { .. }
+                | Self::FinishSecurityKeyAuthentication { .. }
+                | Self::FinishDiscoverableAuthentication { .. }
+        );
+
+        if is_auth_failure {
+            match &self {
+                Self::InvalidSession { .. } | Self::ChallengeExpired { .. } => {
+                    tracing::debug!(?self, "QR login finish: session/challenge error");
+                }
+                Self::UnexpectedCredentialOwner { .. } => {
+                    tracing::debug!(?self, "QR login finish: decoy/scope rejection");
+                }
+                Self::DbGetPublicKeyForCredential { .. } | Self::ParseSecurityKey { .. } => {
+                    tracing::warn!(?self, "QR login finish: credential lookup/parse failure");
+                }
+                Self::IdentifyDiscoverableCredential { .. } => {
+                    tracing::error!(
+                        ?self,
+                        "QR login finish: could not identify discoverable credential"
+                    );
+                }
+                Self::FinishSecurityKeyAuthentication { .. }
+                | Self::FinishDiscoverableAuthentication { .. } => {
+                    tracing::warn!(?self, "QR login finish: signature verification failed");
+                }
+                _ => {}
             }
+            let response = generic_auth_failure_response().into_response();
+            return sentry_middleware::attach(response, self);
+        }
+
+        let (status, body) = match &self {
             Self::PinRequired { .. } => (
                 StatusCode::FORBIDDEN,
                 "your organization requires PIN verification",
-            )
-                .into_response(),
+            ),
             Self::ParsePubkeyCredential { .. } => {
-                (StatusCode::BAD_REQUEST, "failed to parse pubkey credential").into_response()
-            }
-            // Every credential-verification outcome collapses to the same
-            // generic 401 response so none of them is distinguishable from
-            // another by status code or body.
-            Self::UnexpectedCredentialOwner { .. } => {
-                tracing::debug!(?self, "QR login finish: decoy/scope rejection");
-                generic_auth_failure_response().into_response()
-            }
-            Self::DbGetPublicKeyForCredential { .. } | Self::ParseSecurityKey { .. } => {
-                tracing::warn!(?self, "QR login finish: credential lookup/parse failure");
-                generic_auth_failure_response().into_response()
-            }
-            Self::IdentifyDiscoverableCredential { .. } => {
-                tracing::error!(
-                    ?self,
-                    "QR login finish: could not identify discoverable credential"
-                );
-                generic_auth_failure_response().into_response()
-            }
-            Self::FinishSecurityKeyAuthentication { .. }
-            | Self::FinishDiscoverableAuthentication { .. } => {
-                tracing::warn!(?self, "QR login finish: signature verification failed");
-                generic_auth_failure_response().into_response()
+                (StatusCode::BAD_REQUEST, "failed to parse pubkey credential")
             }
             _ => {
                 tracing::error!(?self, "QR login error");
@@ -244,9 +263,9 @@ impl IntoResponse for QrLoginFinishError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "an internal error occurred",
                 )
-                    .into_response()
             }
-        }
+        };
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
@@ -338,7 +357,7 @@ pub enum QrLoginError {
 
 impl IntoResponse for QrLoginError {
     fn into_response(self) -> Response {
-        let (status, message) = match self {
+        let (status, message) = match &self {
             Self::TokenNotFound { .. } => (
                 StatusCode::NOT_FOUND,
                 "QR login token not found".to_string(),
@@ -370,30 +389,29 @@ impl IntoResponse for QrLoginError {
                 )
             }
         };
-        (status, message).into_response()
+        sentry_middleware::error_response(status, message, self)
     }
 }
 
 /// Create a sign challenge for the given credential. Returns (challenge_response, challenge_id).
 /// Stores PendingSignChallenge in state.sign_challenges.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
+#[allow(clippy::too_many_arguments)]
 async fn create_sign_challenge(
     state: &AppState,
     credential_id: &[u8],
+    user_id: Uuid,
     method: String,
     path: String,
     body_hash: String,
     flow: SignedRequestFlow,
     expires_minutes: i64,
 ) -> Result<(webauthn_rs_proto::RequestChallengeResponse, String), SignRequestError> {
-    let user_id = db::get_user_id_by_credential(&state.db, credential_id)
-        .await
-        .with_context(Ctx::internal())?;
     let requires_pin = db::user_requires_pin(&state.db, user_id)
         .await
         .with_context(Ctx::internal())?;
 
-    let cred_bytes = db::get_credential_public_key(&state.db, credential_id)
+    let cred_bytes = db::get_credential_public_key(&state.db, user_id, credential_id)
         .await
         .with_context(Ctx::internal())?;
     let seckey: SecurityKey = serde_json::from_slice(&cred_bytes).with_context(Ctx::internal())?;
@@ -436,12 +454,12 @@ async fn create_sign_challenge(
 }
 
 /// Resolve session ID from headers (X-Session-ID or caution_session cookie),
-/// validate it, and enforce CSRF for cookie-based auth. Returns credential_id.
-#[tracing::instrument(skip_all, err)]
+/// validate it, and enforce CSRF for cookie-based auth. Returns credential_id and user_id.
+#[tracing::instrument(skip_all)]
 pub(crate) async fn authenticate_session(
     state: &AppState,
     headers: &axum::http::HeaderMap,
-) -> Result<Vec<u8>, SignRequestError> {
+) -> Result<(Vec<u8>, Uuid), SignRequestError> {
     let (session_id, using_header_auth) = if let Some(header_session) = headers
         .get("X-Session-ID")
         .and_then(|h| h.to_str().ok())
@@ -456,7 +474,7 @@ pub(crate) async fn authenticate_session(
         });
     };
 
-    let credential_id = db::validate_auth_session(&state.db, &session_id)
+    let (credential_id, user_id) = db::validate_auth_session(&state.db, &session_id)
         .await
         .with_context(Ctx::internal())?
         .ok_or_else(|| SignRequestError::InvalidSession {
@@ -481,7 +499,7 @@ pub(crate) async fn authenticate_session(
         }
     }
 
-    Ok(credential_id)
+    Ok((credential_id, user_id))
 }
 
 #[tracing::instrument(skip_all)]
@@ -495,17 +513,18 @@ pub(crate) fn get_rp_origin() -> String {
         .to_string()
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn begin_sign_request_handler(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Json(req): Json<crate::types::SignChallengeRequest>,
 ) -> Result<Json<crate::types::SignChallengeResponse>, SignRequestError> {
-    let credential_id = authenticate_session(&state, &headers).await?;
+    let (credential_id, user_id) = authenticate_session(&state, &headers).await?;
 
     let (rcr, challenge_id) = create_sign_challenge(
         &state,
         &credential_id,
+        user_id,
         req.method,
         req.path,
         req.body_hash,
@@ -537,7 +556,7 @@ fn qr_login_url(requestee_token: &str) -> String {
     qr_login_url_for_origin(&get_rp_origin(), requestee_token)
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn qr_login_begin_handler(
     State(state): State<AppState>,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
@@ -581,7 +600,7 @@ pub async fn qr_login_begin_handler(
     }))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn qr_login_status_handler(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<QrLoginStatusQuery>,
@@ -664,7 +683,7 @@ pub async fn qr_login_status_handler(
     }))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn qr_login_authenticate_handler(
     State(state): State<AppState>,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
@@ -755,7 +774,7 @@ pub async fn qr_login_authenticate_handler(
     }))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn qr_login_authenticate_finish_handler(
     State(state): State<AppState>,
     Json(req): Json<crate::types::QrLoginAuthenticateFinishRequest>,
@@ -831,14 +850,19 @@ pub async fn qr_login_authenticate_finish_handler(
         serde_json::from_value(req.credential).with_context(FinishCtx::parse_pubkey_credential())?;
 
     let (user_id, credential_id_bytes, mut seckey, auth_result) = match pending.auth_state {
-        AuthState::SecurityKey(auth_state) => {
+        AuthState::SecurityKey { auth_state, scope } => {
             let credential_id_bytes = auth_response.raw_id.as_ref().to_vec();
 
-            let user_id = match db::get_user_id_by_credential(&state.db, &credential_id_bytes).await
+            // Resolve the set of accounts owning this credential, then pick the
+            // one this challenge is scoped to. When a username was supplied the
+            // expected account must own it (membership); an unscoped challenge
+            // requires exactly one owner. Any other outcome collapses into the
+            // same opaque 401 as every other QR-login failure.
+            let owners = match db::get_user_ids_by_credential(&state.db, &credential_id_bytes).await
             {
-                Ok(user_id) => user_id,
+                Ok(owners) => owners,
                 Err(source) => {
-                    tracing::debug!(?source, "QR login finish: credential not found");
+                    tracing::debug!(?source, "QR login finish: credential lookup failed");
                     return Err(QrLoginFinishError::UnexpectedCredentialOwner {
                         expected_user_id: None,
                         actual_user_id: Uuid::nil(),
@@ -846,10 +870,44 @@ pub async fn qr_login_authenticate_finish_handler(
                     });
                 }
             };
+            let user_id = match &scope {
+                UsernameScope::Unscoped => match owners.as_slice() {
+                    [only] => *only,
+                    _ => {
+                        tracing::debug!("QR login finish: credential not found");
+                        return Err(QrLoginFinishError::UnexpectedCredentialOwner {
+                            expected_user_id: None,
+                            actual_user_id: Uuid::nil(),
+                            location: std::panic::Location::caller(),
+                        });
+                    }
+                },
+                expected @ (UsernameScope::Scoped { .. } | UsernameScope::Decoy { .. }) => {
+                    let Some(expected_user) = expected.expected_user_id() else {
+                        tracing::debug!("QR login finish: credential not found for scope");
+                        return Err(QrLoginFinishError::UnexpectedCredentialOwner {
+                            expected_user_id: None,
+                            actual_user_id: Uuid::nil(),
+                            location: std::panic::Location::caller(),
+                        });
+                    };
+                    if owners.contains(&expected_user) {
+                        expected_user
+                    } else {
+                        tracing::debug!("QR login finish: credential not found for scope");
+                        return Err(QrLoginFinishError::UnexpectedCredentialOwner {
+                            expected_user_id: Some(expected_user),
+                            actual_user_id: Uuid::nil(),
+                            location: std::panic::Location::caller(),
+                        });
+                    }
+                }
+            };
 
-            let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
-                .await
-                .with_context(FinishCtx::db_get_public_key_for_credential(user_id))?;
+            let cred_bytes =
+                db::get_credential_public_key(&state.db, user_id, &credential_id_bytes)
+                    .await
+                    .with_context(FinishCtx::db_get_public_key_for_credential(user_id))?;
             let seckey: webauthn_rs::prelude::SecurityKey = serde_json::from_slice(&cred_bytes)
                 .with_context(FinishCtx::parse_security_key(user_id))?;
 
@@ -867,11 +925,13 @@ pub async fn qr_login_authenticate_finish_handler(
                 .with_context(FinishCtx::identify_discoverable_credential())?;
             let credential_id_bytes = cred_id.to_vec();
 
-            let user_id = match db::get_user_id_by_credential(&state.db, &credential_id_bytes).await
+            // Scope resolution to the account the challenge was begun for, so a
+            // shared resident key can't authenticate as another account's copy.
+            let owners = match db::get_user_ids_by_credential(&state.db, &credential_id_bytes).await
             {
-                Ok(user_id) => user_id,
+                Ok(owners) => owners,
                 Err(source) => {
-                    tracing::debug!(?source, "QR login finish: credential not found");
+                    tracing::debug!(?source, "QR login finish: credential lookup failed");
                     return Err(QrLoginFinishError::UnexpectedCredentialOwner {
                         expected_user_id: None,
                         actual_user_id: Uuid::nil(),
@@ -879,10 +939,44 @@ pub async fn qr_login_authenticate_finish_handler(
                     });
                 }
             };
+            let user_id = match &scope {
+                UsernameScope::Unscoped => match owners.as_slice() {
+                    [only] => *only,
+                    _ => {
+                        tracing::debug!("QR login finish: credential not found");
+                        return Err(QrLoginFinishError::UnexpectedCredentialOwner {
+                            expected_user_id: None,
+                            actual_user_id: Uuid::nil(),
+                            location: std::panic::Location::caller(),
+                        });
+                    }
+                },
+                expected @ (UsernameScope::Scoped { .. } | UsernameScope::Decoy { .. }) => {
+                    let Some(expected_user) = expected.expected_user_id() else {
+                        tracing::debug!("QR login finish: credential not found for scope");
+                        return Err(QrLoginFinishError::UnexpectedCredentialOwner {
+                            expected_user_id: None,
+                            actual_user_id: Uuid::nil(),
+                            location: std::panic::Location::caller(),
+                        });
+                    };
+                    if owners.contains(&expected_user) {
+                        expected_user
+                    } else {
+                        tracing::debug!("QR login finish: credential not found for scope");
+                        return Err(QrLoginFinishError::UnexpectedCredentialOwner {
+                            expected_user_id: Some(expected_user),
+                            actual_user_id: Uuid::nil(),
+                            location: std::panic::Location::caller(),
+                        });
+                    }
+                }
+            };
 
-            let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
-                .await
-                .with_context(FinishCtx::db_get_public_key_for_credential(user_id))?;
+            let cred_bytes =
+                db::get_credential_public_key(&state.db, user_id, &credential_id_bytes)
+                    .await
+                    .with_context(FinishCtx::db_get_public_key_for_credential(user_id))?;
             let seckey: webauthn_rs::prelude::SecurityKey = serde_json::from_slice(&cred_bytes)
                 .with_context(FinishCtx::parse_security_key(user_id))?;
 
@@ -907,7 +1001,8 @@ pub async fn qr_login_authenticate_finish_handler(
             }
 
             if let Err(e) =
-                db::mark_credential_resident_if_unknown(&state.db, &credential_id_bytes).await
+                db::mark_credential_resident_if_unknown(&state.db, user_id, &credential_id_bytes)
+                    .await
             {
                 tracing::warn!("Failed to backfill credential resident flag: {:?}", e);
             }
@@ -937,6 +1032,7 @@ pub async fn qr_login_authenticate_finish_handler(
                 .with_context(FinishCtx::serialize_security_key(user_id))?;
             db::update_fido2_credential(
                 &state.db,
+                user_id,
                 &credential_id_bytes,
                 &updated_key_json,
                 auth_result.counter(),
@@ -950,9 +1046,15 @@ pub async fn qr_login_authenticate_finish_handler(
     let session_id = db::generate_session_id();
     let expires_at = time::OffsetDateTime::now_utc() + Duration::hours(state.session_timeout_hours);
 
-    db::create_auth_session(&state.db, &session_id, &credential_id_bytes, expires_at)
-        .await
-        .with_context(FinishCtx::db_create_auth_session(user_id))?;
+    db::create_auth_session(
+        &state.db,
+        &session_id,
+        &credential_id_bytes,
+        user_id,
+        expires_at,
+    )
+    .await
+    .with_context(FinishCtx::db_create_auth_session(user_id))?;
 
     // Mark token completed
     db::complete_qr_login_token(&state.db, &token, &session_id)
@@ -1007,7 +1109,7 @@ pub enum QrSignError {
 
 impl IntoResponse for QrSignError {
     fn into_response(self) -> Response {
-        let (status, message) = match self {
+        let (status, message) = match &self {
             Self::TokenNotFound { .. } => {
                 (StatusCode::NOT_FOUND, "QR sign token not found".to_string())
             }
@@ -1026,7 +1128,7 @@ impl IntoResponse for QrSignError {
                 )
             }
         };
-        (status, message).into_response()
+        sentry_middleware::error_response(status, message, self)
     }
 }
 
@@ -1035,18 +1137,19 @@ pub struct QrSignStatusQuery {
     pub token: String,
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn qr_sign_begin_handler(
     State(state): State<AppState>,
     connect_info: ConnectInfo<std::net::SocketAddr>,
     headers: axum::http::HeaderMap,
     Json(req): Json<crate::types::QrSignChallengeRequest>,
 ) -> Result<Json<crate::types::QrSignBeginResponse>, SignRequestError> {
-    let credential_id = authenticate_session(&state, &headers).await?;
+    let (credential_id, user_id) = authenticate_session(&state, &headers).await?;
 
     let (rcr, challenge_id) = create_sign_challenge(
         &state,
         &credential_id,
+        user_id,
         req.method.clone(),
         req.path.clone(),
         req.body_hash.clone(),
@@ -1086,7 +1189,7 @@ pub async fn qr_sign_begin_handler(
     }))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn qr_sign_status_handler(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<QrSignStatusQuery>,
@@ -1213,7 +1316,7 @@ pub(crate) fn details_for(
 /// Read-only: shows the phone what it is about to sign. Never claims the token
 /// (`qr_sign_authenticate_handler` is the only claimer). Unknown, expired and
 /// completed tokens are all a 404.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn qr_sign_details_handler(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<QrSignStatusQuery>,
@@ -1263,7 +1366,7 @@ pub async fn qr_sign_details_handler(
     )))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn qr_sign_authenticate_handler(
     State(state): State<AppState>,
     connect_info: ConnectInfo<std::net::SocketAddr>,
@@ -1314,7 +1417,7 @@ pub async fn qr_sign_authenticate_handler(
     }))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn qr_sign_authenticate_finish_handler(
     State(state): State<AppState>,
     Json(req): Json<crate::types::QrSignAuthenticateFinishRequest>,

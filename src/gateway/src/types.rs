@@ -89,12 +89,25 @@ pub struct PendingRecoveryVerification {
 /// covers the username-less conditional-UI flow (resolves the user from the
 /// assertion's `userHandle` via `identify_discoverable_authentication`).
 ///
+/// A single physical key may be registered to multiple accounts, so resolving a
+/// credential by its `rawId` alone is ambiguous. Both arms therefore carry a
+/// `UsernameScope` (see `handlers::UsernameScope`) recording which account the
+/// challenge was begun for; finish uses it to scope resolution and reject a
+/// shared key used under any other account.
+///
 /// Sign flows (`PendingSignChallenge`) are already scoped to a single credential
 /// and are intentionally NOT part of this enum — they stay on
 /// `SecurityKeyAuthentication` per the Phase 1 design doc.
 #[derive(Clone)]
 pub enum AuthState {
-    SecurityKey(SecurityKeyAuthentication),
+    /// Legacy broadcast (username-less) and username-scoped login. `scope` is
+    /// `Unscoped` for the broadcast path and `Scoped { expected_user_id }` when a
+    /// username resolved to a real user with credentials, so finish resolves the
+    /// asserted credential to exactly that account.
+    SecurityKey {
+        auth_state: SecurityKeyAuthentication,
+        scope: crate::handlers::UsernameScope,
+    },
     Discoverable {
         auth_state: DiscoverableAuthentication,
         /// Whether this challenge was scoped to a specific username, and if
@@ -178,6 +191,7 @@ pub struct DbCredential {
 pub struct DbSession {
     pub session_id: String,
     pub credential_id: Vec<u8>,
+    pub user_id: Uuid,
     pub expires_at: time::OffsetDateTime,
     pub created_at: time::OffsetDateTime,
     pub last_used_at: time::OffsetDateTime,

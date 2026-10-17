@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 fn credential() -> webauthn_rs_proto::PublicKeyCredential {
@@ -160,7 +160,7 @@ impl RelayServer {
     }
 }
 async fn relay_server(stall: bool) -> RelayServer {
-    use axum::{http::StatusCode, routing::post, Json, Router};
+    use axum::{Json, Router, http::StatusCode, routing::post};
     let active = Arc::new(AtomicBool::new(true));
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let pending = active.clone();
@@ -306,7 +306,8 @@ async fn expired_deadline_wins_over_a_ready_browser_approval() {
         tokio::task::yield_now().await;
         submitted.store(true, Ordering::SeqCst);
         Ok(())
-    }).await;
+    })
+    .await;
     assert!(result.unwrap_err().to_string().contains("expired"));
     assert!(!submitted.load(Ordering::SeqCst));
     assert!(!relay.active.load(Ordering::SeqCst));

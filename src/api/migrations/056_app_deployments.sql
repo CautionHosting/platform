@@ -66,9 +66,12 @@ ALTER TABLE compute_resources
 ALTER TABLE tracked_resources
     ADD COLUMN IF NOT EXISTS deployment_id UUID REFERENCES app_deployments(id) ON DELETE SET NULL;
 DROP INDEX IF EXISTS idx_tracked_resources_active_application;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_tracked_resources_active_legacy_application
+DROP INDEX IF EXISTS idx_tracked_resources_active_legacy_application;
+CREATE UNIQUE INDEX idx_tracked_resources_active_legacy_application
     ON tracked_resources(application_id)
-    WHERE application_id IS NOT NULL AND status = 'running' AND deployment_id IS NULL;
+    WHERE application_id IS NOT NULL AND status = 'running' AND deployment_id IS NULL
+      AND COALESCE(metadata->>'resource_type', '') <> 'builder'
+      AND NOT (metadata ? 'build_id');
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tracked_resources_active_deployment
     ON tracked_resources(deployment_id)
     WHERE deployment_id IS NOT NULL AND status = 'running';

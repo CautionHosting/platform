@@ -450,7 +450,7 @@
                   <span class="copy-btn-text">Copied</span>
                 </button>
                 <pre ref="codeInstall">
-git clone https://codeberg.org/caution/platform
+git clone https://git.caution.co/public/platform
 cd platform
 make build-cli
 ./utils/install.sh</pre
@@ -498,7 +498,7 @@ make build-cli
             <div class="guide-content">
               <p class="quick-start-description">
                 Clone the application you want to deploy.</p>
-                <p class="quick-start-description">You can use <a href="https://codeberg.org/caution" target="_blank" rel="noopener noreferrer" class="guide-link">one of our demos</a> or your own repository.
+                <p class="quick-start-description">You can use <a href="https://git.caution.co/public" target="_blank" rel="noopener noreferrer" class="guide-link">one of our demos</a> or your own repository.
               </p>
               <p class="quick-start-description">
                 Authenticate with your security key and register your SSH key.
@@ -515,8 +515,8 @@ make build-cli
                   <img src="/assets/copy.svg" alt="Copy" class="copy-icon" />
                   <span class="copy-btn-text">Copied</span>
                 </button>
-                <pre ref="codeClone"><span class="code-command">git clone https://codeberg.org/caution/hello-world-enclave</span>
-<span class="code-command">cd hello-world-enclave</span>
+                <pre ref="codeClone"><span class="code-command">git clone https://git.caution.co/public/demo-hello-world-enclave</span>
+<span class="code-command">cd demo-hello-world-enclave</span>
 
 <span class="code-command">caution login</span>
 <span class="code-comment"># Tap your security key when prompted</span>

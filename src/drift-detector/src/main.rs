@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2026 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 //! Drift Detector CLI
 //!
 //! This binary loads database connection and AWS credentials from environment variables,
@@ -490,6 +498,7 @@ struct AwsScanResult {
 /// fully-managed account is listed by every organization's scan), and every
 /// observed instance is returned so the caller can run the unattributed
 /// instance pass afterwards.
+#[tracing::instrument(skip_all)]
 async fn detect_aws_drift(
     provider_accounts: &[ProviderAccount],
     expected_resources: &[ComputeResource],
@@ -571,6 +580,7 @@ async fn detect_aws_drift(
 /// instead so the scan degrades to the previous single-region behavior. A
 /// per-region listing failure propagates so the account is treated as not
 /// fully queried and the run is marked incomplete.
+#[tracing::instrument(skip_all)]
 async fn query_live_instances(
     account: &ProviderAccount,
     aws_access_key_id: &str,
@@ -621,6 +631,7 @@ async fn query_live_instances(
 
 /// Build AWS credentials for a provider account, falling back to the default
 /// credential chain when static keys are not configured.
+#[tracing::instrument(skip_all)]
 fn aws_credentials(
     account: &ProviderAccount,
     aws_access_key_id: &str,
@@ -646,6 +657,7 @@ fn aws_credentials(
 ///
 /// The process exits non-zero when critical drift was detected or when any
 /// organization could not be scanned, so an incomplete run never looks green.
+#[tracing::instrument(skip_all)]
 fn print_summary(
     org_ids: &[Uuid],
     total_resources_checked: usize,

@@ -3,7 +3,7 @@
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use std::{collections::HashSet, io::Read, path::Path};
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("Locksmith artifact preflight failed: {message} [{location:?}]")]
+#[error("Locksmith artifact preflight failed: {message} [{location}]")]
 pub(crate) struct Error {
     message: &'static str,
     #[location]

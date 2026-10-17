@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use locksmith::bundle::RecoverySource;
 use std::collections::HashSet;
 use std::fs;
@@ -97,7 +105,7 @@ fn parse_env_assignments(content: &str) -> Vec<EnvAssignment> {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum ParseQuorumBundlePublicKeyError {
-    #[error("Failed to verify proofed quorum bundle [{location:?}]")]
+    #[error("Failed to verify proofed quorum bundle [{location}]")]
     ParseJson {
         #[location]
         location: Location,
@@ -127,7 +135,7 @@ fn parse_quorum_bundle_public_key(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum LoadRecipientCertError {
-    #[error("Failed to parse recipient public key [{location:?}]")]
+    #[error("Failed to parse recipient public key [{location}]")]
     ParseCert {
         #[location]
         location: Location,
@@ -145,13 +153,13 @@ fn load_recipient_cert(public_key: &str) -> Result<openpgp::Cert, LoadRecipientC
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum EncryptSecretValueError {
-    #[error("Recipient public key has no suitable encryption subkey [{location:?}]")]
+    #[error("Recipient public key has no suitable encryption subkey [{location}]")]
     NoEncryptionKey {
         #[location]
         location: Location,
     },
 
-    #[error("Failed to armor encrypted secret [{location:?}]")]
+    #[error("Failed to armor encrypted secret [{location}]")]
     Armor {
         #[location]
         location: Location,
@@ -160,7 +168,7 @@ pub enum EncryptSecretValueError {
         source: BoxError,
     },
 
-    #[error("Failed to create OpenPGP encryptor [{location:?}]")]
+    #[error("Failed to create OpenPGP encryptor [{location}]")]
     Encryptor {
         #[location]
         location: Location,
@@ -169,7 +177,7 @@ pub enum EncryptSecretValueError {
         source: BoxError,
     },
 
-    #[error("Failed to create OpenPGP literal writer [{location:?}]")]
+    #[error("Failed to create OpenPGP literal writer [{location}]")]
     LiteralWriter {
         #[location]
         location: Location,
@@ -178,7 +186,7 @@ pub enum EncryptSecretValueError {
         source: BoxError,
     },
 
-    #[error("Failed to write secret plaintext [{location:?}]")]
+    #[error("Failed to write secret plaintext [{location}]")]
     WritePlaintext {
         #[location]
         location: Location,
@@ -187,7 +195,7 @@ pub enum EncryptSecretValueError {
         source: BoxError,
     },
 
-    #[error("Failed to finalize encrypted secret [{location:?}]")]
+    #[error("Failed to finalize encrypted secret [{location}]")]
     Finalize {
         #[location]
         location: Location,
@@ -196,7 +204,7 @@ pub enum EncryptSecretValueError {
         source: BoxError,
     },
 
-    #[error("Encrypted OpenPGP armor was not valid UTF-8 [{location:?}]")]
+    #[error("Encrypted OpenPGP armor was not valid UTF-8 [{location}]")]
     Utf8 {
         #[location]
         location: Location,
@@ -214,7 +222,12 @@ fn encrypt_secret_value(
     use EncryptSecretValueErrorCtx as Ctx;
 
     let policy = &OpenPgpPolicy::new();
-    if legacy && matches!(recipient.revocation_status(policy, None), openpgp::types::RevocationStatus::Revoked(_)) {
+    if legacy
+        && matches!(
+            recipient.revocation_status(policy, None),
+            openpgp::types::RevocationStatus::Revoked(_)
+        )
+    {
         return Err(EncryptSecretValueError::NoEncryptionKey {
             location: std::panic::Location::caller(),
         });
@@ -222,7 +235,11 @@ fn encrypt_secret_value(
     // Only an explicitly accepted ImportedV0 artifact may use expired keys.
     // Keep algorithm support, certificate bindings and revocation checks intact.
     let keys = || {
-        let keys = recipient.keys().with_policy(policy, None).supported().revoked(false);
+        let keys = recipient
+            .keys()
+            .with_policy(policy, None)
+            .supported()
+            .revoked(false);
         if legacy { keys } else { keys.alive() }
     };
     let mut recipients: Vec<_> = keys().for_storage_encryption().collect();
@@ -256,7 +273,7 @@ fn encrypt_secret_value(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum WriteSecretFileAtomicallyError {
-    #[error("Output path has no parent: {path} [{location:?}]")]
+    #[error("Output path has no parent: {path} [{location}]")]
     NoParent {
         path: PathBuf,
 
@@ -264,7 +281,7 @@ pub enum WriteSecretFileAtomicallyError {
         location: Location,
     },
 
-    #[error("Output path has invalid file name: {path} [{location:?}]")]
+    #[error("Output path has invalid file name: {path} [{location}]")]
     InvalidFileName {
         path: PathBuf,
 
@@ -272,7 +289,7 @@ pub enum WriteSecretFileAtomicallyError {
         location: Location,
     },
 
-    #[error("Failed to write temporary file {tmp_path} [{location:?}]")]
+    #[error("Failed to write temporary file {tmp_path} [{location}]")]
     WriteTmp {
         #[context(borrow = Path)]
         tmp_path: PathBuf,
@@ -284,7 +301,7 @@ pub enum WriteSecretFileAtomicallyError {
         source: BoxError,
     },
 
-    #[error("Failed to move encrypted secret to {path} [{location:?}]")]
+    #[error("Failed to move encrypted secret to {path} [{location}]")]
     Rename {
         #[context(borrow = Path)]
         path: PathBuf,
@@ -336,7 +353,7 @@ fn write_secret_file_atomically(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum EncryptEnvFileError {
-    #[error("Invalid env key: {key} [{location:?}]")]
+    #[error("Invalid env key: {key} [{location}]")]
     InvalidEnvKey {
         key: String,
 
@@ -344,7 +361,7 @@ pub enum EncryptEnvFileError {
         location: Location,
     },
 
-    #[error("Missing env file: {env_file} [{location:?}]")]
+    #[error("Missing env file: {env_file} [{location}]")]
     MissingEnvFile {
         env_file: PathBuf,
 
@@ -352,7 +369,7 @@ pub enum EncryptEnvFileError {
         location: Location,
     },
 
-    #[error("Missing quorum bundle: {bundle_file} [{location:?}]")]
+    #[error("Missing quorum bundle: {bundle_file} [{location}]")]
     MissingBundleFile {
         bundle_file: PathBuf,
 
@@ -360,7 +377,7 @@ pub enum EncryptEnvFileError {
         location: Location,
     },
 
-    #[error("Failed to read env file {env_file} [{location:?}]")]
+    #[error("Failed to read env file {env_file} [{location}]")]
     ReadEnvFile {
         #[context(borrow = Path)]
         env_file: PathBuf,
@@ -372,7 +389,7 @@ pub enum EncryptEnvFileError {
         source: BoxError,
     },
 
-    #[error("Env key(s) not found in {env_file}: {missing:?} [{location:?}]")]
+    #[error("Env key(s) not found in {env_file}: {missing:?} [{location}]")]
     MissingRequestedKeys {
         env_file: PathBuf,
 
@@ -382,7 +399,7 @@ pub enum EncryptEnvFileError {
         location: Location,
     },
 
-    #[error("Failed to read quorum bundle {bundle_file} [{location:?}]")]
+    #[error("Failed to read quorum bundle {bundle_file} [{location}]")]
     ReadBundleFile {
         #[context(borrow = Path)]
         bundle_file: PathBuf,
@@ -394,7 +411,7 @@ pub enum EncryptEnvFileError {
         source: BoxError,
     },
 
-    #[error("Failed to parse quorum bundle {bundle_file} [{location:?}]")]
+    #[error("Failed to parse quorum bundle {bundle_file} [{location}]")]
     ParseBundle {
         #[context(borrow = Path)]
         bundle_file: PathBuf,
@@ -406,7 +423,7 @@ pub enum EncryptEnvFileError {
         source: BoxError,
     },
 
-    #[error("Failed to load recipient certificate [{location:?}]")]
+    #[error("Failed to load recipient certificate [{location}]")]
     LoadRecipient {
         #[location]
         location: Location,
@@ -415,7 +432,7 @@ pub enum EncryptEnvFileError {
         source: BoxError,
     },
 
-    #[error("Failed to create {secrets_dir} [{location:?}]")]
+    #[error("Failed to create {secrets_dir} [{location}]")]
     CreateSecretsDir {
         #[context(borrow = Path)]
         secrets_dir: PathBuf,
@@ -427,7 +444,7 @@ pub enum EncryptEnvFileError {
         source: BoxError,
     },
 
-    #[error("Failed to encrypt {key} [{location:?}]")]
+    #[error("Failed to encrypt {key} [{location}]")]
     EncryptValue {
         #[context(borrow = str)]
         key: String,
@@ -439,7 +456,7 @@ pub enum EncryptEnvFileError {
         source: BoxError,
     },
 
-    #[error("Failed to write encrypted secret to {path} [{location:?}]")]
+    #[error("Failed to write encrypted secret to {path} [{location}]")]
     WriteValue {
         #[context(borrow = Path)]
         path: PathBuf,
@@ -562,7 +579,7 @@ impl CertEligibility {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum KeymakerCertEligibilityError {
-    #[error("Failed to parse keyring as OpenPGP public certificates [{location:?}]")]
+    #[error("Failed to parse keyring as OpenPGP public certificates [{location}]")]
     ParseKeyring {
         #[location]
         location: Location,
@@ -571,7 +588,7 @@ pub enum KeymakerCertEligibilityError {
         source: BoxError,
     },
 
-    #[error("Failed to parse OpenPGP public certificate [{location:?}]")]
+    #[error("Failed to parse OpenPGP public certificate [{location}]")]
     ParseCert {
         #[location]
         location: Location,
@@ -580,7 +597,7 @@ pub enum KeymakerCertEligibilityError {
         source: BoxError,
     },
 
-    #[error("OpenPGP public certificate is not valid under the standard policy [{location:?}]")]
+    #[error("OpenPGP public certificate is not valid under the standard policy [{location}]")]
     InvalidCert {
         #[location]
         location: Location,
@@ -621,7 +638,7 @@ fn keymaker_cert_eligibility(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum KeymakerEligibleCertCountError {
-    #[error("Failed to inspect keyring eligibility [{location:?}]")]
+    #[error("Failed to inspect keyring eligibility [{location}]")]
     InspectKeyring {
         #[location]
         location: Location,
@@ -647,7 +664,7 @@ fn keymaker_eligible_cert_count(
 pub enum ResolveQuorumParametersError {
     #[error(
         "keyring contains no Keymaker-eligible public certificates \
-         (each certificate needs signing, authentication, and storage-encryption keys) [{location:?}]"
+         (each certificate needs signing, authentication, and storage-encryption keys) [{location}]"
     )]
     NoEligibleCerts {
         #[location]
@@ -655,7 +672,7 @@ pub enum ResolveQuorumParametersError {
     },
 
     #[error(
-        "keyring contains more than 254 Keymaker-eligible public certificates (found {eligible_certs}) [{location:?}]"
+        "keyring contains more than 254 Keymaker-eligible public certificates (found {eligible_certs}) [{location}]"
     )]
     TooManyCerts {
         eligible_certs: usize,
@@ -670,7 +687,7 @@ pub enum ResolveQuorumParametersError {
     #[error(
         "--max ({max}) must match the number of Keymaker-eligible public certificates \
          in the keyring ({eligible_certs}); use --max {eligible_certs}, or pass a keyring with \
-         exactly {max} eligible certificate(s) [{location:?}]"
+         exactly {max} eligible certificate(s) [{location}]"
     )]
     MaxMismatch {
         max: u8,
@@ -682,7 +699,7 @@ pub enum ResolveQuorumParametersError {
     },
 
     #[error(
-        "--threshold must be between 1 and --max (got threshold={threshold}, max={max}) [{location:?}]"
+        "--threshold must be between 1 and --max (got threshold={threshold}, max={max}) [{location}]"
     )]
     InvalidThreshold {
         threshold: u8,
@@ -737,7 +754,7 @@ pub(crate) fn resolve_quorum_parameters(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum KeymakerCertError {
-    #[error("Failed to generate OpenPGP key [{location:?}]")]
+    #[error("Failed to generate OpenPGP key [{location}]")]
     Generate {
         #[location]
         location: Location,
@@ -763,7 +780,7 @@ fn keymaker_cert(user_id: String) -> Result<openpgp::Cert, KeymakerCertError> {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum ArmoredKeyringsForCertError {
-    #[error("Failed to serialize public keyring [{location:?}]")]
+    #[error("Failed to serialize public keyring [{location}]")]
     SerializePublic {
         #[location]
         location: Location,
@@ -772,7 +789,7 @@ pub enum ArmoredKeyringsForCertError {
         source: BoxError,
     },
 
-    #[error("Failed to serialize private keyring [{location:?}]")]
+    #[error("Failed to serialize private keyring [{location}]")]
     SerializePrivate {
         #[location]
         location: Location,
@@ -832,7 +849,7 @@ pub enum WriteKeyringErrorKind {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("failed to write keyring {path} ({kind:?}) [{location:?}]")]
+#[error("failed to write keyring {path} ({kind:?}) [{location}]")]
 pub struct WriteKeyringError {
     #[context(borrow = Path)]
     path: PathBuf,
@@ -898,7 +915,7 @@ fn write_keyring(
 pub enum KeygenError {
     #[error(
         "Refusing to generate an unencrypted private keyring without \
-         --shoot-self-in-foot.\n\n{warning} [{location:?}]"
+         --shoot-self-in-foot.\n\n{warning} [{location}]"
     )]
     NotAcknowledged {
         warning: &'static str,
@@ -907,37 +924,37 @@ pub enum KeygenError {
         location: Location,
     },
 
-    #[error("--name must not be empty [{location:?}]")]
+    #[error("--name must not be empty [{location}]")]
     EmptyName {
         #[location]
         location: Location,
     },
 
-    #[error("--email must not be empty [{location:?}]")]
+    #[error("--email must not be empty [{location}]")]
     EmptyEmail {
         #[location]
         location: Location,
     },
 
-    #[error("--name and --email must not contain newlines or angle brackets [{location:?}]")]
+    #[error("--name and --email must not contain newlines or angle brackets [{location}]")]
     InvalidCharacters {
         #[location]
         location: Location,
     },
 
-    #[error("--email must be an email address [{location:?}]")]
+    #[error("--email must be an email address [{location}]")]
     InvalidEmail {
         #[location]
         location: Location,
     },
 
-    #[error("public and private keyring paths must be different [{location:?}]")]
+    #[error("public and private keyring paths must be different [{location}]")]
     IdenticalPaths {
         #[location]
         location: Location,
     },
 
-    #[error("{path} already exists; pass --force to overwrite it [{location:?}]")]
+    #[error("{path} already exists; pass --force to overwrite it [{location}]")]
     AlreadyExists {
         path: PathBuf,
 
@@ -945,7 +962,7 @@ pub enum KeygenError {
         location: Location,
     },
 
-    #[error("Failed to generate OpenPGP key [{location:?}]")]
+    #[error("Failed to generate OpenPGP key [{location}]")]
     GenerateKey {
         #[location]
         location: Location,
@@ -954,7 +971,7 @@ pub enum KeygenError {
         source: BoxError,
     },
 
-    #[error("Failed to serialize keyrings [{location:?}]")]
+    #[error("Failed to serialize keyrings [{location}]")]
     SerializeKeyrings {
         #[location]
         location: Location,
@@ -963,7 +980,7 @@ pub enum KeygenError {
         source: BoxError,
     },
 
-    #[error("Generated public keyring is not valid UTF-8 [{location:?}]")]
+    #[error("Generated public keyring is not valid UTF-8 [{location}]")]
     PublicKeyringUtf8 {
         #[location]
         location: Location,
@@ -972,7 +989,7 @@ pub enum KeygenError {
         source: BoxError,
     },
 
-    #[error("Generated keyring is not Keymaker-eligible [{location:?}]")]
+    #[error("Generated keyring is not Keymaker-eligible [{location}]")]
     EligibleCount {
         #[location]
         location: Location,
@@ -982,7 +999,7 @@ pub enum KeygenError {
     },
 
     #[error(
-        "generated keyring should contain exactly one eligible certificate, found {count} [{location:?}]"
+        "generated keyring should contain exactly one eligible certificate, found {count} [{location}]"
     )]
     UnexpectedEligibleCount {
         count: usize,
@@ -991,7 +1008,7 @@ pub enum KeygenError {
         location: Location,
     },
 
-    #[error("Failed to write public keyring to {path} [{location:?}]")]
+    #[error("Failed to write public keyring to {path} [{location}]")]
     WritePublicKeyring {
         #[context(borrow = Path)]
         path: PathBuf,
@@ -1003,7 +1020,7 @@ pub enum KeygenError {
         source: BoxError,
     },
 
-    #[error("Failed to write private keyring to {path} [{location:?}]")]
+    #[error("Failed to write private keyring to {path} [{location}]")]
     WritePrivateKeyring {
         #[context(borrow = Path)]
         path: PathBuf,
@@ -1124,7 +1141,7 @@ pub fn keygen(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum EncryptError {
-    #[error("Failed to encrypt env file [{location:?}]")]
+    #[error("Failed to encrypt env file [{location}]")]
     EncryptEnvFile {
         #[location]
         location: Location,
@@ -1160,7 +1177,7 @@ pub(crate) fn encrypt(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum RenameError {
-    #[error("Failed to authenticate with Caution [{location:?}]")]
+    #[error("Failed to authenticate with Caution [{location}]")]
     EnsureAuthenticated {
         #[location]
         location: Location,
@@ -1169,7 +1186,7 @@ pub enum RenameError {
         source: BoxError,
     },
 
-    #[error("Failed to connect to server [{location:?}]")]
+    #[error("Failed to connect to server [{location}]")]
     ConnectPatch {
         #[location]
         location: Location,
@@ -1178,7 +1195,7 @@ pub enum RenameError {
         source: BoxError,
     },
 
-    #[error("Failed to rename quorum bundle ({status}): {message} [{location:?}]")]
+    #[error("Failed to rename quorum bundle ({status}): {message} [{location}]")]
     RenameFailed {
         status: reqwest::StatusCode,
 
@@ -1229,7 +1246,7 @@ pub async fn rename(client: &ApiClient, id: String, name: String) -> Result<(), 
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum LabelSetError {
-    #[error("Failed to authenticate with Caution [{location:?}]")]
+    #[error("Failed to authenticate with Caution [{location}]")]
     EnsureAuthenticated {
         #[location]
         location: Location,
@@ -1238,7 +1255,7 @@ pub enum LabelSetError {
         source: BoxError,
     },
 
-    #[error("Failed to fetch quorum bundle {id} [{location:?}]")]
+    #[error("Failed to fetch quorum bundle {id} [{location}]")]
     FetchBundle {
         #[context(borrow = str)]
         id: String,
@@ -1250,7 +1267,7 @@ pub enum LabelSetError {
         source: BoxError,
     },
 
-    #[error("Invalid label format '{label}', expected key=value [{location:?}]")]
+    #[error("Invalid label format '{label}', expected key=value [{location}]")]
     InvalidLabel {
         label: String,
 
@@ -1258,7 +1275,7 @@ pub enum LabelSetError {
         location: Location,
     },
 
-    #[error("Failed to connect to server [{location:?}]")]
+    #[error("Failed to connect to server [{location}]")]
     ConnectPatch {
         #[location]
         location: Location,
@@ -1267,7 +1284,7 @@ pub enum LabelSetError {
         source: BoxError,
     },
 
-    #[error("Failed to update labels ({status}): {message} [{location:?}]")]
+    #[error("Failed to update labels ({status}): {message} [{location}]")]
     UpdateFailed {
         status: reqwest::StatusCode,
 
@@ -1346,7 +1363,7 @@ pub async fn label_set(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum LabelRemoveError {
-    #[error("Failed to authenticate with Caution [{location:?}]")]
+    #[error("Failed to authenticate with Caution [{location}]")]
     EnsureAuthenticated {
         #[location]
         location: Location,
@@ -1355,7 +1372,7 @@ pub enum LabelRemoveError {
         source: BoxError,
     },
 
-    #[error("Failed to fetch quorum bundle {id} [{location:?}]")]
+    #[error("Failed to fetch quorum bundle {id} [{location}]")]
     FetchBundle {
         #[context(borrow = str)]
         id: String,
@@ -1367,7 +1384,7 @@ pub enum LabelRemoveError {
         source: BoxError,
     },
 
-    #[error("Failed to connect to server [{location:?}]")]
+    #[error("Failed to connect to server [{location}]")]
     ConnectPatch {
         #[location]
         location: Location,
@@ -1376,7 +1393,7 @@ pub enum LabelRemoveError {
         source: BoxError,
     },
 
-    #[error("Failed to remove labels ({status}): {message} [{location:?}]")]
+    #[error("Failed to remove labels ({status}): {message} [{location}]")]
     RemoveFailed {
         status: reqwest::StatusCode,
 
@@ -1448,7 +1465,7 @@ pub async fn label_remove(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum SendShardError {
-    #[error("Failed to fetch app [{location:?}]")]
+    #[error("Failed to fetch app [{location}]")]
     FetchApp {
         #[location]
         location: Location,
@@ -1457,7 +1474,7 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Failed to fetch current app [{location:?}]")]
+    #[error("Failed to fetch current app [{location}]")]
     GetCurrentApp {
         #[location]
         location: Location,
@@ -1466,13 +1483,13 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("App has no public IP. Is the enclave running? [{location:?}]")]
+    #[error("App has no public IP. Is the enclave running? [{location}]")]
     NoPublicIp {
         #[location]
         location: Location,
     },
 
-    #[error("Failed to authenticate with Caution [{location:?}]")]
+    #[error("Failed to authenticate with Caution [{location}]")]
     EnsureAuthenticated {
         #[location]
         location: Location,
@@ -1481,7 +1498,7 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Failed to fetch quorum bundles from Caution [{location:?}]")]
+    #[error("Failed to fetch quorum bundles from Caution [{location}]")]
     FetchBundles {
         #[location]
         location: Location,
@@ -1491,20 +1508,20 @@ pub enum SendShardError {
     },
 
     #[error(
-        "No bundle found locally or on Caution. Create one with: caution secret new <keyring> [{location:?}]"
+        "No bundle found locally or on Caution. Create one with: caution secret new <keyring> [{location}]"
     )]
     NoBundleFound {
         #[location]
         location: Location,
     },
 
-    #[error("Bundle has no data field [{location:?}]")]
+    #[error("Bundle has no data field [{location}]")]
     MissingBundleData {
         #[location]
         location: Location,
     },
 
-    #[error("Failed to create .caution/secrets/ [{location:?}]")]
+    #[error("Failed to create .caution/secrets/ [{location}]")]
     CreateSecretsDir {
         #[location]
         location: Location,
@@ -1513,7 +1530,7 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Failed to serialize fetched bundle [{location:?}]")]
+    #[error("Failed to serialize fetched bundle [{location}]")]
     SerializeBundle {
         #[location]
         location: Location,
@@ -1522,7 +1539,7 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Failed to write bundle to {path} [{location:?}]")]
+    #[error("Failed to write bundle to {path} [{location}]")]
     WriteBundle {
         #[context(borrow = Path)]
         path: PathBuf,
@@ -1534,7 +1551,7 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Bundle file not found: {bundle_file} [{location:?}]")]
+    #[error("Bundle file not found: {bundle_file} [{location}]")]
     BundleMissing {
         bundle_file: PathBuf,
 
@@ -1543,7 +1560,7 @@ pub enum SendShardError {
     },
 
     #[error(
-        "No trusted hashes found{}. Run {} first to establish trusted PCR values [{location:?}]",
+        "No trusted hashes found{}. Run {} first to establish trusted PCR values [{location}]",
         trust_location_note(.path), verify_command(.path)
     )]
     ReadTrustedHashes {
@@ -1557,7 +1574,7 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Failed to parse {} [{location:?}]", .trust_path.display())]
+    #[error("Failed to parse {} [{location}]", .trust_path.display())]
     ParseTrustedHashes {
         #[context(borrow = Path)]
         trust_path: PathBuf,
@@ -1569,7 +1586,7 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("missing pcr{pcr} [{location:?}]")]
+    #[error("missing pcr{pcr} [{location}]")]
     MissingPcr {
         pcr: u8,
 
@@ -1577,7 +1594,7 @@ pub enum SendShardError {
         location: Location,
     },
 
-    #[error("invalid pcr{pcr} hex [{location:?}]")]
+    #[error("invalid pcr{pcr} hex [{location}]")]
     InvalidPcrHex {
         pcr: u8,
 
@@ -1588,7 +1605,7 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Failed to read bundle file: {bundle_file} [{location:?}]")]
+    #[error("Failed to read bundle file: {bundle_file} [{location}]")]
     ReadBundleFile {
         #[context(borrow = Path)]
         bundle_file: PathBuf,
@@ -1600,7 +1617,7 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Failed to parse bundle JSON [{location:?}]")]
+    #[error("Failed to parse bundle JSON [{location}]")]
     ParseBundle {
         #[location]
         location: Location,
@@ -1609,7 +1626,7 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Unable to select share holder [{location:?}]")]
+    #[error("Unable to select share holder [{location}]")]
     SelectHolder {
         #[location]
         location: Location,
@@ -1617,7 +1634,9 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Could not obtain destination attestation from {address}. No share was sent; check that the app is awaiting quorum shares and port 49504 is reachable (30-second connection/response timeout) [{location:?}]")]
+    #[error(
+        "Could not obtain destination attestation from {address}. No share was sent; check that the app is awaiting quorum shares and port 49504 is reachable (30-second connection/response timeout) [{location}]"
+    )]
     DestinationAttestation {
         address: std::net::SocketAddr,
         #[location]
@@ -1626,7 +1645,7 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Destination attestation verification failed at {address} against {}. No share was sent [{location:?}]", .trust_path.display())]
+    #[error("Destination attestation verification failed at {address} against {}. No share was sent [{location}]", .trust_path.display())]
     DestinationVerification {
         address: std::net::SocketAddr,
         #[context(borrow = Path)]
@@ -1637,7 +1656,7 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Destination PCR mismatch ({pcr}) at {address}: the app does not match {}. No share was sent. If you intended to change the deployment, complete {} from the intended app checkout before retrying. --recryptor-pcr-policy verifies the key service, not this app [{location:?}]", .trust_path.display(), verify_command(.trust_path))]
+    #[error("Destination PCR mismatch ({pcr}) at {address}: the app does not match {}. No share was sent. If you intended to change the deployment, complete {} from the intended app checkout before retrying. --recryptor-pcr-policy verifies the key service, not this app [{location}]", .trust_path.display(), verify_command(.trust_path))]
     DestinationPcrMismatch {
         address: std::net::SocketAddr,
         pcr: String,
@@ -1649,7 +1668,9 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Connection closed during quorum unlocking; share acceptance was not confirmed. The application may already be unlocked; check its status before retrying [{location:?}]")]
+    #[error(
+        "Connection closed during quorum unlocking; share acceptance was not confirmed. The application may already be unlocked; check its status before retrying [{location}]"
+    )]
     ConnectionClosed {
         #[location]
         location: Location,
@@ -1657,7 +1678,7 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Invalid address: {address} [{location:?}]")]
+    #[error("Invalid address: {address} [{location}]")]
     InvalidAddress {
         #[context(borrow = str)]
         address: String,
@@ -1669,7 +1690,7 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Failed to send shard to enclave at {address} [{location:?}]")]
+    #[error("Failed to send shard to enclave at {address} [{location}]")]
     SendShard {
         #[context(borrow = str)]
         address: String,
@@ -1681,7 +1702,7 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Shard rejected by enclave: {reason} [{location:?}]")]
+    #[error("Shard rejected by enclave: {reason} [{location}]")]
     ShardRejected {
         reason: String,
 
@@ -1689,7 +1710,7 @@ pub enum SendShardError {
         location: Location,
     },
 
-    #[error("Failed to fetch the deployment [{location:?}]")]
+    #[error("Failed to fetch the deployment [{location}]")]
     FetchDeployment {
         #[location]
         location: Location,
@@ -1698,7 +1719,7 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error("Cannot release to the app's address [{location:?}]")]
+    #[error("Cannot release to the app's address [{location}]")]
     BareTarget {
         #[location]
         location: Location,
@@ -1708,7 +1729,7 @@ pub enum SendShardError {
     },
 
     #[error(
-        "deployment {deployment_id} has no reachable endpoint (status: {status}) [{location:?}]"
+        "deployment {deployment_id} has no reachable endpoint (status: {status}) [{location}]"
     )]
     NoDeploymentEndpoint {
         deployment_id: String,
@@ -1718,7 +1739,7 @@ pub enum SendShardError {
         location: Location,
     },
 
-    #[error("cannot select the bundle for deployment {deployment_id}: {selection} [{location:?}]")]
+    #[error("cannot select the bundle for deployment {deployment_id}: {selection} [{location}]")]
     DeploymentBundle {
         deployment_id: String,
         selection: BundleSelection,
@@ -1754,17 +1775,17 @@ pub(crate) enum ReleaseBundle {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum BundleSelection {
     #[error(
-        "--bundle hashes to {found:?}, but the deployment was built with bundle {recorded} [{location:?}]"
+        "--bundle hashes to {found:?}, but the deployment was built with bundle {recorded} [{location}]"
     )]
     Mismatch {
         recorded: String,
         found: Option<String>,
         location: Location,
     },
-    #[error("the deployment's source has no quorum bundle; pass --bundle [{location:?}]")]
+    #[error("the deployment's source has no quorum bundle; pass --bundle [{location}]")]
     NotRecorded { location: Location },
     #[error(
-        "no local or organization bundle matches the deployment's bundle {recorded} [{location:?}]"
+        "no local or organization bundle matches the deployment's bundle {recorded} [{location}]"
     )]
     NotFound {
         recorded: String,
@@ -1818,12 +1839,21 @@ pub(crate) struct ReleaseTarget {
 
 fn connection_closed(mut error: &(dyn std::error::Error + 'static)) -> bool {
     loop {
-        if let Some(io) = error.downcast_ref::<std::io::Error>() {
-            if matches!(io.kind(), std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::BrokenPipe) {
-                return true;
-            }
+        if let Some(io) = error.downcast_ref::<std::io::Error>()
+            && matches!(
+                io.kind(),
+                std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+            )
+        {
+            return true;
         }
-        match error.source() { Some(source) => error = source, None => return false }
+        match error.source() {
+            Some(source) => error = source,
+            None => return false,
+        }
     }
 }
 
@@ -1903,9 +1933,12 @@ async fn preflight_destination(
     let destination = tokio::time::timeout(
         std::time::Duration::from_secs(30),
         locksmith::release::crypto::Destination::connect(address, nonce.clone()),
-    ).await.with_context(Ctx::destination_attestation(address))?
-        .with_context(Ctx::destination_attestation(address))?;
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+    )
+    .await
+    .with_context(Ctx::destination_attestation(address))?
+    .with_context(Ctx::destination_attestation(address))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .with_context(Ctx::destination_verification(address, trust_path))?;
     verify_destination_attestation(
         address,
@@ -1918,8 +1951,13 @@ async fn preflight_destination(
 }
 
 fn local_quorum_bundle(root: &Path) -> Option<PathBuf> {
-    [".caution/quorum-bundle.json", ".caution/secrets/bundle.json"]
-        .into_iter().map(|path| root.join(path)).find(|path| path.exists())
+    [
+        ".caution/quorum-bundle.json",
+        ".caution/secrets/bundle.json",
+    ]
+    .into_iter()
+    .map(|path| root.join(path))
+    .find(|path| path.exists())
 }
 
 /// Send a shard to a running enclave's locksmith daemon.
@@ -2146,9 +2184,23 @@ pub async fn send_shard(
         hashes_path.display()
     ));
     if let Some(verified_at) = hashes["verified_at"].as_str() {
-        output::verbose(client.verbose, format!("Recorded verification time: {} (stored metadata)", crate::share_release::terminal_label(verified_at)));
+        output::verbose(
+            client.verbose,
+            format!(
+                "Recorded verification time: {} (stored metadata)",
+                crate::share_release::terminal_label(verified_at)
+            ),
+        );
     }
-    output::verbose(client.verbose, format!("Destination PCR policy: {:?}", pcrs.iter().map(|(i, value)| (*i, hex::encode(value))).collect::<std::collections::BTreeMap<_, _>>()));
+    output::verbose(
+        client.verbose,
+        format!(
+            "Destination PCR policy: {:?}",
+            pcrs.iter()
+                .map(|(i, value)| (*i, hex::encode(value)))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        ),
+    );
 
     // Parse the quorum bundle
     if !locksmith::legacy::is_imported_json(&bundle_text).with_context(Ctx::parse_bundle())? {
@@ -2168,7 +2220,10 @@ pub async fn send_shard(
     let names = crate::share_release::holder_names(client, &proof).await;
     let view = bundle.recovery();
     if view.legacy {
-        output::status(format!("Legacy V0 — no Keymaker generation proof (--allow-legacy accepted)\nContent hash: {}", bundle.content_hash().with_context(Ctx::parse_bundle())?));
+        output::status(format!(
+            "Legacy V0 — no Keymaker generation proof (--allow-legacy accepted)\nContent hash: {}",
+            bundle.content_hash().with_context(Ctx::parse_bundle())?
+        ));
     }
     let keys = view.keyring;
     let address_str = format!("{}:49504", target.public_ip);
@@ -2176,8 +2231,15 @@ pub async fn send_shard(
         .parse()
         .with_context(Ctx::invalid_address(&address_str))?;
 
-    let select_holder = || crate::share_release::select_holder(keys, release_options.holder.as_deref(), private_keyring.as_deref(), &names)
-        .with_context(Ctx::select_holder());
+    let select_holder = || {
+        crate::share_release::select_holder(
+            keys,
+            release_options.holder.as_deref(),
+            private_keyring.as_deref(),
+            &names,
+        )
+        .with_context(Ctx::select_holder())
+    };
     // Preserve useful offline input errors in scripts, but never prompt before
     // checking the destination. Neither branch accesses a smartcard or passkey.
     let selected = if std::io::stdin().is_terminal() {
@@ -2190,8 +2252,13 @@ pub async fn send_shard(
         hashes_path.display()
     ));
     preflight_destination(address, &pcrs, hashes_path).await?;
-    output::status("Destination attestation verified. Release will verify a fresh connection again.");
-    let (holder, webauthn) = match selected { Some(holder) => holder, None => select_holder()? };
+    output::status(
+        "Destination attestation verified. Release will verify a fresh connection again.",
+    );
+    let (holder, webauthn) = match selected {
+        Some(holder) => holder,
+        None => select_holder()?,
+    };
     let holder_display = crate::share_release::holder_label(keys, &holder, webauthn, &names);
     output::verbose(client.verbose, format!("Holder certificate: {holder}"));
 
@@ -2231,19 +2298,42 @@ pub async fn send_shard(
     let status: Result<_, BoxError> = if webauthn {
         let proof = serde_json::from_str(&bundle_text).with_context(Ctx::parse_bundle())?;
         let measurements = pcrs.iter().map(|(&i, v)| (i, hex::encode(v))).collect();
-        crate::share_release::recover(client, &release_options, proof, holder, summary, measurements, generation_time)
-            .await.map_err(|error| Box::new(error) as BoxError)
+        crate::share_release::recover(
+            client,
+            &release_options,
+            proof,
+            holder,
+            summary,
+            measurements,
+            generation_time,
+        )
+        .await
+        .map_err(|error| Box::new(error) as BoxError)
     } else {
         summary.print(None);
         output::status("Connecting to the destination for attestation and share submission…");
-        locksmith::client::send_selected_shard(address, pcrs, &bundle, private_keyring, Some(holder))
-            .await.map_err(|error| Box::new(error) as BoxError)
+        locksmith::client::send_selected_shard(
+            address,
+            pcrs,
+            &bundle,
+            private_keyring,
+            Some(holder),
+        )
+        .await
+        .map_err(|error| Box::new(error) as BoxError)
     };
     let status = status.map_err(|source| {
         if connection_closed(source.as_ref()) {
-            SendShardError::ConnectionClosed { location: std::panic::Location::caller(), source }
+            SendShardError::ConnectionClosed {
+                location: std::panic::Location::caller(),
+                source,
+            }
         } else {
-            SendShardError::SendShard { address: address_str, location: std::panic::Location::caller(), source }
+            SendShardError::SendShard {
+                address: address_str,
+                location: std::panic::Location::caller(),
+                source,
+            }
         }
     })?;
 
@@ -2272,14 +2362,21 @@ mod tests {
     fn imported_bundle_allows_unchanged_expired_recipient_only_with_opt_in() {
         let public_key = include_str!("../../../tests/fixtures/expired-v0-recipient.asc");
         let recipient = load_recipient_cert(public_key).unwrap();
-        assert!(recipient.with_policy(&super::OpenPgpPolicy::new(), None).unwrap().alive().is_err());
+        assert!(
+            recipient
+                .with_policy(&super::OpenPgpPolicy::new(), None)
+                .unwrap()
+                .alive()
+                .is_err()
+        );
         assert!(encrypt_secret_value(&recipient, "secret", false).is_err());
         assert!(encrypt_secret_value(&recipient, "secret", true).is_ok());
         let work = tempdir().unwrap();
         let env = work.path().join(".env");
         let bundle = work.path().join("bundle.json");
         let output = work.path().join("secrets");
-        let mut imported: serde_json::Value = serde_json::from_str(include_str!("../../../tests/fixtures/imported-v0.json")).unwrap();
+        let mut imported: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/imported-v0.json")).unwrap();
         imported["original"]["public_key"] = serde_json::json!(public_key);
         let original = serde_json::to_vec(&imported).unwrap();
         std::fs::write(&bundle, &original).unwrap();
@@ -2294,8 +2391,11 @@ mod tests {
 
     #[test]
     fn legacy_encryption_still_rejects_revoked_recipients() {
-        let (cert, revocation) = CertBuilder::new().add_userid("revoked recipient")
-            .add_storage_encryption_subkey().generate().unwrap();
+        let (cert, revocation) = CertBuilder::new()
+            .add_userid("revoked recipient")
+            .add_storage_encryption_subkey()
+            .generate()
+            .unwrap();
         let revoked = cert.insert_packets([revocation]).unwrap();
         assert!(encrypt_secret_value(&revoked, "secret", true).is_err());
     }
@@ -2308,8 +2408,15 @@ mod tests {
         std::fs::create_dir_all(source.parent().unwrap()).unwrap();
         assert!(super::local_quorum_bundle(work.path()).is_none());
         std::fs::write(&source, "raw V0").unwrap();
-        assert_eq!(super::local_quorum_bundle(work.path()), Some(source.clone()));
-        std::fs::write(&imported, include_str!("../../../tests/fixtures/imported-v0.json")).unwrap();
+        assert_eq!(
+            super::local_quorum_bundle(work.path()),
+            Some(source.clone())
+        );
+        std::fs::write(
+            &imported,
+            include_str!("../../../tests/fixtures/imported-v0.json"),
+        )
+        .unwrap();
         let selected = super::local_quorum_bundle(work.path()).unwrap();
         assert_eq!(selected, imported);
         assert!(
@@ -2355,7 +2462,8 @@ mod tests {
         let pcr01 = hex::decode("ef093e4c1fd13878956589833c0e396b935cdf5ae45c1cc595e1a19a6da5812850f0ef3e77df918cb2a86d88ddf9cc03").unwrap();
         let pcr2 = hex::decode("21b9efbc184807662e966d34f390821309eeac6802309798826296bf3e8bec7c10edb30948c90ba67310f7b964fc500a").unwrap();
         let pcrs = std::collections::HashMap::from([(0, pcr01.clone()), (1, pcr01), (2, pcr2)]);
-        let nonce = hex::decode("d041b23bce8678bbc7c174bd8494c4f9759386eec963ec69bfd45c1452b10636").unwrap();
+        let nonce = hex::decode("d041b23bce8678bbc7c174bd8494c4f9759386eec963ec69bfd45c1452b10636")
+            .unwrap();
         let now = std::time::Duration::from_millis(1766509563435);
         let address = "127.0.0.1:49504".parse().unwrap();
         let trust = std::path::Path::new(".caution/trusted_hashes.json");
@@ -2484,22 +2592,39 @@ mod tests {
 
     #[test]
     fn share_results_distinguish_acceptance_from_reconstruction() {
-        assert_eq!(super::share_acceptance_message(0), "Quorum reconstructed successfully.");
-        assert_eq!(super::share_acceptance_message(1), "Share accepted. 1 more share required.");
-        assert_eq!(super::share_acceptance_message(2), "Share accepted. 2 more shares required.");
+        assert_eq!(
+            super::share_acceptance_message(0),
+            "Quorum reconstructed successfully."
+        );
+        assert_eq!(
+            super::share_acceptance_message(1),
+            "Share accepted. 1 more share required."
+        );
+        assert_eq!(
+            super::share_acceptance_message(2),
+            "Share accepted. 2 more shares required."
+        );
         let io = std::io::Error::other("unexpected end of file");
-        assert!(!super::connection_closed(&io), "do not classify errors by their text");
+        assert!(
+            !super::connection_closed(&io),
+            "do not classify errors by their text"
+        );
         let selected = super::SendShardError::SelectHolder {
-            location: std::panic::Location::caller(), source: Box::new(io),
+            location: std::panic::Location::caller(),
+            source: Box::new(io),
         };
-        assert!(selected.to_string().contains("Unable to select share holder"));
+        assert!(
+            selected
+                .to_string()
+                .contains("Unable to select share holder")
+        );
         assert!(!selected.to_string().contains("parse bundle"));
     }
 
     #[tokio::test]
     async fn destination_eof_is_detected_through_real_locksmith_error_chain() {
-        use tokio::io::AsyncReadExt;
         use keymaker_models::generate_quorum::{GenerateQuorumBundle, v1};
+        use tokio::io::AsyncReadExt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let receiver = tokio::spawn(async move {
@@ -2518,16 +2643,38 @@ mod tests {
             .generate()
             .unwrap();
         let mut shardfile = Vec::new();
-        OpenPGP.shard_and_encrypt(1, 1, &[7; 32], std::slice::from_ref(&holder), &mut shardfile).unwrap();
+        OpenPGP
+            .shard_and_encrypt(
+                1,
+                1,
+                &[7; 32],
+                std::slice::from_ref(&holder),
+                &mut shardfile,
+            )
+            .unwrap();
         let bundle = GenerateQuorumBundle::V1(v1::GenerateQuorumResponse {
-            bundle_id: [0; 16], label: Default::default(),
-            keyring: vec![v1::Key::OpenPGP { cert: String::from_utf8(holder.armored().to_vec().unwrap()).unwrap() }],
-            threshold: 1, max: 1, shardfile: String::from_utf8(shardfile).unwrap(), public_key: String::new(),
+            bundle_id: [0; 16],
+            label: Default::default(),
+            keyring: vec![v1::Key::OpenPGP {
+                cert: String::from_utf8(holder.armored().to_vec().unwrap()).unwrap(),
+            }],
+            threshold: 1,
+            max: 1,
+            shardfile: String::from_utf8(shardfile).unwrap(),
+            public_key: String::new(),
         });
         let work = tempdir().unwrap();
         let private_key = work.path().join("holder.asc");
         std::fs::write(&private_key, holder.as_tsk().armored().to_vec().unwrap()).unwrap();
-        let error = locksmith::client::send_selected_shard(address, Default::default(), &bundle, Some(private_key), None).await.unwrap_err();
+        let error = locksmith::client::send_selected_shard(
+            address,
+            Default::default(),
+            &bundle,
+            Some(private_key),
+            None,
+        )
+        .await
+        .unwrap_err();
         assert!(super::connection_closed(&error), "{error:?}");
         receiver.await.unwrap();
     }

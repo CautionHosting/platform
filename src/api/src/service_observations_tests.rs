@@ -201,12 +201,12 @@ fn policies_are_reread_and_public_fields_are_explicit() {
     assert!(load_policy(file.path()).is_some());
     std::fs::write(file.path(), "bad policy").unwrap();
     assert!(load_policy(file.path()).is_none());
-    let metadata = json!({"manifest":{"app_source":{"urls":["file:///secret", "https://codeberg.org/caution/locksmith.git"],"commit":"a".repeat(40),"token":"secret"},"path":"/run/config"},"token":"secret"});
+    let metadata = json!({"manifest":{"app_source":{"urls":["file:///secret", "https://git.caution.co/public/locksmith.git"],"commit":"a".repeat(40),"token":"secret"},"path":"/run/config"},"token":"secret"});
     let source = serde_json::to_value(reported_source(&metadata).unwrap()).unwrap();
     assert_eq!(source.as_object().unwrap().len(), 2);
     assert_eq!(
         source["repository"],
-        "https://codeberg.org/caution/locksmith.git"
+        "https://git.caution.co/public/locksmith.git"
     );
     assert!(!source.to_string().contains("secret"));
     for url in [

@@ -45,11 +45,13 @@ def heredoc(text, delimiter):
     return text.split("<<'" + delimiter + "'\n", 1)[1].split("\n" + delimiter, 1)[0] + "\n"
 
 
-def render(policy="on-failure", delay=10, debug=False):
+def render(policy="on-failure", delay=10, debug=False, egress=False):
     variables = dict(eif_s3_path="s3://test/enclave.eif", memory_mb=512,
                      cpu_count=2, debug_mode=str(debug).lower(), ssh_keys=[],
                      ports=[8080], http_port=8080, e2e="false", e2e_mode="disabled",
-                     locksmith="false", egress="false", domain="test.example.invalid",
+                     locksmith="false", egress=str(egress).lower(), domain="test.example.invalid",
+                     tap_framer_sha256="0" * 64, network_policy_script="#!/bin/sh\nexit 0\n",
+                     http_routes='route {\n respond "fixture" 200\n}\n',
                      restart_policy=policy, restart_delay_seconds=delay)
     expression = "jsonencode(templatefile(" + json.dumps(str(TEMPLATE)) + ", " + json.dumps(variables) + "))\n"
     with tempfile.TemporaryDirectory() as directory:
@@ -106,7 +108,7 @@ class NitroRestartTests(unittest.TestCase):
                         lambda match: str(self.path) + match.group(), script)
         (self.path / "etc/systemd/system").mkdir(parents=True, exist_ok=True)
         prelude = '''set -e
-standard_ports="49500 49501 49502"
+standard_ports="49501 49502"
 systemctl() {
   printf '%s\\n' "$*" >> "$RUNTIME_DIRECTORY/bootstrap-calls"
   case "$*" in
@@ -137,10 +139,11 @@ journalctl() { :; }
                     result = self.bootstrap(text, launch_status=status)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     calls = (self.path / "bootstrap-calls").read_text().splitlines()
-                    for service in ("vsock-proxy-49500.service", "vsock-proxy-49501.service",
-                                    "vsock-proxy-49502.service", "vsock-proxy-http.service",
-                                    "vsock-proxy-8080.service", "caddy"):
+                    for service in ("vsock-proxy-49501.service", "vsock-proxy-49502.service",
+                                    "vsock-proxy-http.service", "caddy"):
                         self.assertIn("start " + service, calls)
+                    self.assertNotIn("start vsock-proxy-8080.service", calls)
+                    self.assertNotIn("start vsock-proxy-49500.service", calls)
                     self.assertEqual(calls.count("start nitro-enclave.service"), 1)
                     self.assertTrue((self.path / "etc/caddy/Caddyfile").is_file())
                     self.assertTrue((self.path / "etc/systemd/system/caddy.service").is_file())
@@ -172,6 +175,51 @@ journalctl() { :; }
                 for block in text.split("Description=VSock Proxy")[1:]:
                     self.assertNotIn("Requires=nitro-enclave", block.split("\nEOF", 1)[0])
         self.assertIn("RestartSec=10s", render())
+
+    def test_failed_policy_or_tunnel_start_stops_network_bootstrap(self):
+        rendered = render(egress=True)
+        startup = "\n".join(line for line in rendered.splitlines()
+                            if line.startswith(("systemctl start caution-network-policy.service",
+                                                "systemctl start vsock-network.service")))
+        for failed in ("caution-network-policy.service", "vsock-network.service", ""):
+            with self.subTest(failed=failed), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                log = root / "calls"
+                stub = root / "systemctl"
+                stub.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALL_LOG"\n[ "$*" != "start $FAIL_SERVICE" ]\n')
+                stub.chmod(0o755)
+                script = "set -e\n" + startup + '\nprintf "READY\\n" >> "$CALL_LOG"\n'
+                result = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                                        env={**os.environ, "PATH": f"{root}:{os.environ['PATH']}",
+                                             "CALL_LOG": str(log), "FAIL_SERVICE": failed})
+                calls = log.read_text().splitlines()
+                self.assertEqual(result.returncode == 0, not failed, result.stderr)
+                self.assertEqual("READY" in calls, not failed)
+                self.assertIn("start caution-network-policy.service", calls)
+                if failed == "caution-network-policy.service":
+                    self.assertNotIn("start vsock-network.service", calls)
+                else:
+                    self.assertIn("start vsock-network.service", calls)
+
+    def test_network_policy_is_a_required_barrier_before_tunnel_and_enclave(self):
+        text = render(egress=True)
+        unit = text.split("/etc/systemd/system/vsock-network.service <<'EOF'\n", 1)[1].split("\nEOF", 1)[0]
+        self.assertIn("Requires=caution-network-policy.service", unit)
+        self.assertIn("ExecStartPre=/usr/local/bin/install-enclave-network-policy", unit)
+        enclave = text.split("/etc/systemd/system/nitro-enclave.service <<EOF\n", 1)[1].split("\nEOF", 1)[0]
+        self.assertTrue(any("caution-network-policy.service" in line.split("=", 1)[1].split()
+                            for line in enclave.splitlines() if line.startswith("Requires=")))
+        self.assertLess(text.index("systemctl start caution-network-policy.service"),
+                        text.index("systemctl start vsock-network.service"))
+        proxy = heredoc(text, "PROXY_SCRIPT")
+        self.assertNotIn("-A FORWARD", proxy)
+        self.assertIn("wait -n", proxy)
+        no_egress = render(egress=False)
+        self.assertNotIn("PROXY_SCRIPT", no_egress)
+        self.assertIn("systemctl start caution-network-policy.service", no_egress)
+        self.assertIn("Requires=caution-network-policy.service", heredoc(no_egress, "CADDY_SERVICE"))
+        for block in no_egress.split("Description=VSock Proxy")[1:]:
+            self.assertIn("Requires=caution-network-policy.service", block.split("\nEOF", 1)[0])
 
     def test_start_records_pid_id_and_preserves_arguments(self):
         result = self.helper("start", "--enclave-cid", "16", "--debug-mode")

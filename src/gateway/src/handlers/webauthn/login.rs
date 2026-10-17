@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use axum::{
     extract::{ConnectInfo, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
@@ -72,11 +80,11 @@ pub(crate) enum BeginLoginError {
 impl IntoResponse for BeginLoginError {
     fn into_response(self) -> Response {
         tracing::error!(?self, "Begin login error");
-        (
+        sentry_middleware::error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "An internal error occurred",
+            self,
         )
-            .into_response()
     }
 }
 
@@ -141,7 +149,7 @@ pub(crate) enum ScopedChallengeError {
 /// as an `allowCredentials` list. A malformed blob at index `i` fails the
 /// whole batch with that `index` and the JSON error boxed as the source;
 /// callers map this leaf into their own single source-bearing variant.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn deserialize_security_keys(
     public_keys: &[Vec<u8>],
 ) -> Result<Vec<SecurityKey>, DeserializeCredentialError> {
@@ -223,16 +231,29 @@ fn equalize_decoy_work(state: &AppState, n: usize) {
     }
 }
 
-/// Username scope recorded on an `AuthState::Discoverable` challenge, checked
-/// against the resolved user at finish time. Only ever meaningfully set by
-/// `scoped_or_decoy_challenge` (i.e. a username was supplied for this
-/// challenge) — the plain broadcast/discoverable login (no username at all)
-/// always uses `Unscoped`.
+/// Username scope recorded on a pending login challenge, checked against the
+/// resolved user at finish time so a shared key (one physical authenticator
+/// registered to multiple accounts) can never authenticate as an account other
+/// than the one the challenge was begun for.
+///
+/// - `Scoped` is set by `scoped_or_decoy_challenge` when a username resolved to
+///   a real user with credentials: the challenge's `allowCredentials` are that
+///   user's, and finish must resolve the asserted credential to *that* user.
+/// - `Decoy` is set for the never-completable decoy challenges (unknown
+///   username, or a known username with zero credentials, or a rate-limited
+///   username): finish must reject regardless of which resident credential the
+///   browser returns.
+/// - `Unscoped` is used only by the username-less broadcast/discoverable login
+///   (no username at all), where nothing was scoped to begin with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UsernameScope {
     /// No username was supplied for this challenge — any resolved user is
     /// acceptable, since nothing was scoped to begin with.
     Unscoped,
+    /// A username resolved to a real user with credentials; the challenge is
+    /// scoped to `expected_user_id` and finish must authenticate as exactly
+    /// that user (a shared key used under any other account is rejected).
+    Scoped { expected_user_id: Uuid },
     /// A username was supplied but the challenge is a decoy: either the
     /// username didn't resolve to any user (`expected_user_id: None`) or it
     /// resolved to a user with zero registered credentials
@@ -241,6 +262,18 @@ pub(crate) enum UsernameScope {
     /// decoy: it looks identical to a real scoped challenge but can't be
     /// completed.
     Decoy { expected_user_id: Option<Uuid> },
+}
+
+impl UsernameScope {
+    /// The account this challenge was begun for, when one is known. `Scoped`
+    /// always has one; `Decoy` may not (unknown username); `Unscoped` never did.
+    pub(crate) fn expected_user_id(&self) -> Option<Uuid> {
+        match self {
+            UsernameScope::Scoped { expected_user_id } => Some(*expected_user_id),
+            UsernameScope::Decoy { expected_user_id } => *expected_user_id,
+            UsernameScope::Unscoped => None,
+        }
+    }
 }
 
 /// Verifies a resolved discoverable-auth user is consistent with the
@@ -257,6 +290,14 @@ pub(crate) fn check_username_scope(
 ) -> Option<(Option<Uuid>, Uuid)> {
     match scope {
         UsernameScope::Unscoped => None,
+        // A `Scoped` challenge is a real, completable username-scoped
+        // challenge and can never be built on the discoverable path. If one
+        // ever appeared here it would be a logic error — reject rather than
+        // authenticate (mirrors the defensive posture of
+        // `check_securitykey_scope`).
+        UsernameScope::Scoped { expected_user_id } => {
+            Some((Some(*expected_user_id), resolved_user_id))
+        }
         UsernameScope::Decoy { expected_user_id } => {
             if *expected_user_id == Some(resolved_user_id) {
                 None
@@ -264,6 +305,37 @@ pub(crate) fn check_username_scope(
                 Some((*expected_user_id, resolved_user_id))
             }
         }
+    }
+}
+
+/// Verifies a resolved username-scoped (`AuthState::SecurityKey`) user is
+/// consistent with the scope recorded when the challenge began. Unlike
+/// [`check_username_scope`] (which only ever sees `Unscoped`/`Decoy` on the
+/// discoverable path), this is called for the real, completable scoped case:
+/// a username resolved to a user with credentials, so finish must authenticate
+/// as *exactly* that user. Returns `Some((expected, actual))` when the asserted
+/// credential resolved to any other account — e.g. a shared key used under the
+/// wrong username — and callers collapse it into their opaque auth-failure
+/// error so the rejection is indistinguishable from every other
+/// credential-verification failure (no username-enumeration oracle).
+#[tracing::instrument(skip_all)]
+pub(crate) fn check_securitykey_scope(
+    scope: &UsernameScope,
+    resolved_user_id: Uuid,
+) -> Option<(Option<Uuid>, Uuid)> {
+    match scope {
+        UsernameScope::Unscoped => None,
+        UsernameScope::Scoped { expected_user_id } => {
+            if *expected_user_id == resolved_user_id {
+                None
+            } else {
+                Some((Some(*expected_user_id), resolved_user_id))
+            }
+        }
+        // A SecurityKey challenge is never a decoy (decoys are always built on
+        // the discoverable path); if one ever appeared here, reject it rather
+        // than authenticate.
+        UsernameScope::Decoy { expected_user_id } => Some((*expected_user_id, resolved_user_id)),
     }
 }
 
@@ -303,7 +375,7 @@ fn apply_decoy_shape(
 /// (`false`) only when `username` is provably not a real account by format
 /// alone (e.g. fails `validate_username`) — there's no real per-credential
 /// cost to match in that case, and it saves the crypto work.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn force_decoy_challenge(
     state: &AppState,
     username: &str,
@@ -358,7 +430,7 @@ async fn force_decoy_challenge(
 /// `scoped_or_decoy_challenge` rather than in `begin_login_handler`, the QR
 /// cross-device begin path (`qr_login_authenticate_handler`, which also
 /// calls this function) inherits the same per-username cap automatically.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn scoped_or_decoy_challenge(
     state: &AppState,
     username: &str,
@@ -418,18 +490,31 @@ pub(crate) async fn scoped_or_decoy_challenge(
         None => Vec::new(),
     };
 
-    if user_id.is_some() && !allow_credentials.is_empty() {
-        tracing::debug!(
-            "Starting username-scoped authentication challenge with {} credentials",
-            allow_credentials.len()
-        );
+    if let Some(user_id) = user_id {
+        if !allow_credentials.is_empty() {
+            tracing::debug!(
+                "Starting username-scoped authentication challenge with {} credentials",
+                allow_credentials.len()
+            );
 
-        let (mut rcr, auth_state) = state
-            .webauthn
-            .start_securitykey_authentication(&allow_credentials)
-            .with_context(Ctx::start_authentication())?;
-        rcr.public_key.user_verification = UserVerificationPolicy::Preferred;
-        return Ok((rcr, AuthState::SecurityKey(auth_state)));
+            let (mut rcr, auth_state) = state
+                .webauthn
+                .start_securitykey_authentication(&allow_credentials)
+                .with_context(Ctx::start_authentication())?;
+            rcr.public_key.user_verification = UserVerificationPolicy::Preferred;
+            // Record the resolved account so finish resolves the asserted
+            // credential to exactly this user, not another account's copy of a
+            // shared key.
+            return Ok((
+                rcr,
+                AuthState::SecurityKey {
+                    auth_state,
+                    scope: UsernameScope::Scoped {
+                        expected_user_id: user_id,
+                    },
+                },
+            ));
+        }
     }
 
     // Decoy path: either the username doesn't resolve to any user, or it
@@ -551,7 +636,16 @@ pub async fn begin_login_handler(
             rcr.public_key.allow_credentials.len()
         );
 
-        (rcr, AuthState::SecurityKey(auth_state))
+        (
+            rcr,
+            AuthState::SecurityKey {
+                auth_state,
+                // No username was supplied for this challenge, so nothing is
+                // scoped: finish resolves the asserted credential to its single
+                // owner (a shared key with multiple owners is rejected).
+                scope: UsernameScope::Unscoped,
+            },
+        )
     } else {
         // Primary path: username-less discoverable / conditional UI login.
         let (rcr, auth_state) = state
@@ -605,7 +699,24 @@ fn credential_lookup_error(error: db::DbError) -> LoginError {
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[track_caller]
+#[tracing::instrument(skip_all)]
+fn public_key_lookup_error(error: db::DbError, user_id: Uuid) -> LoginError {
+    if error.kind == db::DbErrorKind::CredentialNotFound {
+        LoginError::CredentialNotFound {
+            location: std::panic::Location::caller(),
+            source: Box::new(error),
+        }
+    } else {
+        LoginError::DbGetPublicKeyForCredential {
+            user_id,
+            location: std::panic::Location::caller(),
+            source: Box::new(error),
+        }
+    }
+}
+
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn finish_login_handler(
     State(state): State<AppState>,
     Json(req): Json<serde_json::Value>,
@@ -644,21 +755,74 @@ pub async fn finish_login_handler(
     tracing::debug!("Received authentication response");
 
     let (user_id, credential_id_bytes, mut seckey, auth_result) = match pending.auth_state {
-        AuthState::SecurityKey(auth_state) => {
-            // Legacy / username-scoped path: resolve the user from the
-            // asserted credential's rawId, exactly as before.
+        AuthState::SecurityKey { auth_state, scope } => {
+            // Legacy broadcast / username-scoped path: resolve the user from the
+            // asserted credential's rawId. When the challenge was begun for a
+            // specific account (username supplied), scope that resolution to the
+            // expected user so a shared key can't authenticate as any other
+            // account; an unscoped (broadcast) challenge resolves to the owner.
             let credential_id_bytes = auth_response.raw_id.as_ref().to_vec();
             tracing::debug!("Credential ID: {}", hex::encode(&credential_id_bytes));
 
-            let user_id = match db::get_user_id_by_credential(&state.db, &credential_id_bytes).await
+            // Resolve the set of accounts owning this credential, then pick the
+            // one this challenge is scoped to. When a username was supplied the
+            // expected account must own the credential (membership); an unscoped
+            // (broadcast) challenge requires exactly one owner.
+            let owners = match db::get_user_ids_by_credential(&state.db, &credential_id_bytes).await
             {
-                Ok(user_id) => user_id,
+                Ok(owners) => owners,
                 Err(e) => return Err(credential_lookup_error(e)),
             };
 
-            let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
-                .await
-                .with_context(Ctx::db_get_public_key_for_credential(user_id))?;
+            let user_id = match scope {
+                UsernameScope::Unscoped => match owners.as_slice() {
+                    [only] => *only,
+                    // No owner (unknown credential) or a shared key used on a
+                    // username-less challenge: an authentication outcome,
+                    // collapsed into the same opaque 401 as every other failure.
+                    _ => {
+                        return Err(LoginError::CredentialNotFound {
+                            location: std::panic::Location::caller(),
+                            source: Box::new(db::DbError::not_found("get_user_ids_by_credential")),
+                        })
+                    }
+                },
+                expected @ (UsernameScope::Scoped { .. } | UsernameScope::Decoy { .. }) => {
+                    let Some(expected_user) = expected.expected_user_id() else {
+                        return Err(LoginError::CredentialNotFound {
+                            location: std::panic::Location::caller(),
+                            source: Box::new(db::DbError::not_found("get_user_ids_by_credential")),
+                        });
+                    };
+                    if owners.contains(&expected_user) {
+                        expected_user
+                    } else {
+                        return Err(LoginError::CredentialNotFound {
+                            location: std::panic::Location::caller(),
+                            source: Box::new(db::DbError::not_found("get_user_ids_by_credential")),
+                        });
+                    }
+                }
+            };
+
+            // Defense in depth: the resolution above already scopes to the
+            // expected account, but re-check the scope against the resolved user
+            // so any future resolution path that ignores the scope can never
+            // authenticate as the wrong user.
+            if let Some((expected_user_id, actual_user_id)) =
+                check_securitykey_scope(&scope, user_id)
+            {
+                return Err(LoginError::UnexpectedCredentialOwner {
+                    expected_user_id,
+                    actual_user_id,
+                    location: std::panic::Location::caller(),
+                });
+            }
+
+            let cred_bytes =
+                db::get_credential_public_key(&state.db, user_id, &credential_id_bytes)
+                    .await
+                    .map_err(|error| public_key_lookup_error(error, user_id))?;
             let seckey: SecurityKey = serde_json::from_slice(&cred_bytes)
                 .with_context(Ctx::parse_security_key(user_id))?;
 
@@ -686,15 +850,47 @@ pub async fn finish_login_handler(
                 hex::encode(&credential_id_bytes)
             );
 
-            let user_id = match db::get_user_id_by_credential(&state.db, &credential_id_bytes).await
+            // When the challenge was begun for a specific account (username
+            // supplied), scope resolution to that user so a shared resident key
+            // can't authenticate as another account's copy; an unscoped
+            // (username-less) challenge resolves to the credential's owner.
+            let owners = match db::get_user_ids_by_credential(&state.db, &credential_id_bytes).await
             {
-                Ok(user_id) => user_id,
+                Ok(owners) => owners,
                 Err(e) => return Err(credential_lookup_error(e)),
             };
+            let user_id = match &scope {
+                UsernameScope::Unscoped => match owners.as_slice() {
+                    [only] => *only,
+                    _ => {
+                        return Err(LoginError::CredentialNotFound {
+                            location: std::panic::Location::caller(),
+                            source: Box::new(db::DbError::not_found("get_user_ids_by_credential")),
+                        })
+                    }
+                },
+                expected @ (UsernameScope::Scoped { .. } | UsernameScope::Decoy { .. }) => {
+                    let Some(expected_user) = expected.expected_user_id() else {
+                        return Err(LoginError::CredentialNotFound {
+                            location: std::panic::Location::caller(),
+                            source: Box::new(db::DbError::not_found("get_user_ids_by_credential")),
+                        });
+                    };
+                    if owners.contains(&expected_user) {
+                        expected_user
+                    } else {
+                        return Err(LoginError::CredentialNotFound {
+                            location: std::panic::Location::caller(),
+                            source: Box::new(db::DbError::not_found("get_user_ids_by_credential")),
+                        });
+                    }
+                }
+            };
 
-            let cred_bytes = db::get_credential_public_key(&state.db, &credential_id_bytes)
-                .await
-                .with_context(Ctx::db_get_public_key_for_credential(user_id))?;
+            let cred_bytes =
+                db::get_credential_public_key(&state.db, user_id, &credential_id_bytes)
+                    .await
+                    .map_err(|error| public_key_lookup_error(error, user_id))?;
             let seckey: SecurityKey = serde_json::from_slice(&cred_bytes)
                 .with_context(Ctx::parse_security_key(user_id))?;
 
@@ -734,7 +930,8 @@ pub async fn finish_login_handler(
             // userHandle, i.e. it's resident. Best-effort — never fail the
             // login over this.
             if let Err(e) =
-                db::mark_credential_resident_if_unknown(&state.db, &credential_id_bytes).await
+                db::mark_credential_resident_if_unknown(&state.db, user_id, &credential_id_bytes)
+                    .await
             {
                 tracing::warn!("Failed to backfill credential resident flag: {:?}", e);
             }
@@ -775,6 +972,7 @@ pub async fn finish_login_handler(
 
             db::update_fido2_credential(
                 &state.db,
+                user_id,
                 &credential_id_bytes,
                 &updated_key_json,
                 auth_result.counter(),
@@ -788,9 +986,15 @@ pub async fn finish_login_handler(
     let csrf_token = crate::csrf::derive_csrf_token(&session_id, &state.csrf_secret);
     let expires_at = time::OffsetDateTime::now_utc() + Duration::hours(state.session_timeout_hours);
 
-    db::create_auth_session(&state.db, &session_id, &credential_id_bytes, expires_at)
-        .await
-        .with_context(Ctx::db_create_auth_session(user_id))?;
+    db::create_auth_session(
+        &state.db,
+        &session_id,
+        &credential_id_bytes,
+        user_id,
+        expires_at,
+    )
+    .await
+    .with_context(Ctx::db_create_auth_session(user_id))?;
 
     let credential_id_hex = hex::encode(&credential_id_bytes);
     tracing::debug!(
@@ -921,12 +1125,64 @@ mod tests {
     fn only_a_missing_credential_is_an_authentication_failure() {
         let lookup = |kind| {
             Err::<(), _>(std::io::Error::other("lookup"))
-                .with_context(db::DbErrorCtx::new(kind, "get_user_id_by_credential"))
+                .with_context(db::DbErrorCtx::new(kind, "get_user_ids_by_credential"))
                 .unwrap_err()
         };
-        let status = |kind| credential_lookup_error(lookup(kind)).into_response().status();
-        assert_eq!(status(db::DbErrorKind::CredentialNotFound), StatusCode::UNAUTHORIZED);
-        assert_eq!(status(db::DbErrorKind::QueryFailed), StatusCode::INTERNAL_SERVER_ERROR);
+        let status = |kind| {
+            credential_lookup_error(lookup(kind))
+                .into_response()
+                .status()
+        };
+        assert_eq!(
+            status(db::DbErrorKind::CredentialNotFound),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status(db::DbErrorKind::QueryFailed),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_public_key_is_an_opaque_authentication_failure() {
+        let response = public_key_lookup_error(
+            db::DbError::not_found("get_credential_public_key"),
+            Uuid::nil(),
+        )
+        .into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        assert!(!response.headers().contains_key(header::SET_COOKIE));
+        assert!(response
+            .extensions()
+            .get::<sentry_middleware::SentryReportable>()
+            .is_some());
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), br#"{"error":"authentication_failed"}"#);
+    }
+
+    #[tokio::test]
+    async fn public_key_query_failure_is_internal() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy_with(sqlx::postgres::PgConnectOptions::new());
+        pool.close().await;
+        let error = db::get_credential_public_key(&pool, Uuid::nil(), b"credential")
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, db::DbErrorKind::QueryFailed);
+        let response = public_key_lookup_error(error, Uuid::nil()).into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!response.headers().contains_key(header::SET_COOKIE));
+        assert!(response
+            .extensions()
+            .get::<sentry_middleware::SentryReportable>()
+            .is_some());
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), b"an internal error occurred");
     }
 
     // --- normalize_login_username -------------------------------------
@@ -1053,6 +1309,82 @@ mod tests {
             user
         )
         .is_none());
+    }
+
+    #[test]
+    fn check_username_scope_rejects_scoped_on_discoverable_path() {
+        // A `Scoped` challenge is a real username-scoped challenge and can
+        // never be built on the discoverable path; if one ever appeared here it
+        // must reject rather than authenticate.
+        let expected = Uuid::new_v4();
+        let resolved = Uuid::new_v4();
+        let mismatch = check_username_scope(
+            &UsernameScope::Scoped {
+                expected_user_id: expected,
+            },
+            resolved,
+        )
+        .expect("a Scoped scope on the discoverable path must reject");
+        assert_eq!(mismatch, (Some(expected), resolved));
+    }
+
+    // --- check_securitykey_scope ------------------------------------------
+    //
+    // Guards the username-scoped (`AuthState::SecurityKey`) finish path: a
+    // challenge begun for a specific account must authenticate as exactly that
+    // account, so a shared key used under any other username is rejected.
+    // `Unscoped` (broadcast login, no username) allows any resolved user.
+
+    #[test]
+    fn check_securitykey_scope_allows_unscoped_login() {
+        let resolved = Uuid::new_v4();
+        assert!(check_securitykey_scope(&UsernameScope::Unscoped, resolved).is_none());
+    }
+
+    #[test]
+    fn check_securitykey_scope_allows_scoped_matching_expected_user() {
+        // The normal case: a shared key whose credential is registered to the
+        // account the challenge was begun for resolves to exactly that user.
+        let user = Uuid::new_v4();
+        assert!(check_securitykey_scope(
+            &UsernameScope::Scoped {
+                expected_user_id: user,
+            },
+            user
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn check_securitykey_scope_rejects_scoped_for_different_account() {
+        // A shared key used under the wrong username resolves to a different
+        // account than the challenge was begun for: must reject.
+        let expected = Uuid::new_v4();
+        let resolved = Uuid::new_v4();
+        let mismatch = check_securitykey_scope(
+            &UsernameScope::Scoped {
+                expected_user_id: expected,
+            },
+            resolved,
+        )
+        .expect("a shared key used under the wrong account must reject");
+        assert_eq!(mismatch, (Some(expected), resolved));
+    }
+
+    #[test]
+    fn check_securitykey_scope_rejects_decoy_on_securitykey_path() {
+        // A SecurityKey challenge is never a decoy; if one ever appeared here it
+        // must reject rather than authenticate.
+        let expected = Uuid::new_v4();
+        let resolved = Uuid::new_v4();
+        let mismatch = check_securitykey_scope(
+            &UsernameScope::Decoy {
+                expected_user_id: Some(expected),
+            },
+            resolved,
+        )
+        .expect("a decoy scope on the securitykey path must reject");
+        assert_eq!(mismatch, (Some(expected), resolved));
     }
 
     // --- apply_decoy_shape -----------------------------------------------
@@ -1346,7 +1678,7 @@ mod tests {
                     "a forced decoy never did the DB lookup, so expected_user_id must be None"
                 );
             }
-            AuthState::SecurityKey(_) => {
+            AuthState::SecurityKey { .. } => {
                 panic!("forced decoy must never produce a real SecurityKey auth state")
             }
         }
@@ -1420,7 +1752,7 @@ mod tests {
                     }
                 ));
             }
-            AuthState::SecurityKey(_) => {
+            AuthState::SecurityKey { .. } => {
                 panic!("invalid-format username must never produce a real SecurityKey auth state")
             }
         }

@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -10,7 +18,7 @@ use crate::{ApiClient, output, prompt};
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum CachePathError {
-    #[error("Could not load cache directory [{location:?}]")]
+    #[error("Could not load cache directory [{location}]")]
     GetCacheDir {
         #[location]
         location: Location,
@@ -31,7 +39,7 @@ pub fn path(client: &ApiClient) -> Result<(), CachePathError> {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum CacheSizeError {
-    #[error("Could not load cache directory [{location:?}]")]
+    #[error("Could not load cache directory [{location}]")]
     GetCacheDir {
         #[location]
         location: Location,
@@ -40,7 +48,7 @@ pub enum CacheSizeError {
         source: BoxError,
     },
 
-    #[error("Could not get cache directory size ({path:?}) [{location:?}]")]
+    #[error("Could not get cache directory size ({path:?}) [{location}]")]
     GetDirSize {
         #[context(borrow = Path)]
         path: PathBuf,
@@ -72,7 +80,7 @@ pub fn size(client: &ApiClient) -> Result<(), CacheSizeError> {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum CacheListError {
-    #[error("Could not load cache directory [{location:?}]")]
+    #[error("Could not load cache directory [{location}]")]
     GetCacheDir {
         #[location]
         location: Location,
@@ -122,7 +130,7 @@ pub fn list(client: &ApiClient) -> Result<(), CacheListError> {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum CacheDestroyError {
-    #[error("Could not load cache directory [{location:?}]")]
+    #[error("Could not load cache directory [{location}]")]
     GetCacheDir {
         #[location]
         location: Location,
@@ -131,7 +139,7 @@ pub enum CacheDestroyError {
         source: BoxError,
     },
 
-    #[error("Could not get cache directory size ({path:?}) [{location:?}]")]
+    #[error("Could not get cache directory size ({path:?}) [{location}]")]
     GetDirSize {
         #[context(borrow = Path)]
         path: PathBuf,
@@ -143,7 +151,7 @@ pub enum CacheDestroyError {
         source: BoxError,
     },
 
-    #[error("Could not confirm deletion [{location:?}]")]
+    #[error("Could not confirm deletion [{location}]")]
     ConfirmDeletion {
         #[location]
         location: Location,
@@ -152,7 +160,7 @@ pub enum CacheDestroyError {
         source: BoxError,
     },
 
-    #[error("Could not remove all files in directory ({path:?}) [{location:?}]")]
+    #[error("Could not remove all files in directory ({path:?}) [{location}]")]
     RemoveFiles {
         #[context(borrow = Path)]
         path: PathBuf,
@@ -206,7 +214,7 @@ pub enum DirSizeErrorKind {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-#[error("Unable to calculate dir size for {path:?} ({kind:?}) [{location:?}]")]
+#[error("Unable to calculate dir size for {path:?} ({kind:?}) [{location}]")]
 pub struct DirSizeError {
     kind: DirSizeErrorKind,
 

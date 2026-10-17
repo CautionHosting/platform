@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use crate::types::*;
 use axum::{
     extract::{Extension, Path, State},
@@ -39,7 +47,7 @@ pub struct MissingSignedRequestAuditError {
     pub(crate) location: dterror::Location,
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn signed_request_audit_id(
     signed_request: Option<Extension<VerifiedSignedRequestId>>,
 ) -> Result<Option<Uuid>, MissingSignedRequestAuditError> {
@@ -101,33 +109,31 @@ pub enum AddPgpKeyError {
 
 impl IntoResponse for AddPgpKeyError {
     fn into_response(self) -> Response {
-        match self {
-            error @ (Self::InvalidPublicKey { .. } | Self::InvalidName { .. }) => {
-                tracing::warn!(?error, "Rejected PGP key request: invalid input");
+        let (status, body) = match &self {
+            Self::InvalidPublicKey { .. } | Self::InvalidName { .. } => {
+                tracing::warn!(?self, "Rejected PGP key request: invalid input");
                 (
                     StatusCode::BAD_REQUEST,
                     "The submitted PGP key or key name is invalid.",
                 )
-                    .into_response()
             }
             Self::Duplicate { .. } => (
                 StatusCode::CONFLICT,
                 "This PGP public key is already registered to your account",
-            )
-                .into_response(),
-            error @ (Self::MissingSignedRequestAudit { .. } | Self::Database { .. }) => {
-                tracing::error!(?error, "Failed to add PGP public key");
+            ),
+            Self::MissingSignedRequestAudit { .. } | Self::Database { .. } => {
+                tracing::error!(?self, "Failed to add PGP public key");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "An internal error occurred",
                 )
-                    .into_response()
             }
-        }
+        };
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn add_pgp_key_handler(
     State(state): State<AppState>,
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,
@@ -200,11 +206,11 @@ pub struct ListPgpKeysError {
 impl IntoResponse for ListPgpKeysError {
     fn into_response(self) -> Response {
         tracing::error!(?self, "Failed to list PGP keys");
-        (
+        sentry_middleware::error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "An internal error occurred",
+            self,
         )
-            .into_response()
     }
 }
 
@@ -248,23 +254,21 @@ pub enum RemovePgpKeyHandlerError {
 
 impl IntoResponse for RemovePgpKeyHandlerError {
     fn into_response(self) -> Response {
-        match self {
-            Self::NotFound { .. } => {
-                (StatusCode::NOT_FOUND, "PGP public key not found").into_response()
-            }
-            error @ (Self::MissingSignedRequestAudit { .. } | Self::Database { .. }) => {
-                tracing::error!(?error, "Failed to remove PGP public key");
+        let (status, body) = match &self {
+            Self::NotFound { .. } => (StatusCode::NOT_FOUND, "PGP public key not found"),
+            Self::MissingSignedRequestAudit { .. } | Self::Database { .. } => {
+                tracing::error!(?self, "Failed to remove PGP public key");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "An internal error occurred",
                 )
-                    .into_response()
             }
-        }
+        };
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn remove_pgp_key_handler(
     State(state): State<AppState>,
     Extension(AuthenticatedUserId(user_id)): Extension<AuthenticatedUserId>,

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 #
 # Generates e2e test fixture git repos in tests/e2e/fixtures/.
-# Each fixture mirrors the content of codeberg.org/caution/demo-hello-world-enclave
+# Each fixture mirrors the content of git.caution.co/public/demo-hello-world-enclave
 # but uses caution.hcl directly (no Procfile).
 #
 # Run from repo root to regenerate:
@@ -84,7 +84,7 @@ README_EOF
 
 CAUTION_HCL_STANDARD='enclave "default" {
   build {
-    app_sources = ["git@codeberg.org:caution/demo-hello-world-enclave.git"]
+    app_sources = ["git@git.caution.co:public/demo-hello-world-enclave.git"]
   }
   network {
     ingress {
@@ -100,7 +100,7 @@ CAUTION_HCL_STANDARD='enclave "default" {
 
 CAUTION_HCL_E2E='enclave "default" {
   build {
-    app_sources = ["git@codeberg.org:caution/demo-hello-world-enclave.git"]
+    app_sources = ["git@git.caution.co:public/demo-hello-world-enclave.git"]
   }
   network {
     ingress {

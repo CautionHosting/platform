@@ -1,3 +1,11 @@
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use axum::{
     body::Body,
     extract::{Extension, Path, Query, State},
@@ -182,7 +190,7 @@ impl IntoResponse for DownloadEifError {
                 "failed to prepare cached EIF",
             ),
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
@@ -210,7 +218,7 @@ impl EifDownloadCache {
         self.data_dir.join(SUBDIR).join(sanitized)
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     pub(crate) async fn ensure_cached(
         &self,
         s3_client: &aws_sdk_s3::Client,
@@ -283,7 +291,7 @@ impl EifDownloadCache {
         Ok(cache_path)
     }
 
-    #[tracing::instrument(skip_all, err)]
+    #[tracing::instrument(skip_all)]
     async fn evict_lru(&self) -> Result<(), EvictLruError> {
         use EvictLruErrorCtx as Ctx;
 
@@ -465,7 +473,7 @@ pub(crate) async fn build_for_key(
     .map(|row| row.map(build_row))
 }
 
-#[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 pub(crate) async fn download_eif(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,

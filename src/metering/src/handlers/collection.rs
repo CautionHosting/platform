@@ -30,11 +30,11 @@ pub(crate) enum TriggerCollectionError {
 impl IntoResponse for TriggerCollectionError {
     fn into_response(self) -> axum::response::Response {
         tracing::error!(?self, "trigger_collection failed");
-        (
+        sentry_middleware::error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": "internal error"})),
+            self,
         )
-            .into_response()
     }
 }
 
@@ -114,7 +114,7 @@ pub(crate) async fn advisory_unlock(pool: &sqlx::PgPool, lock_id: i64) {
         .await;
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn trigger_collection(
     State(state): State<Arc<AppState>>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), TriggerCollectionError> {
@@ -144,7 +144,7 @@ pub async fn run_collection_loop(state: Arc<AppState>, interval_secs: u64) {
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn run_collection_cycle(state: &AppState) -> Result<usize, CollectionCycleError> {
     if !try_advisory_lock(&state.pool, LOCK_COLLECTION).await {
         tracing::debug!("Collection cycle skipped — another instance holds the lock");
@@ -156,6 +156,7 @@ async fn run_collection_cycle(state: &AppState) -> Result<usize, CollectionCycle
 }
 
 /// Stops the meters of resources that are gone or no longer running.
+#[tracing::instrument(skip_all)]
 async fn reconcile_tracked_resources(pool: &sqlx::PgPool) {
     // Reconcile: stop tracking resources that have been destroyed in compute_resources
     let reconciled = sqlx::query(
@@ -231,7 +232,7 @@ async fn reconcile_tracked_resources(pool: &sqlx::PgPool) {
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn run_collection_cycle_inner(
     state: &AppState,
 ) -> Result<usize, CollectionCycleError> {
@@ -303,7 +304,7 @@ fn should_collect_usage(
 
 /// Collect usage for a resource and record billable debits.
 /// Returns Ok(true) if billable usage was recorded, Ok(false) otherwise.
-#[tracing::instrument(skip_all, fields(resource_id = %resource_id), err)]
+#[tracing::instrument(skip_all, fields(resource_id = %resource_id))]
 pub(crate) async fn collect_resource_usage(
     state: &AppState,
     resource_id: &str,
@@ -428,7 +429,7 @@ pub(crate) async fn collect_resource_usage(
 }
 
 /// Query CloudWatch for NetworkOut bytes and bill for egress.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn collect_network_egress(
     state: &AppState,
     resource: &TrackedResource,

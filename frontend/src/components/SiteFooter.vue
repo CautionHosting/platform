@@ -73,7 +73,7 @@
           </nav>
           <div class="footer-social">
             <a
-              href="https://codeberg.org/Caution/"
+              href="https://git.caution.co/public/"
               target="_blank"
               rel="noopener noreferrer"
               aria-label="Git"

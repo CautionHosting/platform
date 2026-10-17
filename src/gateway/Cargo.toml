@@ -30,7 +30,6 @@ tracing-subscriber = { workspace = true }
 url = { workspace = true }
 percent-encoding = "2"
 regex = { workspace = true }
-async-trait = { workspace = true }
 tempfile = { workspace = true }
 sequoia-openpgp = { workspace = true }
 
@@ -44,6 +43,7 @@ russh = "0.61"
 ssh-key = { version = "0.6.7", features = ["crypto"] }
 thiserror = { workspace = true }
 dterror = { workspace = true }
+sentry-middleware = { path = "../sentry-middleware" }
 bytes = "1"
 rand010 = { package = "rand", version = "0.10", features = ["thread_rng"] }
 futures = "0.3"

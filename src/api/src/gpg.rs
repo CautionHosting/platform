@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 //! GPG decryption for managed on-prem credential payloads using sequoia-openpgp.
 //!
 //! Env vars for the private key:
@@ -143,7 +151,7 @@ pub enum LoadCertError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub fn decrypt_gpg_message(encrypted_content: &str) -> Result<String, DecryptGpgMessageError> {
     use DecryptGpgMessageErrorCtx as Ctx;
 
@@ -251,7 +259,7 @@ pub fn decrypt_gpg_message(encrypted_content: &str) -> Result<String, DecryptGpg
     String::from_utf8(decrypted_data).with_context(Ctx::utf8())
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn get_private_key() -> Result<String, GetPrivateKeyError> {
     use GetPrivateKeyErrorCtx as Ctx;
 
@@ -274,7 +282,7 @@ fn get_private_key() -> Result<String, GetPrivateKeyError> {
     })
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn load_cert(key_content: &str) -> Result<Cert, LoadCertError> {
     use LoadCertErrorCtx as Ctx;
 

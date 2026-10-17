@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use bollard::container::{Config, CreateContainerOptions, DownloadFromContainerOptions};
 use bollard::Docker;
 use dterror::ResultExt;
@@ -684,7 +692,7 @@ fn safe_unpack(
 /// matched, because it measures the application rather than the whole image,
 /// which is what makes the failure so confusing to diagnose.
 ///
-/// See https://codeberg.org/caution/platform/issues/401.
+/// See https://git.caution.co/public/platform/issues/401.
 #[tracing::instrument(skip_all, err)]
 pub async fn export_image_filesystem_tar(
     image_ref: &str,

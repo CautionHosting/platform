@@ -351,7 +351,7 @@ verification revision `2590edb0f23cae6589bc73cc8324673023ac1deb`, including the 
 ES384 encoding fix. The certificate verifier passes the locally computed bundle
 hash to Bootproof, which checks `user_data` before returning the authenticated
 payload. No old-remote patch or local path dependency is required.
-The default Locksmith daemon revision is also `890a46a72c4aee6c6faccddd496c16653e98a765`,
+The default Locksmith daemon revision is also `eee2a8a3673c92b668b0a82d0da2e06c131df6e2`,
 matching the API/CLI loader. `LOCKSMITH_COMMIT` still overrides this default.
 The standalone mock E2E helper uses the same revision. This revision includes
 holder-identity checks during shard submission, certified release indices, and
@@ -377,7 +377,7 @@ keys and encrypted material are not migrated by this change.
 Stored bundle proofs now validate certificate validity at the signed generation
 timestamp, then check the expected PCRs, deterministic nonce and canonical bundle
 hash. PCR-policy expiry is a cutoff on generation time, not the current time.
-This follows [the timestamp policy in #7](https://codeberg.org/caution/locksmith/issues/7#issuecomment-19223141).
+This follows [the timestamp policy in #7](https://git.caution.co/public/locksmith/issues/7#issuecomment-175).
 Historical provenance does not establish fresh authorization or replay protection
 for live shard transport.
 
@@ -393,22 +393,22 @@ one-shot lifecycle. These changes require a rebuilt runtime and Keymaker plus
 independently verified measurements; local tests do not establish Nitro readiness.
 
 
-- [Locksmith #10](https://codeberg.org/caution/locksmith/issues/10): structured v1
+- [Locksmith #10](https://git.caution.co/public/locksmith/issues/10): structured v1
   generation/validation. The proof-bound response requires `threshold` and `max`,
   taken from the same values used for shard generation. Platform compares both
   with its request before storage; the CLI checks them against the original
   selection after proof verification in hosted and direct modes. This still
   trusts the measured Keymaker implementation to generate shares correctly.
-- [Locksmith #11](https://codeberg.org/caution/locksmith/issues/11) and
-  [PR #15](https://codeberg.org/caution/locksmith/pulls/15): durable proof loading.
+- [Locksmith #11](https://git.caution.co/public/locksmith/issues/11) and
+  [PR #15](https://git.caution.co/public/locksmith/pulls/15): durable proof loading.
   Historical certificate verification is implemented. The shared PGP keyring
   reconstruction fix also retains every holder for sender/receiver verification.
   These fixes do not establish successful multi-holder Nitro unlocking. Explicit
   V0 import/recovery and format-aware image preflight are implemented separately;
   Nitro/card acceptance remains outstanding under #11 and PR #15.
-- [Locksmith #2](https://codeberg.org/caution/locksmith/issues/2): Keymaker
+- [Locksmith #2](https://git.caution.co/public/locksmith/issues/2): Keymaker
   serialization/reset lifecycle; no Platform queue or semaphore is added.
-- [Locksmith #12](https://codeberg.org/caution/locksmith/issues/12): WebAuthn
+- [Locksmith #12](https://git.caution.co/public/locksmith/issues/12): WebAuthn
   recryption transport is implemented with enclave-owned WebAuthn verification,
   one-use destination-bound authorization and the existing receiver transport.
   Local/mock tests pass; consolidated Nitro acceptance remains pending.

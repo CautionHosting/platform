@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use axum::{
     middleware,
     routing::{delete, get, post},
@@ -23,9 +31,9 @@ mod csrf;
 mod db;
 mod decoy;
 mod handlers;
-mod release_relay;
 mod pgp;
 mod rate_limit;
+mod release_relay;
 mod request_id;
 mod security_headers;
 mod ssh_server;
@@ -228,7 +236,11 @@ async fn main() -> Result<(), MainError> {
                 .unwrap_or_else(|_| "gateway=info,tower_http=debug".into()),
         )
         .with(tracing_subscriber::fmt::layer())
+        // .with(sentry_middleware::sentry_tracing_layer())  -- enable for performance traces
+        .with(sentry_middleware::RequestBreadcrumbLayer::new())
         .init();
+
+    let _sentry_guard = sentry_middleware::init_sentry!();
 
     #[cfg(feature = "e2e-testing-unsafe")]
     {
@@ -462,9 +474,15 @@ async fn main() -> Result<(), MainError> {
             "/auth/sign-request",
             post(handlers::begin_sign_request_handler),
         )
-        .route("/auth/qr-release/begin", post(release_relay::begin).layer(axum::extract::DefaultBodyLimit::max(65536)))
+        .route(
+            "/auth/qr-release/begin",
+            post(release_relay::begin).layer(axum::extract::DefaultBodyLimit::max(65536)),
+        )
         .route("/auth/qr-release/read", post(release_relay::read))
-        .route("/auth/qr-release/finish", post(release_relay::finish).layer(axum::extract::DefaultBodyLimit::max(16384)))
+        .route(
+            "/auth/qr-release/finish",
+            post(release_relay::finish).layer(axum::extract::DefaultBodyLimit::max(16384)),
+        )
         .route("/auth/qr-release/status", post(release_relay::status))
         .route("/auth/qr-release/cancel", post(release_relay::cancel))
         .route("/auth/qr-sign/begin", post(handlers::qr_sign_begin_handler))
@@ -575,6 +593,9 @@ async fn main() -> Result<(), MainError> {
         .route("/onboarding/verify", get(handlers::proxy_handler))
         .route("/config/stripe-key", get(handlers::proxy_handler))
         .route("/legal/active-documents", get(handlers::proxy_handler))
+        // Debug endpoint: the API registers the handler only when
+        // ENABLE_TEST_ENDPOINTS is set, so this otherwise proxies to a 404.
+        .route("/test/force-error", get(handlers::proxy_handler))
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .with_state(state.clone())
         .layer(cors.clone());
@@ -629,6 +650,7 @@ async fn main() -> Result<(), MainError> {
         .merge(frontend_routes)
         .fallback_service(frontend_service)
         .layer(cors)
+        .layer(sentry_middleware::SentryLayer)
         .layer(middleware::from_fn(request_id::request_id_middleware))
         .layer(middleware::from_fn(
             security_headers::security_headers_middleware,
@@ -676,7 +698,10 @@ async fn main() -> Result<(), MainError> {
                 }
             }
 
-            cleanup_state.recovery_verifications.write().await
+            cleanup_state
+                .recovery_verifications
+                .write()
+                .await
                 .retain(|_, pending| pending.expires_at > now);
 
             // Clean up expired authentication states
@@ -752,6 +777,7 @@ async fn shutdown_signal() {
     }
 }
 
+#[tracing::instrument(skip_all)]
 fn load_or_generate_host_key(path: &str) -> Result<PrivateKey, LoadHostKeyError> {
     use std::fs;
     use std::path::Path;

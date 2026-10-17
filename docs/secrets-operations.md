@@ -2,8 +2,8 @@
 
 For existing unversioned PGP bundles, follow [Legacy V0 import and recovery](legacy-v0.md).
 
-Source status, 6 October 2026: Platform selects Locksmith
-`890a46a72c4aee6c6faccddd496c16653e98a765` for API/CLI dependencies,
+Source status, 15 October 2026: Platform selects Locksmith
+`eee2a8a3673c92b668b0a82d0da2e06c131df6e2` for API/CLI dependencies,
 the mock helper and the default enclave runtime. This revision enforces the
 expected bundle hash inside Bootproof's historical verifier and retains the
 60-second future-skew allowance and bounded rejection logging for external-PGP
@@ -116,7 +116,7 @@ token and is part of that trust boundary.
 Rebuild/redeploy API, gateway, CLI and application images at the aligned revisions;
 review any `LOCKSMITH_COMMIT` override. Existing environment files take precedence
 over the builder default and are not updated when `env.example` changes. Update
-the override to `890a46a72c4aee6c6faccddd496c16653e98a765`, or remove it to use the
+the override to `eee2a8a3673c92b668b0a82d0da2e06c131df6e2`, or remove it to use the
 default, before rebuilding. The old `2db332a` daemon only loads raw V0 bundles and
 cannot load current V1 or ImportedV0 artifacts. Configure:
 

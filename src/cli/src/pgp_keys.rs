@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -32,7 +40,7 @@ struct ListPgpKeysResponse {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum FetchPgpKeysError {
-    #[error("Failed to fetch PGP public keys [{location:?}]")]
+    #[error("Failed to fetch PGP public keys [{location}]")]
     GetProtectedJson {
         #[location]
         location: Location,
@@ -59,7 +67,7 @@ async fn fetch_pgp_keys(
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum PgpKeysAddError {
     /// The public key file could not be opened.
-    #[error("Failed to open PGP public key file: {key_file} [{location:?}]")]
+    #[error("Failed to open PGP public key file: {key_file} [{location}]")]
     KeyFileOpen {
         #[context(borrow = Path)]
         key_file: PathBuf,
@@ -72,7 +80,7 @@ pub enum PgpKeysAddError {
     },
 
     /// The public key file could not be read.
-    #[error("Failed to read PGP public key file: {key_file} [{location:?}]")]
+    #[error("Failed to read PGP public key file: {key_file} [{location}]")]
     KeyFileRead {
         #[context(borrow = Path)]
         key_file: PathBuf,
@@ -85,7 +93,7 @@ pub enum PgpKeysAddError {
     },
 
     /// The public key file exceeds the size limit. Replays the constant value at construction so text and bound cannot drift apart.
-    #[error("PGP public key is too large (maximum {max_bytes} bytes) [{location:?}]")]
+    #[error("PGP public key is too large (maximum {max_bytes} bytes) [{location}]")]
     KeyTooLarge {
         max_bytes: usize,
 
@@ -94,7 +102,7 @@ pub enum PgpKeysAddError {
     },
 
     /// The public key file does not contain UTF-8 armored text.
-    #[error("PGP public key file must contain UTF-8 armored text [{location:?}]")]
+    #[error("PGP public key file must contain UTF-8 armored text [{location}]")]
     KeyNotUtf8 {
         #[location]
         location: Location,
@@ -103,7 +111,7 @@ pub enum PgpKeysAddError {
         source: BoxError,
     },
 
-    #[error("Failed to prepare PGP public key [{location:?}]")]
+    #[error("Failed to prepare PGP public key [{location}]")]
     UploadPreparation {
         #[location]
         location: Location,
@@ -113,7 +121,7 @@ pub enum PgpKeysAddError {
     },
 
     /// The derived or supplied name exceeds the length limit. Replays the constant value at construction so text and bound cannot drift apart.
-    #[error("PGP key name must be at most {max_chars} characters [{location:?}]")]
+    #[error("PGP key name must be at most {max_chars} characters [{location}]")]
     NameTooLong {
         max_chars: usize,
 
@@ -122,20 +130,20 @@ pub enum PgpKeysAddError {
     },
 
     /// The derived or supplied name contains control characters.
-    #[error("PGP key name cannot contain control characters [{location:?}]")]
+    #[error("PGP key name cannot contain control characters [{location}]")]
     NameControlChars {
         #[location]
         location: Location,
     },
 
     /// The trimmed name is empty.
-    #[error("PGP key name cannot be empty [{location:?}]")]
+    #[error("PGP key name cannot be empty [{location}]")]
     NameEmptyAfterTrim {
         #[location]
         location: Location,
     },
 
-    #[error("authentication failed [{location:?}]")]
+    #[error("authentication failed [{location}]")]
     EnsureAuthenticated {
         #[location]
         location: Location,
@@ -145,7 +153,7 @@ pub enum PgpKeysAddError {
     },
 
     /// The fetch of existing keys for duplicate checking failed; wraps the module-private helper's typed error.
-    #[error("Failed to fetch PGP public keys [{location:?}]")]
+    #[error("Failed to fetch PGP public keys [{location}]")]
     FetchPgpKeys {
         #[location]
         location: Location,
@@ -155,14 +163,14 @@ pub enum PgpKeysAddError {
     },
 
     /// A key with the same fingerprint is already registered to the account.
-    #[error("This PGP public key is already registered to your account [{location:?}]")]
+    #[error("This PGP public key is already registered to your account [{location}]")]
     AlreadyRegistered {
         #[location]
         location: Location,
     },
 
     /// An HTTP request for the add-key flow failed; `signed_post` still returns errors from its legacy boundary.
-    #[error("Failed to submit PGP public key [{location:?}]")]
+    #[error("Failed to submit PGP public key [{location}]")]
     SubmitKey {
         #[location]
         location: Location,
@@ -172,7 +180,7 @@ pub enum PgpKeysAddError {
     },
 
     /// The API returned a non-success response; the text is what `api_error_message` extracted from it.
-    #[error("Failed to add PGP public key: {api_response} [{location:?}]")]
+    #[error("Failed to add PGP public key: {api_response} [{location}]")]
     ServerResponseFailure {
         api_response: String,
 
@@ -181,7 +189,7 @@ pub enum PgpKeysAddError {
     },
 
     /// The API success response did not decode into the add-key shape.
-    #[error("Failed to parse add PGP public key response [{location:?}]")]
+    #[error("Failed to parse add PGP public key response [{location}]")]
     ParseAddResponse {
         #[location]
         location: Location,
@@ -284,7 +292,7 @@ pub async fn add(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum PgpKeysListError {
-    #[error("authentication failed [{location:?}]")]
+    #[error("authentication failed [{location}]")]
     EnsureAuthenticated {
         #[location]
         location: Location,
@@ -294,7 +302,7 @@ pub enum PgpKeysListError {
     },
 
     /// The fetch of active keys for the listing failed; wraps the module-private helper's typed error.
-    #[error("Failed to fetch PGP public keys [{location:?}]")]
+    #[error("Failed to fetch PGP public keys [{location}]")]
     FetchPgpKeys {
         #[location]
         location: Location,
@@ -335,13 +343,13 @@ pub async fn list(client: &ApiClient) -> Result<(), PgpKeysListError> {
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum PgpKeysRemoveError {
     /// The fingerprint argument is not 40 or 64 hexadecimal characters once whitespace and case are normalized.
-    #[error("PGP key fingerprint must contain 40 or 64 hexadecimal characters [{location:?}]")]
+    #[error("PGP key fingerprint must contain 40 or 64 hexadecimal characters [{location}]")]
     FingerprintInvalid {
         #[location]
         location: Location,
     },
 
-    #[error("authentication failed [{location:?}]")]
+    #[error("authentication failed [{location}]")]
     EnsureAuthenticated {
         #[location]
         location: Location,
@@ -351,7 +359,7 @@ pub enum PgpKeysRemoveError {
     },
 
     /// The fetch of active keys for the lookup failed; wraps the module-private helper's typed error.
-    #[error("Failed to fetch PGP public keys [{location:?}]")]
+    #[error("Failed to fetch PGP public keys [{location}]")]
     FetchPgpKeys {
         #[location]
         location: Location,
@@ -361,7 +369,7 @@ pub enum PgpKeysRemoveError {
     },
 
     /// No active key matches the normalized fingerprint; the matched lookup value is captured for diagnosis.
-    #[error("No active PGP public key matches fingerprint {key_fingerprint} [{location:?}]")]
+    #[error("No active PGP public key matches fingerprint {key_fingerprint} [{location}]")]
     KeyNotFound {
         key_fingerprint: String,
 
@@ -370,7 +378,7 @@ pub enum PgpKeysRemoveError {
     },
 
     /// The HTTP delete request for the key failed; `signed_delete` still returns errors from its legacy boundary.
-    #[error("HTTP request failed [{location:?}]")]
+    #[error("HTTP request failed [{location}]")]
     Http {
         #[location]
         location: Location,
@@ -380,7 +388,7 @@ pub enum PgpKeysRemoveError {
     },
 
     /// The API returned a non-success response; the text is what `api_error_message` extracted from it.
-    #[error("Failed to remove PGP public key: {api_response} [{location:?}]")]
+    #[error("Failed to remove PGP public key: {api_response} [{location}]")]
     ServerResponseFailure {
         api_response: String,
 

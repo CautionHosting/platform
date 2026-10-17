@@ -528,7 +528,8 @@ fn accepts_repeated_ecdh_keys_within_one_holder_only() {
 
 #[test]
 fn legacy_upload_requires_signed_opt_in_and_public_consistency() {
-    let data: serde_json::Value = serde_json::from_str(include_str!("../../../../tests/fixtures/imported-v0.json")).unwrap();
+    let data: serde_json::Value =
+        serde_json::from_str(include_str!("../../../../tests/fixtures/imported-v0.json")).unwrap();
     assert!(verify_upload(&data, false).is_err());
     verify_upload(&data, true).unwrap();
     let mut broken = data.clone();
@@ -540,17 +541,26 @@ fn legacy_upload_requires_signed_opt_in_and_public_consistency() {
     let mut disguised = data;
     disguised["data"] = serde_json::json!({"version":"V1"});
     assert!(verify_upload(&disguised, true).is_err());
-    assert!(verify_upload(&serde_json::json!({"data":{"version":"V1"},"necroproof":[]}), true).is_err());
-    let request: crate::cryptographic_bundles::CreateBundleRequest = serde_json::from_value(serde_json::json!({"data": {}})).unwrap();
+    assert!(
+        verify_upload(
+            &serde_json::json!({"data":{"version":"V1"},"necroproof":[]}),
+            true
+        )
+        .is_err()
+    );
+    let request: crate::cryptographic_bundles::CreateBundleRequest =
+        serde_json::from_value(serde_json::json!({"data": {}})).unwrap();
     assert!(!request.allow_legacy);
 }
 
 #[test]
 fn credential_snapshots_require_uv_and_enforce_recovery_bounds_without_reordering() {
     let row = |id: u8, verified| {
-        let mut value: serde_json::Value = serde_json::from_str(include_str!("test-credential.json")).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_str(include_str!("test-credential.json")).unwrap();
         use base64::Engine;
-        value["cred"]["cred_id"] = serde_json::json!(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([id]));
+        value["cred"]["cred_id"] =
+            serde_json::json!(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([id]));
         (serde_json::to_vec(&value).unwrap(), verified)
     };
     for count in [0usize, 1, 64, 65] {
@@ -559,9 +569,12 @@ fn credential_snapshots_require_uv_and_enforce_recovery_bounds_without_reorderin
     }
     assert!(credential_snapshot(vec![row(1, false)]).is_err());
     let rows = vec![row(2, false), row(1, true)];
-    let expected: Vec<_> = rows.iter().map(|(bytes, _)| {
-        serde_json::to_string(&serde_json::from_slice::<SecurityKey>(bytes).unwrap()).unwrap()
-    }).collect();
+    let expected: Vec<_> = rows
+        .iter()
+        .map(|(bytes, _)| {
+            serde_json::to_string(&serde_json::from_slice::<SecurityKey>(bytes).unwrap()).unwrap()
+        })
+        .collect();
     assert_eq!(credential_snapshot(rows).unwrap(), expected);
     assert!(credential_snapshot(vec![row(1, true), (b"{}".to_vec(), false)]).is_err());
 }

@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,7 +21,7 @@ use crate::{ApiClient, output, prompt};
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum FetchExistingSshKeysError {
-    #[error("Failed to fetch existing SSH keys [{location:?}]")]
+    #[error("Failed to fetch existing SSH keys [{location}]")]
     GetProtectedJson {
         #[location]
         location: Location,
@@ -23,7 +31,7 @@ pub enum FetchExistingSshKeysError {
     },
 
     /// The API response did not contain an array of keys.
-    #[error("Invalid response format [{location:?}]")]
+    #[error("Invalid response format [{location}]")]
     InvalidResponseFormat {
         #[location]
         location: Location,
@@ -61,7 +69,7 @@ async fn fetch_existing_ssh_keys(
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum AddSingleKeyError {
     /// An SSH-signed (or plain fallback) POST while registering the key failed; `signed_post` still returns errors from its legacy boundary.
-    #[error("Failed to submit key [{location:?}]")]
+    #[error("Failed to submit key [{location}]")]
     SubmitKey {
         #[location]
         location: Location,
@@ -71,14 +79,14 @@ pub enum AddSingleKeyError {
     },
 
     /// The API rejected the key as a duplicate.
-    #[error("Key already exists [{location:?}]")]
+    #[error("Key already exists [{location}]")]
     KeyAlreadyExists {
         #[location]
         location: Location,
     },
 
     /// The API returned a non-success response; the text is what `api_error_message` extracted from it.
-    #[error("{api_response} [{location:?}]")]
+    #[error("{api_response} [{location}]")]
     ServerResponse {
         api_response: String,
 
@@ -123,7 +131,7 @@ async fn add_single_key(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum SshKeysAddError {
-    #[error("authentication failed [{location:?}]")]
+    #[error("authentication failed [{location}]")]
     EnsureAuthenticated {
         #[location]
         location: Location,
@@ -133,7 +141,7 @@ pub enum SshKeysAddError {
     },
 
     /// The initial fetch of existing SSH keys for duplicate checking failed.
-    #[error("Failed to fetch existing SSH keys [{location:?}]")]
+    #[error("Failed to fetch existing SSH keys [{location}]")]
     FetchExistingSshKeys {
         #[location]
         location: Location,
@@ -143,14 +151,14 @@ pub enum SshKeysAddError {
     },
 
     /// `ssh-add -L` reported no loaded keys.
-    #[error("No keys found in ssh-agent. Run 'ssh-add' first. [{location:?}]")]
+    #[error("No keys found in ssh-agent. Run 'ssh-add' first. [{location}]")]
     NoAgentKeys {
         #[location]
         location: Location,
     },
 
     /// Prompt label from the failing `prompt::text` call site.
-    #[error("failed to read input '{prompt_label}' [{location:?}]")]
+    #[error("failed to read input '{prompt_label}' [{location}]")]
     PromptInput {
         #[context(borrow = str)]
         prompt_label: String,
@@ -163,7 +171,7 @@ pub enum SshKeysAddError {
     },
 
     /// The selected agent-key index was out of range or unparsable.
-    #[error("Invalid number, please select a number between 1 and {key_count} [{location:?}]")]
+    #[error("Invalid number, please select a number between 1 and {key_count} [{location}]")]
     InvalidAgentSelection {
         key_count: usize,
 
@@ -172,7 +180,7 @@ pub enum SshKeysAddError {
     },
 
     /// A local duplicate check found the key already registered under another name.
-    #[error("This SSH key is already added as '{existing_key_name}'. [{location:?}]")]
+    #[error("This SSH key is already added as '{existing_key_name}'. [{location}]")]
     KeyAlreadyAdded {
         existing_key_name: String,
 
@@ -181,14 +189,14 @@ pub enum SshKeysAddError {
     },
 
     /// The supplied or read public key does not look like an OpenSSH formatted key.
-    #[error("Invalid SSH key format [{location:?}]")]
+    #[error("Invalid SSH key format [{location}]")]
     InvalidKeyFormat {
         #[location]
         location: Location,
     },
 
     /// The public key file could not be read.
-    #[error("Failed to read SSH key file [{location:?}]")]
+    #[error("Failed to read SSH key file [{location}]")]
     KeyFileRead {
         #[context(borrow = Path)]
         path: PathBuf,
@@ -201,7 +209,7 @@ pub enum SshKeysAddError {
     },
 
     /// Registering the key with the API failed.
-    #[error("Failed to add SSH key [{location:?}]")]
+    #[error("Failed to add SSH key [{location}]")]
     AddSingleKey {
         #[location]
         location: Location,
@@ -211,7 +219,7 @@ pub enum SshKeysAddError {
     },
 
     /// No way was provided to supply a key.
-    #[error("Provide a key file, --key, or --from-agent [{location:?}]")]
+    #[error("Provide a key file, --key, or --from-agent [{location}]")]
     MissingKeySource {
         #[location]
         location: Location,
@@ -373,7 +381,7 @@ pub async fn add(
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum SshKeysRemoveError {
-    #[error("authentication failed [{location:?}]")]
+    #[error("authentication failed [{location}]")]
     EnsureAuthenticated {
         #[location]
         location: Location,
@@ -383,7 +391,7 @@ pub enum SshKeysRemoveError {
     },
 
     /// The HTTP delete request for the key failed.
-    #[error("HTTP request failed [{location:?}]")]
+    #[error("HTTP request failed [{location}]")]
     Http {
         #[location]
         location: Location,
@@ -393,7 +401,7 @@ pub enum SshKeysRemoveError {
     },
 
     /// The API returned a non-success response; the text is what `api_error_message` extracted from it.
-    #[error("Failed to remove key: {api_response} [{location:?}]")]
+    #[error("Failed to remove key: {api_response} [{location}]")]
     ServerResponseFailure {
         api_response: String,
 
@@ -436,7 +444,7 @@ pub async fn remove(client: &ApiClient, fingerprint: &str) -> Result<(), SshKeys
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum SshKeysListError {
-    #[error("authentication failed [{location:?}]")]
+    #[error("authentication failed [{location}]")]
     EnsureAuthenticated {
         #[location]
         location: Location,
@@ -445,7 +453,7 @@ pub enum SshKeysListError {
         source: BoxError,
     },
 
-    #[error("Failed to list SSH keys [{location:?}]")]
+    #[error("Failed to list SSH keys [{location}]")]
     ListSshKeys {
         #[location]
         location: Location,
@@ -455,7 +463,7 @@ pub enum SshKeysListError {
     },
 
     /// The API response did not contain an array of keys.
-    #[error("Invalid response format [{location:?}]")]
+    #[error("Invalid response format [{location}]")]
     InvalidResponseFormat {
         #[location]
         location: Location,

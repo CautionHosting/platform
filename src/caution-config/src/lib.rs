@@ -4,7 +4,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub mod app_name;
+pub mod network_policy;
+pub use network_policy::NetworkPolicyError;
+mod historical;
 pub mod pricing;
+mod traffic_rule;
+pub use historical::HistoricalConfigError;
 mod restart;
 pub use restart::{RestartConfig, RestartPolicy};
 
@@ -80,17 +85,13 @@ pub enum PortSpec {
     Exact { port: u16 },
 }
 
-/// A single traffic rule.
-///
-/// NOTE: `deny_unknown_fields` is intentionally absent here -- `#[serde(flatten)]`
-/// on `Option<PortSpec>` (untagged) is incompatible with it. Serde can't
-/// distinguish "field consumed by flattened type" from "unknown field" when
-/// the flattened type uses multi-field untagged variants (e.g. `FromTo`).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// A single traffic rule, decoded strictly before policy normalization.
+#[derive(Clone, Debug, Serialize)]
 pub struct TrafficRule {
     pub cidr_ipv4: String,
     #[serde(flatten)]
     pub port_spec: Option<PortSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ip_protocol: Option<String>,
 }
 
@@ -329,7 +330,26 @@ pub struct NetworkConfig {
     pub ingress: Vec<TrafficRule>,
     #[serde(deserialize_with = "single_or_vec", default)]
     pub egress: Vec<TrafficRule>,
+    /// Recovery endpoint sources. Omitted inherits HTTP sources; an empty list denies all.
+    #[serde(default, deserialize_with = "deserialize_recovery_ingress", skip_serializing_if = "Option::is_none")]
+    pub recovery_ingress: Option<Vec<RecoveryIngress>>,
     pub http: Option<HttpConfig>,
+}
+
+/// A CIDR-only source rule for recovery endpoints.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryIngress {
+    /// IPv4 source CIDR, canonicalized by `NetworkConfig::policy`.
+    #[serde(deserialize_with = "traffic_rule::strict")]
+    pub cidr_ipv4: String,
+}
+
+fn deserialize_recovery_ingress<'de, D>(deserializer: D) -> Result<Option<Vec<RecoveryIngress>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    single_or_vec(deserializer).map(Some)
 }
 
 impl NetworkConfig {
@@ -434,6 +454,13 @@ pub enum AwsIdValidationError {
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error, dterror::CtxError)]
 pub enum FromProcfileError {
+    #[error("invalid network policy [{location}]")]
+    NetworkPolicy {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
     #[error(
         "Port {port} is reserved for internal enclave services. Ports 49500-49600 are reserved; choose a different application port. [{location}]"
     )]
@@ -488,6 +515,14 @@ pub enum FromProcfileError {
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error, dterror::CtxError)]
 pub enum FromStrError {
+    #[error("invalid network policy for enclave '{enclave}' [{location}]")]
+    NetworkPolicy {
+        enclave: String,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
     #[error("Ports 49500-49600 are reserved; choose a different application port. [{location}]")]
     ReservedPort {
         #[location]
@@ -771,6 +806,11 @@ fn validate_provider(provider: &Provider) -> Result<(), AwsIdValidationError> {
 impl ConfigurationFile {
     #[tracing::instrument(skip_all, err)]
     pub fn from_procfile(content: &str) -> Result<Self, FromProcfileError> {
+        Self::parse_procfile(content, false)
+    }
+
+    #[tracing::instrument(skip_all, err)]
+    fn parse_procfile(content: &str, historical: bool) -> Result<Self, FromProcfileError> {
         use FromProcfileErrorCtx as Ctx;
 
         let mut containerfile = None;
@@ -857,7 +897,7 @@ impl ConfigurationFile {
                             }
                             match trimmed.parse::<u16>() {
                                 Ok(port) if port > 0 => {
-                                    if is_reserved(port) {
+                                    if !historical && is_reserved(port) {
                                         return Err(FromProcfileError::ReservedPort {
                                             port,
                                             location: std::panic::Location::caller(),
@@ -917,7 +957,8 @@ impl ConfigurationFile {
             }
         }
 
-        if let Some(hp) = http_port
+        if !historical
+            && let Some(hp) = http_port
             && !ports.contains(&hp)
         {
             return Err(FromProcfileError::HttpPortNotInPorts {
@@ -1013,11 +1054,16 @@ impl ConfigurationFile {
             Some(NetworkConfig {
                 ingress,
                 egress: Vec::new(),
+                recovery_ingress: None,
                 http,
             })
         } else {
             None
         };
+
+        if !historical && let Some(network) = &network {
+            network.policy().with_context(Ctx::network_policy())?;
+        }
 
         let unit = run.map(|cmd| {
             let parts = shlex::split(&cmd);
@@ -1114,7 +1160,20 @@ impl ConfigurationFile {
     pub fn from_str(s: &str) -> Result<Self, FromStrError> {
         use FromStrErrorCtx as Ctx;
 
-        let mut config: ConfigurationFile = hcl::from_str(s).with_context(Ctx::hcl_parse())?;
+        let config: ConfigurationFile = hcl::from_str(s).with_context(Ctx::hcl_parse())?;
+
+        for (name, enclave) in config.enclave.iter().flatten() {
+            if let Some(network) = &enclave.network {
+                network.policy().with_context(Ctx::network_policy(name.clone()))?;
+            }
+        }
+
+        Self::validate_parsed_hcl(config)
+    }
+
+    #[tracing::instrument(skip_all, err)]
+    fn validate_parsed_hcl(mut config: Self) -> Result<Self, FromStrError> {
+        use FromStrErrorCtx as Ctx;
 
         if let Some(provider) = config.caution.as_ref().and_then(|c| c.provider.as_ref())
             && let Err(source) = validate_provider(provider)
@@ -1123,32 +1182,6 @@ impl ConfigurationFile {
                 location: std::panic::Location::caller(),
                 source: Box::new(source),
             });
-        }
-
-        if let Some((_, enclave)) = &config.enclave.iter().flatten().next()
-            && let Some(network) = &enclave.network
-        {
-            for ingress in &network.ingress {
-                match ingress.port_spec {
-                    // There's no stdlib range intersection, but I think this may be more elegant.
-                    Some(PortSpec::FromTo {
-                        start_port,
-                        end_port,
-                    }) if start_port <= RESERVED_INTERNAL_PORT_END
-                        && end_port >= RESERVED_INTERNAL_PORT_START =>
-                    {
-                        return Err(FromStrError::ReservedPort {
-                            location: std::panic::Location::caller(),
-                        });
-                    }
-                    Some(PortSpec::Exact { port }) if is_reserved(port) => {
-                        return Err(FromStrError::ReservedPort {
-                            location: std::panic::Location::caller(),
-                        });
-                    }
-                    _ => (),
-                }
-            }
         }
 
         if let Some(ref enclaves) = config.enclave {
@@ -1174,21 +1207,6 @@ impl ConfigurationFile {
                         && e2e.effective_mode() != Some(E2eMode::Steve)
                     {
                         return Err(FromStrError::KeyExchangeRequiresSteve {
-                            location: std::panic::Location::caller(),
-                        });
-                    }
-
-                    let port_covered = network.ingress.iter().any(|rule| match &rule.port_spec {
-                        Some(PortSpec::Exact { port }) => port == &http.port,
-                        Some(PortSpec::FromTo {
-                            start_port,
-                            end_port,
-                        }) => *start_port <= http.port && http.port <= *end_port,
-                        None => false,
-                    });
-                    if !port_covered {
-                        return Err(FromStrError::HttpPortNotInPorts {
-                            port: http.port,
                             location: std::panic::Location::caller(),
                         });
                     }
@@ -1274,8 +1292,8 @@ mod tests {
                     build: Some(BuildConfig {
                         containerfile: Some("Containerfile.example".into()),
                         app_sources: vec![
-                            "git@codeberg.org:caution/demo-hello-world-enclave".into(),
-                            "https://codeberg.org/caution/demo-hello-world-enclave".into(),
+                            "git@git.caution.co:public/demo-hello-world-enclave".into(),
+                            "https://git.caution.co/public/demo-hello-world-enclave".into(),
                         ],
                         cache: Some(false),
                     }),
@@ -1284,6 +1302,7 @@ mod tests {
                         ssh_keys: vec!["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGiqWyt0v5RpZqVK9EUeTWdCBGQo6+GN6jbUe0mPSEfV ryan@left".into()],
                     }),
                     network: Some(NetworkConfig {
+                        recovery_ingress: None,
                         ingress: vec![TrafficRule {
                             cidr_ipv4: "0.0.0.0/0".into(),
                             port_spec: Some(PortSpec::FromTo {
@@ -1552,10 +1571,11 @@ enclave "main" {
 }
 "#;
         let err = ConfigurationFile::from_str(hcl).unwrap_err();
-        assert!(matches!(
-            err,
-            FromStrError::HttpPortNotInPorts { port: 9090, .. }
-        ));
+        let FromStrError::NetworkPolicy { source, .. } = err else {
+            panic!("expected network policy error");
+        };
+        assert!(matches!(source.downcast_ref::<NetworkPolicyError>(),
+            Some(NetworkPolicyError::HttpPortNotInIngress { port: 9090, .. })));
     }
 
     #[test]
@@ -1802,7 +1822,7 @@ enclave "main" {
 
     #[test]
     fn test_from_procfile_ports_mapped_to_ingress() {
-        let procfile = "run: /app/server\nports: 80, 443\n";
+        let procfile = "run: /app/server\nports: 8080, 8443\n";
         let config = ConfigurationFile::from_procfile(procfile).unwrap();
         let enclave = config.enclave.unwrap();
         let network = enclave.get("default").unwrap().network.as_ref().unwrap();
@@ -1810,12 +1830,12 @@ enclave "main" {
         assert_eq!(network.ingress[0].cidr_ipv4, "0.0.0.0/0");
         assert_eq!(
             network.ingress[0].port_spec,
-            Some(PortSpec::Exact { port: 80 })
+            Some(PortSpec::Exact { port: 8080 })
         );
         assert_eq!(network.ingress[0].ip_protocol, Some("tcp".into()));
         assert_eq!(
             network.ingress[1].port_spec,
-            Some(PortSpec::Exact { port: 443 })
+            Some(PortSpec::Exact { port: 8443 })
         );
     }
 
@@ -2111,7 +2131,7 @@ enclave "main" {
         let build = e.build.as_ref().unwrap();
         assert_eq!(
             build.app_sources,
-            vec!["git@codeberg.org:caution/demo-hello-world-enclave.git"]
+            vec!["git@git.caution.co:public/demo-hello-world-enclave.git"]
         );
 
         let network = e.network.as_ref().unwrap();
@@ -2125,7 +2145,11 @@ enclave "main" {
 
     #[test]
     fn demo_ai_inference() {
-        let config = ConfigurationFile::from_procfile(DEMO_AI_INFERENCE_PROCFILE).unwrap();
+        let error = ConfigurationFile::from_procfile(DEMO_AI_INFERENCE_PROCFILE)
+            .expect_err("legacy fixture exposes HTTP without declared ingress");
+        assert!(matches!(error, FromProcfileError::NetworkPolicy { .. }));
+        let input = format!("{DEMO_AI_INFERENCE_PROCFILE}\nports: 80\nhttp_port: 80\n");
+        let config = ConfigurationFile::from_procfile(&input).unwrap();
         let enclave = config.enclave.as_ref().unwrap();
         let e = enclave.get("default").unwrap();
 
@@ -2157,7 +2181,7 @@ enclave "main" {
         let build = e.build.as_ref().unwrap();
         assert_eq!(
             build.app_sources,
-            vec!["https://codeberg.org/caution/demo-ai-inference.git"]
+            vec!["https://git.caution.co/public/demo-ai-inference.git"]
         );
 
         let resources = e.resources.as_ref().unwrap();
@@ -2166,7 +2190,7 @@ enclave "main" {
 
         assert_eq!(build.cache, Some(false));
 
-        assert!(network.ingress.is_empty());
+        assert_eq!(network.ingress.len(), 1);
     }
 
     #[test]
@@ -2182,7 +2206,7 @@ enclave "main" {
         let build = e.build.as_ref().unwrap();
         assert_eq!(
             build.app_sources,
-            vec!["https://codeberg.org/caution/locksmith/archive/${COMMIT}.tar.gz"]
+            vec!["https://git.caution.co/public/locksmith/archive/${COMMIT}.tar.gz"]
         );
 
         let network = e.network.as_ref().unwrap();
@@ -2216,7 +2240,7 @@ enclave "main" {
         let build = e.build.as_ref().unwrap();
         assert_eq!(
             build.app_sources,
-            vec!["git@codeberg.org:caution/demo-hello-world-enclave.git"]
+            vec!["git@git.caution.co:public/demo-hello-world-enclave.git"]
         );
 
         let network = e.network.as_ref().unwrap();
@@ -2262,7 +2286,7 @@ enclave "main" {
         let build = e.build.as_ref().unwrap();
         assert_eq!(
             build.app_sources,
-            vec!["https://codeberg.org/caution/demo-ai-inference.git"]
+            vec!["https://git.caution.co/public/demo-ai-inference.git"]
         );
 
         let resources = e.resources.as_ref().unwrap();
@@ -2291,7 +2315,7 @@ enclave "main" {
         let build = e.build.as_ref().unwrap();
         assert_eq!(
             build.app_sources,
-            vec!["https://codeberg.org/caution/locksmith/archive/${COMMIT}.tar.gz"]
+            vec!["https://git.caution.co/public/locksmith/archive/${COMMIT}.tar.gz"]
         );
 
         let network = e.network.as_ref().unwrap();

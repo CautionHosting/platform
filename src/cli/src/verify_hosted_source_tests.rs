@@ -11,6 +11,7 @@ fn source(url: &str) -> AppSource {
 fn repository_candidates_are_https_and_commit_pinned_without_changing_manifest() {
     for repo in [
         "https://codeberg.org/caution/locksmith",
+        "https://git.caution.co/public/locksmith",
         "https://forge.example:8443/team/repo.git",
     ] {
         let source = source(repo);

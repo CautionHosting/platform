@@ -8,8 +8,8 @@ enclave "main" {
   build {
     containerfile = "Containerfile.example"
     app_sources = [
-      "git@codeberg.org:caution/demo-hello-world-enclave",
-      "https://codeberg.org/caution/demo-hello-world-enclave",
+      "git@git.caution.co:public/demo-hello-world-enclave",
+      "https://git.caution.co/public/demo-hello-world-enclave",
     ]
     cache = false
   }

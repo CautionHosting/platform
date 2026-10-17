@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use axum::{
     Json, Router,
     body::Body,
@@ -25,6 +33,7 @@ mod builder;
 #[cfg(feature = "e2e-testing-unsafe")]
 mod cleanup;
 mod cloud_credentials;
+mod component_artifacts;
 mod config;
 mod cryptographic_bundles;
 mod deployment;
@@ -38,6 +47,7 @@ mod legal;
 mod managed_dns;
 mod metering;
 mod middleware;
+mod network_policy;
 mod onboarding;
 mod org_quorum;
 mod organizations;
@@ -46,6 +56,7 @@ mod resources;
 mod service_observations;
 mod subscriptions;
 mod suspension;
+mod test_endpoints;
 mod types;
 mod users;
 mod validated_types;
@@ -227,7 +238,7 @@ pub(crate) enum CheckOrgAccessError {
     Forbidden { location: Location },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn check_org_access(
     db: &PgPool,
     user_id: Uuid,
@@ -275,7 +286,7 @@ pub(crate) enum GetUserPrimaryOrgError {
     NotFound { location: Location },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn get_user_primary_org(
     db: &PgPool,
     user_id: Uuid,
@@ -336,7 +347,7 @@ pub(crate) enum GetOrCreateProviderAccountError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn get_or_create_provider_account(
     db: &PgPool,
     org_id: Uuid,
@@ -430,7 +441,7 @@ pub(crate) enum GetOrCreateResourceTypeError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn get_or_create_resource_type(
     db: &PgPool,
 ) -> Result<Uuid, GetOrCreateResourceTypeError> {
@@ -469,8 +480,9 @@ async fn health_check() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))
 }
 
-const PLATFORM_REPO: &str = "https://codeberg.org/caution/platform.git";
+const PLATFORM_REPO: &str = "https://git.caution.co/public/platform.git";
 
+#[tracing::instrument(skip_all)]
 async fn build_inputs() -> impl IntoResponse {
     #[derive(serde::Serialize)]
     struct BuildInputs {
@@ -563,7 +575,7 @@ impl WaitForHealthError {
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn wait_for_health(
     public_ip: &str,
     timeout_secs: u64,
@@ -713,7 +725,7 @@ mod deployment_health_tests {
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn wait_for_attestation_health(
     public_ip: &str,
     timeout_secs: u64,
@@ -792,7 +804,7 @@ pub(crate) enum GetCommitShaError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn get_commit_sha(
     app_name: &str,
     branch: &str,
@@ -837,7 +849,7 @@ pub(crate) enum SelectDeployCommitShaError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 fn select_deploy_commit_sha(
     branch: &str,
     resolved_commit_sha: &str,
@@ -890,11 +902,11 @@ impl IntoResponse for ListCloudCredentialsError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 async fn list_cloud_credentials(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -949,11 +961,11 @@ impl IntoResponse for CreateCloudCredentialError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 async fn create_cloud_credential(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1019,11 +1031,11 @@ impl IntoResponse for GetCloudCredentialError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(credential_id = %credential_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(credential_id = %credential_id))]
 async fn get_cloud_credential(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1086,11 +1098,11 @@ impl IntoResponse for DeleteCloudCredentialError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(credential_id = %credential_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(credential_id = %credential_id))]
 async fn delete_cloud_credential(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1156,11 +1168,11 @@ impl IntoResponse for SetDefaultCloudCredentialError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal database error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(credential_id = %credential_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(credential_id = %credential_id))]
 async fn set_default_cloud_credential(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1217,11 +1229,11 @@ impl IntoResponse for ListQuorumBundlesError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 async fn list_quorum_bundles(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1238,7 +1250,7 @@ async fn list_quorum_bundles(
     Ok(Json(items))
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 async fn create_quorum_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1261,6 +1273,7 @@ async fn create_quorum_bundle(
     Ok(Json(bundle))
 }
 
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 async fn create_org_user_quorum_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1277,6 +1290,7 @@ async fn create_org_user_quorum_bundle(
     ))
 }
 
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 async fn list_org_quorum_participants(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1329,11 +1343,11 @@ impl IntoResponse for GetQuorumBundleError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(bundle_id = %id))]
+#[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 async fn get_quorum_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1356,7 +1370,7 @@ async fn get_quorum_bundle(
     Ok(Json(bundle))
 }
 
-#[tracing::instrument(skip_all, err, fields(bundle_id = %id))]
+#[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 async fn update_quorum_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1423,11 +1437,11 @@ impl IntoResponse for DeleteQuorumBundleError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(bundle_id = %id))]
+#[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 async fn delete_quorum_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1484,11 +1498,11 @@ impl IntoResponse for ListSecretsBundlesError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 async fn list_secrets_bundles(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1536,11 +1550,11 @@ impl IntoResponse for CreateSecretsBundleError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 async fn create_secrets_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1595,11 +1609,11 @@ impl IntoResponse for GetSecretsBundleError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(bundle_id = %id))]
+#[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 async fn get_secrets_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1659,11 +1673,11 @@ impl IntoResponse for UpdateSecretsBundleError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(bundle_id = %id))]
+#[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 async fn update_secrets_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1724,11 +1738,11 @@ impl IntoResponse for DeleteSecretsBundleError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(bundle_id = %id))]
+#[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 async fn delete_secrets_bundle(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1919,14 +1933,14 @@ impl IntoResponse for CreateManagedOnpremResourceError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
 /// Create or update a managed on-prem resource.
 /// Accepts either plain JSON or GPG-encrypted config from the setup script.
 /// If resource_id is provided, updates the existing resource; otherwise creates a new one.
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 async fn create_managed_onprem_resource(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -2242,7 +2256,7 @@ pub(crate) enum RecoverDeployFailureError {
 }
 
 #[allow(clippy::too_many_arguments)]
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn recover_deploy_failure(
     state: &Arc<AppState>,
     org_id: Uuid,
@@ -2308,9 +2322,9 @@ pub(crate) enum RestorePendingDeployRejectionError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn restore_pending_deploy_rejection(
-    state: &Arc<AppState>,
+    db: &sqlx::PgPool,
     org_id: Uuid,
     resource_id: Uuid,
     deploy_attempt_id: Uuid,
@@ -2331,7 +2345,7 @@ async fn restore_pending_deploy_rejection(
         .bind(resource_id)
         .bind(org_id)
         .bind(deploy_attempt_id)
-        .execute(&state.db)
+        .execute(db)
         .await
     } else {
         sqlx::query(
@@ -2344,7 +2358,7 @@ async fn restore_pending_deploy_rejection(
         .bind(resource_id)
         .bind(org_id)
         .bind(deploy_attempt_id)
-        .execute(&state.db)
+        .execute(db)
         .await
     };
 
@@ -2377,7 +2391,7 @@ impl DeployTarget {
                 was_destroyed,
             } => {
                 if let Err(error) = restore_pending_deploy_rejection(
-                    state,
+                    &state.db,
                     org_id,
                     resource_id,
                     deploy_attempt_id,
@@ -2587,7 +2601,7 @@ pub(crate) enum ResolveBuilderTargetError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn resolve_builder_target(
     default_config: &builder::BuilderConfig,
     managed_onprem: Option<&deployment::ManagedOnPremConfig>,
@@ -2681,11 +2695,11 @@ impl IntoResponse for GetBuilderConfigError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 async fn get_builder_config(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -2762,11 +2776,11 @@ impl IntoResponse for SetBuilderConfigError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(resource_id = %resource_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 async fn set_builder_config(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -2775,14 +2789,11 @@ async fn set_builder_config(
 ) -> Result<Json<serde_json::Value>, SetBuilderConfigError> {
     use SetBuilderConfigErrorCtx as Ctx;
 
+    let builder_size = validated_types::builder_size_from_request(&body)?;
+
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
         .with_context(Ctx::primary_org_lookup())?;
-
-    let builder_size = body
-        .get("builder_size")
-        .and_then(|v| v.as_str())
-        .unwrap_or("small");
 
     if !state.builder_sizes.is_valid(builder_size) {
         let valid: Vec<&str> = state
@@ -2823,6 +2834,13 @@ async fn set_builder_config(
 /// the underlying sources stay chained on the error and never reach the client.
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum DeployLogicError {
+    #[error("could not prepare pinned component artifacts [{location}]")]
+    Components {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
     #[error("invalid platform framework commit [{location}]")]
     FrameworkCommit {
         #[location]
@@ -3000,6 +3018,15 @@ pub(crate) enum DeployLogicError {
         #[source]
         source: BoxError,
     },
+    #[error("invalid network policy [{location}]")]
+    NetworkPolicy {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("recovery without HTTP requires explicit ingress sources [{location}]")]
+    RecoveryIngressRequired { location: Location },
 
     #[error("failed to inspect repository contents [{location}]")]
     RepoInspect {
@@ -3224,7 +3251,7 @@ impl DeployLogicError {
     /// Frozen status code and fixed client body for each failure path.
     fn client_response(&self) -> (StatusCode, &'static str) {
         match self {
-            DeployLogicError::FrameworkCommit { .. } => {
+            DeployLogicError::FrameworkCommit { .. } | DeployLogicError::Components { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
             DeployLogicError::OrgMembership { .. } => {
@@ -3325,9 +3352,37 @@ impl DeployLogicError {
                 StatusCode::BAD_REQUEST,
                 "Requested commit_sha does not match the branch head",
             ),
-            DeployLogicError::BuildConfigGit { .. } => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            DeployLogicError::BuildConfigGit { source, .. } => {
+                match source.downcast_ref::<LoadBuildConfigForDeployError>() {
+                    Some(LoadBuildConfigForDeployError::HclParse { source, .. }) => {
+                        let message = match source.downcast_ref::<config::FromStrError>() {
+                            Some(config::FromStrError::NetworkPolicy { source, .. }) => source
+                                .downcast_ref::<config::NetworkPolicyError>()
+                                .map(config::NetworkPolicyError::client_message)
+                                .unwrap_or("Invalid caution.hcl network policy"),
+                            _ => "Invalid caution.hcl",
+                        };
+                        (StatusCode::BAD_REQUEST, message)
+                    }
+                    Some(LoadBuildConfigForDeployError::ProcfileParse { source, .. })
+                        if matches!(source.downcast_ref::<config::FromProcfileError>(),
+                            Some(config::FromProcfileError::NetworkPolicy { .. })) =>
+                    {
+                        (StatusCode::BAD_REQUEST, "Invalid network policy.")
+                    }
+                    _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+                }
             }
+            DeployLogicError::NetworkPolicy { source, .. } => (
+                StatusCode::BAD_REQUEST,
+                source.downcast_ref::<config::NetworkPolicyError>()
+                    .map(config::NetworkPolicyError::client_message)
+                    .unwrap_or("Invalid caution.hcl network policy"),
+            ),
+            DeployLogicError::RecoveryIngressRequired { .. } => (
+                StatusCode::BAD_REQUEST,
+                "Recovery without HTTP requires explicit network.recovery_ingress sources",
+            ),
             DeployLogicError::RepoInspect { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
@@ -3462,8 +3517,16 @@ async fn deploy_handler(
     Extension(auth): Extension<AuthContext>,
     validated_types::Validated(req): validated_types::Validated<DeployRequest>,
 ) -> Response {
+    use sentry_middleware::{REQUEST_ID, capture_error_with_breadcrumbs, drain_breadcrumbs};
+
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
     let deploy_attempt_id = Uuid::new_v4();
+
+    // Capture the request ID and any breadcrumbs accumulated so far (pre-spawn
+    // phase: auth, validation, handler setup). We remove them from the shared
+    // map so SentryService's later drain is a no-op.
+    let request_id = REQUEST_ID.get();
+    let pre_spawn_breadcrumbs = drain_breadcrumbs(&request_id);
 
     // Spawn the deploy logic in a separate task
     let db_for_recovery = state.db.clone();
@@ -3473,14 +3536,16 @@ async fn deploy_handler(
     let state_for_recovery = state.clone();
     let progress = Arc::new(app_deployments::lifecycle::DeployProgress::default());
     tokio::spawn(async move {
-        // An inner task, so that a panic still reaches the recovery below.
-        let result = match tokio::spawn(deploy_logic(
-            state,
-            auth,
-            req,
-            deploy_attempt_id,
-            progress.clone(),
-            tx.clone(),
+        let result = match tokio::spawn(REQUEST_ID.scope(
+            request_id,
+            deploy_logic(
+                state,
+                auth,
+                req,
+                deploy_attempt_id,
+                progress.clone(),
+                tx.clone(),
+            ),
         ))
         .await
         {
@@ -3493,9 +3558,11 @@ async fn deploy_handler(
             }
         };
 
-        // Send final result as JSON
         match result {
             Ok(response) => {
+                // Clean up post-spawn breadcrumbs (no error to report).
+                drain_breadcrumbs(&request_id);
+
                 let json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
                 let _ = tx.send(Ok(bytes::Bytes::from(format!("{}\n", json)))).await;
             }
@@ -3529,6 +3596,13 @@ async fn deploy_handler(
                     )
                     .await;
                 }
+
+                // Collect all breadcrumbs (pre-spawn + post-spawn) and report
+                // the failure to Sentry with an isolated hub.
+                let post_spawn = drain_breadcrumbs(&request_id);
+                let mut all_breadcrumbs = pre_spawn_breadcrumbs;
+                all_breadcrumbs.extend(post_spawn);
+                capture_error_with_breadcrumbs(&error, all_breadcrumbs);
 
                 let (status, msg) = error.client_response();
                 let _ = tx.send(Ok(milestone_error(msg))).await;
@@ -3573,7 +3647,7 @@ pub(crate) enum RepoHasFileAtCommitError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn repo_has_file_at_commit(
     git_dir: &str,
     commit_sha: &str,
@@ -3644,7 +3718,7 @@ pub(crate) enum ResolveContainerfileForDeployError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn validate_explicit_containerfile_for_deploy(
     git_dir: &str,
     commit_sha: &str,
@@ -3713,7 +3787,7 @@ pub(crate) enum LoadBuildConfigForDeployError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn load_build_config_for_deploy(
     git_dir: &str,
     commit_sha: &str,
@@ -3773,7 +3847,7 @@ async fn load_build_config_for_deploy(
     Ok((procfile_content, config_file))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 async fn resolve_containerfile_for_deploy(
     git_dir: &str,
     commit_sha: &str,
@@ -4017,6 +4091,57 @@ mod deploy_containerfile_tests {
         let commit_sha = String::from_utf8(output.stdout).unwrap().trim().to_string();
 
         (repo_dir, commit_sha)
+    }
+
+    #[tokio::test]
+    async fn deploy_path_rejects_invalid_policy_without_procfile_fallback() {
+        let (repo_dir, commit_sha) = commit_test_repo(&[
+            (
+                "caution.hcl",
+                r#"enclave "main" {
+                    network {
+                        egress { cidr_ipv4 = "not-a-cidr" }
+                    }
+                }"#,
+            ),
+            ("Procfile", "run: /app\n"),
+        ]);
+        let git_dir = repo_dir.path().join(".git");
+        let error = load_build_config_for_deploy(git_dir.to_str().unwrap(), &commit_sha)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, super::LoadBuildConfigForDeployError::HclParse { .. }));
+        let error = super::DeployLogicError::BuildConfigGit {
+            source: Box::new(error),
+            location: std::panic::Location::caller(),
+        };
+        let (status, body) = error.client_response();
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(body.starts_with("Invalid caution.hcl") || body.starts_with("Invalid network"));
+        assert!(!body.contains("main.rs"));
+        assert!(!body.contains(repo_dir.path().to_str().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn deploy_path_rejects_invalid_procfile_policy_as_client_error() {
+        for procfile in [
+            "run: /app\nports: 22\n",
+            "run: /app\nports: 80, 8080\nhttp_port: 8080\n",
+        ] {
+            let (repo_dir, commit_sha) = commit_test_repo(&[("Procfile", procfile)]);
+            let git_dir = repo_dir.path().join(".git");
+            let source = load_build_config_for_deploy(git_dir.to_str().unwrap(), &commit_sha)
+                .await
+                .unwrap_err();
+            let error = super::DeployLogicError::BuildConfigGit {
+                source: Box::new(source),
+                location: std::panic::Location::caller(),
+            };
+            assert_eq!(
+                error.client_response(),
+                (axum::http::StatusCode::BAD_REQUEST, "Invalid network policy.")
+            );
+        }
     }
 
     #[tokio::test]
@@ -4473,6 +4598,22 @@ async fn deploy_logic(
         });
     }
 
+    let component_selection = component_artifacts::ComponentSelection::parse_with_mode(
+        std::env::var("COMPONENT_BUILD_MODE").ok().as_deref(),
+        std::env::var("COMPONENT_SET_SHA256").ok(),
+        std::env::var("COMPONENTS_S3_BUCKET").ok(),
+        &state.builder_config.eif_s3_bucket,
+    )
+    .with_context(Ctx::components())?;
+    let selected_components = match component_selection {
+        Some(selection) => Some(
+            component_artifacts::SelectedComponents::load(selection)
+                .await
+                .with_context(Ctx::components())?,
+        ),
+        None => None,
+    };
+
     // Legacy claims the app by moving it to Pending; a candidate claims its
     // reservation once the commit is known (below).
     if candidate_deployment_id.is_none() {
@@ -4623,27 +4764,22 @@ async fn deploy_logic(
 
     let no_cache = ec_build.and_then(|b| b.cache).map(|c| !c).unwrap_or(false);
     let app_sources = ec_build.map(|b| b.app_sources.clone()).unwrap_or_default();
-    let egress = ec_network.map(|n| n.egress_enabled()).unwrap_or(false);
-
-    let ingress_ports: Vec<u16> = ec_network
-        .map(|n| {
-            let mut ports: Vec<u16> = n
-                .ingress
-                .iter()
-                .flat_map(|rule| match &rule.port_spec {
-                    Some(config::PortSpec::Exact { port }) => vec![*port],
-                    Some(config::PortSpec::FromTo {
-                        start_port,
-                        end_port,
-                    }) => (*start_port..=*end_port).collect::<Vec<u16>>(),
-                    _ => Vec::new(),
-                })
-                .collect();
-            ports.sort();
-            ports.dedup();
-            ports
-        })
-        .unwrap_or_default();
+    let network = ec_network
+        .cloned()
+        .unwrap_or_else(|| config::NetworkConfig {
+            ingress: Vec::new(),
+            egress: Vec::new(),
+            recovery_ingress: None,
+            http: None,
+        });
+    let network_policy = network.policy().with_context(Ctx::network_policy())?;
+    if config_file.has_vault_env() && network.http.is_none() && network.recovery_ingress.is_none() {
+        return Err(DeployLogicError::RecoveryIngressRequired {
+            location: std::panic::Location::caller(),
+        });
+    }
+    let egress = network_policy.egress_enabled();
+    let ingress_ports = network_policy.ports();
 
     let managed_onprem_credential = if let Some(credential) = cred
         .as_ref()
@@ -4786,9 +4922,22 @@ async fn deploy_logic(
     )
     .await
     .with_context(Ctx::builder_target())?;
-    let builder_eif_s3_key = {
+    let build_result: Result<builder::BuildResult, DeployLogicError> = async {
         let enclaveos_commit = enclave_builder::build::resolve_enclaveos_commit();
         let steve_commit = enclave_builder::build::resolve_steve_commit();
+        if let Some(selected) = &selected_components {
+            component_artifacts::validate_source_pins(
+                selected.set(),
+                &enclaveos_commit,
+                &enclave_builder::build::resolve_bootproof_commit(),
+                &framework_commit,
+                e2e.then_some(steve_commit.as_str()),
+                config_file
+                    .has_vault_env()
+                    .then_some(enclave_builder::build::resolve_locksmith_commit().as_str()),
+            )
+            .with_context(Ctx::components())?;
+        }
         let cache_key = builder::compute_cache_key(
             &commit_sha,
             &enclaveos_commit,
@@ -4805,18 +4954,28 @@ async fn deploy_logic(
             &framework_commit,
             tls_await_app_address,
         );
+        let cache_key = component_artifacts::cache_key_with_components(
+            &cache_key,
+            selected_components
+                .as_ref()
+                .map(|selected| selected.digest()),
+        );
         let s3_client = s3_client_for_credentials(&builder_target.aws_credentials).await;
 
         // Check cache first
         let cached_result = if !no_cache {
-            builder::check_build_cache(
+            let result = builder::check_build_cache(
                 &state.db,
                 req.org_id,
                 &cache_key,
                 builder_target.cache_app_id,
             )
-            .await
-            .with_context(Ctx::cache_lookup())?
+            .await;
+            if matches!(&result, Err(builder::CheckBuildCacheError::Decode { .. })) {
+                result.with_context(Ctx::components())?
+            } else {
+                result.with_context(Ctx::cache_lookup())?
+            }
         } else {
             None
         };
@@ -4838,13 +4997,30 @@ async fn deploy_logic(
         };
 
         if let Some(cached) = cached_result {
+            let expected = selected_components
+                .as_ref()
+                .map(|selected| {
+                    component_artifacts::BuildComponentArtifacts::from_set(
+                        selected.set(),
+                        &cached.eif_s3_key,
+                    )
+                })
+                .transpose()
+                .with_context(Ctx::components())?;
+            if cached.component_artifacts != expected {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "cached EIF component provenance does not match captured selection",
+                ))
+                .with_context(Ctx::components());
+            }
             let _ = tx.send(Ok(milestone("Using cached build..."))).await;
             tracing::info!(
                 "Builder cache HIT: cache_key={}, s3_key={}",
                 cache_key,
                 cached.eif_s3_key
             );
-            cached.eif_s3_key
+            Ok(cached)
         } else {
             let _ = tx
                 .send(Ok(milestone("Provisioning dedicated builder...")))
@@ -4865,6 +5041,20 @@ async fn deploy_logic(
                 });
             }
 
+            if let Some(selected) = &selected_components {
+                selected
+                    .stage_for_builder(
+                        s3_client.clone(),
+                        builder_target.config.eif_s3_bucket.clone(),
+                        &component_artifacts::required_components(
+                            e2e,
+                            config_file.has_vault_env(),
+                            egress,
+                        ),
+                    )
+                    .await
+                    .with_context(Ctx::components())?;
+            }
             let build_id = uuid::Uuid::new_v4();
             let source_artifact = builder::upload_source_archive(
                 &s3_client,
@@ -4886,6 +5076,9 @@ async fn deploy_logic(
             let resolved_size = state.builder_sizes.resolve(size_id);
 
             let build_request = builder::BuildRequest {
+                component_set: selected_components
+                    .as_ref()
+                    .map(|selected| selected.set().clone()),
                 org_id: req.org_id,
                 app_id: resource_id,
                 app_name: app_name.clone(),
@@ -4931,12 +5124,33 @@ async fn deploy_logic(
                 &tx,
                 auth.user_id,
             )
-            .await
-            .with_context(Ctx::builder_failed())?;
-
-            build_result.eif_s3_key
+            .await;
+            if matches!(
+                &build_result,
+                Err(builder::ExecuteRemoteBuildError::Components { .. })
+            ) {
+                build_result.with_context(Ctx::components())
+            } else {
+                build_result.with_context(Ctx::builder_failed())
+            }
         }
-    };
+    }
+    .await;
+    if matches!(&build_result, Err(DeployLogicError::Components { .. }))
+        && let Err(error) = restore_pending_deploy_rejection(
+            &state.db,
+            req.org_id,
+            resource_id,
+            deploy_attempt_id,
+            previous_state,
+            was_destroyed,
+        )
+        .await
+    {
+        tracing::error!(?error, "failed to restore pending deploy rejection");
+    }
+    let build_result = build_result?;
+    let builder_eif_s3_key = build_result.eif_s3_key;
 
     let eif_path = format!(
         "s3://{}/{}",
@@ -4964,6 +5178,8 @@ async fn deploy_logic(
         "eif_path": eif_path,
         "eif_hash": eif_hash,
         "eif_s3_key": builder_eif_s3_key,
+        "component_artifacts": build_result.component_artifacts,
+        "tap_framer_sha256": build_result.component_artifacts.as_ref().map(|artifacts| artifacts.tap_framer_sha256()),
         "eif_size_bytes": eif_size_bytes_db,
         "commit_sha": commit_sha,
         "run_command": run_command,
@@ -4972,6 +5188,8 @@ async fn deploy_logic(
         "cpus": cpu_count,
         "debug": debug_enabled,
         "ports": ingress_ports,
+        "network": network,
+        "network_policy": network_policy,
         "http_port": http_port,
     });
     let eif_size_bytes = eif_size_bytes_db as u64;
@@ -5136,6 +5354,10 @@ async fn deploy_logic(
     let _ = tx.send(Ok(milestone(&target))).await;
 
     let nitro_request = deployment::NitroDeploymentRequest {
+        tap_framer_sha256: build_result
+            .component_artifacts
+            .as_ref()
+            .map(|artifacts| artifacts.tap_framer_sha256().to_owned()),
         org_id: req.org_id,
         resource_id,
         resource_name: app_name.clone(),
@@ -5149,6 +5371,7 @@ async fn deploy_logic(
         debug_mode: debug_enabled,
         restart: enclave_opt.and_then(|e| e.restart).unwrap_or_default(),
         ports: ingress_ports.clone(),
+        network,
         http_port,
         e2e,
         e2e_mode: e2e_mode_value.to_string(),
@@ -5519,6 +5742,7 @@ async fn deploy_logic(
 
 /// A deploy runs in a spawned task, so an API restart abandons its `pending`
 /// row. The API is a single process: at startup no deploy can be in flight.
+#[tracing::instrument(skip_all)]
 async fn reset_abandoned_pending_deploys(db: &PgPool) {
     match sqlx::query_scalar::<_, Uuid>(
         "UPDATE compute_resources
@@ -5701,6 +5925,7 @@ async fn provision_candidate(
     Ok(result)
 }
 
+#[tracing::instrument(skip_all)]
 async fn reconcile_terminating_resources(state: Arc<AppState>) {
     use futures::{StreamExt, stream};
 
@@ -5730,6 +5955,7 @@ async fn reconcile_terminating_resources(state: Arc<AppState>) {
         .await;
 }
 
+#[tracing::instrument(skip_all)]
 async fn reconcile_managed_dns(state: Arc<AppState>, managed_dns: managed_dns::ManagedDns) {
     use futures::{StreamExt, stream};
 
@@ -5760,9 +5986,31 @@ async fn reconcile_managed_dns(state: Arc<AppState>, managed_dns: managed_dns::M
         .await;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupMode {
+    Serve,
+    CheckComponents,
+}
+
+impl StartupMode {
+    fn parse(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Self, MainError> {
+        let mut arguments = arguments.into_iter();
+        match (arguments.next(), arguments.next()) {
+            (None, None) => Ok(Self::Serve),
+            (Some(argument), None) if argument == "--check-components" => Ok(Self::CheckComponents),
+            _ => Err(MainError::InvalidArguments {
+                location: std::panic::Location::caller(),
+            }),
+        }
+    }
+}
+
 /// Failure modes for the process entry point [`main`].
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum MainError {
+    #[error("invalid arguments; usage: api [--check-components] [{location}]")]
+    InvalidArguments { location: Location },
+
     #[error("could not connect to the database [{location}]")]
     DatabaseConnect {
         #[location]
@@ -5794,6 +6042,16 @@ pub(crate) enum MainError {
 
     #[error("could not load builder config from environment [{location}]")]
     BuilderConfigFromEnv {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error(
+        "component startup preflight failed; prepare compatible set then activate image/pins together [{location}]"
+    )]
+    ComponentStartup {
         #[location]
         location: Location,
         #[source]
@@ -5836,7 +6094,18 @@ pub(crate) enum MainError {
 #[tokio::main]
 async fn main() -> Result<(), MainError> {
     use MainErrorCtx as Ctx;
-    tracing_subscriber::fmt::init();
+    use tracing_subscriber::prelude::*;
+
+    let mode = StartupMode::parse(std::env::args_os().skip(1))?;
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "api=info".into()),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        // .with(sentry_middleware::sentry_tracing_layer())  -- enable for performance traces
+        .with(sentry_middleware::RequestBreadcrumbLayer::new())
+        .init();
 
     #[cfg(feature = "e2e-testing-unsafe")]
     {
@@ -5851,6 +6120,46 @@ async fn main() -> Result<(), MainError> {
             "e2e-testing-unsafe feature is enabled — /internal/cleanup/destroy-next-app endpoint is active. Do NOT use in production."
         );
     }
+
+    if test_endpoints::enabled() {
+        let env = std::env::var("ENVIRONMENT").unwrap_or_default();
+        if env == "production" {
+            eprintln!(
+                "FATAL: ENABLE_TEST_ENDPOINTS is set in a production environment. Refusing to start."
+            );
+            std::process::exit(1);
+        }
+        tracing::warn!(
+            "ENABLE_TEST_ENDPOINTS is enabled — /test/force-error endpoint is active. Do NOT use in production."
+        );
+    }
+
+    let builder_config =
+        builder::BuilderConfig::from_env().with_context(Ctx::builder_config_from_env())?;
+    let platform_git_sha = std::env::var("PLATFORM_GIT_SHA").ok();
+    component_artifacts::validate_startup(
+        std::env::var("COMPONENT_BUILD_MODE").ok().as_deref(),
+        std::env::var("COMPONENT_SET_SHA256").ok(),
+        std::env::var("COMPONENTS_S3_BUCKET").ok(),
+        &builder_config.eif_s3_bucket,
+        platform_git_sha.as_deref(),
+        &enclave_builder::build::resolve_tool_commits(),
+    )
+    .await
+    .inspect_err(|error| {
+        tracing::error!(
+            ?error,
+            "Component startup preflight failed; prepare compatible set then activate image/pins together"
+        );
+    })
+    .with_context(Ctx::component_startup())?;
+    if mode == StartupMode::CheckComponents {
+        println!("Component startup preflight succeeded");
+        return Ok(());
+    }
+    info!("Dedicated builder enabled");
+
+    let _sentry_guard = sentry_middleware::init_sentry!();
 
     if let Err(e) = provisioning::validate_setup() {
         tracing::warn!("Provisioning validation failed: {:?}", e);
@@ -5925,10 +6234,6 @@ async fn main() -> Result<(), MainError> {
     let pricing = PricingConfig::load().with_context(Ctx::pricing_load())?;
     let builder_sizes =
         builder::BuilderSizesConfig::load().with_context(Ctx::builder_sizes_load())?;
-
-    let builder_config =
-        builder::BuilderConfig::from_env().with_context(Ctx::builder_config_from_env())?;
-    info!("Dedicated builder enabled");
 
     let eif_cache_size_gb: u64 = std::env::var("EIF_CACHE_SIZE_GB")
         .ok()
@@ -6246,7 +6551,7 @@ async fn main() -> Result<(), MainError> {
         middleware::internal_auth_middleware,
     ));
 
-    let public_routes = Router::new()
+    let mut public_routes = Router::new()
         .route("/health", get(health_check))
         .route("/.well-known/caution/build-inputs", get(build_inputs))
         .route("/onboarding/verify", get(onboarding::verify_email))
@@ -6254,6 +6559,13 @@ async fn main() -> Result<(), MainError> {
             "/legal/active-documents",
             get(legal::list_active_legal_documents),
         );
+
+    // Debug endpoint for exercising Sentry reporting. Off unless explicitly
+    // enabled, and the startup guard refuses to run it in production.
+    if test_endpoints::enabled() {
+        public_routes =
+            public_routes.route("/test/force-error", get(test_endpoints::force_error_test));
+    }
 
     // Background task: reap orphaned builder instances
     let reaper_state = state.clone();
@@ -6281,6 +6593,7 @@ async fn main() -> Result<(), MainError> {
         .merge(resource_routes)
         .merge(internal_routes)
         .merge(public_routes)
+        .layer(sentry_middleware::SentryLayer)
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
@@ -6305,5 +6618,84 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => tracing::info!("Received SIGINT, shutting down"),
         _ = sigterm.recv() => tracing::info!("Received SIGTERM, shutting down"),
+    }
+}
+
+#[cfg(test)]
+mod component_rejection_tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires disposable COMPONENTS_TEST_DATABASE_URL"]
+    async fn component_rejection_restore_preserves_running_and_attempt_ownership() {
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&std::env::var("COMPONENTS_TEST_DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        sqlx::raw_sql("CREATE TEMP TABLE compute_resources (id UUID, organization_id UUID, state TEXT, destroyed_at TIMESTAMPTZ, deploy_attempt_id UUID);
+            CREATE TYPE pg_temp.resource_state AS ENUM ('pending', 'running', 'stopped');
+            ALTER TABLE compute_resources ALTER COLUMN state TYPE pg_temp.resource_state USING state::pg_temp.resource_state;")
+            .execute(&db).await.unwrap();
+        let org = Uuid::new_v4();
+        let id = Uuid::new_v4();
+        let attempt = Uuid::new_v4();
+        sqlx::query("INSERT INTO compute_resources VALUES ($1, $2, 'pending', NULL, $3)")
+            .bind(id)
+            .bind(org)
+            .bind(attempt)
+            .execute(&db)
+            .await
+            .unwrap();
+        for (o, r, a) in [
+            (Uuid::new_v4(), id, attempt),
+            (org, Uuid::new_v4(), attempt),
+            (org, id, Uuid::new_v4()),
+        ] {
+            restore_pending_deploy_rejection(&db, o, r, a, types::ResourceState::Running, false)
+                .await
+                .unwrap();
+            let state: String = sqlx::query_scalar("SELECT state::text FROM compute_resources")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+            assert_eq!(state, "pending");
+        }
+        restore_pending_deploy_rejection(
+            &db,
+            org,
+            id,
+            attempt,
+            types::ResourceState::Running,
+            false,
+        )
+        .await
+        .unwrap();
+        let row: (String, Option<Uuid>, bool) = sqlx::query_as(
+            "SELECT state::text, deploy_attempt_id, destroyed_at IS NULL FROM compute_resources",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(row, ("running".into(), None, true));
+        restore_pending_deploy_rejection(
+            &db,
+            org,
+            id,
+            attempt,
+            types::ResourceState::Stopped,
+            true,
+        )
+        .await
+        .unwrap();
+        let state: String = sqlx::query_scalar("SELECT state::text FROM compute_resources")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            state, "running",
+            "stale rejection must not change a restored resource"
+        );
+        db.close().await;
     }
 }

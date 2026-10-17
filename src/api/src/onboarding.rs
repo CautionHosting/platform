@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use axum::{
     Json,
     extract::{Extension, Query, State},
@@ -116,11 +124,11 @@ impl IntoResponse for GetUserStatusError {
             }
             GetUserStatusError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found"),
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn get_user_status(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -207,11 +215,11 @@ impl IntoResponse for SendVerificationEmailError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err, fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
 pub async fn send_verification_email(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -355,11 +363,11 @@ impl IntoResponse for VerifyEmailError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
         };
-        (status, body).into_response()
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn verify_email(
     State(state): State<Arc<AppState>>,
     Query(params): Query<VerifyEmailQuery>,
@@ -497,7 +505,7 @@ pub enum CheckOnboardingStatusError {
     },
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub async fn check_onboarding_status(
     db: &PgPool,
     user_id: uuid::Uuid,

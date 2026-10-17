@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use std::path::{Path, PathBuf};
 
 use dterror::{BoxError, CtxError, Location, ResultExt as _};
@@ -258,6 +266,13 @@ async fn main() -> Result<(), RemoteBuildError> {
     let builder = EnclaveBuilder::new(enclave_source, enclave_version, framework_source, &work_dir)
         .with_context(Ctx::new_builder())?
         .with_no_cache(no_cache);
+    let builder = match std::env::var("CAUTION_COMPONENTS_PATH")
+        .ok()
+        .filter(|path| !path.is_empty())
+    {
+        Some(path) => builder.with_prebuilt_components(PathBuf::from(path)),
+        None => builder,
+    };
 
     let user_image = UserImage {
         reference: image_ref,

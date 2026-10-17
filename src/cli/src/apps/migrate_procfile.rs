@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use clap::Args;
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use std::fs;
@@ -23,7 +31,7 @@ pub(crate) struct MigrateProcfileArgs {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum MigrateProcfileError {
-    #[error("failed to read {path} [{location:?}]")]
+    #[error("failed to read {path} [{location}]")]
     Read {
         #[context(borrow = Path)]
         path: PathBuf,
@@ -35,7 +43,7 @@ pub(crate) enum MigrateProcfileError {
         source: BoxError,
     },
 
-    #[error("failed to parse Procfile [{location:?}]")]
+    #[error("failed to parse Procfile [{location}]")]
     Parse {
         #[location]
         location: Location,
@@ -44,7 +52,7 @@ pub(crate) enum MigrateProcfileError {
         source: BoxError,
     },
 
-    #[error("output file already exists: {path}; use --force to overwrite [{location:?}]")]
+    #[error("output file already exists: {path}; use --force to overwrite [{location}]")]
     OutputExists {
         path: PathBuf,
 
@@ -52,7 +60,7 @@ pub(crate) enum MigrateProcfileError {
         location: Location,
     },
 
-    #[error("failed to write {path} [{location:?}]")]
+    #[error("failed to write {path} [{location}]")]
     Write {
         #[context(borrow = Path)]
         path: PathBuf,
@@ -466,7 +474,7 @@ mod tests {
     fn hello_world_procfile_uses_block_syntax() {
         let procfile = r#"run: /usr/local/bin/hello
 containerfile: Containerfile
-app_sources: git@codeberg.org:caution/demo-hello-world-enclave.git
+app_sources: git@git.caution.co:public/demo-hello-world-enclave.git
 cache: false
 ports: 8083
 "#;

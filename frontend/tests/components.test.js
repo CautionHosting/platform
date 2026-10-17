@@ -11,8 +11,8 @@ test('verification links carry only a safe endpoint, never observed PCRs', () =>
   assert.deepEqual([...url.searchParams], [['url', 'https://keymaker.example.com/attestation']])
   assert.equal(target.command, "caution verify --attestation-url 'https://keymaker.example.com/attestation'")
   for (const bad of ['javascript:alert(1)', 'http://host.example', 'https://user:secret@host.example', 'https://host.example/?x=1', 'https://host.example/#x', 'invalid', null, 'https://127.0.0.1']) assert.equal(verificationTarget(bad), null)
-  assert.equal(safeUrl('https://codeberg.org/caution/platform.git'), 'https://codeberg.org/caution/platform.git')
-  assert.equal(repositoryLabel('https://codeberg.org/caution/platform.git'), 'caution/platform')
+  assert.equal(safeUrl('https://git.caution.co/public/platform.git'), 'https://git.caution.co/public/platform.git')
+  assert.equal(repositoryLabel('https://git.caution.co/public/platform.git'), 'public/platform')
 })
 test('only valid zero unpinned optional PCRs are hidden', () => {
   const rows = measurementRows({ measurements: { 0: zero, 2: hash, 3: zero, 4: zero, 5: '0', 6: 'garbage', 7: hash }, policies: [{ sets: [{ pcrs: { 0: hash, 4: zero, 8: hash } }] }] })

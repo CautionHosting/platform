@@ -11,7 +11,7 @@ const measurements = { 0: 'a'.repeat(96), 1: 'b'.repeat(96), 2: 'c'.repeat(96), 
 const pinned = { 0: measurements[0], 1: measurements[1], 2: measurements[2], 8: measurements[8] }
 const service = { id: 'keymaker', name: 'Keymaker', url: 'https://keymaker.example.com', readiness: passed, attestation: passed, measurements,
   policies: [{ purpose: 'Bundle generation', result: failed, sets: [{ pcrs: pinned, expires_at_unix_seconds: null }, { pcrs: { ...pinned, 0: 'e'.repeat(96) }, expires_at_unix_seconds: 1 }] }],
-  service_reported_source: { repository: `https://codeberg.org/caution/${'long-source-name-'.repeat(15)}.git`, commit: 'a'.repeat(40) } }
+  service_reported_source: { repository: `https://git.caution.co/public/${'long-source-name-'.repeat(15)}.git`, commit: 'a'.repeat(40) } }
 const checkedAt = new Date(Date.now() - 120000).toISOString()
 let pending = 1, requests = 0, authRequests = 0, status = 200, entriesOverride = null
 const server = createServer(async (req, res) => {
@@ -21,7 +21,7 @@ const server = createServer(async (req, res) => {
     requests++
     const isPending = pending-- > 0
     res.writeHead(status, { 'content-type': 'application/json' })
-    return res.end(JSON.stringify({ locksmith: { repo: 'https://codeberg.org/caution/locksmith.git', commit: 'b'.repeat(40) }, services: {
+    return res.end(JSON.stringify({ locksmith: { repo: 'https://git.caution.co/public/locksmith.git', commit: 'b'.repeat(40) }, services: {
       pending: isPending, checked_at: isPending ? null : checkedAt, entries: isPending ? [] : entriesOverride || [service, { ...service, id: 'key-service', name: 'Key service', url: 'https://key-service.example.com', policies: [{ ...service.policies[0], purpose: 'Certificate issuance' }, { ...service.policies[0], purpose: 'Share release' }] }]
     } }))
   }
@@ -165,7 +165,7 @@ try {
   assert.equal(await page.$(maker + ' [data-accepted="true"]'), null)
   await page.click('.framework > summary')
   await page.click('.framework .copy-repository')
-  assert.equal(await page.evaluate(() => window.copiedValue), 'https://codeberg.org/caution/locksmith.git')
+  assert.equal(await page.evaluate(() => window.copiedValue), 'https://git.caution.co/public/locksmith.git')
   await refresh()
   assert.equal(await page.$eval('.framework', e => e.open), true)
   const outage = { ...service, readiness: { status: 'failed', reason: 'Request failed' }, attestation: { status: 'failed', reason: 'Request timed out' }, measurements: {}, service_reported_source: null,

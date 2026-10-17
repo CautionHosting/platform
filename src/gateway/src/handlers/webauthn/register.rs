@@ -21,7 +21,7 @@ use super::super::{
 };
 use dterror::ResultExt;
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub async fn begin_register_handler(
     State(state): State<AppState>,
     Json(req): Json<crate::types::RegisterBeginRequest>,
@@ -53,39 +53,17 @@ pub async fn begin_register_handler(
     .await
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all)]
 pub(crate) async fn begin_registration_challenge(
     state: &AppState,
     username: String,
     kind: PendingRegistrationKind,
 ) -> Result<Json<RegisterBeginResponse>, RegisterError> {
-    // Fetch ALL existing credential IDs to pass as excludeCredentials
-    // This prevents the same authenticator from registering multiple accounts
-    let existing_cred_ids = db::get_all_credential_ids(&state.db)
-        .await
-        .with_context(Ctx::internal())?;
-    let exclude_credentials: Vec<CredentialID> = existing_cred_ids
-        .into_iter()
-        .map(CredentialID::from)
-        .collect();
-
-    tracing::debug!(
-        "Excluding {} existing credentials from registration",
-        exclude_credentials.len()
-    );
-
     let user_unique_id = Uuid::new_v4();
 
     let (mut ccr, reg_state) = state
         .webauthn
-        .start_securitykey_registration(
-            user_unique_id,
-            &username,
-            &username,
-            Some(exclude_credentials).filter(|v| !v.is_empty()),
-            None,
-            None,
-        )
+        .start_securitykey_registration(user_unique_id, &username, &username, None, None, None)
         .with_context(Ctx::challenge_failed())?;
 
     // Override authenticator selection to be maximally compatible:
@@ -130,7 +108,7 @@ pub(crate) async fn begin_registration_challenge(
     }))
 }
 
-#[tracing::instrument(skip_all, err)]
+#[tracing::instrument(skip_all, err(Debug))]
 pub(crate) async fn finish_register_handler(
     State(state): State<AppState>,
     connect_info: ConnectInfo<std::net::SocketAddr>,
@@ -172,15 +150,6 @@ pub(crate) async fn finish_register_handler(
         .with_context(Ctx::challenge_failed())?;
 
     let credential_id = seckey.cred_id().clone();
-    if db::credential_exists(&state.db, &credential_id)
-        .await
-        .with_context(Ctx::internal())?
-    {
-        tracing::warn!("Registration rejected - credential already registered");
-        return Err(RegisterError::CredentialAlreadyRegistered {
-            location: std::panic::Location::caller(),
-        });
-    }
 
     state.reg_states.write().await.remove(&session_key);
 
@@ -263,6 +232,19 @@ pub(crate) async fn finish_register_handler(
     let passkey_json = serde_json::to_vec(&seckey).with_context(Ctx::internal())?;
     let resident = read_credprops_rk(&reg_response);
 
+    if db::credential_conflicts_with_other_user(&state.db, &credential_id, &passkey_json)
+        .await
+        .with_context(Ctx::internal())?
+    {
+        tracing::warn!(
+            credential_id = %hex::encode(&credential_id),
+            "Registration rejected: credential ID already registered to another user with a different key"
+        );
+        return Err(RegisterError::CredentialAlreadyRegistered {
+            location: std::panic::Location::caller(),
+        });
+    }
+
     db::save_fido2_credential(
         &state.db,
         &credential_id,
@@ -285,7 +267,7 @@ pub(crate) async fn finish_register_handler(
     let csrf_token = crate::csrf::derive_csrf_token(&session_id, &state.csrf_secret);
     let expires_at = time::OffsetDateTime::now_utc() + Duration::hours(state.session_timeout_hours);
 
-    db::create_auth_session(&state.db, &session_id, &credential_id, expires_at)
+    db::create_auth_session(&state.db, &session_id, &credential_id, user_id, expires_at)
         .await
         .with_context(Ctx::internal())?;
 

@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use axum::{
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
@@ -262,24 +270,54 @@ pub(crate) fn generic_auth_failure_response() -> (StatusCode, HeaderMap, &'stati
 
 impl IntoResponse for LoginError {
     fn into_response(self) -> Response {
-        match self {
-            // Session/challenge lifecycle errors are folded into the same
-            // generic 401 as credential-verification failures below: the
-            // frontend only checks `response.ok` on the finish calls and
-            // shows a generic message, so distinguishing "session expired"
-            // from "bad credential" would just reopen the oracle at a
-            // different layer.
-            Self::InvalidSession { .. } | Self::ChallengeExpired { .. } => {
-                tracing::debug!(?self, "Login finish: session/challenge error");
-                generic_auth_failure_response().into_response()
+        // Session/challenge lifecycle errors and credential-verification
+        // failures all collapse to the same generic 401 response so none of
+        // them is distinguishable from another by status code or body.
+        let is_auth_failure = matches!(
+            self,
+            Self::InvalidSession { .. }
+                | Self::ChallengeExpired { .. }
+                | Self::UnexpectedCredentialOwner { .. }
+                | Self::ParseSecurityKey { .. }
+                | Self::IdentifyDiscoverableCredential { .. }
+                | Self::FinishSecurityKeyAuthentication { .. }
+                | Self::FinishDiscoverableAuthentication { .. }
+        );
+
+        if is_auth_failure {
+            match &self {
+                Self::InvalidSession { .. } | Self::ChallengeExpired { .. } => {
+                    tracing::debug!(?self, "Login finish: session/challenge error");
+                }
+                Self::UnexpectedCredentialOwner { .. } => {
+                    tracing::debug!(?self, "Login finish: decoy/scope rejection");
+                }
+                Self::ParseSecurityKey { .. } => {
+                    tracing::warn!(?self, "Login finish: credential lookup/parse failure");
+                }
+                Self::IdentifyDiscoverableCredential { .. } => {
+                    tracing::error!(
+                        ?self,
+                        "Login finish: could not identify discoverable credential"
+                    );
+                }
+                Self::FinishSecurityKeyAuthentication { .. }
+                | Self::FinishDiscoverableAuthentication { .. } => {
+                    tracing::warn!(?self, "Login finish: signature verification failed");
+                }
+                _ => {}
             }
+            let response = generic_auth_failure_response().into_response();
+            return sentry_middleware::attach(response, self);
+        }
+
+        let (status, body) = match &self {
             Self::PinRequired { .. } => (
                 StatusCode::FORBIDDEN,
                 "your organization requires PIN verification",
-            )
-                .into_response(),
+            ),
             Self::ParsePubkeyCredential { .. } => {
-                (StatusCode::BAD_REQUEST, "failed to parse pubkey credential").into_response()
+                (StatusCode::BAD_REQUEST, "failed to parse pubkey credential")
             }
             // Every credential-verification outcome — unknown credential,
             // failed signature verification, and decoy/scope rejection —
@@ -289,27 +327,32 @@ impl IntoResponse for LoginError {
             // errors, so they're logged at debug/warn, not error.
             Self::CredentialNotFound { .. } => {
                 tracing::debug!(?self, "Login finish: credential not found");
-                generic_auth_failure_response().into_response()
+                let response = generic_auth_failure_response().into_response();
+                return sentry_middleware::attach(response, self);
             }
             Self::UnexpectedCredentialOwner { .. } => {
                 tracing::debug!(?self, "Login finish: decoy/scope rejection");
-                generic_auth_failure_response().into_response()
+                let response = generic_auth_failure_response().into_response();
+                return sentry_middleware::attach(response, self);
             }
             Self::ParseSecurityKey { .. } => {
                 tracing::warn!(?self, "Login finish: credential lookup/parse failure");
-                generic_auth_failure_response().into_response()
+                let response = generic_auth_failure_response().into_response();
+                return sentry_middleware::attach(response, self);
             }
             Self::IdentifyDiscoverableCredential { .. } => {
                 tracing::error!(
                     ?self,
                     "Login finish: could not identify discoverable credential"
                 );
-                generic_auth_failure_response().into_response()
+                let response = generic_auth_failure_response().into_response();
+                return sentry_middleware::attach(response, self);
             }
             Self::FinishSecurityKeyAuthentication { .. }
             | Self::FinishDiscoverableAuthentication { .. } => {
                 tracing::warn!(?self, "Login finish: signature verification failed");
-                generic_auth_failure_response().into_response()
+                let response = generic_auth_failure_response().into_response();
+                return sentry_middleware::attach(response, self);
             }
             _ => {
                 tracing::error!(?self, "Login error");
@@ -317,9 +360,9 @@ impl IntoResponse for LoginError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "an internal error occurred",
                 )
-                    .into_response()
             }
-        }
+        };
+        sentry_middleware::error_response(status, body, self)
     }
 }
 
@@ -372,7 +415,7 @@ pub enum SignRequestError {
 
 impl IntoResponse for SignRequestError {
     fn into_response(self) -> Response {
-        let (status, message) = match self {
+        let (status, message) = match &self {
             Self::MissingSession { .. } => {
                 (StatusCode::UNAUTHORIZED, "missing session".to_string())
             }
@@ -396,7 +439,7 @@ impl IntoResponse for SignRequestError {
                 )
             }
         };
-        (status, message).into_response()
+        sentry_middleware::error_response(status, message, self)
     }
 }
 
@@ -433,12 +476,6 @@ pub enum RegisterError {
         location: Location,
     },
 
-    #[error("This security key is already registered. Each key can only be registered once. [{location}]")]
-    CredentialAlreadyRegistered {
-        #[location]
-        location: Location,
-    },
-
     #[error("Too many pending registrations. Please try again later. [{location}]")]
     TooManyPending {
         #[location]
@@ -456,6 +493,12 @@ pub enum RegisterError {
 
     #[error("This username is already taken. [{location}]")]
     UsernameTaken {
+        #[location]
+        location: Location,
+    },
+
+    #[error("This security key is already registered to another account. [{location}]")]
+    CredentialAlreadyRegistered {
         #[location]
         location: Location,
     },
@@ -490,7 +533,7 @@ pub enum RegisterError {
 
 impl IntoResponse for RegisterError {
     fn into_response(self) -> Response {
-        let (status, message) = match self {
+        let (status, message) = match &self {
             Self::InvalidAccessCode { .. } => (
                 StatusCode::BAD_REQUEST,
                 "This access code is invalid or has already been used.".to_string(),
@@ -507,11 +550,6 @@ impl IntoResponse for RegisterError {
                 StatusCode::GONE,
                 "No matching registration state found. Please start over.".to_string(),
             ),
-            Self::CredentialAlreadyRegistered { .. } => (
-                StatusCode::CONFLICT,
-                "This security key is already registered. Each key can only be registered once."
-                    .to_string(),
-            ),
             Self::TooManyPending { .. } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many pending registrations. Please try again later.".to_string(),
@@ -523,6 +561,10 @@ impl IntoResponse for RegisterError {
             Self::UsernameTaken { .. } => (
                 StatusCode::CONFLICT,
                 "This username is already taken.".to_string(),
+            ),
+            Self::CredentialAlreadyRegistered { .. } => (
+                StatusCode::CONFLICT,
+                "This security key is already registered to another account.".to_string(),
             ),
             Self::InvalidPayload { .. } => (
                 StatusCode::BAD_REQUEST,
@@ -545,7 +587,7 @@ impl IntoResponse for RegisterError {
                 )
             }
         };
-        (status, message).into_response()
+        sentry_middleware::error_response(status, message, self)
     }
 }
 

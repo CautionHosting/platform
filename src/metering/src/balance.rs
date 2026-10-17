@@ -28,7 +28,7 @@ pub(crate) struct CheckBalanceThresholdsError {
 }
 
 /// After deducting credits, check if the org's balance requires action.
-#[tracing::instrument(skip_all, fields(org_id = %org_id), err)]
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub(crate) async fn check_balance_thresholds(
     state: &AppState,
     org_id: uuid::Uuid,
@@ -114,6 +114,7 @@ pub(crate) async fn check_balance_thresholds(
 }
 
 /// Suspend only fully-managed resources for an org (not managed on-prem).
+#[tracing::instrument(skip_all, fields(org_id = %org_id))]
 pub(crate) async fn suspend_fully_managed_org(state: &AppState, org_id: uuid::Uuid) {
     // Set credit_suspended_at
     if let Err(e) = sqlx::query(
