@@ -95,6 +95,8 @@ fn classify_enclave_source(
 
 pub mod build;
 pub mod compile;
+mod component_stage;
+pub mod components;
 pub mod docker;
 pub mod extract;
 pub mod manifest;
@@ -128,6 +130,7 @@ pub struct EnclaveBuilder {
     /// Whether to skip Docker cache for EIF builds
     pub no_cache: bool,
     cache_type: CacheType,
+    prebuilt_components: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -429,6 +432,7 @@ impl EnclaveBuilder {
             work_dir,
             no_cache,
             cache_type,
+            prebuilt_components: None,
         })
     }
 
@@ -452,6 +456,7 @@ impl EnclaveBuilder {
             work_dir,
             no_cache: false,
             cache_type: CacheType::Build,
+            prebuilt_components: None,
         })
     }
 
@@ -474,6 +479,13 @@ impl EnclaveBuilder {
             artifacts::check(user_fs).with_context(BuildEnclaveErrorCtx::check_artifacts())?;
         }
         Ok(())
+    }
+
+    /// Explicitly consume locally downloaded components matching the manifest.
+    /// Source verification never opts into this mode.
+    pub fn with_prebuilt_components(mut self, directory: PathBuf) -> Self {
+        self.prebuilt_components = Some(directory);
+        self
     }
 
     #[tracing::instrument(skip_all)]
@@ -624,6 +636,7 @@ impl EnclaveBuilder {
             e2e_cors_origins,
             egress,
             templates_dir,
+            self.prebuilt_components.as_deref(),
         )
         .await
     }

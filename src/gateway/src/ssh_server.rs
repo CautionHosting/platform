@@ -370,6 +370,30 @@ impl russh::server::Server for SshServer {
             git_processes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
+
+    #[tracing::instrument(skip_all)]
+    fn handle_session_error(&mut self, error: SshHandlerError) {
+        let (error_kind, io_kind) = match &error {
+            SshHandlerError::NotAuthenticated { .. } => ("not_authenticated", None),
+            SshHandlerError::StdinWrite { source, .. } => (
+                "git_stdin_write",
+                source.downcast_ref::<std::io::Error>().map(std::io::Error::kind),
+            ),
+            SshHandlerError::Protocol { source, .. } => {
+                match source.downcast_ref::<russh::Error>() {
+                    Some(russh::Error::KeepaliveTimeout) => ("keepalive_timeout", None),
+                    Some(russh::Error::InactivityTimeout) => ("inactivity_timeout", None),
+                    Some(russh::Error::ConnectionTimeout) => ("connection_timeout", None),
+                    Some(russh::Error::HUP) => ("peer_hangup", None),
+                    Some(russh::Error::Disconnect) => ("disconnect", None),
+                    Some(russh::Error::WrongChannel) => ("wrong_channel", None),
+                    Some(russh::Error::IO(error)) => ("transport_io", Some(error.kind())),
+                    _ => ("protocol", None),
+                }
+            }
+        };
+        tracing::warn!(error_kind, ?io_kind, "SSH session failed");
+    }
 }
 
 /// Render a public key as the OpenSSH `"<type> <base64>"` line used for
@@ -1486,6 +1510,10 @@ pub async fn run_ssh_server(
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "ssh_server_connection_tests.rs"]
+mod connection_tests;
 
 #[cfg(test)]
 mod tests {

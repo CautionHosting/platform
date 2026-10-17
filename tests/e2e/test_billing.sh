@@ -3,7 +3,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 #
 # E2E billing test for the Caution platform (Paddle billing).
-# Requires: make up-test-billing (starts services including metering + email)
+# Requires: make test-e2e-billing (mounts fixtures/prices-billing.json in API + metering)
+# Direct invocation requires the same fixture in both running services.
 #
 # Tests the full billing lifecycle:
 #   1. Wait for services (gateway, metering, email)
@@ -45,6 +46,9 @@
 #  37. Subscription API projects live past-due credit subscriptions
 
 set -euo pipefail
+
+source "$(dirname "${BASH_SOURCE[0]}")/lib/config.sh"
+require_prices_fixture "$(dirname "${BASH_SOURCE[0]}")/fixtures/prices-billing.json" api metering
 
 GATEWAY_URL="${GATEWAY_URL:-http://localhost:8000}"
 METERING_URL="${METERING_URL:-http://metering:8083}"
@@ -1572,10 +1576,12 @@ INSERT INTO usage_ledger (
      date_trunc('month', NOW()) - INTERVAL '1 second', '{}');
 " >/dev/null 2>&1
 
+# Independent oracle: latest ledger rate is $0.40 + 25% = $0.50;
+# prices-billing.json fixes fallback markup at 25%: $0.192 * 1.25 = $0.24.
 EXPECTED_PROJECTION=$(docker exec "$TEST_DB_HOST" psql -U postgres -d caution_test -t -A -c "
 SELECT 2 + EXTRACT(EPOCH FROM (
     date_trunc('month', NOW()) + INTERVAL '1 month' - date_trunc('month', NOW())
-)) / 3600 * (0.5 + 0.192);
+)) / 3600 * (0.5 + 0.24);
 " 2>/dev/null | head -1 | tr -d ' \n')
 DASHBOARD_USAGE=$(curl -sf "$GATEWAY_URL/api/billing/usage" -H "X-Session-ID: $SESSION_ID")
 if jq -e --argjson expected "$EXPECTED_PROJECTION" '

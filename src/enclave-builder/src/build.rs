@@ -11,6 +11,7 @@
 
 use dterror::ResultExt;
 use sha2::{Digest, Sha256};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::process::Command;
@@ -217,6 +218,16 @@ pub enum StageEifComponentsError {
         source: dterror::BoxError,
     },
 
+    #[error("could not set generated file permissions on {path} [{location}]")]
+    SetGeneratedFilePermissions {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
+
     #[error("could not resolve templates directory [{location}]")]
     ResolveTemplates {
         #[location]
@@ -396,6 +407,9 @@ pub async fn stage_eif_components(
             .write_to_file(&manifest_path)
             .await
             .with_context(Ctx::write_manifest())?;
+        fs::set_permissions(&manifest_path, std::fs::Permissions::from_mode(0o644))
+            .await
+            .with_context(Ctx::set_generated_file_permissions(&manifest_path))?;
         tracing::info!("Wrote manifest to: {}", manifest_path.display());
     }
 
@@ -467,6 +481,9 @@ pub async fn stage_eif_components(
     fs::write(&run_sh_path, &run_sh_content)
         .await
         .with_context(Ctx::write_run_sh(&run_sh_path))?;
+    fs::set_permissions(&run_sh_path, std::fs::Permissions::from_mode(0o644))
+        .await
+        .with_context(Ctx::set_generated_file_permissions(&run_sh_path))?;
     tracing::info!("Generated run.sh at: {}", run_sh_path.display());
 
     let containerfile_path = stage_dir.join("Containerfile.eif");
@@ -757,8 +774,8 @@ async fn render_run_sh_template(
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error, dterror::CtxError)]
 pub enum RenderContainerfileTemplateError {
-    #[error("could not read selected TAP framer recipe '{path}' [{location}]")]
-    ReadTapFramerRecipe {
+    #[error("could not read selected component recipes for '{path}' [{location}]")]
+    ReadComponentRecipes {
         #[context(borrow = Path)]
         path: PathBuf,
         #[location]
@@ -809,25 +826,39 @@ async fn render_containerfile_template(
         enabled_blocks.push("EGRESS");
     }
     let mut processed = process_template_blocks(&template, &enabled_blocks);
-    if processed.contains("{{TAP_FRAMER_CONTAINERFILE}}") {
-        let recipe_path =
-            template_path.with_file_name("../../../containerfiles/Containerfile.tap-framer");
-        let recipe = fs::read_to_string(&recipe_path)
-            .await
-            .with_context(Ctx::read_tap_framer_recipe(&recipe_path))?;
-        processed = processed.replace("{{TAP_FRAMER_CONTAINERFILE}}", &recipe);
+    use crate::components::{recipe, Component};
+    let recipes = recipe::read_selected(
+        template_path.parent().unwrap_or_else(|| Path::new(".")),
+        &processed,
+        &Component::ALL,
+    )
+    .await
+    .with_context(Ctx::read_component_recipes(template_path))?;
+    for (component, source) in recipes {
+        let scoped = recipe::scope_imports(&source, component);
+        processed = processed.replace(component.containerfile_marker(), &scoped);
     }
-
-    Ok(processed
-        .replace("{{BOOTPROOF_COMMIT}}", bootproof_commit)
-        .replace("{{STEVE_COMMIT}}", steve_commit)
-        .replace("{{LOCKSMITH_COMMIT}}", locksmith_commit))
+    for (component, commit) in [
+        (Component::Bootproof, bootproof_commit),
+        (Component::Steve, steve_commit),
+        (Component::Locksmith, locksmith_commit),
+    ] {
+        processed = recipe::pin_source_revision(&processed, component, commit);
+    }
+    Ok(processed)
 }
 
 /// Error type for [`build_eif_from_filesystems`].
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error, dterror::CtxError)]
 pub enum BuildEifFromFilesystemsError {
+    #[error("could not configure pinned component build [{location}]")]
+    Components {
+        #[location]
+        location: dterror::Location,
+        #[source]
+        source: dterror::BoxError,
+    },
     #[error("could not create directory {path} [{location}]")]
     CreateDir {
         #[context(borrow = Path)]
@@ -990,6 +1021,7 @@ pub async fn build_eif_from_filesystems(
     e2e_cors_origins: Option<String>,
     egress: bool,
     templates_dir: Option<&Path>,
+    prebuilt_components: Option<&Path>,
 ) -> Result<EifFile, BuildEifFromFilesystemsError> {
     use BuildEifFromFilesystemsErrorCtx as Ctx;
 
@@ -1001,6 +1033,7 @@ pub async fn build_eif_from_filesystems(
             .with_context(Ctx::create_dir(parent))?;
     }
 
+    let has_component_set = manifest.as_ref().is_some_and(|m| m.component_set.is_some());
     let stage_dir = stage_eif_components(
         user_fs_path,
         enclave_source_path,
@@ -1022,6 +1055,26 @@ pub async fn build_eif_from_filesystems(
     )
     .await
     .with_context(Ctx::stage())?;
+
+    if has_component_set || prebuilt_components.is_some() {
+        let selected_manifest = EnclaveManifest::read_from_file(&stage_dir.join("manifest.json"))
+            .await
+            .with_context(Ctx::components())?;
+        let selected_templates = match templates_dir {
+            Some(path) => path.to_path_buf(),
+            None => resolve_templates_dir().with_context(Ctx::components())?,
+        };
+        crate::component_stage::configure(
+            &stage_dir,
+            &selected_templates,
+            Some(&selected_manifest),
+            prebuilt_components,
+            e2e,
+            locksmith,
+        )
+        .await
+        .with_context(Ctx::components())?;
+    }
 
     tracing::info!("Building EIF using Docker and Containerfile.eif");
     let output_dir = stage_dir.join("output");
@@ -1912,6 +1965,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_stage_generated_file_modes() {
+        const CHILD_UMASK: &str = "CAUTION_TEST_STAGE_GENERATED_FILE_UMASK";
+        let Ok(mask) = std::env::var(CHILD_UMASK) else {
+            let mut failures = Vec::new();
+            for mask in ["022", "077"] {
+                let output = std::process::Command::new("sh")
+                    .args([
+                        "-c",
+                        "umask \"$1\"; shift; exec \"$@\"",
+                        "stage-mode-test",
+                        mask,
+                    ])
+                    .arg(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "build::tests::test_stage_generated_file_modes",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(CHILD_UMASK, mask)
+                    .output()
+                    .unwrap();
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                println!("umask {mask}:\n{stdout}{stderr}");
+                if !output.status.success() {
+                    failures.push(mask);
+                }
+            }
+            assert!(failures.is_empty(), "failed umasks: {failures:?}");
+            return;
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let user = root.path().join("user");
+        let enclave = root.path().join("enclave");
+        let templates = root.path().join("historical-templates");
+        for directory in [&user, &enclave, &templates] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        std::fs::write(
+            templates.join("Containerfile.eif"),
+            include_str!("../tests/fixtures/Containerfile.eif.inline-components"),
+        )
+        .unwrap();
+        std::fs::write(
+            templates.join("run.sh.template"),
+            "#!/bin/sh\n# selected historical template\n{{USER_CMD}}\n",
+        )
+        .unwrap();
+        let mut manifest = test_manifest();
+        manifest.enclaveos_commit = Some("historical-enclaveos".into());
+        manifest.bootproof_commit = Some("historical-bootproof".into());
+        let expected_manifest = serde_json::to_vec_pretty(&manifest).unwrap();
+        let mut modes = Vec::new();
+        for reused in [false, true] {
+            if reused {
+                for name in ["manifest.json", "run.sh"] {
+                    let path = root.path().join("eif-stage").join(name);
+                    std::fs::write(&path, b"stale contents").unwrap();
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+                }
+            }
+            let stage = stage_eif_components(
+                &user,
+                &enclave,
+                root.path(),
+                manifest.run_command.clone(),
+                Some(manifest.clone()),
+                &[],
+                None,
+                false,
+                "disabled",
+                DEFAULT_KEY_EXCHANGE,
+                false,
+                None,
+                "http",
+                false,
+                None,
+                false,
+                Some(&templates),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                std::fs::read(stage.join("manifest.json")).unwrap(),
+                expected_manifest
+            );
+            assert_eq!(
+                std::fs::read_to_string(stage.join("run.sh")).unwrap(),
+                concat!(
+                    "#!/bin/sh\n# selected historical template\nsh -c '/app/server'\n",
+                    "APP_STATUS=$?\necho \"ERROR: user application exited with status ${APP_STATUS}\"\n",
+                    "exit \"${APP_STATUS}\"\n"
+                )
+            );
+            let recipe = std::fs::read_to_string(stage.join("Containerfile.eif")).unwrap();
+            assert!(recipe.contains("chmod +x /build/initramfs/run.sh"));
+            for name in ["manifest.json", "run.sh"] {
+                let mode = std::fs::metadata(stage.join(name))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o7777;
+                println!("umask={mask} reused={reused} {name} mode={mode:04o}");
+                modes.push(mode);
+            }
+        }
+        assert_eq!(
+            modes,
+            vec![0o644; 4],
+            "fresh and reused generated files under umask {mask}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_stage_manifest_records_non_default_key_exchange() {
         let manifest = stage_test_manifest(XWING_DRAFT10_KEY_EXCHANGE).await;
 
@@ -2310,6 +2479,16 @@ mod tests {
                 include_str!("../templates/run.sh.template"),
             )
             .unwrap();
+            for component in [
+                crate::components::Component::Init,
+                crate::components::Component::Bootproof,
+            ] {
+                let path = templates
+                    .join("../../..")
+                    .join(component.containerfile_path());
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, component.embedded_containerfile()).unwrap();
+            }
             let sources = ["Cargo.toml", "Cargo.lock", "src/main.rs", "src/vsock.rs"];
             if egress {
                 let recipe = templates.join("../../../containerfiles/Containerfile.tap-framer");
@@ -2372,7 +2551,7 @@ mod tests {
             assert!(!recipe.contains("# {EGRESS"));
             if egress {
                 for instruction in [
-                    "FROM rust AS tap-framer-builder",
+                    "FROM tap-framer-rust AS tap-framer-builder",
                     "COPY src/tap-framer/src/ /build-tap-framer/src/",
                     "# selected recipe",
                     "COPY --from=tap-framer-builder /binaries/tap-framer /build/binaries/tap-framer",
@@ -2394,7 +2573,7 @@ mod tests {
             assert!(!stage.join("tap-framer").exists());
             assert!(!recipe.contains("{{TAP_FRAMER_CONTAINERFILE}}"));
             assert_eq!(
-                recipe.matches("FROM rust AS tap-framer-builder").count(),
+                recipe.matches("FROM tap-framer-rust AS tap-framer-builder").count(),
                 usize::from(egress)
             );
             assert_eq!(stage.join("src/tap-framer").exists(), egress);
@@ -2420,6 +2599,110 @@ mod tests {
                 assert!(!eif.with_extension("tap-framer").exists());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_component_containerfiles_compose_across_feature_matrix() {
+        use crate::components::{recipe, Component};
+        let commit = "a".repeat(40);
+        for flags in 0..16 {
+            let steve = flags & 1 != 0;
+            let caddy = flags & 2 != 0;
+            let locksmith = flags & 4 != 0;
+            let egress = flags & 8 != 0;
+            let dir = tempfile::tempdir().unwrap();
+            let templates = dir.path().join("selected/src/enclave-builder/templates");
+            std::fs::create_dir_all(&templates).unwrap();
+            let template = templates.join("Containerfile.eif");
+            std::fs::write(&template, include_str!("../templates/Containerfile.eif")).unwrap();
+            let enabled = |component| match component {
+                Component::Init | Component::Bootproof => true,
+                Component::Steve => steve,
+                Component::Locksmith => locksmith,
+                Component::TapFramer => egress,
+            };
+            for component in Component::ALL.into_iter().filter(|c| enabled(*c)) {
+                let path = dir
+                    .path()
+                    .join("selected")
+                    .join(component.containerfile_path());
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, component.embedded_containerfile()).unwrap();
+            }
+            let rendered = render_containerfile_template(
+                &template, steve, caddy, locksmith, egress, &commit, &commit, &commit,
+            )
+            .await
+            .unwrap();
+            assert!(!rendered.contains("_CONTAINERFILE}}"));
+            for component in Component::ALL {
+                let canonical = recipe::pin_source_revision(
+                    &recipe::scope_imports(component.embedded_containerfile(), component),
+                    component,
+                    &commit,
+                );
+                assert_eq!(
+                    rendered.contains(&canonical),
+                    enabled(component),
+                    "flags={flags}, {component}"
+                );
+            }
+            let mut stages = std::collections::BTreeSet::new();
+            for line in rendered.lines() {
+                let words = line.split_whitespace().collect::<Vec<_>>();
+                if let ["FROM", base, "AS", name] = words.as_slice() {
+                    assert!(
+                        *base == "scratch" || base.contains("@sha256:") || stages.contains(base),
+                        "undefined base: {line}"
+                    );
+                    assert!(stages.insert(*name), "duplicate stage: {line}");
+                } else if let Some(from) = words.get(1).and_then(|w| w.strip_prefix("--from=")) {
+                    assert!(stages.contains(from), "undefined import: {line}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_render_selected_bootproof_recipe() {
+        let dir = tempfile::tempdir().unwrap();
+        let templates = dir.path().join("selected/src/enclave-builder/templates");
+        let recipes = templates.join("../../../containerfiles");
+        std::fs::create_dir_all(&templates).unwrap();
+        std::fs::create_dir_all(&recipes).unwrap();
+        let template = templates.join("Containerfile.eif");
+        std::fs::write(&template, "{{BOOTPROOF_CONTAINERFILE}}\n").unwrap();
+        let recipe = "FROM scratch AS bootproof-builder\n# selected framework recipe\n";
+        std::fs::write(recipes.join("Containerfile.bootproof"), recipe).unwrap();
+        let rendered = render_containerfile_template(
+            &template,
+            false,
+            false,
+            false,
+            false,
+            "bootproof",
+            "steve",
+            "locksmith",
+        )
+        .await
+        .unwrap();
+        assert_eq!(rendered.trim_end(), recipe.trim_end());
+        std::fs::remove_file(recipes.join("Containerfile.bootproof")).unwrap();
+        assert!(
+            render_containerfile_template(
+                &template,
+                false,
+                false,
+                false,
+                false,
+                "bootproof",
+                "steve",
+                "locksmith",
+            )
+            .await
+            .is_err(),
+            "a missing selected recipe must not fall back to the active checkout"
+        );
     }
 
     #[tokio::test]

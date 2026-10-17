@@ -155,9 +155,10 @@ impl IntoResponse for PasskeyError {
                 StatusCode::GONE,
                 "Passkey registration challenge has expired. Please try again.",
             ),
-            Self::CredentialAlreadyRegistered { .. } => {
-                (StatusCode::CONFLICT, "This passkey is already registered.")
-            }
+            Self::CredentialAlreadyRegistered { .. } => (
+                StatusCode::CONFLICT,
+                "This security key is already registered to another account.",
+            ),
             Self::TooManyPending { .. } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "Too many pending passkey registrations. Please try again later.",

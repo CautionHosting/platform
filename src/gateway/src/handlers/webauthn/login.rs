@@ -699,6 +699,23 @@ fn credential_lookup_error(error: db::DbError) -> LoginError {
     }
 }
 
+#[track_caller]
+#[tracing::instrument(skip_all)]
+fn public_key_lookup_error(error: db::DbError, user_id: Uuid) -> LoginError {
+    if error.kind == db::DbErrorKind::CredentialNotFound {
+        LoginError::CredentialNotFound {
+            location: std::panic::Location::caller(),
+            source: Box::new(error),
+        }
+    } else {
+        LoginError::DbGetPublicKeyForCredential {
+            user_id,
+            location: std::panic::Location::caller(),
+            source: Box::new(error),
+        }
+    }
+}
+
 #[tracing::instrument(skip_all, err(Debug))]
 pub async fn finish_login_handler(
     State(state): State<AppState>,
@@ -805,7 +822,7 @@ pub async fn finish_login_handler(
             let cred_bytes =
                 db::get_credential_public_key(&state.db, user_id, &credential_id_bytes)
                     .await
-                    .with_context(Ctx::db_get_public_key_for_credential(user_id))?;
+                    .map_err(|error| public_key_lookup_error(error, user_id))?;
             let seckey: SecurityKey = serde_json::from_slice(&cred_bytes)
                 .with_context(Ctx::parse_security_key(user_id))?;
 
@@ -873,7 +890,7 @@ pub async fn finish_login_handler(
             let cred_bytes =
                 db::get_credential_public_key(&state.db, user_id, &credential_id_bytes)
                     .await
-                    .with_context(Ctx::db_get_public_key_for_credential(user_id))?;
+                    .map_err(|error| public_key_lookup_error(error, user_id))?;
             let seckey: SecurityKey = serde_json::from_slice(&cred_bytes)
                 .with_context(Ctx::parse_security_key(user_id))?;
 
@@ -1124,6 +1141,48 @@ mod tests {
             status(db::DbErrorKind::QueryFailed),
             StatusCode::INTERNAL_SERVER_ERROR
         );
+    }
+
+    #[tokio::test]
+    async fn missing_public_key_is_an_opaque_authentication_failure() {
+        let response = public_key_lookup_error(
+            db::DbError::not_found("get_credential_public_key"),
+            Uuid::nil(),
+        )
+        .into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        assert!(!response.headers().contains_key(header::SET_COOKIE));
+        assert!(response
+            .extensions()
+            .get::<sentry_middleware::SentryReportable>()
+            .is_some());
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), br#"{"error":"authentication_failed"}"#);
+    }
+
+    #[tokio::test]
+    async fn public_key_query_failure_is_internal() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy_with(sqlx::postgres::PgConnectOptions::new());
+        pool.close().await;
+        let error = db::get_credential_public_key(&pool, Uuid::nil(), b"credential")
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, db::DbErrorKind::QueryFailed);
+        let response = public_key_lookup_error(error, Uuid::nil()).into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!response.headers().contains_key(header::SET_COOKIE));
+        assert!(response
+            .extensions()
+            .get::<sentry_middleware::SentryReportable>()
+            .is_some());
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), b"an internal error occurred");
     }
 
     // --- normalize_login_username -------------------------------------

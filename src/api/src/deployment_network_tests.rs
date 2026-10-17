@@ -48,8 +48,12 @@ fn enclave_tls_rejects_application_ports_owned_by_its_caddy_listener() {
 #[test]
 #[ignore = "requires local terraform, gzip and Caddy; no AWS calls or running-service changes"]
 fn terraform_network_policy_bootstrap_renders_and_adapts_without_cloud_access() {
-    for mode in ["disabled", "steve", "tls"] {
+    for (mode, digest) in ["disabled", "steve", "tls"]
+        .into_iter()
+        .flat_map(|mode| [None, Some("a".repeat(64))].map(|digest| (mode, digest)))
+    {
         let mut request = deployment_request("/tmp/enclave.eif", None);
+        request.tap_framer_sha256 = digest;
         request.domain = Some("policy-test.invalid".into());
         request.egress = true;
         request.e2e = mode != "disabled";
@@ -122,6 +126,11 @@ fn terraform_network_policy_bootstrap_renders_and_adapts_without_cloud_access() 
         let rendered = command_input(Command::new("gzip").args(["-d", "-c"]), &compressed);
         command_input(Command::new("bash").arg("-n"), &rendered);
         let rendered = String::from_utf8(rendered).unwrap();
+        let digest = request
+            .tap_framer_sha256
+            .as_deref()
+            .unwrap_or(super::SOURCE_TAP_FRAMER_SHA256.trim());
+        assert!(rendered.contains(&format!("'{digest}' /opt/nitro/tap-framer.download")));
         assert!(
             rendered.contains("-A CAUTION_EGRESS -d 192.0.2.8/32 -p tcp --dport 443:443 -j ACCEPT")
         );

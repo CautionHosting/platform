@@ -139,7 +139,7 @@ cd "$WORK"
 PIDS="$PIDS $!"
 "${COMMON[@]}" BUILDER_AMI_ID=test BUILDER_SECURITY_GROUP_ID=test \
     BUILDER_SUBNET_ID=test BUILDER_INSTANCE_PROFILE=test \
-    AWS_ENDPOINT_URL=http://127.0.0.1:9 \
+    AWS_ENDPOINT_URL=http://127.0.0.1:9 COMPONENT_BUILD_MODE=source \
     "$CARGO_TARGET_DIR/debug/api" > api.log 2>&1 &
 API_PID=$!
 PIDS="$PIDS $API_PID"
@@ -235,7 +235,7 @@ PIDS="$LIVE_PIDS"
 "${COMMON[@]}" PUBLIC_CERTIFICATE_SERVICE_URL="$REAL_KEY_SERVICE_URL" \
     CAUTION_CA_CERT_PATH="$WORK/policies/recovery-ca.asc" \
     BUILDER_AMI_ID=test BUILDER_SECURITY_GROUP_ID=test BUILDER_SUBNET_ID=test \
-    BUILDER_INSTANCE_PROFILE=test AWS_ENDPOINT_URL=http://127.0.0.1:9 \
+    BUILDER_INSTANCE_PROFILE=test AWS_ENDPOINT_URL=http://127.0.0.1:9 COMPONENT_BUILD_MODE=source \
     "$CARGO_TARGET_DIR/debug/api" > recovery-api.log 2>&1 &
 PIDS="$PIDS $!"
 for _ in $(seq 1 60); do curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1 && break; sleep 1; done

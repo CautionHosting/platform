@@ -1348,7 +1348,7 @@ pub(crate) enum BuildAndGetPcrsError {
     },
 
     #[error(
-        "failed to reproduce enclave using framework '{framework_source}'. For missing TAP-framer sources or incompatible template staging, install a CLI containing platform PR #464 and retry the same verification with --no-cache. Keep the manifest's framework pin; do not bypass PCR verification [{location}]"
+        "failed to reproduce enclave using framework '{framework_source}'. If the failure concerns missing component sources or unexpanded component template markers, upgrade to a CLI supporting standalone component Containerfile rendering and selected-revision source staging, then retry the same verification with --no-cache. Keep the manifest's framework pin; do not bypass PCR verification [{location}]"
     )]
     BuildEnclave {
         #[context(borrow = str)]
@@ -4447,7 +4447,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reproduction_failure_preserves_cause_and_gives_tap_framer_compatibility_guidance() {
+    fn reproduction_failure_preserves_cause_and_gives_component_compatibility_guidance() {
         let framework = "https://example.com/platform/archive/selected-commit.tar.gz";
         let error = Err::<(), _>(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -4470,7 +4470,10 @@ mod tests {
         );
         let message = error.to_string();
         assert!(message.contains(framework));
-        assert!(message.contains("PR #464"));
+        assert!(message.contains("If the failure concerns"));
+        assert!(message.contains("standalone component Containerfile rendering"));
+        assert!(message.contains("selected-revision source staging"));
+        assert!(!message.contains("PR #"));
         assert!(message.contains("--no-cache"));
         assert!(message.contains("Keep the manifest's framework pin"));
         assert!(message.contains("do not bypass PCR verification"));

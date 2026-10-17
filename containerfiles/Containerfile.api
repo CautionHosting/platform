@@ -60,11 +60,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --network=none \
     cargo build ${CARGO_BUILD_FLAGS} --frozen \
       -p api --bin api \
-      -p enclave-builder --bin remote-build-helper \
+      -p enclave-builder --bin remote-build-helper --bin prepare-components \
       -p hcl-patcher --bin hcl-patcher \
       --target ${TARGET_ARCH} \
       ${EXTRA_FEATURES:+--features ${EXTRA_FEATURES}} \
       && install -D -m 0755 /build/target/${TARGET_ARCH}/${CARGO_PROFILE_DIR}/api /usr/local/bin/api \
+      && install -D -m 0755 /build/target/${TARGET_ARCH}/${CARGO_PROFILE_DIR}/prepare-components /usr/local/bin/prepare-components \
       && install -D -m 0755 /build/target/${TARGET_ARCH}/${CARGO_PROFILE_DIR}/remote-build-helper /usr/local/bin/remote-build-helper \
       && install -D -m 0755 /build/target/${TARGET_ARCH}/${CARGO_PROFILE_DIR}/hcl-patcher /usr/local/bin/hcl-patcher
 
@@ -100,11 +101,14 @@ COPY --from=linux-nitro /nsm.ko /usr/share/nitro/nsm.ko
 COPY --from=cpio . /
 COPY --from=socat . /
 COPY --from=builder /usr/local/bin/api /usr/local/bin/api
+COPY --from=builder /usr/local/bin/prepare-components /usr/local/bin/prepare-components
 COPY --from=builder /usr/local/bin/remote-build-helper /usr/local/bin/remote-build-helper
 COPY --from=builder /usr/local/bin/hcl-patcher /usr/local/bin/hcl-patcher
 
 COPY terraform /app/terraform
 COPY src/enclave-builder/templates /app/src/enclave-builder/templates
+COPY containerfiles/Containerfile.init containerfiles/Containerfile.bootproof \
+     containerfiles/Containerfile.steve containerfiles/Containerfile.locksmith /app/containerfiles/
 COPY containerfiles/Containerfile.tap-framer /app/containerfiles/Containerfile.tap-framer
 COPY src/tap-framer/Cargo.toml src/tap-framer/Cargo.lock /app/src/tap-framer/
 COPY src/tap-framer/src /app/src/tap-framer/src

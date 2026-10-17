@@ -47,7 +47,7 @@ webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"]
 
 # Enclave dependencies
 sha2 = { workspace = true }
-enclave-builder = { path = "../enclave-builder" }
+enclave-builder = { path = "../enclave-builder", features = ["s3-components"] }
 
 # Encryption for credentials
 aes-gcm = { workspace = true }

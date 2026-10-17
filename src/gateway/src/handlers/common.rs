@@ -278,7 +278,6 @@ impl IntoResponse for LoginError {
             Self::InvalidSession { .. }
                 | Self::ChallengeExpired { .. }
                 | Self::UnexpectedCredentialOwner { .. }
-                | Self::DbGetPublicKeyForCredential { .. }
                 | Self::ParseSecurityKey { .. }
                 | Self::IdentifyDiscoverableCredential { .. }
                 | Self::FinishSecurityKeyAuthentication { .. }
@@ -293,7 +292,7 @@ impl IntoResponse for LoginError {
                 Self::UnexpectedCredentialOwner { .. } => {
                     tracing::debug!(?self, "Login finish: decoy/scope rejection");
                 }
-                Self::DbGetPublicKeyForCredential { .. } | Self::ParseSecurityKey { .. } => {
+                Self::ParseSecurityKey { .. } => {
                     tracing::warn!(?self, "Login finish: credential lookup/parse failure");
                 }
                 Self::IdentifyDiscoverableCredential { .. } => {

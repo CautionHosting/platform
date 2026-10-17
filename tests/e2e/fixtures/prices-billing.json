@@ -1,0 +1,12 @@
+{
+  "compute_margin_percent": 25,
+  "subscription_tiers": {
+    "starter": { "monthly_cents": 2900, "enclaves": 2 },
+    "1_enclave": { "monthly_cents": 25000, "enclaves": 1 }
+  },
+  "credit_packages": {
+    "1000": { "bonus_percent": 2.5 },
+    "5000": { "bonus_percent": 5 },
+    "10000": { "bonus_percent": 10 }
+  }
+}

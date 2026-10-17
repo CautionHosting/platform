@@ -413,6 +413,9 @@ pub struct NitroDeploymentRequest {
     /// If set, EIF is already in S3 at this key — skip local upload.
     #[serde(default)]
     pub eif_s3_key: Option<String>,
+    /// Exact deployment-paired host helper digest, retained across redeploy/rollback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tap_framer_sha256: Option<String>,
     pub memory_mb: u32,
     pub cpu_count: u32,
     pub disk_gb: u32,
@@ -721,6 +724,10 @@ async fn scale_down_asg(
 }
 
 #[cfg(test)]
+#[path = "deployment_component_tests.rs"]
+mod component_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -860,6 +867,7 @@ mod tests {
         eif_s3_key: Option<&str>,
     ) -> NitroDeploymentRequest {
         NitroDeploymentRequest {
+            tap_framer_sha256: None,
             org_id: Uuid::nil(),
             resource_id: Uuid::nil(),
             resource_name: "app".to_string(),
@@ -3085,7 +3093,7 @@ fn bootstrap_locals(
         ])).build();
     let variables = object(vec![
         ("eif_s3_path", hcl::Expression::String(eif_s3_path.into())),
-        ("tap_framer_sha256", SOURCE_TAP_FRAMER_SHA256.trim().into()),
+        ("tap_framer_sha256", request.tap_framer_sha256.as_deref().unwrap_or(SOURCE_TAP_FRAMER_SHA256.trim()).into()),
         ("memory_mb", hcl::Expression::Number(request.memory_mb.into())),
         ("cpu_count", hcl::Expression::Number(cpu_count.into())),
         ("debug_mode", request.debug_mode.to_string().into()),
@@ -3114,6 +3122,13 @@ fn bootstrap_locals(
 pub(crate) enum GenerateMainTfError {
     #[error("invalid deployment network policy [{location}]")]
     NetworkPolicy {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("invalid pinned host helper digest [{location}]")]
+    ComponentDigest {
         #[location]
         location: Location,
         #[source]
@@ -3152,6 +3167,12 @@ async fn generate_nitro_deployment_main_tf(
 ) -> std::result::Result<(), GenerateMainTfError> {
     use GenerateMainTfErrorCtx as Ctx;
     let policy = request.network.policy().with_context(Ctx::network_policy())?;
+    if let Some(digest) = &request.tap_framer_sha256 {
+        dterror::ResultExt::with_context(
+            enclave_builder::components::validate_digest(digest),
+            Ctx::component_digest(),
+        )?;
+    }
 
     let aws_region = request
         .credentials
@@ -4174,6 +4195,13 @@ pub(crate) enum GenerateOnpremTfError {
         #[source]
         source: BoxError,
     },
+    #[error("invalid pinned host helper digest [{location}]")]
+    ComponentDigest {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
     #[error("missing managed_onprem config [{location}]")]
     MissingConfig { location: Location },
     #[error("could not compute enclave sizing [{location}]")]
@@ -4207,6 +4235,12 @@ async fn generate_managed_onprem_deployment_tf(
 ) -> std::result::Result<(), GenerateOnpremTfError> {
     use GenerateOnpremTfErrorCtx as Ctx;
     let policy = request.network.policy().with_context(Ctx::network_policy())?;
+    if let Some(digest) = &request.tap_framer_sha256 {
+        dterror::ResultExt::with_context(
+            enclave_builder::components::validate_digest(digest),
+            Ctx::component_digest(),
+        )?;
+    }
 
     let onprem =
         request

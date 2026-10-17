@@ -3129,9 +3129,12 @@ dependencies = [
 name = "enclave-builder"
 version = "0.1.0"
 dependencies = [
+ "aws-config",
+ "aws-sdk-s3",
  "base64 0.22.1",
  "bollard",
  "bootproof-sdk",
+ "clap",
  "coset 0.3.8",
  "dterror 0.3.0",
  "flate2",

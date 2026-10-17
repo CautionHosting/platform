@@ -8,6 +8,7 @@ Run with: make test-bootstrap
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -60,6 +61,80 @@ elif name == "systemctl":
 else:
     assert name == "psql", name
 '''
+
+
+class ComponentPolicyTests(unittest.TestCase):
+    """Source-policy regressions; no provider initialization or IAM operations."""
+
+    def resource(self, kind, name):
+        source = (ROOT / "infra-bootstrap/main.tf").read_text()
+        match = re.search(rf'^resource "{kind}" "{name}" \{{\n(.*?)^\}}', source, re.M | re.S)
+        if match is None:
+            self.fail(f"missing {kind}.{name}")
+        return match[1]
+
+    def statements(self, resource):
+        return re.findall(r'^      \{\n(.*?)^      \},?$', resource, re.M | re.S)
+
+    def statement(self, resource, sid):
+        matches = [s for s in self.statements(resource) if re.search(rf'Sid\s*=\s*"{sid}"', s)]
+        self.assertEqual(len(matches), 1, f"expected one {sid} statement")
+        return matches[0]
+
+    def values(self, statement, field):
+        match = re.search(rf'{field}\s*=\s*(\[.*?\]|"[^"\n]*")', statement, re.S)
+        if match is None:
+            self.fail(f"missing literal {field}")
+        return re.findall(r'"([^"\n]*)"', match[1])
+
+    def test_default_platform_can_publish_all_component_objects_create_only(self):
+        policy = self.resource("aws_iam_policy", "platform_deploy")
+        statement = self.statement(policy, "S3ComponentPublication")
+        self.assertEqual(self.values(statement, "Effect"), ["Allow"])
+        self.assertEqual(self.values(statement, "Action"), ["s3:PutObject"])
+        self.assertCountEqual(self.values(statement, "Resource"), [
+            "${aws_s3_bucket.eif_storage.arn}/components/v1/blobs/sha256/*",
+            "${aws_s3_bucket.eif_storage.arn}/components/v1/builds/*",
+            "${aws_s3_bucket.eif_storage.arn}/components/v1/manifests/sha256/*",
+        ])
+        self.assertRegex(statement, r'StringEquals\s*=\s*\{\s*"s3:if-none-match"\s*=\s*"\*"')
+        self.assertNotIn("components_source_bucket_name", policy)
+        self.assertNotRegex(policy, r'\bcount\s*=')
+        attachment = self.resource("aws_iam_user_policy_attachment", "platform")
+        self.assertRegex(attachment, r'user\s*=\s*aws_iam_user\.platform\.name')
+        self.assertRegex(attachment, r'policy_arn\s*=\s*aws_iam_policy\.platform_deploy\.arn')
+
+    def test_builder_component_access_remains_read_only(self):
+        policy = self.resource("aws_iam_role_policy", "builder_s3")
+        statement = self.statement(policy, "BuilderComponentReads")
+        self.assertEqual(self.values(statement, "Action"), ["s3:GetObject"])
+        self.assertEqual(self.values(statement, "Resource"),
+                         ["${aws_s3_bucket.eif_storage.arn}/components/v1/*"])
+        for statement in self.statements(policy):
+            if any(action != "s3:GetObject" and action != "s3:ListBucket"
+                   for action in self.values(statement, "Action")):
+                self.assertCountEqual(self.values(statement, "Resource"), [
+                    "${aws_s3_bucket.eif_storage.arn}/builds/*",
+                    "${aws_s3_bucket.eif_storage.arn}/eifs/*",
+                ])
+
+    def test_alternate_source_relay_stays_opt_in_and_create_only(self):
+        policy = self.resource("aws_iam_user_policy", "platform_component_relay")
+        self.assertRegex(policy, r'count\s*=\s*var.components_source_bucket_name != null && '
+                         r'var.components_source_bucket_name != var.eif_bucket_name \? 1 : 0')
+        self.assertRegex(policy, r'user\s*=\s*aws_iam_user\.platform\.name')
+        self.assertEqual(len(self.statements(policy)), 2)
+        for sid, action, bucket in (
+            ("ReadAlternateComponentSource", "s3:GetObject", "arn:aws:s3:::${var.components_source_bucket_name}"),
+            ("CreateRelayedComponents", "s3:PutObject", "${aws_s3_bucket.eif_storage.arn}"),
+        ):
+            statement = self.statement(policy, sid)
+            self.assertEqual(self.values(statement, "Action"), [action])
+            self.assertCountEqual(self.values(statement, "Resource"), [
+                bucket + "/components/v1/blobs/sha256/*",
+                bucket + "/components/v1/manifests/sha256/*",
+            ])
+        self.assertRegex(statement, r'StringEquals\s*=\s*\{\s*"s3:if-none-match"\s*=\s*"\*"')
 
 
 class BootstrapTests(unittest.TestCase):

@@ -34,6 +34,7 @@ WORK_DIR=$(mktemp -d)
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/caution-cli"
 SSH_KEY_PATH="$WORK_DIR/test_key"
 RESOURCE_ID=""
+SSH_AGENT_OWNED=false
 LOG_DIR="tests/e2e/logs"
 LOG_FILE="$LOG_DIR/platform-ports-$(date +%Y%m%d-%H%M%S).log"
 STEP_NUM=0
@@ -44,16 +45,74 @@ STEP_RESULTS=()
 mkdir -p "$LOG_DIR"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
+destroy_for_cleanup() {
+    local deadline=$((SECONDS + 900))
+    local attempt remaining output status
+    for attempt in $(seq 1 60); do
+        remaining=$((deadline - SECONDS))
+        [ "$remaining" -gt 0 ] || break
+        if output=$(timeout -k 5s "${remaining}s" "$CAUTION_BIN" -u "$GATEWAY_URL" \
+            apps destroy "$RESOURCE_ID" --force 2>&1); then
+            printf '%s\n' "$output" | tee -a "$WORK_DIR/cleanup.log"
+            return 0
+        else
+            status=$?
+        fi
+        printf '%s\n' "$output" | tee -a "$WORK_DIR/cleanup.log"
+        echo "Cleanup destroy attempt $attempt failed (status $status)"
+        # begin_termination atomically rejects pending deploys with this 409.
+        # --force skips confirmation, NOT cloud errors (--force-delete would).
+        # Other failures/timeouts have uncertain outcomes: retain evidence, do not retry.
+        [ "$status" -eq 1 ] || return "$status"
+        case "$output" in
+            *"failed to destroy app (status 409 Conflict): resource is deploying"*) ;;
+            *) return "$status" ;;
+        esac
+        [ "$attempt" -lt 60 ] || break
+        remaining=$((deadline - SECONDS))
+        [ "$remaining" -gt 0 ] || break
+        [ "$remaining" -le 15 ] || remaining=15
+        sleep "$remaining" || return 1
+    done
+    echo "Cleanup retry budget exhausted; deployment may still be in flight" | tee -a "$WORK_DIR/cleanup.log"
+    return 1
+}
+
 cleanup() {
+    local exit_status=$?
+    trap - EXIT
+    set +e
+    if [ "$exit_status" -ne 0 ] && [ "$STEPS_FAILED" -eq 0 ]; then
+        STEPS_FAILED=$((STEPS_FAILED + 1))
+        STEP_RESULTS+=("[FAIL] Step $STEP_NUM: Unexpected exit (status $exit_status)")
+    fi
+
     echo ""
     echo "=== Cleanup ==="
 
+    local cleanup_failed=false
     if [ -n "$RESOURCE_ID" ]; then
         echo "Destroying app $RESOURCE_ID..."
-        "$CAUTION_BIN" -u "$GATEWAY_URL" apps destroy "$RESOURCE_ID" --force 2>/dev/null || true
+        if ! destroy_for_cleanup; then
+            cleanup_failed=true
+        fi
     fi
 
-    rm -rf "$WORK_DIR"
+    if [ "$SSH_AGENT_OWNED" = true ]; then
+        if ! ssh-agent -k > "$WORK_DIR/ssh-agent-cleanup.log" 2>&1; then
+            echo "Could not stop owned SSH agent $SSH_AGENT_PID"
+            cat "$WORK_DIR/ssh-agent-cleanup.log"
+            cleanup_failed=true
+        fi
+    fi
+
+    if [ "$cleanup_failed" = false ]; then
+        rm -rf "$WORK_DIR" || cleanup_failed=true
+    fi
+    if [ "$cleanup_failed" = true ]; then
+        STEPS_FAILED=$((STEPS_FAILED + 1))
+        STEP_RESULTS+=("[FAIL] Cleanup: incomplete; resource $RESOURCE_ID; evidence retained at $WORK_DIR")
+    fi
 
     echo ""
     echo "========================================"
@@ -73,8 +132,9 @@ cleanup() {
         docker logs api 2>&1 | tail -80 || true
         echo "--- Gateway logs ---"
         docker logs gateway 2>&1 | tail -80 || true
-        exit 1
+        [ "$exit_status" -ne 0 ] || exit_status=1
     fi
+    exit "$exit_status"
 }
 trap cleanup EXIT
 
@@ -133,6 +193,7 @@ require_command git
 require_command jq
 require_command ssh
 require_command ssh-keygen
+require_command timeout
 
 # ── Step 1: Wait for services ────────────────────────────────────────
 
@@ -225,7 +286,9 @@ if [ -z "$FINGERPRINT" ] || [ "$FINGERPRINT" = "null" ]; then
     step_fail "Add SSH key"
 fi
 
-eval "$(ssh-agent -s)" >/dev/null
+SSH_AGENT_ENV=$(ssh-agent -s)
+eval "$SSH_AGENT_ENV" >/dev/null
+SSH_AGENT_OWNED=true
 ssh-add "$SSH_KEY_PATH" 2>/dev/null
 step_pass "Add SSH key"
 

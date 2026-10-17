@@ -6,9 +6,12 @@ Requires=caution-network.service
 After=caution-postgres.service caution-network.service
 
 [Service]
+EnvironmentFile=-%h/.config/caution/components.env
+ExecStartPre=/bin/sh -c 'test -s "%h/.config/caution/components.env" && test -n "$${API_COMPONENT_IMAGE:-}" || { echo "Missing component selection or empty API_COMPONENT_IMAGE; run make prepare-components before starting caution-api" >&2; exit 1; }'
+ExecStartPre=/usr/bin/docker run --rm --network caution-network --env-file %h/.config/caution/.env -e PLATFORM_GIT_SHA -e COMPONENT_BUILD_MODE -e COMPONENT_SET_SHA256 -e COMPONENTS_S3_BUCKET -e ENCLAVEOS_COMMIT -e BOOTPROOF_COMMIT -e STEVE_COMMIT -e LOCKSMITH_COMMIT ${API_COMPONENT_IMAGE} --check-components
 ExecStartPre=-/usr/bin/docker rm -f api
 ExecStartPre=/usr/bin/mkdir -p %h/.config/caution/policies
-ExecStart=/usr/bin/docker run --name api --network caution-network -e TF_PLUGIN_CACHE_DIR=/var/cache/caution/terraform --env-file %h/.config/caution/.env -v %h/.config/caution/prices.json:/app/prices.json:ro -v %h/.config/caution/config.json:/app/config.json:ro -v %h/.config/caution/policies:/run/config:ro -v caution-data-dir:/var/cache/caution caution-api
+ExecStart=/usr/bin/docker run --name api --network caution-network -e TF_PLUGIN_CACHE_DIR=/var/cache/caution/terraform --env-file %h/.config/caution/.env -v %h/.config/caution/prices.json:/app/prices.json:ro -v %h/.config/caution/config.json:/app/config.json:ro -v %h/.config/caution/policies:/run/config:ro -v caution-data-dir:/var/cache/caution -e PLATFORM_GIT_SHA -e COMPONENT_BUILD_MODE -e COMPONENT_SET_SHA256 -e COMPONENTS_S3_BUCKET -e ENCLAVEOS_COMMIT -e BOOTPROOF_COMMIT -e STEVE_COMMIT -e LOCKSMITH_COMMIT ${API_COMPONENT_IMAGE}
 ExecStop=/usr/bin/docker stop api
 
 [Install]
