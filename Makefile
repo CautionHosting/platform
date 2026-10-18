@@ -940,6 +940,7 @@ test-bootstrap:
 test-e2e-contracts:
 	@python3 tests/e2e/test_acceptance_contracts.py
 	@python3 tests/e2e/test_platform_ports_contracts.py
+	@python3 tests/test_helper_imports.py
 	@python3 tests/test_managed_dns_contract.py
 	@python3 -m unittest discover -s tests -p test_nitro_restart_systemd_harness.py -v
 
