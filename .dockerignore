@@ -4,3 +4,5 @@ dist
 frontend/node_modules
 out
 target
+tests/e2e/logs/
+tests/e2e/browser-authenticator/node_modules/

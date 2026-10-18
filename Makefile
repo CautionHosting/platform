@@ -716,6 +716,17 @@ E2E_LOCK_FILE ?= /tmp/caution-platform-e2e.lock
 ONPREM_PROVISIONER_DIR ?= ../bring-your-own-compute-setup
 ONPREM_PROVISIONER_IMAGE ?= codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest
 DESTROY_ALL_SCRIPT := tests/e2e/destroy-all-apps.sh
+TEST_STARTUP_TIMEOUT ?= 60
+
+# Only called after a startup probe fails; $(2) lists services started by its caller.
+# Do not reuse down-test here: it also removes services this caller does not own.
+define cleanup_test_startup_failure
+status=$$?; \
+timeout --signal=KILL 3s docker logs --tail 40 "$(1)" 2>&1 | head -c 8192 >&2 || true; \
+timeout --signal=KILL 5s docker rm -f $(2) >/dev/null 2>&1 || echo "Warning: test container cleanup failed" >&2; \
+timeout --signal=KILL 5s docker volume rm "$(TEST_DB_VOLUME)" >/dev/null 2>&1 || echo "Warning: test volume cleanup failed" >&2; \
+exit $$status
+endef
 
 postgres-test: network
 	@docker rm -f $(TEST_DB_HOST) 2>/dev/null || true
@@ -728,13 +739,12 @@ postgres-test: network
 		-e POSTGRES_DB=$(TEST_DB_NAME) \
 		-e POSTGRES_USER=postgres \
 		-e POSTGRES_PASSWORD=postgres \
-		postgres:16-alpine >/dev/null && \
-	echo "Test postgres started, waiting for ready..." && \
-	sleep 3 && \
-	until docker exec $(TEST_DB_HOST) pg_isready -U postgres > /dev/null 2>&1; do \
-		sleep 1; \
-	done && \
-	echo "Test postgres ready"
+		postgres:16-alpine >/dev/null
+	@echo "Test postgres started, waiting for ready..."
+	@python3 scripts/wait-ready.py --timeout "$(TEST_STARTUP_TIMEOUT)" postgres "$(TEST_DB_HOST)" "$(TEST_DB_NAME)" || { \
+		$(call cleanup_test_startup_failure,$(TEST_DB_HOST),$(TEST_DB_HOST)); \
+	}
+	@echo "Test postgres ready"
 
 migrate-test: postgres-test
 	@echo "Running migrations on test DB..."
@@ -847,7 +857,9 @@ up-test: down migrate-test
 	@$(MAKE) prepare-components COMPONENT_ENV_FILE="$(TEST_COMPONENT_ENV_FILE)" COMPONENT_BUILD_MODE="$(TEST_COMPONENT_BUILD_MODE)"
 	@$(MAKE) run-email-test run-api-test
 	@echo "Waiting for API to be ready..."
-	@sleep 2
+	@python3 scripts/wait-ready.py --timeout "$(TEST_STARTUP_TIMEOUT)" http http://127.0.0.1:8080/health || { \
+		$(call cleanup_test_startup_failure,api,api email $(TEST_DB_HOST)); \
+	}
 	@$(MAKE) run-gateway-test
 	@echo "  All services running (e2e-testing-unsafe mode)"
 	@echo "  All ports bound to 127.0.0.1 only (not externally accessible)"
@@ -864,7 +876,9 @@ up-test-billing: down-test-billing migrate-test
 	@$(MAKE) prepare-components COMPONENT_ENV_FILE="$(TEST_COMPONENT_ENV_FILE)" COMPONENT_BUILD_MODE="$(TEST_COMPONENT_BUILD_MODE)"
 	@$(MAKE) run-email-test run-metering-test run-api-test
 	@echo "Waiting for API to be ready..."
-	@sleep 2
+	@python3 scripts/wait-ready.py --timeout "$(TEST_STARTUP_TIMEOUT)" http http://127.0.0.1:8080/health || { \
+		$(call cleanup_test_startup_failure,api,api email metering $(TEST_DB_HOST)); \
+	}
 	@$(MAKE) run-gateway-test
 	@echo "  All services running (billing e2e mode)"
 	@echo "  Gateway:  http://127.0.0.1:8000"
