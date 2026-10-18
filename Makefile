@@ -65,7 +65,7 @@ build-gateway:
 	@echo "Building Gateway binary..."
 	@mkdir -p $(OUT_DIR)
 	@docker rmi -f caution-gateway 2>/dev/null || true
-	@docker build -t caution-gateway -f ./containerfiles/Containerfile.gateway .
+	@docker build -t caution-gateway $(if $(VITE_PADDLE_SANDBOX),--build-arg VITE_PADDLE_SANDBOX=$(VITE_PADDLE_SANDBOX)) -f ./containerfiles/Containerfile.gateway .
 	@echo "Gateway image build complete"
 
 # NOTE: Tofu is currently broke in stagex.
@@ -490,11 +490,15 @@ volume:
 
 postgres: network volume
 	systemctl restart --user caution-postgres
+ifeq ($(CAUTION_HOSTED),1)
+	@python3 scripts/hosted-platform.py wait-postgres
+else
 	until docker exec postgres pg_isready -U postgres > /dev/null 2>&1; do \
 		echo "   Waiting for postgres..."; \
 		sleep 1; \
 	done && \
 	echo "Postgres ready"
+endif
 
 migrate: postgres
 	@echo "Running migrations..."
@@ -590,7 +594,10 @@ run-drift-detector: network
 # Main targets
 # =============================================================================
 
-.PHONY: setup test-bootstrap
+.PHONY: setup test-bootstrap hosted-bootstrap-version
+
+hosted-bootstrap-version:
+	@printf '1\n'
 
 setup:
 	@bash scripts/setup-platform.sh
@@ -609,6 +616,9 @@ up-components:
 	@$(MAKE) migrate
 	systemctl --user daemon-reload
 	systemctl restart --user caution-email caution-metering caution-api caution-gateway
+ifeq ($(CAUTION_HOSTED),1)
+	@python3 scripts/hosted-platform.py health
+endif
 	@echo "  All services running"
 	@echo "  Gateway: http://localhost:8000"
 	@echo "  SSH: localhost:2222"
@@ -917,6 +927,7 @@ test-cli-install:
 
 test-bootstrap:
 	@python3 -m unittest discover -s tests -p test_infra_bootstrap.py -v
+	@python3 -m unittest discover -s tests -p test_hosted_platform.py -v
 
 .PHONY: test-e2e-contracts
 test-e2e-contracts:

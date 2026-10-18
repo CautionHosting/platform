@@ -331,8 +331,8 @@ class BootstrapTests(unittest.TestCase):
             with self.subTest(settings=settings):
                 result = self.run_script("utils/makefile-run-migrations.sh", **settings)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(self.args("psql")[0][:8], ["-v", "ON_ERROR_STOP=1", "-h", expected[0], "-U", expected[1], "-d", expected[2]])
+                self.assertEqual(self.args("psql")[0][:9], ["-X", "-v", "ON_ERROR_STOP=1", "-h", expected[0], "-U", expected[1], "-d", expected[2]])
                 self.assertEqual(self.calls[0]["env"]["PGPASSWORD"], expected[3])
-        result = self.run_script("utils/makefile-run-migrations.sh", FAIL="psql:-v")
-        self.assertEqual(result.returncode, 1, result.stderr)
+        result = self.run_script("utils/makefile-run-migrations.sh", FAIL="psql:-X")
+        self.assertEqual(result.returncode, 17, result.stderr)
         self.assertEqual(len(self.args("psql")), 1)

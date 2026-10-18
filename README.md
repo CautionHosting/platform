@@ -85,10 +85,32 @@ Start the platform services after reviewing configuration:
 make up
 ```
 
-`make up` starts PostgreSQL, runs migrations, builds the API, gateway (including
-frontend assets), email, and metering images, then starts those services. No
-separate `make build-all` is needed; the first run requires network access for
-image pulls and build dependencies.
+`make up` builds the API, gateway (including frontend assets), email, and metering
+images, prepares the selected enclave components, then starts PostgreSQL, applies
+migrations, and starts those services. No separate `make build-all` is needed;
+the first run requires network access for image pulls and build dependencies.
+Migrations record each committed file's checksum in `caution_bootstrap_migrations`:
+retries skip applied files, reject changed/missing history, and roll back a failed
+file without recording success. Existing databases without this ledger are not
+automatically adopted.
+
+#### Infrastructure-managed EC2 setup
+
+The infrastructure bootstrap can clone an exact platform commit on EC2, provide
+configuration outside the checkout, then invoke the same `make setup` / `make up`
+targets as its service user. Hosted bootstrap contract v1 is advertised by
+`make -s hosted-bootstrap-version`. The wrapper sets `CAUTION_HOSTED=1`,
+`CAUTION_DNS_MODE=deferred|manual|delegated`, `CAUTION_MAIL_MODE=test|smtp`, and the
+appropriate `VITE_PADDLE_SANDBOX` build flag. These switches do not provision AWS
+or replace infrastructure-owned Debian, EBS, secrets, user-manager, or TLS setup.
+
+Hosted setup requires an existing readable `.env`, preserves configuration, and
+installs/enables user units with restart policies. It binds gateway HTTP to
+loopback for the TLS edge (and SSH to loopback while DNS is deferred), and applies
+test-mail overrides only to the email container. Hosted startup has bounded
+PostgreSQL and service/API/frontend health checks and fails rather than announcing
+success when any required service is unhealthy. Normal local setup/start retains
+its existing behavior when `CAUTION_HOSTED` is not set.
 
 Run the script/setup regression tests with `make test-bootstrap`; these also run
 as part of `make test` and use temporary directories and stubbed cloud commands.

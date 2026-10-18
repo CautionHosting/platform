@@ -22,6 +22,21 @@ if ! docker info >/dev/null 2>&1; then
     exit 1
 fi
 
+if [[ "${CAUTION_HOSTED:-0}" == 1 ]]; then
+    if [[ ! -f "$CONFIG_DIR/.env" || ! -r "$CONFIG_DIR/.env" ]]; then
+        printf 'Error: hosted setup requires an existing readable %s/.env; provision configuration first.\n' "$CONFIG_DIR" >&2
+        exit 1
+    fi
+    case "${CAUTION_DNS_MODE:-}" in
+        deferred|manual|delegated) ;;
+        *) printf 'Error: CAUTION_DNS_MODE must be deferred, manual or delegated.\n' >&2; exit 1 ;;
+    esac
+    case "${CAUTION_MAIL_MODE:-}" in
+        test|smtp) ;;
+        *) printf 'Error: CAUTION_MAIL_MODE must be test or smtp.\n' >&2; exit 1 ;;
+    esac
+fi
+
 mkdir -p "$CONFIG_DIR" "$UNIT_DIR"
 for file in .env prices.json config.json; do
     if [[ -e "$CONFIG_DIR/$file" || -L "$CONFIG_DIR/$file" ]]; then
@@ -35,6 +50,10 @@ for file in .env prices.json config.json; do
     [[ "$file" != .env ]] || example=env.example
     install -m 0600 "$REPO_ROOT/$example" "$CONFIG_DIR/$file"
 done
-install -m 0644 "$REPO_ROOT"/systemd/*.service "$UNIT_DIR/"
-systemctl --user daemon-reload
+if [[ "${CAUTION_HOSTED:-0}" == 1 ]]; then
+    python3 "$REPO_ROOT/scripts/hosted-platform.py" setup
+else
+    install -m 0644 "$REPO_ROOT"/systemd/*.service "$UNIT_DIR/"
+    systemctl --user daemon-reload
+fi
 printf 'Setup complete; no services started. Review %s/{.env,prices.json,config.json}, then run make up.\n' "$CONFIG_DIR"
