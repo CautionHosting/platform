@@ -4114,6 +4114,13 @@ pub async fn run() -> Result<(), RunError> {
 
 #[cfg(test)]
 mod tests {
+    pub(crate) mod http_fixture {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/http_fixture.rs"
+        ));
+    }
+
     use super::openpgp;
     use super::verify::{
         ARCHIVE_PREFLIGHT_ATTEMPTS, ArchivePreflightStatus, MAX_ATTESTATION_RESPONSE_BYTES,
@@ -4855,8 +4862,8 @@ enclave "main" {{
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = [0; 4096];
-            socket.read(&mut request).await.unwrap();
+            let request = http_fixture::read_headers_async(&mut socket).await.unwrap();
+            assert!(request.starts_with(b"POST /api/quorum-bundles/from-org-users HTTP/1.1\r\n"));
             socket
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n")
                 .await

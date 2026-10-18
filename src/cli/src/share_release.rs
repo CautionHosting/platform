@@ -1032,7 +1032,7 @@ mod holder_selection_tests {
     fn lookup_outcomes_distinguish_missing_and_inconsistent_metadata() {
         let (_, bundle, row) = fixture();
         assert!(matches!(
-            names_from_rows(&bundle, &[row.clone()]),
+            names_from_rows(&bundle, std::slice::from_ref(&row)),
             NameLookup::Found(_)
         ));
         assert_eq!(names_from_rows(&bundle, &[]), NameLookup::UnmatchedBundle);
@@ -1114,7 +1114,7 @@ mod holder_selection_tests {
 
     #[tokio::test]
     async fn metadata_redirect_does_not_forward_session() {
-        use std::io::{Read, Write};
+        use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
         let source = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let target = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1139,8 +1139,14 @@ mod holder_selection_tests {
             stream
                 .set_read_timeout(Some(Duration::from_secs(10)))
                 .unwrap();
-            let mut request = [0; 4096];
-            stream.read(&mut request).unwrap();
+            let request = crate::tests::http_fixture::read_headers(&mut stream).unwrap();
+            assert!(request.starts_with(b"GET /api/quorum-bundles HTTP/1.1\r\n"));
+            assert!(
+                String::from_utf8(request)
+                    .unwrap()
+                    .to_ascii_lowercase()
+                    .contains("\r\nx-session-id: secret\r\n")
+            );
             stream.write_all(redirect.as_bytes()).unwrap();
         });
         assert_eq!(

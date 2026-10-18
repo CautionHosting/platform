@@ -29,17 +29,17 @@ mod tests {
         let https = Url::parse("https://forge.example/repo/archive/commit.tar.gz").unwrap();
         let http = Url::parse("http://development.example/source").unwrap();
         let cdn = Url::parse("https://cdn.example/source").unwrap();
-        assert!(permits_redirect(&[https.clone()], &cdn));
-        assert!(!permits_redirect(&[https.clone()], &http));
-        assert!(permits_redirect(&[http.clone()], &http));
-        assert!(permits_redirect(&[http.clone()], &https));
+        assert!(permits_redirect(std::slice::from_ref(&https), &cdn));
+        assert!(!permits_redirect(std::slice::from_ref(&https), &http));
+        assert!(permits_redirect(std::slice::from_ref(&http), &http));
+        assert!(permits_redirect(std::slice::from_ref(&http), &https));
         assert!(!permits_redirect(&[http.clone(), https.clone()], &http));
         for target in [
             "file:///tmp/source",
             "https://user:password@cdn.example/source",
         ] {
             assert!(!permits_redirect(
-                &[https.clone()],
+                std::slice::from_ref(&https),
                 &Url::parse(target).unwrap()
             ));
         }

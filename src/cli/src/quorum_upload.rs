@@ -164,7 +164,7 @@ mod tests {
         let body = serde_json::json!({"data":{"data":{"bundle_id":[1],"public_key":"key"},"necroproof":[2]}});
         let record = serde_json::json!({"data":body["data"],"name":"renamed","id":"platform-id"});
         assert!(!already_uploaded(&[], &body).unwrap());
-        assert!(already_uploaded(&[record.clone()], &body).unwrap());
+        assert!(already_uploaded(std::slice::from_ref(&record), &body).unwrap());
         let unrelated = serde_json::json!({"data":{"data":{"bundle_id":[3]}}});
         assert!(!already_uploaded(&[unrelated], &body).unwrap());
         let mut conflict = record.clone();

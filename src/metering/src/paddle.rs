@@ -523,24 +523,100 @@ mod tests {
         assert!(txn.is_ok());
     }
 
-    /// Helper: load .env and build a PaddleClient from PADDLE_API_URL + PADDLE_API_KEY.
-    /// Returns None if Paddle is not configured (tests skip gracefully).
-    fn sandbox_client() -> Option<PaddleClient> {
-        dotenvy::dotenv().ok();
-        let api_url = std::env::var("PADDLE_API_URL").unwrap_or_default();
-        let api_key = std::env::var("PADDLE_API_KEY").unwrap_or_default();
-        if api_key.is_empty() || api_url.is_empty() {
-            eprintln!("PADDLE_API_KEY or PADDLE_API_URL not set, skipping sandbox test");
-            return None;
+    /// Only the ignored provider tests read explicit environment configuration; no dotenv discovery.
+    fn sandbox_client() -> PaddleClient {
+        let api_url = std::env::var("PADDLE_API_URL").ok();
+        let api_key = std::env::var("PADDLE_API_KEY").ok();
+        sandbox_client_from_config(api_url.as_deref(), api_key.as_deref())
+    }
+
+    fn sandbox_client_from_config(api_url: Option<&str>, api_key: Option<&str>) -> PaddleClient {
+        let api_key = api_key
+            .filter(|key| !key.trim().is_empty())
+            .expect("Sandbox tests require nonempty PADDLE_API_KEY in the environment");
+        let api_url = api_url
+            .filter(|url| !url.trim().is_empty())
+            .expect("Sandbox tests require nonempty PADDLE_API_URL in the environment");
+        assert!(
+            api_url == "https://sandbox-api.paddle.com",
+            "Sandbox tests require PADDLE_API_URL=https://sandbox-api.paddle.com exactly"
+        );
+        PaddleClient {
+            client: Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("Sandbox test HTTP client should build"),
+            base_url: api_url.to_string(),
+            api_key: api_key.to_string(),
+            webhook_secret: String::new(),
         }
-        Some(PaddleClient::new(api_url, api_key, "".to_string()))
+    }
+
+    #[test]
+    fn test_sandbox_config_requires_key() {
+        for api_key in [None, Some(""), Some(" \t\n")] {
+            let result = std::panic::catch_unwind(|| {
+                sandbox_client_from_config(Some("https://sandbox-api.paddle.com"), api_key)
+            });
+            assert!(
+                result.is_err(),
+                "Missing or blank sandbox key must fail, not skip"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sandbox_config_requires_url() {
+        for api_url in [None, Some(""), Some(" \t\n")] {
+            let result = std::panic::catch_unwind(|| {
+                sandbox_client_from_config(api_url, Some("test-only-key"))
+            });
+            assert!(
+                result.is_err(),
+                "Missing or blank sandbox URL must fail, not skip"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sandbox_config_rejects_other_origins() {
+        for api_url in [
+            "https://api.paddle.com",
+            "http://sandbox-api.paddle.com",
+            "https://example.com",
+            "https://sandbox-api.paddle.com.example.com",
+            "https://sandbox-api.paddle.com@other.example.com",
+            "https://user:password@sandbox-api.paddle.com",
+            "https://sandbox-api.paddle.com:8443",
+            "https://sandbox-api.paddle.com/customers",
+            "https://sandbox-api.paddle.com?redirect=other",
+            "https://sandbox-api.paddle.com#fragment",
+            "not a URL",
+        ] {
+            let result = std::panic::catch_unwind(|| {
+                sandbox_client_from_config(Some(api_url), Some("test-only-key"))
+            });
+            assert!(
+                result.is_err(),
+                "Only the exact HTTPS sandbox origin is allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sandbox_config_accepts_exact_sandbox_origin() {
+        let client = sandbox_client_from_config(
+            Some("https://sandbox-api.paddle.com"),
+            Some("test-only-key"),
+        );
+        assert!(client.is_configured());
+        assert_eq!(client.base_url, "https://sandbox-api.paddle.com");
     }
 
     #[tokio::test]
+    #[ignore = "NOT EXECUTED by default: mutates Paddle sandbox; run make test-paddle-sandbox"]
     async fn test_create_customer_sandbox() {
-        let Some(client) = sandbox_client() else {
-            return;
-        };
+        let client = sandbox_client();
 
         let customer = client
             .create_customer(
@@ -559,10 +635,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "NOT EXECUTED by default: mutates Paddle sandbox; run make test-paddle-sandbox"]
     async fn test_create_transaction_sandbox() {
-        let Some(client) = sandbox_client() else {
-            return;
-        };
+        let client = sandbox_client();
 
         let customer = client
             .create_customer(
@@ -594,10 +669,9 @@ mod tests {
 
     /// Full lifecycle: create customer → create transaction → retrieve transaction
     #[tokio::test]
+    #[ignore = "NOT EXECUTED by default: mutates Paddle sandbox; run make test-paddle-sandbox"]
     async fn test_full_billing_lifecycle_sandbox() {
-        let Some(client) = sandbox_client() else {
-            return;
-        };
+        let client = sandbox_client();
 
         let customer = client
             .create_customer(
@@ -642,10 +716,9 @@ mod tests {
 
     /// Verify that creating a customer with the same email returns a 409 or handles gracefully
     #[tokio::test]
+    #[ignore = "NOT EXECUTED by default: mutates Paddle sandbox; run make test-paddle-sandbox"]
     async fn test_duplicate_customer_sandbox() {
-        let Some(client) = sandbox_client() else {
-            return;
-        };
+        let client = sandbox_client();
 
         let email = format!("sandbox-dup-{}@example.com", uuid::Uuid::new_v4());
 

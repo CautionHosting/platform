@@ -926,6 +926,8 @@ test-bootstrap:
 test-e2e-contracts:
 	@python3 tests/e2e/test_acceptance_contracts.py
 	@python3 tests/e2e/test_platform_ports_contracts.py
+	@python3 tests/test_managed_dns_contract.py
+	@python3 -m unittest discover -s tests -p test_nitro_restart_systemd_harness.py -v
 
 test-e2e:
 	@$(MAKE) build-cli
@@ -1241,9 +1243,13 @@ clean-e2e:
 	exit $$status
 
 test-paddle-sandbox:
-	@echo "Running Paddle sandbox integration tests..."
-	@echo "Uses PADDLE_API_KEY and PADDLE_API_URL from .env"
-	cargo test --package metering -- sandbox --nocapture
+	@echo "Running opt-in Paddle sandbox integration tests (creates customers and transactions)..."
+	@echo "Requires exported PADDLE_API_KEY and PADDLE_API_URL=https://sandbox-api.paddle.com; no .env loading"
+	cargo test --package metering -- --ignored --exact --nocapture \
+		paddle::tests::test_create_customer_sandbox \
+		paddle::tests::test_create_transaction_sandbox \
+		paddle::tests::test_full_billing_lifecycle_sandbox \
+		paddle::tests::test_duplicate_customer_sandbox
 
 test: test-unit test-cli-install test-bootstrap test-e2e-contracts test-prepare-components
 

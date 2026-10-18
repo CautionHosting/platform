@@ -77,9 +77,15 @@ fn rejects_invalid_egress_fields() {
             [&rule, "\negress { cidr_ipv4 = \"0.0.0.0/0\" }"].concat(),
         ] {
             let input = config_with_network(&network);
-            assert!(hcl::from_str::<ConfigurationFile>(&input).is_err(), "{input}");
+            assert!(
+                hcl::from_str::<ConfigurationFile>(&input).is_err(),
+                "{input}"
+            );
             let error = ConfigurationFile::from_str(&input).unwrap_err();
-            assert!(matches!(error, caution_config::FromStrError::HclParse { .. }));
+            assert!(matches!(
+                error,
+                caution_config::FromStrError::HclParse { .. }
+            ));
             assert!(std::error::Error::source(&error).is_some());
         }
     }

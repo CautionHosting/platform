@@ -331,7 +331,11 @@ pub struct NetworkConfig {
     #[serde(deserialize_with = "single_or_vec", default)]
     pub egress: Vec<TrafficRule>,
     /// Recovery endpoint sources. Omitted inherits HTTP sources; an empty list denies all.
-    #[serde(default, deserialize_with = "deserialize_recovery_ingress", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_recovery_ingress",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub recovery_ingress: Option<Vec<RecoveryIngress>>,
     pub http: Option<HttpConfig>,
 }
@@ -345,7 +349,9 @@ pub struct RecoveryIngress {
     pub cidr_ipv4: String,
 }
 
-fn deserialize_recovery_ingress<'de, D>(deserializer: D) -> Result<Option<Vec<RecoveryIngress>>, D::Error>
+fn deserialize_recovery_ingress<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<RecoveryIngress>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -1164,7 +1170,9 @@ impl ConfigurationFile {
 
         for (name, enclave) in config.enclave.iter().flatten() {
             if let Some(network) = &enclave.network {
-                network.policy().with_context(Ctx::network_policy(name.clone()))?;
+                network
+                    .policy()
+                    .with_context(Ctx::network_policy(name.clone()))?;
             }
         }
 
@@ -1574,8 +1582,10 @@ enclave "main" {
         let FromStrError::NetworkPolicy { source, .. } = err else {
             panic!("expected network policy error");
         };
-        assert!(matches!(source.downcast_ref::<NetworkPolicyError>(),
-            Some(NetworkPolicyError::HttpPortNotInIngress { port: 9090, .. })));
+        assert!(matches!(
+            source.downcast_ref::<NetworkPolicyError>(),
+            Some(NetworkPolicyError::HttpPortNotInIngress { port: 9090, .. })
+        ));
     }
 
     #[test]

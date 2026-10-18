@@ -2592,7 +2592,9 @@ mod tests {
             assert!(!stage.join("tap-framer").exists());
             assert!(!recipe.contains("{{TAP_FRAMER_CONTAINERFILE}}"));
             assert_eq!(
-                recipe.matches("FROM tap-framer-rust AS tap-framer-builder").count(),
+                recipe
+                    .matches("FROM tap-framer-rust AS tap-framer-builder")
+                    .count(),
                 usize::from(egress)
             );
             assert_eq!(stage.join("src/tap-framer").exists(), egress);

@@ -95,6 +95,7 @@ def exercise(artifacts, policy, failure, bad_launch=False):
     names = {"nitro-enclave.service": prefix + ".service",
              "nitro-enclave-console.service": prefix + "-console.service",
              "nitro-enclaves-allocator.service": prefix + "-allocator.service",
+             "caution-network-policy.service": prefix + "-policy.service",
              "vsock-proxy-http.service": prefix + "-proxy.service"}
     main = names["nitro-enclave.service"]
     proxy = names["vsock-proxy-http.service"]
@@ -118,7 +119,7 @@ def exercise(artifacts, policy, failure, bad_launch=False):
             (directory / "bad-launch").touch()
         try:
             for original, name in names.items():
-                if original == "nitro-enclaves-allocator.service":
+                if original in ("nitro-enclaves-allocator.service", "caution-network-policy.service"):
                     body = "[Service]\nType=oneshot\nExecStart=/usr/bin/true\nRemainAfterExit=yes\n"
                 else:
                     body = unit_block(text, original)
@@ -175,19 +176,21 @@ def exercise(artifacts, policy, failure, bad_launch=False):
             assert systemctl("is-active", proxy).returncode == 0
             print("PASS " + policy + (" failed" if failure else " clean") + " exit, proxy continuity, console lifecycle, explicit stop", flush=True)
         except Exception:
-            print(systemctl("status", *linked, "--no-pager", check=False).stdout, file=sys.stderr)
+            if linked:
+                print(systemctl("status", *linked, "--no-pager", check=False).stdout, file=sys.stderr)
             raise
         finally:
-            systemctl("stop", *linked, check=False)
-            systemctl("reset-failed", *linked, check=False)
-            for name in linked:
-                (runtime_root / "systemd/user" / name).unlink(missing_ok=True)
-            systemctl("daemon-reload")
+            if linked:
+                systemctl("stop", *linked, check=False)
+                systemctl("reset-failed", *linked, check=False)
+                for name in linked:
+                    (runtime_root / "systemd/user" / name).unlink(missing_ok=True)
+                systemctl("daemon-reload")
 
 
 if __name__ == "__main__":
     artifacts = Path(sys.argv[1]).resolve()
-    systemctl("is-system-running")
+    systemctl("show", "--property=Version", "--value")
     for policy in ["no", "on-failure", "always"]:
         for failure in [False, True]:
             exercise(artifacts, policy, failure)

@@ -3318,13 +3318,16 @@ mod tests {
             .0;
         let missing_jq = std::process::Command::new("bash")
             .arg("-c")
-            .arg(format!("set -e\nPATH=''\n{fragment}\nprintf 'helper-started'"))
+            .arg(format!(
+                "set -e\nPATH=''\n{fragment}\nprintf 'helper-started'"
+            ))
             .output()
             .expect("userdata shell tests require bash on PATH");
         assert_eq!(missing_jq.status.code(), Some(1));
         assert!(
-            String::from_utf8_lossy(&missing_jq.stderr)
-                .contains("Component download prerequisite missing: install jq and ensure it is on PATH"),
+            String::from_utf8_lossy(&missing_jq.stderr).contains(
+                "Component download prerequisite missing: install jq and ensure it is on PATH"
+            ),
             "missing jq should have an actionable diagnostic: {}",
             String::from_utf8_lossy(&missing_jq.stderr)
         );
