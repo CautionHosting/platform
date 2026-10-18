@@ -169,7 +169,7 @@ mod tests {
         ))
         .unwrap();
         let (_, auth_state) = webauthn
-            .start_securitykey_authentication(&[key.clone()])
+            .start_securitykey_authentication(std::slice::from_ref(&key))
             .unwrap();
         let user_id = Uuid::new_v4();
         let id = Uuid::new_v4();

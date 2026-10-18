@@ -68,8 +68,8 @@ fn direct_rejects_mixed_and_webauthn() {
         key_source: "caution_backed_pgp",
         pgp_key_id: None,
     };
-    assert!(validate_direct(true, &[pgp.clone()]).is_ok());
-    assert!(validate_direct(false, &[web.clone()]).is_ok());
+    assert!(validate_direct(true, std::slice::from_ref(&pgp)).is_ok());
+    assert!(validate_direct(false, std::slice::from_ref(&web)).is_ok());
     for participants in [vec![web.clone()], vec![pgp, web]] {
         assert!(
             validate_direct(true, &participants)
@@ -109,7 +109,8 @@ fn fingerprints_resolve_to_the_same_registration_uuid_payload() {
             }],
         };
         let mut opts = options(vec![member.user_id]);
-        let expected = select_participants(&opts, &[member.clone()], false, false).unwrap();
+        let expected =
+            select_participants(&opts, std::slice::from_ref(&member), false, false).unwrap();
         let spaced = fingerprint
             .as_bytes()
             .chunks(4)
@@ -123,7 +124,8 @@ fn fingerprints_resolve_to_the_same_registration_uuid_payload() {
             format!(" \t{spaced}\n"),
         ] {
             opts.pgp_keys = vec![format!("alice={selector}").parse().unwrap()];
-            let actual = select_participants(&opts, &[member.clone()], false, false).unwrap();
+            let actual =
+                select_participants(&opts, std::slice::from_ref(&member), false, false).unwrap();
             assert_eq!(
                 serde_json::to_value(&actual.0).unwrap(),
                 serde_json::to_value(&expected.0).unwrap()
@@ -256,7 +258,7 @@ fn multiple_registered_keys_prompt_without_a_selector() {
     opts.holders = vec!["alice=external-pgp".parse().unwrap()];
     let mut prompts = 0;
     let (selected, certificates) =
-        select_participants_with_choice(&opts, &[member.clone()], true, false, |_| {
+        select_participants_with_choice(&opts, std::slice::from_ref(&member), true, false, |_| {
             prompts += 1;
             Ok(2)
         })
@@ -334,9 +336,13 @@ fn selection_without_custody_fails_before_prompting() {
         webauthn_uv_credentials: 0,
     };
     for interactive in [false, true] {
-        let error =
-            select_participants(&options(vec![user]), &[member.clone()], interactive, false)
-                .unwrap_err();
+        let error = select_participants(
+            &options(vec![user]),
+            std::slice::from_ref(&member),
+            interactive,
+            false,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("no registered credentials"));
     }
 }
@@ -353,7 +359,7 @@ fn duplicate_users_and_overrides_are_rejected() {
     };
     let mut opts = options(vec![user, user]);
     opts.caution_backed = true;
-    assert!(select_participants(&opts, &[member.clone()], false, false).is_err());
+    assert!(select_participants(&opts, std::slice::from_ref(&member), false, false).is_err());
     opts.from_org_users.pop();
     opts.pgp_keys = vec![
         PgpSelection {
@@ -641,7 +647,7 @@ fn selector_parsing_and_uuid_precedence() {
     };
     let selector: UserSelector = id.to_string().parse().unwrap();
     assert!(
-        selector.resolve(&[member.clone()]).is_err(),
+        selector.resolve(std::slice::from_ref(&member)).is_err(),
         "UUIDs never fall back to usernames"
     );
     let actual = Member {
@@ -775,7 +781,7 @@ fn unknown_partial_and_ambiguous_names_are_rejected() {
         assert!(
             name.parse::<UserSelector>()
                 .unwrap()
-                .resolve(&[first.clone()])
+                .resolve(std::slice::from_ref(&first))
                 .err()
                 .unwrap()
                 .to_string()

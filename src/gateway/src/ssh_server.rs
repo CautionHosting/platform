@@ -10,8 +10,8 @@ use russh::{Channel, ChannelId};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Child;
@@ -444,7 +444,9 @@ impl russh::server::Server for SshServer {
             SshHandlerError::NotAuthenticated { .. } => ("not_authenticated", None),
             SshHandlerError::StdinWrite { source, .. } => (
                 "git_stdin_write",
-                source.downcast_ref::<std::io::Error>().map(std::io::Error::kind),
+                source
+                    .downcast_ref::<std::io::Error>()
+                    .map(std::io::Error::kind),
             ),
             SshHandlerError::Protocol { source, .. } => {
                 match source.downcast_ref::<russh::Error>() {

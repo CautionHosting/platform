@@ -810,22 +810,37 @@ mod tests {
         for (option, value) in [
             ("--bucket", "bucket"),
             ("--framework-source", "/framework"),
-            ("--framework-commit", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            (
+                "--framework-commit",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
             ("--enclave-source", "/enclave"),
-            ("--enclave-commit", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-            ("--bootproof-commit", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            (
+                "--enclave-commit",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+            (
+                "--bootproof-commit",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
             ("--steve-commit", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-            ("--locksmith-commit", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            (
+                "--locksmith-commit",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
             ("--output-lock", "/output.json"),
             ("--accepted-lock", "/accepted.json"),
             ("--build-log-dir", "/logs"),
             ("--region", "us-east-1"),
         ] {
-            let error = Arguments::try_parse_from([
-                "prepare-components", "--print-inputs", option, value,
-            ])
-            .unwrap_err();
-            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict, "{option}");
+            let error =
+                Arguments::try_parse_from(["prepare-components", "--print-inputs", option, value])
+                    .unwrap_err();
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{option}"
+            );
         }
     }
 

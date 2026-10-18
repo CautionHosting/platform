@@ -3365,8 +3365,10 @@ impl DeployLogicError {
                         (StatusCode::BAD_REQUEST, message)
                     }
                     Some(LoadBuildConfigForDeployError::ProcfileParse { source, .. })
-                        if matches!(source.downcast_ref::<config::FromProcfileError>(),
-                            Some(config::FromProcfileError::NetworkPolicy { .. })) =>
+                        if matches!(
+                            source.downcast_ref::<config::FromProcfileError>(),
+                            Some(config::FromProcfileError::NetworkPolicy { .. })
+                        ) =>
                     {
                         (StatusCode::BAD_REQUEST, "Invalid network policy.")
                     }
@@ -3375,7 +3377,8 @@ impl DeployLogicError {
             }
             DeployLogicError::NetworkPolicy { source, .. } => (
                 StatusCode::BAD_REQUEST,
-                source.downcast_ref::<config::NetworkPolicyError>()
+                source
+                    .downcast_ref::<config::NetworkPolicyError>()
                     .map(config::NetworkPolicyError::client_message)
                     .unwrap_or("Invalid caution.hcl network policy"),
             ),
@@ -4110,7 +4113,10 @@ mod deploy_containerfile_tests {
         let error = load_build_config_for_deploy(git_dir.to_str().unwrap(), &commit_sha)
             .await
             .unwrap_err();
-        assert!(matches!(error, super::LoadBuildConfigForDeployError::HclParse { .. }));
+        assert!(matches!(
+            error,
+            super::LoadBuildConfigForDeployError::HclParse { .. }
+        ));
         let error = super::DeployLogicError::BuildConfigGit {
             source: Box::new(error),
             location: std::panic::Location::caller(),
@@ -4139,7 +4145,10 @@ mod deploy_containerfile_tests {
             };
             assert_eq!(
                 error.client_response(),
-                (axum::http::StatusCode::BAD_REQUEST, "Invalid network policy.")
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    "Invalid network policy."
+                )
             );
         }
     }

@@ -1728,9 +1728,7 @@ pub enum SendShardError {
         source: BoxError,
     },
 
-    #[error(
-        "deployment {deployment_id} has no reachable endpoint (status: {status}) [{location}]"
-    )]
+    #[error("deployment {deployment_id} has no reachable endpoint (status: {status}) [{location}]")]
     NoDeploymentEndpoint {
         deployment_id: String,
         status: String,
@@ -2629,8 +2627,22 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let receiver = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut bytes = [0; 4096];
-            stream.read(&mut bytes).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                use sha2::{Digest, Sha256};
+                let length = stream.read_u32().await.unwrap();
+                assert!(
+                    (32..=4096).contains(&length),
+                    "invalid attestation frame length"
+                );
+                let mut frame = vec![0; length as usize];
+                stream.read_exact(&mut frame).await.unwrap();
+                assert_eq!(&frame[..32], &Sha256::digest(&frame[32..])[..]);
+                let request: locksmith::models::GeneratePublicKeyRequest =
+                    serde_json::from_slice(&frame[32..]).unwrap();
+                assert_eq!(hex::decode(request.nonce).unwrap().len(), 12);
+            })
+            .await
+            .unwrap();
             // Close after the client's attestation request, before any share is sent.
         });
         // Locksmith decrypts the share before connecting, so the bundle and key must be real.

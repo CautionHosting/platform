@@ -267,8 +267,16 @@ async fn busy_and_timeout_do_not_retry_generation() {
         let recorded = calls.clone();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0; 4096];
-            stream.read(&mut request).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let request = http_fixture::read_headers(&mut stream).unwrap();
+            assert!(request.starts_with(b"POST / HTTP/1.1\r\n"));
+            let headers = String::from_utf8(request).unwrap().to_ascii_lowercase();
+            assert!(headers.contains("\r\ncontent-length: 2\r\n"));
+            let mut body = [0; 2];
+            stream.read_exact(&mut body).unwrap();
+            assert_eq!(&body, b"{}");
             recorded.fetch_add(1, Ordering::SeqCst);
             std::thread::sleep(Duration::from_millis(delay));
             let response = [
@@ -294,6 +302,13 @@ async fn busy_and_timeout_do_not_retry_generation() {
 
 #[path = "database.rs"]
 mod database;
+
+mod http_fixture {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/http_fixture.rs"
+    ));
+}
 
 mod recipients {
     include!(concat!(

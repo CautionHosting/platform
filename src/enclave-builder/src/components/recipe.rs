@@ -759,10 +759,7 @@ mod tests {
                 "git checkout \"$BOOTPROOF_COMMIT\"",
                 "git checkout \"$BOOTPROOF_COMMIT\" || git checkout main",
             ),
-            original.replace(
-                "COPY --from=git . /",
-                "COPY --from=untrusted:latest . /",
-            ),
+            original.replace("COPY --from=git . /", "COPY --from=untrusted:latest . /"),
             original.replace("COPY --from=git . /", "COPY app/ /build-bootproof/"),
             original.replace(
                 "FROM scratch AS bootproof-export",

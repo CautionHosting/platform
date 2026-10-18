@@ -56,16 +56,14 @@ pub fn shared_recipient_with_kdf(
                     .set_creation_time(created + Duration::from_secs(index))
                     .unwrap();
             }
-            if index == 1 {
-                if let Some((new_hash, new_sym)) = kdf {
-                    let sequoia_openpgp::crypto::mpi::PublicKey::ECDH { hash, sym, .. } =
-                        recipient.mpis_mut()
-                    else {
-                        panic!("expected ECDH fixture");
-                    };
-                    *hash = new_hash;
-                    *sym = new_sym;
-                }
+            if let (1, Some((new_hash, new_sym))) = (index, kdf) {
+                let sequoia_openpgp::crypto::mpi::PublicKey::ECDH { hash, sym, .. } =
+                    recipient.mpis_mut()
+                else {
+                    panic!("expected ECDH fixture");
+                };
+                *hash = new_hash;
+                *sym = new_sym;
             }
             assert_eq!(
                 recipient.mpis() != shared.mpis(),

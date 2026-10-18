@@ -539,8 +539,12 @@ mod tests {
     }
     impl Fixture {
         async fn new(identity: &'static str, replies: Vec<Reply>) -> Self {
-            Self::with_retry_config(identity, replies, RetryConfig::standard().with_max_attempts(1))
-                .await
+            Self::with_retry_config(
+                identity,
+                replies,
+                RetryConfig::standard().with_max_attempts(1),
+            )
+            .await
         }
         async fn with_retry_config(
             identity: &'static str,
@@ -978,7 +982,11 @@ mod tests {
         }
         let fixture = Fixture::new("WRITER", replies).await;
         assert_invalid(
-            fixture.store.put_immutable(&key, b"good").await.unwrap_err(),
+            fixture
+                .store
+                .put_immutable(&key, b"good")
+                .await
+                .unwrap_err(),
             "conditional publication attempts exhausted",
         );
         fixture.done().await;
@@ -1014,7 +1022,10 @@ mod tests {
     async fn source_denial_or_corruption_never_writes_destination() {
         let (key, _) = blob();
         for (response, operation) in [
-            (reply("GET", 403, "<Error><Code>AccessDenied</Code></Error>"), "read"),
+            (
+                reply("GET", 403, "<Error><Code>AccessDenied</Code></Error>"),
+                "read",
+            ),
             (reply("GET", 200, b"evil"), "verify blob"),
         ] {
             let source = Fixture::new("SOURCE", vec![response.at(&key)]).await;

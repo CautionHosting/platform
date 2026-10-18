@@ -888,7 +888,8 @@ mod tests {
             network: serde_json::from_value(serde_json::json!({
                 "ingress": [{"cidr_ipv4": "0.0.0.0/0", "port": 8080}],
                 "http": {"port": 8080}
-            })).unwrap(),
+            }))
+            .unwrap(),
             http_port: Some(8080),
             e2e: false,
             e2e_mode: E2E_MODE_DISABLED.to_string(),
@@ -906,7 +907,8 @@ mod tests {
     #[tokio::test]
     async fn generated_network_policy_preserves_sources_in_all_deployment_modes() {
         for (managed, candidate) in [(false, false), (true, false), (false, true), (true, true)] {
-            let mut value = serde_json::to_value(deployment_request("/tmp/enclave.eif", None)).unwrap();
+            let mut value =
+                serde_json::to_value(deployment_request("/tmp/enclave.eif", None)).unwrap();
             value["ports"] = serde_json::json!([8080, 9000, 9001]);
             value["http_port"] = serde_json::json!(8080);
             value["e2e"] = serde_json::json!(true);
@@ -920,27 +922,76 @@ mod tests {
                 "http": {"port": 8080, "e2e_encryption": {"mode": "steve"}}
             });
             let mut request: NitroDeploymentRequest = serde_json::from_value(value).unwrap();
-            if !managed { request.managed_onprem = None; }
+            if !managed {
+                request.managed_onprem = None;
+            }
             let directory = TempDir::new().unwrap();
             if candidate {
-                generate_deployment_main_tf(directory.path(), &request, Uuid::nil(), &sample_network(), "s3://bucket/enclave.eif").await.unwrap();
+                generate_deployment_main_tf(
+                    directory.path(),
+                    &request,
+                    Uuid::nil(),
+                    &sample_network(),
+                    "s3://bucket/enclave.eif",
+                )
+                .await
+                .unwrap();
             } else if managed {
-                generate_managed_onprem_deployment_tf(directory.path(), &request, "s3://bucket/enclave.eif").await.unwrap();
+                generate_managed_onprem_deployment_tf(
+                    directory.path(),
+                    &request,
+                    "s3://bucket/enclave.eif",
+                )
+                .await
+                .unwrap();
             } else {
-                generate_nitro_deployment_main_tf(directory.path(), &request, "s3://bucket/enclave.eif").await.unwrap();
+                generate_nitro_deployment_main_tf(
+                    directory.path(),
+                    &request,
+                    "s3://bucket/enclave.eif",
+                )
+                .await
+                .unwrap();
             }
             let text = std::fs::read_to_string(directory.path().join("main.tf")).unwrap();
             let body: hcl::Body = hcl::from_str(&text).unwrap();
-            let group = body.blocks().find(|block| block.identifier() == "resource" && block.labels().first().is_some_and(|label| label.as_str() == "aws_security_group")).unwrap();
-            let ingress: Vec<_> = group.body.blocks().filter(|block| block.identifier() == "ingress").collect();
-            let attributes = |block: &hcl::Block| -> serde_json::Value { hcl::from_str(&hcl::to_string(&block.body).unwrap()).unwrap() };
+            let group = body
+                .blocks()
+                .find(|block| {
+                    block.identifier() == "resource"
+                        && block
+                            .labels()
+                            .first()
+                            .is_some_and(|label| label.as_str() == "aws_security_group")
+                })
+                .unwrap();
+            let ingress: Vec<_> = group
+                .body
+                .blocks()
+                .filter(|block| block.identifier() == "ingress")
+                .collect();
+            let attributes = |block: &hcl::Block| -> serde_json::Value {
+                hcl::from_str(&hcl::to_string(&block.body).unwrap()).unwrap()
+            };
             for block in ingress {
                 let rule = attributes(block);
-                if rule["from_port"] == 80 { continue; }
+                if rule["from_port"] == 80 {
+                    continue;
+                }
                 assert_ne!(rule["from_port"], 8080, "HTTP upstream must be private");
-                assert_ne!(rule["cidr_blocks"], serde_json::json!(["0.0.0.0/0"]), "application source restrictions must survive rendering: {rule}");
+                assert_ne!(
+                    rule["cidr_blocks"],
+                    serde_json::json!(["0.0.0.0/0"]),
+                    "application source restrictions must survive rendering: {rule}"
+                );
             }
-            assert!(!group.body.blocks().any(|block| block.identifier() == "dynamic"), "lossy dynamic ingress must not remain");
+            assert!(
+                !group
+                    .body
+                    .blocks()
+                    .any(|block| block.identifier() == "dynamic"),
+                "lossy dynamic ingress must not remain"
+            );
             assert!(text.contains("198.51.100.0/24"));
             assert!(text.contains("203.0.113.4/32"));
         }
@@ -1668,7 +1719,12 @@ mod tests {
         assert!(user_data.contains(r#"%{ if e2e_mode == "steve" ~}"#));
         assert!(user_data.contains("${http_routes}"));
         let request = deployment_request("/tmp/enclave.eif", None);
-        let routes = crate::network_policy::http_routes(&request.network.policy().unwrap(), Some(8080), "steve", None);
+        let routes = crate::network_policy::http_routes(
+            &request.network.policy().unwrap(),
+            Some(8080),
+            "steve",
+            None,
+        );
         assert!(routes.contains("reverse_proxy localhost:49500"));
         assert!(!routes.contains("localhost:8080"));
     }
@@ -1686,9 +1742,19 @@ mod tests {
         assert!(user_data.contains(r#"%{ if http_port != 0 && e2e_mode == "disabled" ~}"#));
         assert!(user_data.contains("TLS :443 is forwarded into the enclave"));
         let request = deployment_request("/tmp/enclave.eif", None);
-        let routes = crate::network_policy::http_routes(&request.network.policy().unwrap(), Some(8080), "tls", Some("app.example.com"));
+        let routes = crate::network_policy::http_routes(
+            &request.network.policy().unwrap(),
+            Some(8080),
+            "tls",
+            Some("app.example.com"),
+        );
         assert!(routes.contains("respond \"OK\" 200"));
-        assert!(routes.find("handle /attestation").unwrap() < routes.find("redir https://app.example.com{uri} 308").unwrap());
+        assert!(
+            routes.find("handle /attestation").unwrap()
+                < routes
+                    .find("redir https://app.example.com{uri} 308")
+                    .unwrap()
+        );
         assert!(routes.contains("reverse_proxy localhost:49502"));
         assert!(!user_data.contains("reverse_proxy https://127.0.0.1:443"));
         assert!(!user_data.contains("header_up Host ${domain}"));
@@ -3175,9 +3241,11 @@ async fn provision_nitro_enclave(
         std::fs::write(work_dir.join("user-data.sh"), user_data_template),
         Ctx::write_user_data(),
     )?;
-    std::fs::write(work_dir.join("network-policy.sh.tftpl"),
-        include_str!("../../../terraform/modules/aws/nitro-enclave/network-policy.sh.tftpl"))
-        .with_context(Ctx::write_user_data())?;
+    std::fs::write(
+        work_dir.join("network-policy.sh.tftpl"),
+        include_str!("../../../terraform/modules/aws/nitro-enclave/network-policy.sh.tftpl"),
+    )
+    .with_context(Ctx::write_user_data())?;
 
     // Always use Caution's env credentials for init (S3 state backend access)
     let data_dir =
@@ -3346,9 +3414,11 @@ async fn provision_managed_onprem(
         std::fs::write(work_dir.join("user-data.sh"), user_data_template),
         Ctx::write_user_data(),
     )?;
-    std::fs::write(work_dir.join("network-policy.sh.tftpl"),
-        include_str!("../../../terraform/modules/aws/nitro-enclave/network-policy.sh.tftpl"))
-        .with_context(Ctx::write_user_data())?;
+    std::fs::write(
+        work_dir.join("network-policy.sh.tftpl"),
+        include_str!("../../../terraform/modules/aws/nitro-enclave/network-policy.sh.tftpl"),
+    )
+    .with_context(Ctx::write_user_data())?;
 
     let data_dir =
         std::env::var("CAUTION_DATA_DIR").unwrap_or_else(|_| "/var/cache/caution".to_string());
@@ -3976,7 +4046,9 @@ fn compute_enclave_sizing(
 #[tracing::instrument(skip_all)]
 fn bootstrap_reference() -> hcl::Expression {
     hcl::expr::Traversal::builder(hcl::expr::Variable::unchecked("local"))
-        .attr("enclave_user_data").build().into()
+        .attr("enclave_user_data")
+        .build()
+        .into()
 }
 
 #[tracing::instrument(skip_all)]
@@ -5060,7 +5132,10 @@ async fn generate_nitro_deployment_main_tf(
 ) -> std::result::Result<(), GenerateMainTfError> {
     use GenerateMainTfErrorCtx as Ctx;
 
-    let policy = request.network.policy().with_context(Ctx::network_policy())?;
+    let policy = request
+        .network
+        .policy()
+        .with_context(Ctx::network_policy())?;
     if let Some(digest) = &request.tap_framer_sha256 {
         enclave_builder::components::validate_digest(digest)
             .with_context(Ctx::component_digest())?;
@@ -5092,7 +5167,12 @@ async fn generate_nitro_deployment_main_tf(
 
     let mut body = hcl::Body::builder()
         .add_block(tf_settings_block())
-        .add_block(bootstrap_locals(request, cpu_count_rounded, eif_s3_path, &policy));
+        .add_block(bootstrap_locals(
+            request,
+            cpu_count_rounded,
+            eif_s3_path,
+            &policy,
+        ));
     let blocks = managed_provider_blocks(request.credentials.as_ref(), &aws_region, &org_id_str)
         .into_iter()
         .chain(availability_zone_data_blocks(instance_type))
@@ -5619,7 +5699,10 @@ async fn generate_managed_onprem_deployment_tf(
     eif_s3_path: &str,
 ) -> std::result::Result<(), GenerateOnpremTfError> {
     use GenerateOnpremTfErrorCtx as Ctx;
-    let policy = request.network.policy().with_context(Ctx::network_policy())?;
+    let policy = request
+        .network
+        .policy()
+        .with_context(Ctx::network_policy())?;
     if let Some(digest) = &request.tap_framer_sha256 {
         dterror::ResultExt::with_context(
             enclave_builder::components::validate_digest(digest),
@@ -5848,7 +5931,10 @@ async fn generate_managed_onprem_deployment_tf(
     }
 
     for block in crate::network_policy::ingress_blocks(
-        &policy, request.http_port, effective_e2e_mode(request.e2e, &request.e2e_mode), request.locksmith,
+        &policy,
+        request.http_port,
+        effective_e2e_mode(request.e2e, &request.e2e_mode),
+        request.locksmith,
     ) {
         sg_builder = sg_builder.add_block(block);
     }
@@ -5890,7 +5976,12 @@ async fn generate_managed_onprem_deployment_tf(
     body = body.add_block(sg_builder.build());
 
     // resource "aws_launch_template" "enclave"
-    body = body.add_block(bootstrap_locals(request, cpu_count_rounded, eif_s3_path, &policy));
+    body = body.add_block(bootstrap_locals(
+        request,
+        cpu_count_rounded,
+        eif_s3_path,
+        &policy,
+    ));
 
     let lt_builder = hcl::Block::builder("resource")
         .add_label("aws_launch_template")

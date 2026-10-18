@@ -916,7 +916,8 @@ fn read_build_config_from_dir(
                 .with_context(Ctx::parse(hcl))
         } else {
             caution_config::ConfigurationFile::from_str(&content).with_context(Ctx::parse(hcl))
-        }).map(Some);
+        })
+        .map(Some);
     }
     let procfile = dir.join("Procfile");
     if historical && !procfile.exists() {
@@ -932,7 +933,8 @@ fn read_build_config_from_dir(
     } else {
         caution_config::ConfigurationFile::from_procfile(&content)
             .with_context(Ctx::parse(procfile))
-    }).map(Some)
+    })
+    .map(Some)
 }
 
 #[tracing::instrument(skip_all)]
@@ -940,7 +942,9 @@ fn resolve_reproduction_locksmith(
     source_config: Option<&caution_config::ConfigurationFile>,
     recorded_locksmith: bool,
 ) -> bool {
-    source_config.map(|config| config.has_vault_env()).unwrap_or(recorded_locksmith)
+    source_config
+        .map(|config| config.has_vault_env())
+        .unwrap_or(recorded_locksmith)
 }
 
 #[tracing::instrument(skip_all)]
@@ -1634,7 +1638,11 @@ async fn build_and_get_pcrs(
         if external_manifest.is_some() {
             read_reproduction_config_from_dir(app_dir).with_context(Ctx::read_config_dir())?
         } else {
-            Some(client.read_config_from_dir(app_dir).with_context(Ctx::read_config_dir())?)
+            Some(
+                client
+                    .read_config_from_dir(app_dir)
+                    .with_context(Ctx::read_config_dir())?,
+            )
         }
     } else if external_manifest.is_none() {
         Some(client.read_config().with_context(Ctx::read_config())?)
@@ -1827,7 +1835,10 @@ async fn build_and_get_pcrs(
             external_manifest.is_some(),
         )
         .with_context(Ctx::read_config_dir())?
-        .unwrap_or(caution_config::ConfigurationFile { caution: None, enclave: None }),
+        .unwrap_or(caution_config::ConfigurationFile {
+            caution: None,
+            enclave: None,
+        }),
     };
     let reproduction_network =
         configured_enclave(&reproduction_config).and_then(|enclave| enclave.network.as_ref());
@@ -1893,9 +1904,9 @@ async fn build_and_get_pcrs(
     let locksmith = resolve_reproduction_locksmith(
         (has_source_config && (app_source_dir.is_some() || external_manifest.is_none()))
             .then_some(&reproduction_config),
-        external_manifest.as_ref().is_some_and(|manifest| {
-            manifest.locksmith || manifest.locksmith_commit.is_some()
-        }),
+        external_manifest
+            .as_ref()
+            .is_some_and(|manifest| manifest.locksmith || manifest.locksmith_commit.is_some()),
     );
     output::verbose(client.verbose, format!("Locksmith secrets: {}", locksmith));
 
@@ -4643,7 +4654,9 @@ mod tests {
         assert!(build.no_cache);
         assert_eq!(build.build_command.as_deref(), Some("make old-image"));
         assert_eq!(build.oci_tarball.as_deref(), Some("historical.tar"));
-        let cfg = read_reproduction_config_from_dir(dir.path()).expect("historical Procfile").unwrap();
+        let cfg = read_reproduction_config_from_dir(dir.path())
+            .expect("historical Procfile")
+            .unwrap();
         let enclave = configured_enclave(&cfg).unwrap();
         let network = enclave.network.as_ref().unwrap();
         assert!(historical_ingress_ports(Some(network)).is_empty());
@@ -4690,7 +4703,9 @@ mod tests {
             build.containerfile.as_deref(),
             Some("Historical.Containerfile")
         );
-        let cfg = read_reproduction_config_from_dir(dir.path()).expect("historical HCL").unwrap();
+        let cfg = read_reproduction_config_from_dir(dir.path())
+            .expect("historical HCL")
+            .unwrap();
         let network = configured_enclave(&cfg).unwrap().network.as_ref().unwrap();
         let ports = historical_ingress_ports(Some(network));
         assert_eq!(ports, (8080..=8082).collect::<Vec<u16>>());
@@ -4757,7 +4772,8 @@ mod tests {
 
     #[test]
     fn shared_ingress_ports_match_policy_for_ranges_duplicates_and_http() {
-        let cfg = caution_config::ConfigurationFile::from_str(r#"
+        let cfg = caution_config::ConfigurationFile::from_str(
+            r#"
             enclave "main" {
                 network {
                     ingress {
@@ -4772,19 +4788,35 @@ mod tests {
                     http { port = 8081 }
                 }
             }
-        "#).expect("config");
+        "#,
+        )
+        .expect("config");
         let network = configured_enclave(&cfg).and_then(|enclave| enclave.network.as_ref());
-        assert_eq!(configured_ingress_ports(network).expect("ports"), [8080, 8081, 8082]);
-        assert_eq!(configured_ingress_ports(network).expect("ports"), network.expect("network").policy().expect("policy").ports());
-        assert!(configured_ingress_ports(None).expect("no network").is_empty());
+        assert_eq!(
+            configured_ingress_ports(network).expect("ports"),
+            [8080, 8081, 8082]
+        );
+        assert_eq!(
+            configured_ingress_ports(network).expect("ports"),
+            network.expect("network").policy().expect("policy").ports()
+        );
+        assert!(
+            configured_ingress_ports(None)
+                .expect("no network")
+                .is_empty()
+        );
     }
 
     #[test]
     fn shared_ingress_ports_propagate_invalid_programmatic_rules() {
         let network: caution_config::NetworkConfig = serde_json::from_value(serde_json::json!({
             "ingress": [{"cidr_ipv4":"192.0.2.0/24", "port":8080, "ip_protocol":"udp"}]
-        })).expect("raw config");
-        assert!(matches!(configured_ingress_ports(Some(&network)), Err(caution_config::NetworkPolicyError::InvalidProtocol { .. })));
+        }))
+        .expect("raw config");
+        assert!(matches!(
+            configured_ingress_ports(Some(&network)),
+            Err(caution_config::NetworkPolicyError::InvalidProtocol { .. })
+        ));
     }
 
     #[test]
