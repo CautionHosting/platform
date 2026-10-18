@@ -713,6 +713,8 @@ KEYMAKER_POLICY_DIR ?= $(HOME)/.config/caution/policies
 # test-e2e-app-deployments turns it on.
 API_EXTRA_ENV ?= -e APP_DEPLOYMENTS_ENABLED=false -e APP_DEPLOYMENTS_BYOC_ENABLED=false
 E2E_LOCK_FILE ?= /tmp/caution-platform-e2e.lock
+# Full live suites share one stack; use 1 only for serial diagnosis.
+E2E_JOBS ?= 2
 ONPREM_PROVISIONER_DIR ?= ../bring-your-own-compute-setup
 ONPREM_PROVISIONER_IMAGE ?= codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest
 DESTROY_ALL_SCRIPT := tests/e2e/destroy-all-apps.sh
@@ -938,35 +940,44 @@ test-bootstrap:
 
 .PHONY: test-e2e-contracts
 test-e2e-contracts:
+	@python3 tests/test_e2e_scheduling.py
 	@python3 tests/e2e/test_acceptance_contracts.py
 	@python3 tests/e2e/test_platform_ports_contracts.py
 	@python3 tests/test_helper_imports.py
 	@python3 tests/test_managed_dns_contract.py
 	@python3 -m unittest discover -s tests -p test_nitro_restart_systemd_harness.py -v
 
+# The full lifecycle does not lock; external runners own stack serialization.
+# One shell keeps teardown after suite jobs and their EXIT cleanup.
 test-e2e:
-	@$(MAKE) build-cli
-	@$(MAKE) up-test
-	@echo "Running e2e tests..."
-	@CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_happy_path.sh; \
-	status=$$?; \
-	if [ $$status -eq 0 ]; then \
-		CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_platform_ports.sh || status=$$?; \
-	fi; \
-	if [ $$status -eq 0 ]; then \
-		CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_env_parity.sh || status=$$?; \
-	fi; \
-	if [ $$status -eq 0 ]; then \
-		CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_ssh_units.sh || status=$$?; \
-	fi; \
-	if [ $$status -eq 0 ]; then \
-		bash tests/e2e/test_pgp_units.sh || status=$$?; \
-	fi; \
-	if [ $$status -eq 0 ]; then \
-		bash tests/e2e/test_pgp_audit_constraints.sh || status=$$?; \
-	fi; \
-	$(MAKE) down-test; \
-	exit $$status
+	@case "$(E2E_JOBS)" in 1|2) ;; *) echo "E2E_JOBS must be 1 or 2" >&2; exit 2;; esac
+	@bash -c '\
+		set -e; \
+		trap "exit 130" INT; \
+		trap "exit 143" TERM; \
+		$(MAKE) build-cli; \
+		trap "$(MAKE) down-test" EXIT; \
+		$(MAKE) up-test; \
+		echo "Running e2e tests ($(E2E_JOBS) workers)..."; \
+		$(MAKE) --no-keep-going -j$(E2E_JOBS) _test-e2e-suites'
+
+# Internal targets: the caller owns the single stack. GNU Make stops
+# scheduling on failure and drains running suites (including their EXIT cleanup).
+E2E_SUITE_TARGETS := _test-e2e-happy_path _test-e2e-platform_ports \
+	_test-e2e-env_parity _test-e2e-ssh_units _test-e2e-pgp_units \
+	_test-e2e-pgp_audit_constraints
+.PHONY: _test-e2e-suites $(E2E_SUITE_TARGETS)
+_test-e2e-suites: $(E2E_SUITE_TARGETS)
+
+$(E2E_SUITE_TARGETS): SHELL := /bin/bash
+$(E2E_SUITE_TARGETS): _test-e2e-%:
+	@set -e; \
+	config=$$(mktemp -d); \
+	trap 'rm -rf -- "$$config"' EXIT; \
+	trap 'exit 130' INT; \
+	trap 'exit 143' TERM; \
+	XDG_CONFIG_HOME="$$config" CAUTION_BIN="$(abspath $(CLI_OUT_DIR)/$(CLI_BINARY))" \
+		bash tests/e2e/test_$*.sh
 
 test-e2e-ssh-units:
 	@$(MAKE) build-cli
