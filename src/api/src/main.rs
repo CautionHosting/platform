@@ -91,6 +91,7 @@ type SubscriptionEntitlementRow = (
 use caution_config::pricing::{
     CreditPackagePricing, PaddleCatalog, PricingConfig as SharedPricingConfig, TierPricing,
 };
+use caution_deploy::EnclaveDeployer as _;
 
 #[derive(Clone, Debug)]
 pub(crate) struct PricingConfig {
@@ -4880,7 +4881,6 @@ async fn deploy_logic(
     let memory_mb = ec_resources.map(|r| r.memory_mb).unwrap_or(512);
     let cpu_count = ec_resources.map(|r| r.cpu).unwrap_or(2);
     let debug_enabled = ec_debug.and_then(|d| d.enabled).unwrap_or(false);
-    let ssh_keys = ec_debug.map(|d| d.ssh_keys.clone()).unwrap_or_default();
     let http_port = ec_network.and_then(|n| n.http.as_ref()).map(|h| h.port);
     let domain = ec_network
         .and_then(|n| n.http.as_ref())
@@ -5498,43 +5498,45 @@ async fn deploy_logic(
     let target = deployment_target_milestone(capacity, target_account, &deployed_region);
     let _ = tx.send(Ok(milestone(&target))).await;
 
-    let nitro_request = deployment::NitroDeploymentRequest {
-        tap_framer_sha256: build_result
-            .component_artifacts
-            .as_ref()
-            .map(|artifacts| artifacts.tap_framer_sha256().to_owned()),
+    let deployer = caution_deploy_aws::AwsNitroDeployer::new();
+    let build_mechanism = enclave_build_nitro::NitroEifMechanism::new();
+    let target_platform = caution_config::Platform::from_config(&config_file);
+    caution_deploy::ensure_supported(
+        enclave_build::ImageBuildMechanism::name(&build_mechanism),
+        enclave_build::ImageBuildMechanism::supported_platforms(&build_mechanism),
+        target_platform,
+    )
+    .with_context(Ctx::nitro_deploy())?;
+    caution_deploy::ensure_platform_match(target_platform, deployer.platform())
+        .with_context(Ctx::nitro_deploy())?;
+
+    let deploy_artifacts = caution_deploy::DeployArtifacts {
+        image_path: eif_path.clone(),
+        image_s3_key: Some(builder_eif_s3_key.clone()),
+        user_data: enclave_build_nitro::NitroEifMechanism::user_data_template().to_string(),
+    };
+    let deploy_ctx = caution_deploy_aws::AwsDeployContext {
         org_id: req.org_id,
         resource_id,
         resource_name: app_name.clone(),
         aws_account_id: aws_account_id.clone(),
         role_arn: role_arn_opt.clone(),
-        eif_path: eif_path.clone(),
-        eif_s3_key: Some(builder_eif_s3_key.clone()),
-        memory_mb,
-        cpu_count,
-        disk_gb: 30, // no HCL equivalent
-        debug_mode: debug_enabled,
-        restart: enclave_opt.and_then(|e| e.restart).unwrap_or_default(),
-        ports: ingress_ports.clone(),
-        network,
-        http_port,
-        e2e,
-        e2e_mode: e2e_mode_value.to_string(),
-        locksmith: config_file.has_vault_env(),
-        egress,
-        ssh_keys,
-        domain: domain.clone(),
-        region: fully_managed_region.clone(),
         credentials: deployment_credentials,
         managed_onprem: managed_onprem_config,
+        region: fully_managed_region.clone(),
         tls_await_app_address,
-        user_data: enclave_build_nitro::NitroEifMechanism::user_data_template().to_string(),
+        tap_framer_sha256: build_result
+            .component_artifacts
+            .as_ref()
+            .map(|artifacts| artifacts.tap_framer_sha256().to_owned()),
     };
+    let nitro_request = deployer.build_request(&config_file, &deploy_artifacts, &deploy_ctx);
 
     let _ = tx.send(Ok(milestone("Uploading and launching..."))).await;
 
     let deployment_result: Result<_, DeployLogicError> = match deploy_target {
-        DeployTarget::Legacy { .. } => deployment::deploy_nitro_enclave(nitro_request)
+        DeployTarget::Legacy { .. } => deployer
+            .deploy(&config_file, &deploy_artifacts, &deploy_ctx)
             .await
             .with_context(Ctx::nitro_deploy()),
         DeployTarget::Candidate { deployment_id } => provision_candidate(

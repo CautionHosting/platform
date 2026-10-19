@@ -51,6 +51,7 @@ enclave-build = { path = "../enclave-build" }
 enclave-build-nitro = { path = "../enclave-build-nitro", features = ["s3-components"] }
 docker-builder = { path = "../docker-builder" }
 caution-deploy-aws = { path = "../caution-deploy-aws" }
+caution-deploy = { path = "../caution-deploy" }
 
 # Encryption for credentials
 aes-gcm = { workspace = true }

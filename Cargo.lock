@@ -339,6 +339,7 @@ dependencies = [
  "bootproof-sdk",
  "bytes",
  "caution-config",
+ "caution-deploy",
  "caution-deploy-aws",
  "chrono",
  "docker-builder",
