@@ -935,18 +935,18 @@ test-nitro-restart:
 
 .PHONY: test-network-policy
 test-network-policy: test-nitro-restart
-	cargo test -p api --bin api network_policy -- --include-ignored
+	cargo test -p caution-deploy-aws --lib network_policy -- --include-ignored
 	python3 tests/test_network_policy.py -v
 
 # Real source/prebuilt EIF equality; fixture must live on an isolated build host.
 .PHONY: test-prebuilt-components
 test-prebuilt-components:
 	@test -n "$(COMPONENT_E2E_ROOT)" || { echo "COMPONENT_E2E_ROOT is required (disposable build host only)"; exit 1; }
-	COMPONENT_E2E_ROOT="$(COMPONENT_E2E_ROOT)" cargo test --locked -p enclave-builder --test prebuilt_components -- --ignored --nocapture
+	COMPONENT_E2E_ROOT="$(COMPONENT_E2E_ROOT)" cargo test --locked -p enclave-build-nitro --test prebuilt_components -- --ignored --nocapture
 
 test-live-caddy-nitro:
 	@test -n "$(CADDY_E2E_URL)" || { echo "CADDY_E2E_URL is required"; exit 1; }
-	CADDY_E2E_URL="$(CADDY_E2E_URL)" cargo test -p enclave-builder --test caddy_nitro_live -- --ignored --nocapture
+	CADDY_E2E_URL="$(CADDY_E2E_URL)" cargo test -p enclave-build-nitro --test caddy_nitro_live -- --ignored --nocapture
 
 test-cli-install:
 	@bash tests/test_cli_install.sh

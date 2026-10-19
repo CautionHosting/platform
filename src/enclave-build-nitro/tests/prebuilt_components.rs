@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 //! Real compiler/EIF integration. Run only on a disposable Docker build host:
-//! COMPONENT_E2E_ROOT=/path/to/fixture cargo test -p enclave-builder
+//! COMPONENT_E2E_ROOT=/path/to/fixture cargo test -p enclave-build-nitro
 //!   --test prebuilt_components -- --ignored --nocapture
 //! Fixture: framework/, enclave/, selected.lock.json, downloads/ containing the
 //! selected real ELF outputs. No application service or enclave is started.
