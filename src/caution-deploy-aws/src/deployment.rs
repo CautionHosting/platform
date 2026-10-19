@@ -9,6 +9,7 @@
     reason = "generated {Error}Ctx mirrors trip redundant_field_names"
 )]
 
+pub use caution_deploy::DeploymentResult;
 use dterror::{BoxError, CtxError, Location, ResultExt as _};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
@@ -376,14 +377,6 @@ impl std::fmt::Debug for AwsCredentials {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeploymentResult {
-    pub instance_id: String,
-    pub public_ip: String,
-    pub url: String,
-    pub instance_type: Option<String>,
-}
-
 pub const E2E_MODE_DISABLED: &str = "disabled";
 pub const E2E_MODE_STEVE: &str = "steve";
 
@@ -443,6 +436,10 @@ pub struct NitroDeploymentRequest {
     /// to the enclave, which starts Caddy once the app domain resolves to it.
     #[serde(default)]
     pub tls_await_app_address: bool,
+    /// User-data template authored by the build mechanism. Required; a deploy
+    /// request without it fails with `MissingUserData`.
+    #[serde(default)]
+    pub user_data: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -536,7 +533,6 @@ pub async fn deploy_nitro_enclave(
         })?;
 
     let config = TerraformConfig {
-        module_path: nitro_module_path(),
         s3_bucket: std::env::var("TERRAFORM_STATE_BUCKET")
             .unwrap_or_else(|_| "caution-terraform-state".to_string()),
     };
@@ -901,6 +897,7 @@ mod tests {
             credentials: None,
             managed_onprem: Some(managed_onprem_config()),
             tls_await_app_address: false,
+            user_data: String::new(),
         }
     }
 
@@ -1869,7 +1866,6 @@ mod tests {
 }
 
 struct TerraformConfig {
-    module_path: PathBuf,
     s3_bucket: String,
 }
 
@@ -1894,7 +1890,6 @@ async fn provider_lockfile() -> Option<PathBuf> {
 impl Default for TerraformConfig {
     fn default() -> Self {
         Self {
-            module_path: PathBuf::from("terraform/modules/aws/nitro-enclave"),
             s3_bucket: std::env::var("TERRAFORM_STATE_BUCKET")
                 .unwrap_or_else(|_| "caution-terraform-state".to_string()),
         }
@@ -3150,13 +3145,8 @@ pub enum ProvisionNitroEnclaveError {
         #[source]
         source: BoxError,
     },
-    #[error("could not read user-data.sh template [{location}]")]
-    ReadUserData {
-        #[location]
-        location: Location,
-        #[source]
-        source: BoxError,
-    },
+    #[error("deploy request is missing the mechanism-provided user-data template [{location}]")]
+    MissingUserData { location: Location },
     #[error("could not write user-data.sh [{location}]")]
     WriteUserData {
         #[location]
@@ -3233,12 +3223,13 @@ async fn provision_nitro_enclave(
         Ctx::generate_main_tf(),
     )?;
 
-    let user_data_template = dterror::ResultExt::with_context(
-        std::fs::read_to_string(config.module_path.join("user-data.sh")),
-        Ctx::read_user_data(),
-    )?;
+    if request.user_data.is_empty() {
+        return Err(ProvisionNitroEnclaveError::MissingUserData {
+            location: std::panic::Location::caller(),
+        });
+    }
     dterror::ResultExt::with_context(
-        std::fs::write(work_dir.join("user-data.sh"), user_data_template),
+        std::fs::write(work_dir.join("user-data.sh"), request.user_data.clone()),
         Ctx::write_user_data(),
     )?;
     std::fs::write(
@@ -3305,13 +3296,8 @@ pub enum ProvisionManagedOnpremError {
         #[source]
         source: BoxError,
     },
-    #[error("could not read user-data.sh template [{location}]")]
-    ReadUserData {
-        #[location]
-        location: Location,
-        #[source]
-        source: BoxError,
-    },
+    #[error("deploy request is missing the mechanism-provided user-data template [{location}]")]
+    MissingUserData { location: Location },
     #[error("could not write user-data.sh [{location}]")]
     WriteUserData {
         #[location]
@@ -3406,12 +3392,13 @@ async fn provision_managed_onprem(
         Ctx::generate_main_tf(),
     )?;
 
-    let user_data_template = dterror::ResultExt::with_context(
-        std::fs::read_to_string(config.module_path.join("user-data.sh")),
-        Ctx::read_user_data(),
-    )?;
+    if request.user_data.is_empty() {
+        return Err(ProvisionManagedOnpremError::MissingUserData {
+            location: std::panic::Location::caller(),
+        });
+    }
     dterror::ResultExt::with_context(
-        std::fs::write(work_dir.join("user-data.sh"), user_data_template),
+        std::fs::write(work_dir.join("user-data.sh"), request.user_data.clone()),
         Ctx::write_user_data(),
     )?;
     std::fs::write(

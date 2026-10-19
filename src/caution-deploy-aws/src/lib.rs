@@ -14,6 +14,9 @@
     reason = "generated {Error}Ctx mirrors trip redundant_field_names"
 )]
 
+mod deployer;
 pub mod deployment;
 pub mod ec2;
 pub mod network_policy;
+
+pub use deployer::{AwsDeployContext, AwsDestroyContext, AwsNitroDeployer};

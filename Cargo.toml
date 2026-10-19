@@ -10,6 +10,7 @@ members = [
     "src/enclave-build-nitro",
     "src/enclave-build",
     "src/docker-builder",
+    "src/caution-deploy",
     "src/caution-deploy-aws",
     "src/metering",
     "src/sentry-middleware",
