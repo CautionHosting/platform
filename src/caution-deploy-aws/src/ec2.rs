@@ -83,7 +83,7 @@ pub struct InstanceRuntime {
 
 /// Failure modes for [`Ec2Client::count_vpcs`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum CountVpcsError {
+pub enum CountVpcsError {
     #[error("failed to count VPCs [{location}]")]
     Request {
         #[location]
@@ -95,7 +95,7 @@ pub(crate) enum CountVpcsError {
 
 /// Failure modes for [`Ec2Client::count_elastic_ips`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum CountElasticIpsError {
+pub enum CountElasticIpsError {
     #[error("failed to count elastic IPs [{location}]")]
     Request {
         #[location]
@@ -107,7 +107,7 @@ pub(crate) enum CountElasticIpsError {
 
 /// Failure modes for [`Ec2Client::active_instance_types`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum ActiveInstanceTypesError {
+pub enum ActiveInstanceTypesError {
     #[error("failed to get active instance types [{location}]")]
     Describe {
         #[location]
@@ -119,7 +119,7 @@ pub(crate) enum ActiveInstanceTypesError {
 
 /// Failure modes for [`Ec2Client::describe_regions`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum DescribeRegionsError {
+pub enum DescribeRegionsError {
     #[error("failed to describe regions [{location}]")]
     Request {
         #[location]
@@ -132,7 +132,7 @@ pub(crate) enum DescribeRegionsError {
 /// Failure modes for [`Ec2Client::instance_type_offered`] and
 /// [`Ec2Client::instance_type_offered_in_zone`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum InstanceTypeOfferedError {
+pub enum InstanceTypeOfferedError {
     #[error("failed to check instance type offering [{location}]")]
     Request {
         #[location]
@@ -144,7 +144,7 @@ pub(crate) enum InstanceTypeOfferedError {
 
 /// Failure modes for [`ServiceQuotasClient::get_service_quota_value`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum GetServiceQuotaValueError {
+pub enum GetServiceQuotaValueError {
     #[error("failed to get service quota value [{location}]")]
     Request {
         #[location]
@@ -236,7 +236,7 @@ fn run_instances_request_params(params: &RunInstancesParams) -> Vec<(String, Str
 
 /// Failure modes for [`Ec2Client::signed_request`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum Ec2SignedRequestError {
+pub enum Ec2SignedRequestError {
     #[error("EC2 API request failed [{location}]")]
     Request {
         #[location]
@@ -248,7 +248,7 @@ pub(crate) enum Ec2SignedRequestError {
 
 /// Failure modes for [`Ec2Client::describe_instances`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum DescribeInstancesError {
+pub enum DescribeInstancesError {
     #[error("EC2 DescribeInstances request failed [{location}]")]
     Request {
         #[location]
@@ -259,14 +259,14 @@ pub(crate) enum DescribeInstancesError {
 }
 
 impl DescribeInstancesError {
-    pub(crate) fn client_message(&self) -> &'static str {
+    pub fn client_message(&self) -> &'static str {
         "EC2 DescribeInstances request failed"
     }
 }
 
 /// Failure modes for [`Ec2Client::terminate_instances`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum TerminateInstancesError {
+pub enum TerminateInstancesError {
     #[error("EC2 TerminateInstances request failed [{location}]")]
     Request {
         #[location]
@@ -278,7 +278,7 @@ pub(crate) enum TerminateInstancesError {
 
 /// Failure modes for [`Ec2Client::describe_security_groups`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum DescribeSecurityGroupsError {
+pub enum DescribeSecurityGroupsError {
     #[error("EC2 DescribeSecurityGroups request failed [{location}]")]
     Request {
         #[location]
@@ -290,7 +290,7 @@ pub(crate) enum DescribeSecurityGroupsError {
 
 /// Failure modes for [`Ec2Client::subnet_zones`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum SubnetZonesError {
+pub enum SubnetZonesError {
     #[error("EC2 DescribeSubnets request failed [{location}]")]
     Request {
         #[location]
@@ -302,7 +302,7 @@ pub(crate) enum SubnetZonesError {
 
 /// Failure modes for [`Ec2Client::delete_security_group`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum DeleteSecurityGroupError {
+pub enum DeleteSecurityGroupError {
     #[error("EC2 DeleteSecurityGroup request failed [{location}]")]
     Request {
         #[location]
@@ -314,7 +314,7 @@ pub(crate) enum DeleteSecurityGroupError {
 
 /// Failure modes for [`Ec2Client::stop_instances`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum StopInstancesError {
+pub enum StopInstancesError {
     #[error("EC2 StopInstances request failed [{location}]")]
     Request {
         #[location]
@@ -325,14 +325,14 @@ pub(crate) enum StopInstancesError {
 }
 
 impl StopInstancesError {
-    pub(crate) fn client_message(&self) -> &'static str {
+    pub fn client_message(&self) -> &'static str {
         "EC2 API request failed"
     }
 }
 
 /// Failure modes for [`Ec2Client::start_instances`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum StartInstancesError {
+pub enum StartInstancesError {
     #[error("EC2 StartInstances request failed [{location}]")]
     Request {
         #[location]
@@ -343,14 +343,14 @@ pub(crate) enum StartInstancesError {
 }
 
 impl StartInstancesError {
-    pub(crate) fn client_message(&self) -> &'static str {
+    pub fn client_message(&self) -> &'static str {
         "EC2 API request failed"
     }
 }
 
 /// Failure modes for [`Ec2Client::run_instances`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum RunInstancesError {
+pub enum RunInstancesError {
     #[error("EC2 RunInstances request failed [{location}]")]
     Request {
         #[location]
@@ -365,7 +365,7 @@ pub(crate) enum RunInstancesError {
 
 /// Failure modes for [`Ec2Client::latest_amazon_linux_2023_ami_id`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum LatestAmazonLinuxAmiError {
+pub enum LatestAmazonLinuxAmiError {
     #[error("EC2 DescribeImages request failed [{location}]")]
     Request {
         #[location]
@@ -380,7 +380,7 @@ pub(crate) enum LatestAmazonLinuxAmiError {
 
 /// Failure modes for [`Ec2Client::find_security_group_id`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum FindSecurityGroupError {
+pub enum FindSecurityGroupError {
     #[error("EC2 DescribeSecurityGroups request failed [{location}]")]
     Request {
         #[location]
@@ -392,7 +392,7 @@ pub(crate) enum FindSecurityGroupError {
 
 /// Failure modes for [`Ec2Client::create_security_group`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum CreateSecurityGroupError {
+pub enum CreateSecurityGroupError {
     #[error("EC2 CreateSecurityGroup request failed [{location}]")]
     Request {
         #[location]
@@ -407,7 +407,7 @@ pub(crate) enum CreateSecurityGroupError {
 
 /// Failure modes for [`Ec2Client::associate_address`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum AssociateAddressError {
+pub enum AssociateAddressError {
     #[error("EC2 AssociateAddress request failed [{location}]")]
     Request {
         #[location]
@@ -419,7 +419,7 @@ pub(crate) enum AssociateAddressError {
 
 /// Failure modes for [`Ec2Client::associate_app_address`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum AssociateAppAddressError {
+pub enum AssociateAppAddressError {
     #[error("could not describe Elastic IP addresses [{location}]")]
     DescribeAddresses {
         #[location]
@@ -446,7 +446,7 @@ pub(crate) enum AssociateAppAddressError {
 }
 
 impl AssociateAppAddressError {
-    pub(crate) fn client_message(&self) -> &'static str {
+    pub fn client_message(&self) -> &'static str {
         match self {
             Self::DescribeAddresses { .. } => "EC2 API request failed",
             Self::ParseAddress { .. } => "expected exactly one Elastic IP tagged for app",
@@ -457,14 +457,14 @@ impl AssociateAppAddressError {
 
 /// Failure modes for [`parse_app_address`] (leaf error: no underlying source).
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ParseAppAddressError {
+pub enum ParseAppAddressError {
     #[error("expected exactly one Elastic IP tagged for app [{location}]")]
     NotExactlyOne { location: Location },
 }
 
 /// Failure modes for [`Ec2Client::describe_app_address`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum DescribeAppAddressError {
+pub enum DescribeAppAddressError {
     #[error("could not describe Elastic IP addresses [{location}]")]
     DescribeAddresses {
         #[location]
@@ -484,7 +484,7 @@ pub(crate) enum DescribeAppAddressError {
 
 /// Failure modes for [`Ec2Client::move_app_address`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum MoveAppAddressError {
+pub enum MoveAppAddressError {
     #[error("could not read the app Elastic IP address [{location}]")]
     DescribeAddress {
         #[location]
@@ -524,7 +524,7 @@ fn holder_label(holder: &Option<String>) -> &str {
 
 /// Failure modes for [`Ec2Client::describe_instance_runtime`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum DescribeInstanceRuntimeError {
+pub enum DescribeInstanceRuntimeError {
     #[error("EC2 DescribeInstances request failed [{location}]")]
     Request {
         #[location]
@@ -544,7 +544,7 @@ pub(crate) enum DescribeInstanceRuntimeError {
 
 /// Failure modes for [`parse_instance_runtime`] (leaf error: no underlying source).
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ParseInstanceRuntimeError {
+pub enum ParseInstanceRuntimeError {
     #[error("DescribeInstances response has no reservation set [{location}]")]
     NoReservationSet { location: Location },
     #[error("DescribeInstances response lists an instance without a state [{location}]")]
@@ -1244,7 +1244,7 @@ pub struct AsgClient {
 
 /// Failure modes for [`AsgClient::signed_request`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum AsgSignedRequestError {
+pub enum AsgSignedRequestError {
     #[error("Auto Scaling API request failed [{location}]")]
     Request {
         #[location]
@@ -1256,7 +1256,7 @@ pub(crate) enum AsgSignedRequestError {
 
 /// Failure modes for [`AsgClient::set_desired_capacity`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum SetDesiredCapacityError {
+pub enum SetDesiredCapacityError {
     #[error("Auto Scaling SetDesiredCapacity request failed [{location}]")]
     Request {
         #[location]
@@ -1268,7 +1268,7 @@ pub(crate) enum SetDesiredCapacityError {
 
 /// Failure modes for [`AsgClient::update_auto_scaling_group`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum UpdateAutoScalingGroupError {
+pub enum UpdateAutoScalingGroupError {
     #[error("Auto Scaling UpdateAutoScalingGroup request failed [{location}]")]
     Request {
         #[location]
@@ -1357,7 +1357,7 @@ impl AsgClient {
 
 /// Failure modes for the free [`signed_request`] helper.
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum SignedRequestError {
+pub enum SignedRequestError {
     #[error("{service} API request failed [{location}]")]
     Http {
         #[context(borrow = str)]
@@ -1477,7 +1477,7 @@ fn signed_request_non_success(service: &str, status: u16, body: &str) -> SignedR
 
 /// Failure modes for the free [`signed_json_request`] helper.
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum SignedJsonRequestError {
+pub enum SignedJsonRequestError {
     #[error("Failed to serialize AWS JSON body [{location}]")]
     Serialize {
         #[location]

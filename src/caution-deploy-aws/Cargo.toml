@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: 2025 Caution SEZC
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+
+[package]
+name = "caution-deploy-aws"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Error handling
+thiserror = { workspace = true }
+dterror = { workspace = true }
+
+# Configuration input
+caution-config = { version = "0.1.0", path = "../caution-config" }
+# Shared component digest validation
+enclave-builder = { path = "../enclave-builder" }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# HCL generation for OpenTofu configs
+hcl-rs = { version = "0.19", features = ["perf"] }
+indexmap = { version = "2", features = ["serde"] }
+
+# Temp files
+tempfile = { workspace = true }
+
+# Identity
+uuid = { workspace = true }
+chrono = { workspace = true }
+
+# HTTP client (EC2/AWS JSON APIs)
+reqwest = { version = "0.11", features = ["json"] }
+
+# AWS SDK for S3 uploads
+aws-config = { version = "1.1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1.15"
+
+# Signing and encoding
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
