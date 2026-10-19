@@ -132,7 +132,7 @@ pub enum QrLoginFinishError {
         location: Location,
     },
 
-    #[error("your organization requires PIN verification [{location}]")]
+    #[error("Your organization requires user verification for your passkey. Unlock it with your PIN, password, or biometrics. [{location}]")]
     PinRequired {
         #[location]
         location: Location,
@@ -252,7 +252,7 @@ impl IntoResponse for QrLoginFinishError {
         let (status, body) = match &self {
             Self::PinRequired { .. } => (
                 StatusCode::FORBIDDEN,
-                "your organization requires PIN verification",
+                "Your organization requires user verification for your passkey. Unlock it with your PIN, password, or biometrics.",
             ),
             Self::ParsePubkeyCredential { .. } => {
                 (StatusCode::BAD_REQUEST, "failed to parse pubkey credential")
