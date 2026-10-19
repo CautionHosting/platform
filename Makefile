@@ -713,9 +713,23 @@ KEYMAKER_POLICY_DIR ?= $(HOME)/.config/caution/policies
 # test-e2e-app-deployments turns it on.
 API_EXTRA_ENV ?= -e APP_DEPLOYMENTS_ENABLED=false -e APP_DEPLOYMENTS_BYOC_ENABLED=false
 E2E_LOCK_FILE ?= /tmp/caution-platform-e2e.lock
+# Full live suites share one stack; default to all six suites in parallel.
+# E2E_JOBS accepts 1-6; use 1 for serial diagnosis.
+E2E_JOBS ?= 6
 ONPREM_PROVISIONER_DIR ?= ../bring-your-own-compute-setup
 ONPREM_PROVISIONER_IMAGE ?= codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest
 DESTROY_ALL_SCRIPT := tests/e2e/destroy-all-apps.sh
+TEST_STARTUP_TIMEOUT ?= 60
+
+# Only called after a startup probe fails; $(2) lists services started by its caller.
+# Do not reuse down-test here: it also removes services this caller does not own.
+define cleanup_test_startup_failure
+status=$$?; \
+timeout --signal=KILL 3s docker logs --tail 40 "$(1)" 2>&1 | head -c 8192 >&2 || true; \
+timeout --signal=KILL 5s docker rm -f $(2) >/dev/null 2>&1 || echo "Warning: test container cleanup failed" >&2; \
+timeout --signal=KILL 5s docker volume rm "$(TEST_DB_VOLUME)" >/dev/null 2>&1 || echo "Warning: test volume cleanup failed" >&2; \
+exit $$status
+endef
 
 postgres-test: network
 	@docker rm -f $(TEST_DB_HOST) 2>/dev/null || true
@@ -728,13 +742,12 @@ postgres-test: network
 		-e POSTGRES_DB=$(TEST_DB_NAME) \
 		-e POSTGRES_USER=postgres \
 		-e POSTGRES_PASSWORD=postgres \
-		postgres:16-alpine >/dev/null && \
-	echo "Test postgres started, waiting for ready..." && \
-	sleep 3 && \
-	until docker exec $(TEST_DB_HOST) pg_isready -U postgres > /dev/null 2>&1; do \
-		sleep 1; \
-	done && \
-	echo "Test postgres ready"
+		postgres:16-alpine >/dev/null
+	@echo "Test postgres started, waiting for ready..."
+	@python3 scripts/wait-ready.py --timeout "$(TEST_STARTUP_TIMEOUT)" postgres "$(TEST_DB_HOST)" "$(TEST_DB_NAME)" || { \
+		$(call cleanup_test_startup_failure,$(TEST_DB_HOST),$(TEST_DB_HOST)); \
+	}
+	@echo "Test postgres ready"
 
 migrate-test: postgres-test
 	@echo "Running migrations on test DB..."
@@ -847,7 +860,9 @@ up-test: down migrate-test
 	@$(MAKE) prepare-components COMPONENT_ENV_FILE="$(TEST_COMPONENT_ENV_FILE)" COMPONENT_BUILD_MODE="$(TEST_COMPONENT_BUILD_MODE)"
 	@$(MAKE) run-email-test run-api-test
 	@echo "Waiting for API to be ready..."
-	@sleep 2
+	@python3 scripts/wait-ready.py --timeout "$(TEST_STARTUP_TIMEOUT)" http http://127.0.0.1:8080/health || { \
+		$(call cleanup_test_startup_failure,api,api email $(TEST_DB_HOST)); \
+	}
 	@$(MAKE) run-gateway-test
 	@echo "  All services running (e2e-testing-unsafe mode)"
 	@echo "  All ports bound to 127.0.0.1 only (not externally accessible)"
@@ -864,7 +879,9 @@ up-test-billing: down-test-billing migrate-test
 	@$(MAKE) prepare-components COMPONENT_ENV_FILE="$(TEST_COMPONENT_ENV_FILE)" COMPONENT_BUILD_MODE="$(TEST_COMPONENT_BUILD_MODE)"
 	@$(MAKE) run-email-test run-metering-test run-api-test
 	@echo "Waiting for API to be ready..."
-	@sleep 2
+	@python3 scripts/wait-ready.py --timeout "$(TEST_STARTUP_TIMEOUT)" http http://127.0.0.1:8080/health || { \
+		$(call cleanup_test_startup_failure,api,api email metering $(TEST_DB_HOST)); \
+	}
 	@$(MAKE) run-gateway-test
 	@echo "  All services running (billing e2e mode)"
 	@echo "  Gateway:  http://127.0.0.1:8000"
@@ -924,34 +941,44 @@ test-bootstrap:
 
 .PHONY: test-e2e-contracts
 test-e2e-contracts:
+	@python3 tests/test_e2e_scheduling.py
 	@python3 tests/e2e/test_acceptance_contracts.py
 	@python3 tests/e2e/test_platform_ports_contracts.py
+	@python3 tests/test_helper_imports.py
 	@python3 tests/test_managed_dns_contract.py
 	@python3 -m unittest discover -s tests -p test_nitro_restart_systemd_harness.py -v
 
+# The full lifecycle does not lock; external runners own stack serialization.
+# One shell keeps teardown after suite jobs and their EXIT cleanup.
 test-e2e:
-	@$(MAKE) build-cli
-	@$(MAKE) up-test
-	@echo "Running e2e tests..."
-	@CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_happy_path.sh; \
-	status=$$?; \
-	if [ $$status -eq 0 ]; then \
-		CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_platform_ports.sh || status=$$?; \
-	fi; \
-	if [ $$status -eq 0 ]; then \
-		CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_env_parity.sh || status=$$?; \
-	fi; \
-	if [ $$status -eq 0 ]; then \
-		CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_ssh_units.sh || status=$$?; \
-	fi; \
-	if [ $$status -eq 0 ]; then \
-		bash tests/e2e/test_pgp_units.sh || status=$$?; \
-	fi; \
-	if [ $$status -eq 0 ]; then \
-		bash tests/e2e/test_pgp_audit_constraints.sh || status=$$?; \
-	fi; \
-	$(MAKE) down-test; \
-	exit $$status
+	@case "$(E2E_JOBS)" in 1|2|3|4|5|6) ;; *) echo "E2E_JOBS must be an integer from 1 to 6" >&2; exit 2;; esac
+	@bash -c '\
+		set -e; \
+		trap "exit 130" INT; \
+		trap "exit 143" TERM; \
+		$(MAKE) build-cli; \
+		trap "$(MAKE) down-test" EXIT; \
+		$(MAKE) up-test; \
+		echo "Running e2e tests ($(E2E_JOBS) workers)..."; \
+		$(MAKE) --no-keep-going -j$(E2E_JOBS) _test-e2e-suites'
+
+# Internal targets: the caller owns the single stack. GNU Make stops
+# scheduling on failure and drains running suites (including their EXIT cleanup).
+E2E_SUITE_TARGETS := _test-e2e-happy_path _test-e2e-platform_ports \
+	_test-e2e-env_parity _test-e2e-ssh_units _test-e2e-pgp_units \
+	_test-e2e-pgp_audit_constraints
+.PHONY: _test-e2e-suites $(E2E_SUITE_TARGETS)
+_test-e2e-suites: $(E2E_SUITE_TARGETS)
+
+$(E2E_SUITE_TARGETS): SHELL := /bin/bash
+$(E2E_SUITE_TARGETS): _test-e2e-%:
+	@set -e; \
+	config=$$(mktemp -d); \
+	trap 'rm -rf -- "$$config"' EXIT; \
+	trap 'exit 130' INT; \
+	trap 'exit 143' TERM; \
+	XDG_CONFIG_HOME="$$config" CAUTION_BIN="$(abspath $(CLI_OUT_DIR)/$(CLI_BINARY))" \
+		bash tests/e2e/test_$*.sh
 
 test-e2e-ssh-units:
 	@$(MAKE) build-cli
