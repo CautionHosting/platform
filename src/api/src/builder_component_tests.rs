@@ -13,7 +13,6 @@ fn request() -> BuildRequest {
     request.steve_commit = enclave_build_nitro::build::resolve_steve_commit();
     request.framework_commit = "a".repeat(40);
     request.e2e = true;
-    request.e2e_mode = "steve".into();
     request.locksmith = true;
     let mut artifacts = BTreeMap::new();
     for (component, commit) in [

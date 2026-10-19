@@ -4885,11 +4885,6 @@ async fn deploy_logic(
     let domain = ec_network
         .and_then(|n| n.http.as_ref())
         .and_then(|h| h.domain.clone());
-    let http_upstream_protocol = ec_network
-        .and_then(|n| n.http.as_ref())
-        .and_then(|h| h.upstream_protocol)
-        .map(|protocol| protocol.as_str())
-        .unwrap_or("http");
     let e2e_config = ec_network
         .and_then(|n| n.http.as_ref())
         .and_then(|h| h.e2e_encryption.as_ref());
@@ -5234,23 +5229,12 @@ async fn deploy_logic(
                 procfile_content: config_content,
                 run_command: run_command.clone(),
                 containerfile: containerfile.clone(),
-                ports: ingress_ports.clone(),
-                http_port: ec_network.and_then(|n| n.http.as_ref()).map(|h| h.port),
                 e2e,
-                e2e_mode: e2e_mode_value.to_string(),
                 e2e_key_exchange: e2e_key_exchange.to_string(),
                 allow_plaintext_fallback,
-                domain: ec_network
-                    .and_then(|n| n.http.as_ref())
-                    .and_then(|h| h.domain.clone()),
-                http_upstream_protocol: http_upstream_protocol.to_string(),
                 framework_commit: framework_commit.clone(),
                 locksmith: config_file.has_vault_env(),
                 egress,
-                e2e_cors_origins: e2e_config
-                    .as_ref()
-                    .and_then(|e2e| e2e.cors_origins.as_ref())
-                    .map(|origins| origins.join(",")),
                 no_cache,
                 enclaveos_commit,
                 steve_commit,
