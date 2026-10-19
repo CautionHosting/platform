@@ -243,3 +243,48 @@ impl ImageBuildMechanism for NitroEifMechanism {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use caution_config::{EnclaveConfig, NetworkConfig, PortSpec, TrafficRule};
+    use std::collections::BTreeMap;
+
+    /// A configuration whose network policy is rejected (SSH port 22 is reserved
+    /// for platform services).
+    fn config_with_invalid_policy() -> ConfigurationFile {
+        ConfigurationFile {
+            caution: None,
+            enclave: Some(BTreeMap::from([(
+                "main".to_string(),
+                EnclaveConfig {
+                    build: None,
+                    debug: None,
+                    network: Some(NetworkConfig {
+                        ingress: vec![TrafficRule {
+                            cidr_ipv4: "0.0.0.0/0".to_string(),
+                            port_spec: Some(PortSpec::Exact { port: 22 }),
+                            ip_protocol: Some("tcp".to_string()),
+                        }],
+                        egress: Vec::new(),
+                        recovery_ingress: None,
+                        http: None,
+                    }),
+                    resources: None,
+                    restart: None,
+                    unit: None,
+                },
+            )])),
+        }
+    }
+
+    #[test]
+    fn build_params_rejects_invalid_network_policy() {
+        let config = config_with_invalid_policy();
+        let result = build_params(&config);
+        assert!(
+            matches!(result, Err(ImageBuildError::InvalidConfiguration { .. })),
+            "invalid network policy must fail the build"
+        );
+    }
+}
