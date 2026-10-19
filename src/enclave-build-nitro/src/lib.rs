@@ -34,6 +34,27 @@ pub use enclave_build::{
 };
 pub use mechanism::NitroEifMechanism;
 
+/// Relative locations of the framework templates across framework revisions.
+///
+/// Newer framework archives place templates under the renamed crate directory;
+/// pre-rename archives still use `src/enclave-builder/templates`, so manifests
+/// that pin an old framework commit can still be reproduced.
+const FRAMEWORK_TEMPLATES_PATHS: [&str; 2] = [
+    "src/enclave-build-nitro/templates",
+    "src/enclave-builder/templates",
+];
+
+/// Resolve the templates directory within a checked-out framework source tree,
+/// preferring the current layout and falling back to the pre-rename one.
+#[tracing::instrument(skip_all)]
+fn framework_templates_dir(framework_root: &Path) -> PathBuf {
+    FRAMEWORK_TEMPLATES_PATHS
+        .iter()
+        .map(|relative| framework_root.join(relative))
+        .find(|candidate| candidate.is_dir())
+        .unwrap_or_else(|| framework_root.join(FRAMEWORK_TEMPLATES_PATHS[0]))
+}
+
 #[derive(Debug, Clone)]
 pub struct EnclaveBuilder {
     /// Enclave source code location (git URL or local path to enclave/ directory)
@@ -668,7 +689,7 @@ impl EnclaveBuilder {
         };
         let templates_dir = framework_source_path
             .as_ref()
-            .map(|p| p.join("src/enclave-build-nitro/templates"));
+            .map(|p| framework_templates_dir(p));
 
         let manifest = if let Some(ext_manifest) = external_manifest {
             tracing::info!("Using external manifest for reproducible build");
@@ -821,7 +842,7 @@ impl EnclaveBuilder {
         };
         let templates_dir = framework_source_path
             .as_ref()
-            .map(|p| p.join("src/enclave-build-nitro/templates"));
+            .map(|p| framework_templates_dir(p));
 
         let manifest = if let Some(ext_manifest) = external_manifest {
             tracing::info!("Using external manifest for reproducible build");
@@ -1183,5 +1204,29 @@ mod tests {
         let url = "https://git.caution.co/public/platform.git";
 
         assert_eq!(pin_archive_url_to_commit(url, "abc123"), url);
+    }
+
+    #[test]
+    fn framework_templates_dir_prefers_current_and_falls_back_to_legacy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        std::fs::create_dir_all(root.join("src/enclave-builder/templates")).unwrap();
+        assert_eq!(
+            framework_templates_dir(root),
+            root.join("src/enclave-builder/templates")
+        );
+
+        std::fs::create_dir_all(root.join("src/enclave-build-nitro/templates")).unwrap();
+        assert_eq!(
+            framework_templates_dir(root),
+            root.join("src/enclave-build-nitro/templates")
+        );
+
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(
+            framework_templates_dir(empty.path()),
+            empty.path().join("src/enclave-build-nitro/templates")
+        );
     }
 }

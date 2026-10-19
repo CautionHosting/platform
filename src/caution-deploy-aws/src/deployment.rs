@@ -3670,6 +3670,8 @@ pub enum ProvisionDeploymentError {
         #[source]
         source: BoxError,
     },
+    #[error("deploy request is missing the mechanism-provided user-data template [{location}]")]
+    MissingUserData { location: Location },
     #[error("could not copy user-data.sh [{location}]")]
     WriteUserData {
         #[location]
@@ -3729,12 +3731,14 @@ pub async fn provision_deployment(
         .await
         .with_context(Ctx::generate_main_tf())?;
 
-    fs::copy(
-        nitro_module_path().join("user-data.sh"),
-        work_dir.join("user-data.sh"),
-    )
-    .await
-    .with_context(Ctx::write_user_data())?;
+    if request.user_data.is_empty() {
+        return Err(ProvisionDeploymentError::MissingUserData {
+            location: std::panic::Location::caller(),
+        });
+    }
+    fs::write(work_dir.join("user-data.sh"), request.user_data.clone())
+        .await
+        .with_context(Ctx::write_user_data())?;
     fs::write(
         work_dir.join("network-policy.sh.tftpl"),
         include_str!("../../../terraform/modules/aws/nitro-enclave/network-policy.sh.tftpl"),
