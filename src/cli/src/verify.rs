@@ -1106,24 +1106,6 @@ pub(crate) enum BuildLocalError {
         source: BoxError,
     },
 
-    #[error("failed to initialize enclave builder")]
-    InitBuilder {
-        #[location]
-        location: Location,
-
-        #[source]
-        source: BoxError,
-    },
-
-    #[error("failed to parse run command")]
-    ParseRunCommand {
-        #[location]
-        location: Location,
-
-        #[source]
-        source: BoxError,
-    },
-
     #[error("failed to build enclave")]
     BuildEnclave {
         #[location]
