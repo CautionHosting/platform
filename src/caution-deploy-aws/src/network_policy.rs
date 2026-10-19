@@ -10,7 +10,7 @@ use std::fmt::Write;
 /// Explicit ingress tuples. Port 80 is public solely for platform management;
 /// the HTTP app upstream is never directly exposed. SSH is owned by its caller.
 #[tracing::instrument(skip_all)]
-pub(crate) fn ingress_blocks(
+pub fn ingress_blocks(
     policy: &NetworkPolicy,
     http_port: Option<u16>,
     e2e_mode: &str,
@@ -56,7 +56,7 @@ fn ingress_tuples<'a>(
 /// The same tuples enforced at the host boundary, before TCP-to-VSOCK. AWS
 /// security groups are additive, so they cannot be the only source check.
 #[tracing::instrument(skip_all)]
-pub(crate) fn ingress_input_rules(
+pub fn ingress_input_rules(
     policy: &NetworkPolicy,
     http_port: Option<u16>,
     e2e_mode: &str,
@@ -134,7 +134,7 @@ fn raw_ranges(low: u16, high: u16, http_port: Option<u16>) -> Vec<(u16, u16)> {
 
 /// Canonical restore-format allowlist for guest-forwarded traffic.
 #[tracing::instrument(skip_all)]
-pub(crate) fn egress_forward_rules(policy: &NetworkPolicy) -> String {
+pub fn egress_forward_rules(policy: &NetworkPolicy) -> String {
     let mut rules = String::new();
     for rule in policy.egress() {
         let protocol = match rule.protocol() {
@@ -160,7 +160,7 @@ pub(crate) fn egress_forward_rules(policy: &NetworkPolicy) -> String {
 /// Guest-to-host DNS exceptions, only when explicitly covered by the allowlist.
 /// The installer owns the CAUTION_INPUT chain and its terminal drop policy.
 #[tracing::instrument(skip_all)]
-pub(crate) fn egress_dns_rules(policy: &NetworkPolicy) -> String {
+pub fn egress_dns_rules(policy: &NetworkPolicy) -> String {
     let mut rules = String::new();
     for (protocol, name) in [(Protocol::Tcp, "tcp"), (Protocol::Udp, "udp")] {
         if policy.egress().iter().any(|rule| {
@@ -203,7 +203,7 @@ fn contains_dns_host(cidr: &str) -> bool {
 /// precedes the app; TLS byte-forwarding and ACME remain outside this snippet.
 /// The caller must validate `domain` before rendering.
 #[tracing::instrument(skip_all)]
-pub(crate) fn http_routes(
+pub fn http_routes(
     policy: &NetworkPolicy,
     http_port: Option<u16>,
     e2e_mode: &str,

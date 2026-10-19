@@ -41,7 +41,7 @@ fn generate_provider_lock_config() -> String {
 }
 
 /// Default timeout for tofu init/apply/destroy operations (10 minutes).
-pub(crate) const TOFU_TIMEOUT_SECS: u64 = 600;
+pub const TOFU_TIMEOUT_SECS: u64 = 600;
 
 /// Returns the path to the cached provider lockfile in the data directory.
 pub fn cached_lockfile_path(data_dir: &str) -> PathBuf {
@@ -165,7 +165,7 @@ pub async fn get_or_generate_lockfile(data_dir: &str) -> Option<PathBuf> {
 
 /// Failure modes for [`run_with_timeout`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum RunCommandError {
+pub enum RunCommandError {
     #[error("Failed to spawn command [{location}]")]
     Spawn {
         #[location]
@@ -217,7 +217,7 @@ pub(crate) enum RunCommandError {
 
 /// Failure modes for `tofu init`.
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum TofuInitError {
+pub enum TofuInitError {
     #[error("could not run tofu init [{location}]")]
     RunCommand {
         #[location]
@@ -234,7 +234,7 @@ pub(crate) enum TofuInitError {
 
 /// Failure modes for `tofu apply`.
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum TofuApplyError {
+pub enum TofuApplyError {
     #[error("could not run tofu apply [{location}]")]
     RunCommand {
         #[location]
@@ -251,7 +251,7 @@ pub(crate) enum TofuApplyError {
 
 /// Failure modes for `tofu destroy`.
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum TofuDestroyError {
+pub enum TofuDestroyError {
     #[error("could not run tofu destroy [{location}]")]
     RunCommand {
         #[location]
@@ -470,7 +470,7 @@ fn managed_onprem_uses_direct_customer_bucket(
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum DeployNitroEnclaveError {
+pub enum DeployNitroEnclaveError {
     #[error("deployment region is required [{location}]")]
     MissingRegion { location: Location },
     #[error("credentials required for managed on-prem [{location}]")]
@@ -660,7 +660,7 @@ pub async fn destroy_app_with_credentials(
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum ScaleDownAsgError {
+pub enum ScaleDownAsgError {
     #[error("could not set ASG desired capacity to 0 [{location}]")]
     SetDesiredCapacity {
         #[location]
@@ -1902,7 +1902,7 @@ impl Default for TerraformConfig {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum DestroyEc2Error {
+pub enum DestroyEc2Error {
     #[error("could not create temporary directory [{location}]")]
     TempDir {
         #[location]
@@ -2062,7 +2062,7 @@ fn build_destroy_tf_body(has_credentials: bool, aws_region: &str) -> hcl::Body {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum GenerateBackendConfigError {
+pub enum GenerateBackendConfigError {
     #[error("could not serialize backend config [{location}]")]
     Serialize {
         #[location]
@@ -2096,7 +2096,7 @@ async fn generate_backend_config(
 }
 
 /// The state key of one deployment, nested under its app's key.
-pub(crate) fn deployment_state_key(org_id: Uuid, resource_id: Uuid, deployment_id: Uuid) -> String {
+pub fn deployment_state_key(org_id: Uuid, resource_id: Uuid, deployment_id: Uuid) -> String {
     format!(
         "organizations/{org_id}/resources/{resource_id}/deployments/{deployment_id}/terraform.tfstate"
     )
@@ -2318,7 +2318,7 @@ fn run_tofu_apply_command(cmd: &mut Command) -> std::result::Result<(), TofuAppl
 
 /// Failure modes for `tofu output -json`.
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum TofuOutputError {
+pub enum TofuOutputError {
     #[error("could not run tofu output command [{location}]")]
     RunCommand {
         #[location]
@@ -2373,7 +2373,7 @@ fn run_tofu_output_json(
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum GetTofuOutputsError {
+pub enum GetTofuOutputsError {
     #[error("could not read tofu outputs [{location}]")]
     Output {
         #[location]
@@ -2438,7 +2438,7 @@ struct ManagedOnPremTerraformOutputs {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum GetManagedOnpremOutputsError {
+pub enum GetManagedOnpremOutputsError {
     #[error("could not run tofu output command [{location}]")]
     RunCommand {
         #[location]
@@ -2530,7 +2530,7 @@ fn get_managed_onprem_tofu_outputs(
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum UpdateAsgLaunchTemplateError {
+pub enum UpdateAsgLaunchTemplateError {
     #[error("could not update ASG launch template after retries [{location}]")]
     UpdateAsg {
         #[location]
@@ -2620,7 +2620,7 @@ async fn update_asg_launch_template(
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum WaitForAsgInstanceError {
+pub enum WaitForAsgInstanceError {
     #[error("timeout waiting for instance in ASG [{location}]")]
     Timeout { location: Location },
     #[error("could not describe instances [{location}]")]
@@ -2676,7 +2676,7 @@ async fn wait_for_asg_instance(
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum AssociateEipWithInstanceError {
+pub enum AssociateEipWithInstanceError {
     #[error("could not associate EIP with instance [{location}]")]
     AssociateAddress {
         #[location]
@@ -2758,7 +2758,7 @@ fn run_tofu_destroy(
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum UploadEifToS3Error {
+pub enum UploadEifToS3Error {
     #[error("could not read EIF file [{location}]")]
     ReadFile {
         #[location]
@@ -2931,7 +2931,7 @@ async fn upload_eif_to_s3(
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum UploadEifToCustomerBucketError {
+pub enum UploadEifToCustomerBucketError {
     #[error("could not read EIF file [{location}]")]
     ReadFile {
         #[location]
@@ -3036,7 +3036,7 @@ async fn upload_eif_to_customer_bucket(
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum UploadEifFromPlatformS3Error {
+pub enum UploadEifFromPlatformS3Error {
     #[error("could not download EIF from platform bucket [{location}]")]
     GetObject {
         #[location]
@@ -3128,7 +3128,7 @@ async fn upload_eif_from_platform_s3_to_customer_bucket(
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum ProvisionNitroEnclaveError {
+pub enum ProvisionNitroEnclaveError {
     #[error("could not create temporary directory [{location}]")]
     TempDir {
         #[location]
@@ -3281,7 +3281,7 @@ async fn provision_nitro_enclave(
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum ProvisionManagedOnpremError {
+pub enum ProvisionManagedOnpremError {
     #[error("missing managed_onprem config [{location}]")]
     MissingConfig { location: Location },
     #[error("could not create temporary directory [{location}]")]
@@ -3496,13 +3496,13 @@ async fn provision_managed_onprem(
 
 // `CtxError` needs a variant with a source; this enum has none.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ParseAppNetworkOutputsError {
+pub enum ParseAppNetworkOutputsError {
     #[error("tofu output missing '{field}' [{location}]")]
     MissingField { field: String, location: Location },
 }
 
 /// Reads the app network state's `tofu output -json` object.
-pub(crate) fn parse_app_network_outputs(
+pub fn parse_app_network_outputs(
     outputs: &serde_json::Value,
     region: &str,
 ) -> std::result::Result<AppNetwork, ParseAppNetworkOutputsError> {
@@ -3528,7 +3528,7 @@ pub(crate) fn parse_app_network_outputs(
 }
 
 /// A linked app network: the provisioner's network around the EIP its app state created.
-pub(crate) fn parse_linked_network_outputs(
+pub fn parse_linked_network_outputs(
     outputs: &serde_json::Value,
     region: &str,
     linked: &LinkedNetwork,
@@ -3555,7 +3555,7 @@ pub(crate) fn parse_linked_network_outputs(
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum ProvisionAppNetworkError {
+pub enum ProvisionAppNetworkError {
     #[error("could not create temporary directory [{location}]")]
     TempDir {
         #[location]
@@ -3603,7 +3603,7 @@ pub(crate) enum ProvisionAppNetworkError {
 /// Applies the app network state (VPC, IAM, unassociated EIP; only the EIP in a linked
 /// account) on the per-app key. Idempotent: a re-apply leaves an existing network unchanged.
 #[tracing::instrument(skip_all, err)]
-pub(crate) async fn provision_app_network(
+pub async fn provision_app_network(
     request: &AppNetworkRequest,
 ) -> std::result::Result<AppNetwork, ProvisionAppNetworkError> {
     use ProvisionAppNetworkErrorCtx as Ctx;
@@ -3661,7 +3661,7 @@ pub(crate) async fn provision_app_network(
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum ProvisionDeploymentError {
+pub enum ProvisionDeploymentError {
     #[error("could not create temporary directory [{location}]")]
     TempDir {
         #[location]
@@ -3716,7 +3716,7 @@ pub(crate) enum ProvisionDeploymentError {
 /// Applies one deployment's state (security group and instance) inside the app network.
 /// The result's `public_ip` is the instance's own temporary IP, not the app's EIP.
 #[tracing::instrument(skip_all, err)]
-pub(crate) async fn provision_deployment(
+pub async fn provision_deployment(
     request: &NitroDeploymentRequest,
     deployment_id: Uuid,
     network: &AppNetwork,
@@ -3789,7 +3789,7 @@ pub(crate) async fn provision_deployment(
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum DestroyDeploymentStateError {
+pub enum DestroyDeploymentStateError {
     #[error("could not create temporary directory [{location}]")]
     TempDir {
         #[location]
@@ -3831,7 +3831,7 @@ pub(crate) enum DestroyDeploymentStateError {
 /// (the environment's otherwise). Re-runnable: an empty or missing state
 /// destroys nothing and succeeds.
 #[tracing::instrument(skip_all, err)]
-pub(crate) async fn destroy_deployment_state(
+pub async fn destroy_deployment_state(
     org_id: Uuid,
     resource_id: Uuid,
     deployment_id: Uuid,
@@ -3875,7 +3875,7 @@ pub(crate) async fn destroy_deployment_state(
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum ClearStateLockError {
+pub enum ClearStateLockError {
     #[error("could not delete the state lock of '{state_key}' [{location}]")]
     DeleteLock {
         #[context(borrow = str)]
@@ -3890,9 +3890,7 @@ pub(crate) enum ClearStateLockError {
 /// Deletes `<state_key>.tflock` from the state bucket. Only for reconciling work whose
 /// owning process is dead. Deleting an absent lock succeeds.
 #[tracing::instrument(skip_all, err)]
-pub(crate) async fn clear_state_lock(
-    state_key: &str,
-) -> std::result::Result<(), ClearStateLockError> {
+pub async fn clear_state_lock(state_key: &str) -> std::result::Result<(), ClearStateLockError> {
     use ClearStateLockErrorCtx as Ctx;
 
     let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
@@ -3926,14 +3924,14 @@ const NITRO_INSTANCE_SPECS: &[(&str, u32, u32)] = &[
     ("r6i.12xlarge", 48, 384 * 1024),
 ];
 
-pub(crate) struct EnclaveSizing {
-    pub(crate) cpu_count: u32,
-    pub(crate) instance_type: &'static str,
-    pub(crate) host_vcpus: u32,
+pub struct EnclaveSizing {
+    pub cpu_count: u32,
+    pub instance_type: &'static str,
+    pub host_vcpus: u32,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum EnclaveSizingError {
+pub enum EnclaveSizingError {
     #[error("Enclave vCPU count must be at least 1 [{location}]")]
     ZeroCpu { location: dterror::Location },
     #[error("Enclave memory_mb must be at least 1 [{location}]")]
@@ -3951,7 +3949,7 @@ pub(crate) enum EnclaveSizingError {
 }
 
 #[tracing::instrument(skip_all)]
-pub(crate) fn enclave_sizing(
+pub fn enclave_sizing(
     cpu_count: u32,
     memory_mb: u32,
 ) -> std::result::Result<EnclaveSizing, EnclaveSizingError> {
@@ -4001,7 +3999,7 @@ pub(crate) fn enclave_sizing(
     })
 }
 
-pub(crate) fn host_vcpus_for_instance_type(instance_type: &str) -> Option<u32> {
+pub fn host_vcpus_for_instance_type(instance_type: &str) -> Option<u32> {
     let size = instance_type.split('.').next_back()?;
 
     match size {
@@ -4197,7 +4195,7 @@ fn bootstrap_locals(
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum GenerateMainTfError {
+pub enum GenerateMainTfError {
     #[error("invalid deployment network policy [{location}]")]
     NetworkPolicy {
         #[location]
@@ -4877,7 +4875,7 @@ fn port_variable_blocks() -> Vec<hcl::Block> {
 /// only terminates, edits and associates resources carrying it, so every
 /// resource created there carries it from creation. Its value is the
 /// provisioner's deployment ID, not a Caution deployment.
-pub(crate) const SCOPE_TAG_KEY: &str = "caution:deployment-id";
+pub const SCOPE_TAG_KEY: &str = "caution:deployment-id";
 
 /// `extra_tags` as object entries, appended after a resource's fixed tags.
 fn extra_tag_entries<'a>(
@@ -5262,48 +5260,48 @@ async fn generate_nitro_deployment_main_tf(
 /// The per-app network state: VPC, IAM and an unassociated EIP. Applied once per app;
 /// deployment states reference its outputs by literal ID. Stored as JSONB.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct AppNetwork {
-    pub(crate) region: String,
-    pub(crate) vpc_id: String,
-    pub(crate) subnet_id: String,
-    pub(crate) availability_zone: String,
-    pub(crate) instance_profile_name: String,
-    pub(crate) eip_allocation_id: String,
-    pub(crate) eip_public_ip: String,
+pub struct AppNetwork {
+    pub region: String,
+    pub vpc_id: String,
+    pub subnet_id: String,
+    pub availability_zone: String,
+    pub instance_profile_name: String,
+    pub eip_allocation_id: String,
+    pub eip_public_ip: String,
     /// The provisioner's deployment ID when the network lives in a linked (BYOC)
     /// account; absent (and absent from the JSON) in Caution's account. Every
     /// later operation on the app's deployments uses that environment
     /// (`app_deployments::account`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) scope_tag: Option<String>,
+    pub scope_tag: Option<String>,
 }
 
-pub(crate) struct AppNetworkRequest {
-    pub(crate) org_id: Uuid,
-    pub(crate) resource_id: Uuid,
-    pub(crate) aws_account_id: String,
-    pub(crate) region: String,
+pub struct AppNetworkRequest {
+    pub org_id: Uuid,
+    pub resource_id: Uuid,
+    pub aws_account_id: String,
+    pub region: String,
     /// The first deployment's instance type; selects the subnet's AZ.
-    pub(crate) instance_type: String,
+    pub instance_type: String,
     /// A linked (BYOC) account's environment; `None` builds the network in Caution's account.
-    pub(crate) linked: Option<LinkedNetwork>,
+    pub linked: Option<LinkedNetwork>,
 }
 
 /// What a linked (BYOC) app network reuses from the provisioner's environment.
 /// Only the app EIP is created there.
-pub(crate) struct LinkedNetwork {
-    pub(crate) credentials: AwsCredentials,
+pub struct LinkedNetwork {
+    pub credentials: AwsCredentials,
     /// The provisioner's deployment ID ([`SCOPE_TAG_KEY`]), not a Caution deployment.
-    pub(crate) scope_tag: String,
-    pub(crate) vpc_id: String,
-    pub(crate) subnet_id: String,
-    pub(crate) availability_zone: String,
-    pub(crate) instance_profile_name: String,
+    pub scope_tag: String,
+    pub vpc_id: String,
+    pub subnet_id: String,
+    pub availability_zone: String,
+    pub instance_profile_name: String,
 }
 
 /// Failure modes for [`linked_network`].
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum LinkedNetworkError {
+pub enum LinkedNetworkError {
     #[error("failed to read the provisioner's subnets [{location}]")]
     Subnets {
         #[location]
@@ -5328,7 +5326,7 @@ pub(crate) enum LinkedNetworkError {
 /// The linked environment of a BYOC app's first deployment: the first of the
 /// provisioner's subnets, in its order, whose zone offers `instance_type`.
 #[tracing::instrument(skip_all, err)]
-pub(crate) async fn linked_network(
+pub async fn linked_network(
     credentials: &AwsCredentials,
     onprem: &ManagedOnPremConfig,
     instance_type: &str,
@@ -5652,7 +5650,7 @@ fn provider_credential_variable(name: &str, sensitive: bool) -> hcl::Block {
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum GenerateOnpremTfError {
+pub enum GenerateOnpremTfError {
     #[error("invalid deployment network policy [{location}]")]
     NetworkPolicy {
         #[location]
