@@ -5135,8 +5135,7 @@ async fn generate_nitro_deployment_main_tf(
         .policy()
         .with_context(Ctx::network_policy())?;
     if let Some(digest) = &request.tap_framer_sha256 {
-        enclave_builder::components::validate_digest(digest)
-            .with_context(Ctx::component_digest())?;
+        enclave_build::components::validate_digest(digest).with_context(Ctx::component_digest())?;
     }
 
     let aws_region = request
@@ -5477,8 +5476,7 @@ async fn generate_deployment_main_tf(
         .policy()
         .with_context(Ctx::network_policy())?;
     if let Some(digest) = &request.tap_framer_sha256 {
-        enclave_builder::components::validate_digest(digest)
-            .with_context(Ctx::component_digest())?;
+        enclave_build::components::validate_digest(digest).with_context(Ctx::component_digest())?;
     }
 
     let (cpu_count_rounded, instance_type) =
@@ -5703,7 +5701,7 @@ async fn generate_managed_onprem_deployment_tf(
         .with_context(Ctx::network_policy())?;
     if let Some(digest) = &request.tap_framer_sha256 {
         dterror::ResultExt::with_context(
-            enclave_builder::components::validate_digest(digest),
+            enclave_build::components::validate_digest(digest),
             Ctx::component_digest(),
         )?;
     }

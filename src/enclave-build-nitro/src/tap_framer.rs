@@ -117,7 +117,7 @@ mod tests {
         ] {
             for missing in names {
                 let dir = tempfile::tempdir().unwrap();
-                let templates = dir.path().join("src/enclave-builder/templates");
+                let templates = dir.path().join("src/enclave-build-nitro/templates");
                 std::fs::create_dir_all(&templates).unwrap();
                 for name in names {
                     if name != missing {
@@ -145,7 +145,9 @@ mod tests {
     #[tokio::test]
     async fn stages_component_from_selected_framework_not_template_copy() {
         let dir = tempfile::tempdir().unwrap();
-        let templates = dir.path().join("selected/src/enclave-builder/templates");
+        let templates = dir
+            .path()
+            .join("selected/src/enclave-build-nitro/templates");
         let stage = dir.path().join("stage");
         std::fs::create_dir_all(&templates).unwrap();
         for name in ["Cargo.toml", "Cargo.lock", "src/main.rs", "src/vsock.rs"] {

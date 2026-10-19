@@ -498,10 +498,10 @@ async fn build_inputs() -> impl IntoResponse {
     struct BuildInputs {
         #[serde(skip_serializing_if = "Option::is_none")]
         platform: Option<PlatformSource>,
-        enclaveos: enclave_builder::build::ToolSource,
-        bootproof: enclave_builder::build::ToolSource,
-        steve: enclave_builder::build::ToolSource,
-        locksmith: enclave_builder::build::ToolSource,
+        enclaveos: enclave_build_nitro::build::ToolSource,
+        bootproof: enclave_build_nitro::build::ToolSource,
+        steve: enclave_build_nitro::build::ToolSource,
+        locksmith: enclave_build_nitro::build::ToolSource,
         services: service_observations::Snapshot,
     }
     #[derive(serde::Serialize)]
@@ -510,7 +510,7 @@ async fn build_inputs() -> impl IntoResponse {
         repo: &'static str,
     }
 
-    let tools = enclave_builder::build::resolve_tool_commits();
+    let tools = enclave_build_nitro::build::resolve_tool_commits();
     let platform = std::env::var("PLATFORM_GIT_SHA")
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -5068,18 +5068,18 @@ async fn deploy_logic(
     .await
     .with_context(Ctx::builder_target())?;
     let build_result: Result<builder::BuildResult, DeployLogicError> = async {
-        let enclaveos_commit = enclave_builder::build::resolve_enclaveos_commit();
-        let steve_commit = enclave_builder::build::resolve_steve_commit();
+        let enclaveos_commit = enclave_build_nitro::build::resolve_enclaveos_commit();
+        let steve_commit = enclave_build_nitro::build::resolve_steve_commit();
         if let Some(selected) = &selected_components {
             component_artifacts::validate_source_pins(
                 selected.set(),
                 &enclaveos_commit,
-                &enclave_builder::build::resolve_bootproof_commit(),
+                &enclave_build_nitro::build::resolve_bootproof_commit(),
                 &framework_commit,
                 e2e.then_some(steve_commit.as_str()),
                 config_file
                     .has_vault_env()
-                    .then_some(enclave_builder::build::resolve_locksmith_commit().as_str()),
+                    .then_some(enclave_build_nitro::build::resolve_locksmith_commit().as_str()),
             )
             .with_context(Ctx::components())?;
         }
@@ -6288,7 +6288,7 @@ async fn main() -> Result<(), MainError> {
         std::env::var("COMPONENTS_S3_BUCKET").ok(),
         &builder_config.eif_s3_bucket,
         platform_git_sha.as_deref(),
-        &enclave_builder::build::resolve_tool_commits(),
+        &enclave_build_nitro::build::resolve_tool_commits(),
     )
     .await
     .inspect_err(|error| {

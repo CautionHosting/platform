@@ -175,7 +175,7 @@ pub async fn read_selected(
 
 /// Keep canonical import names local to each component when composing an EIF.
 #[tracing::instrument(skip_all)]
-pub(crate) fn scope_imports(recipe: &str, component: Component) -> String {
+pub fn scope_imports(recipe: &str, component: Component) -> String {
     let prefix = format!("{component}-");
     let mut scoped = recipe.to_owned();
     for line in recipe.lines() {
@@ -695,13 +695,15 @@ mod tests {
     };
 
     // Frozen from 4fd6292: historical inline components plus the standalone TAP marker.
-    const TEMPLATE: &str = include_str!("../../tests/fixtures/Containerfile.eif.inline-components");
+    const TEMPLATE: &str = include_str!(
+        "../../../enclave-build-nitro/tests/fixtures/Containerfile.eif.inline-components"
+    );
     const TAP_RECIPE: &str = include_str!("../../../../containerfiles/Containerfile.tap-framer");
     const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 
     #[test]
     fn canonical_files_are_shared_whole_and_selected_without_fallback() {
-        let template = include_str!("../../templates/Containerfile.eif");
+        let template = include_str!("../../../enclave-build-nitro/templates/Containerfile.eif");
         for component in Component::ALL {
             let recipe = component.embedded_containerfile();
             let scoped = scope_imports(recipe, component);
@@ -747,7 +749,7 @@ mod tests {
 
     #[test]
     fn canonical_recipes_reject_unpinned_inputs_and_wrong_export() {
-        let template = include_str!("../../templates/Containerfile.eif");
+        let template = include_str!("../../../enclave-build-nitro/templates/Containerfile.eif");
         let original = Component::Bootproof.embedded_containerfile();
         for changed in [
             original.replace("ARG BOOTPROOF_COMMIT\n", "ARG BOOTPROOF_COMMIT=main\n"),
@@ -776,7 +778,7 @@ mod tests {
 
     #[test]
     fn canonical_recipes_validate_the_entire_export_contract() {
-        let template = include_str!("../../templates/Containerfile.eif");
+        let template = include_str!("../../../enclave-build-nitro/templates/Containerfile.eif");
         for component in Component::ALL {
             let original = component.embedded_containerfile();
             let filename = component.filenames()[0];

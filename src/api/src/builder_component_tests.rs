@@ -2,15 +2,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use super::*;
-use enclave_builder::components::{
+use enclave_build::components::{
     ArtifactFile, Component, ComponentArtifact, ComponentSet, ComponentSpec,
 };
 use std::collections::BTreeMap;
 
 fn request() -> BuildRequest {
     let mut request = super::tests::make_test_build_request_with_egress(true);
-    request.enclaveos_commit = enclave_builder::build::resolve_enclaveos_commit();
-    request.steve_commit = enclave_builder::build::resolve_steve_commit();
+    request.enclaveos_commit = enclave_build_nitro::build::resolve_enclaveos_commit();
+    request.steve_commit = enclave_build_nitro::build::resolve_steve_commit();
     request.framework_commit = "a".repeat(40);
     request.e2e = true;
     request.e2e_mode = "steve".into();
@@ -20,12 +20,12 @@ fn request() -> BuildRequest {
         (Component::Init, request.enclaveos_commit.clone()),
         (
             Component::Bootproof,
-            enclave_builder::build::resolve_bootproof_commit(),
+            enclave_build_nitro::build::resolve_bootproof_commit(),
         ),
         (Component::Steve, request.steve_commit.clone()),
         (
             Component::Locksmith,
-            enclave_builder::build::resolve_locksmith_commit(),
+            enclave_build_nitro::build::resolve_locksmith_commit(),
         ),
         (Component::TapFramer, request.framework_commit.clone()),
     ] {
@@ -95,7 +95,7 @@ fn pinned_userdata_fits_ec2_and_downloads_only_from_its_own_bucket() {
         .split_once("\nMANIFEST_EOF")
         .unwrap()
         .0;
-    let manifest: enclave_builder::manifest::EnclaveManifest =
+    let manifest: enclave_build::manifest::EnclaveManifest =
         serde_json::from_str(manifest).unwrap();
     assert_eq!(manifest.component_set, request.component_set);
 }
@@ -163,7 +163,7 @@ fn download_script_checks_hash_and_size_before_helper_execution() {
             for name in component.filenames() {
                 let key = format!(
                     "components/v1/blobs/sha256/{}/{name}",
-                    enclave_builder::components::sha256(name.as_bytes())
+                    enclave_build::components::sha256(name.as_bytes())
                 );
                 let path = blobs.join(key);
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -223,7 +223,7 @@ touch "$READY"
             .map(|name| {
                 format!(
                     "s3://test-bucket/components/v1/blobs/sha256/{}/{name}",
-                    enclave_builder::components::sha256(name.as_bytes())
+                    enclave_build::components::sha256(name.as_bytes())
                 )
             })
             .collect::<Vec<_>>();

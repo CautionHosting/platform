@@ -12,7 +12,9 @@
 use std::path::{Path, PathBuf};
 
 use dterror::{BoxError, CtxError, Location, ResultExt as _};
-use enclave_builder::{EnclaveBuilder, EnclaveManifest, EnclaveSource, FrameworkSource, UserImage};
+use enclave_build_nitro::{
+    EnclaveBuilder, EnclaveManifest, EnclaveSource, FrameworkSource, UserImage,
+};
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum RemoteBuildError {
@@ -154,8 +156,8 @@ fn http_port_from_env() -> Option<u16> {
 fn key_exchange_from_env() -> Result<String, RemoteBuildError> {
     use RemoteBuildErrorCtx as Ctx;
     let value = std::env::var("CAUTION_KEY_EXCHANGE")
-        .unwrap_or_else(|_| enclave_builder::build::DEFAULT_KEY_EXCHANGE.to_string());
-    enclave_builder::build::validate_key_exchange(&value)
+        .unwrap_or_else(|_| enclave_build_nitro::build::DEFAULT_KEY_EXCHANGE.to_string());
+    enclave_build_nitro::build::validate_key_exchange(&value)
         .with_context(Ctx::key_exchange(&value))?;
     Ok(value)
 }
@@ -173,7 +175,7 @@ fn enclave_source_from_manifest(
                 })?;
             let pinned_url = commit
                 .as_deref()
-                .map(|commit| enclave_builder::pin_archive_url_to_commit(&url, commit))
+                .map(|commit| enclave_build_nitro::pin_archive_url_to_commit(&url, commit))
                 .unwrap_or(url);
             let version = commit.clone().unwrap_or_else(|| "main".to_string());
             Ok((pinned_url, version))
@@ -194,7 +196,7 @@ fn framework_source_from_manifest(manifest: &EnclaveManifest) -> String {
     match &manifest.framework_source {
         FrameworkSource::GitArchive { url, commit } => commit
             .as_deref()
-            .map(|commit| enclave_builder::pin_archive_url_to_commit(url, commit))
+            .map(|commit| enclave_build_nitro::pin_archive_url_to_commit(url, commit))
             .unwrap_or_else(|| url.clone()),
     }
 }
@@ -345,7 +347,7 @@ async fn main() -> Result<(), RemoteBuildError> {
         .with_context(Ctx::copy_pcrs(&output_pcrs))?;
 
     if egress {
-        enclave_builder::tap_framer::export_binary(&builder.work_dir, &output_eif)
+        enclave_build_nitro::tap_framer::export_binary(&builder.work_dir, &output_eif)
             .await
             .with_context(Ctx::export_tap_framer())?;
     }

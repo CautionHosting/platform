@@ -47,7 +47,9 @@ webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"]
 
 # Enclave dependencies
 sha2 = { workspace = true }
-enclave-builder = { path = "../enclave-builder", features = ["s3-components"] }
+enclave-build = { path = "../enclave-build" }
+enclave-build-nitro = { path = "../enclave-build-nitro", features = ["s3-components"] }
+docker-builder = { path = "../docker-builder" }
 caution-deploy-aws = { path = "../caution-deploy-aws" }
 
 # Encryption for credentials

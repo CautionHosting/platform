@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: 2025 Caution SEZC
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+
+[package]
+name = "enclave-build"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+s3-components = ["dep:aws-sdk-s3"]
+
+[dependencies]
+# Error handling
+thiserror = { workspace = true }
+dterror = { workspace = true }
+
+# Configuration input for build mechanisms
+caution-config = { version = "0.1.0", path = "../caution-config" }
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# Hashing for component digests
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+# Prebuilt component storage (optional)
+aws-sdk-s3 = { version = "1.15", optional = true }
+
+# Logging
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

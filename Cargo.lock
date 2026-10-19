@@ -341,8 +341,10 @@ dependencies = [
  "caution-config",
  "caution-deploy-aws",
  "chrono",
+ "docker-builder",
  "dterror 0.3.0",
- "enclave-builder",
+ "enclave-build",
+ "enclave-build-nitro",
  "futures",
  "hcl-rs",
  "hex",
@@ -1824,7 +1826,7 @@ dependencies = [
  "caution-config",
  "chrono",
  "dterror 0.3.0",
- "enclave-builder",
+ "enclave-build",
  "hcl-rs",
  "hex",
  "hmac 0.12.1",
@@ -2041,8 +2043,10 @@ dependencies = [
  "coset 0.3.8",
  "crossterm",
  "dirs",
+ "docker-builder",
  "dterror 0.3.0",
- "enclave-builder",
+ "enclave-build",
+ "enclave-build-nitro",
  "flate2",
  "hcl-rs",
  "hex",
@@ -2873,6 +2877,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "docker-builder"
+version = "0.1.0"
+dependencies = [
+ "dterror 0.3.0",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3153,7 +3168,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "enclave-builder"
+name = "enclave-build"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "aws-sdk-s3",
+ "caution-config",
+ "dterror 0.3.0",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "enclave-build-nitro"
 version = "0.1.0"
 dependencies = [
  "aws-config",
@@ -3164,6 +3197,7 @@ dependencies = [
  "clap",
  "coset 0.3.8",
  "dterror 0.3.0",
+ "enclave-build",
  "flate2",
  "futures-util",
  "hex",

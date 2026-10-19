@@ -406,8 +406,8 @@ pub(crate) async fn run(client: &ApiClient, service: Service, no_cache: bool) ->
 
 // Approval occurs after the exact manifest is fetched, before any build executes.
 fn validate_source(
-    manifest: Option<&enclave_builder::EnclaveManifest>,
-) -> Result<&enclave_builder::EnclaveManifest, Error> {
+    manifest: Option<&enclave_build::EnclaveManifest>,
+) -> Result<&enclave_build::EnclaveManifest, Error> {
     let manifest = manifest
         .ok_or_else(|| Error::invalid("service verification requires a source manifest"))?;
     let app = manifest
@@ -425,7 +425,7 @@ fn validate_source(
     verify::hosted_source::archive_urls(app)
         .with_context(Ctx::new("validate pinned application source retrieval"))?;
     match &manifest.framework_source {
-        enclave_builder::FrameworkSource::GitArchive {
+        enclave_build::FrameworkSource::GitArchive {
             url,
             commit: Some(commit),
         } if commit.len() == 40 && commit.bytes().all(|b| b.is_ascii_hexdigit()) => {
@@ -439,7 +439,7 @@ fn validate_source(
         }
     }
     match &manifest.enclave_source {
-        enclave_builder::EnclaveSource::GitArchive {
+        enclave_build::EnclaveSource::GitArchive {
             urls,
             commit: Some(commit),
         } if !urls.is_empty()
@@ -461,7 +461,7 @@ fn validate_source(
 }
 
 pub(crate) fn approve_source(
-    manifest: Option<&enclave_builder::EnclaveManifest>,
+    manifest: Option<&enclave_build::EnclaveManifest>,
 ) -> Result<(), Error> {
     let manifest = validate_source(manifest)?;
     output::status(

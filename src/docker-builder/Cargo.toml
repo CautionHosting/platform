@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: 2025 Caution SEZC
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+
+[package]
+name = "docker-builder"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Error handling
+thiserror = { workspace = true }
+dterror = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

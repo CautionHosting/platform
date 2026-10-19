@@ -24,8 +24,8 @@ use std::time::Duration;
 use base64::{Engine as _, engine::general_purpose};
 use bootproof_sdk::VerifiableSignedAttestationFormat;
 use bootproof_sdk::format::nitro::{Nitro, NitroPcrs};
+use docker_builder::{BuildConfig, build_user_image};
 use dterror::{BoxError, CtxError, FromContext, Location, ResultExt};
-use enclave_builder::{BuildConfig, build_user_image};
 use reqwest::tls::TlsInfo;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -169,7 +169,7 @@ pub(crate) struct TlsExpectation {
 
 #[derive(Debug)]
 struct ReproductionResult {
-    pcrs: enclave_builder::PcrValues,
+    pcrs: enclave_build::PcrValues,
     tls: Option<TlsExpectation>,
 }
 
@@ -1165,7 +1165,7 @@ pub(crate) async fn build_local(client: &ApiClient, no_cache: bool) -> Result<()
     let e2e_mode = e2e_config.and_then(|config| config.effective_mode());
     let e2e = e2e_mode == Some(caution_config::E2eMode::Steve);
     let e2e_mode_value = e2e_mode.map(|mode| mode.as_str()).unwrap_or("disabled");
-    let steve_commit = e2e.then(enclave_builder::build::resolve_steve_commit);
+    let steve_commit = e2e.then(enclave_build_nitro::build::resolve_steve_commit);
     let measured_cache_key =
         measured_build_cache_key(&source_cache_key, &cfg, steve_commit.as_deref())
             .with_context(Ctx::cache_key())?;
@@ -1186,13 +1186,13 @@ pub(crate) async fn build_local(client: &ApiClient, no_cache: bool) -> Result<()
     output::success(format!("✓ Application image built: {}", image_ref));
 
     let cache_dir = client.get_cache_dir().with_context(Ctx::cache_dir())?;
-    let builder = enclave_builder::EnclaveBuilder::new_with_cache(
-        enclave_builder::enclave_source_url(&enclave_builder::build::resolve_enclaveos_commit()),
+    let builder = enclave_build_nitro::EnclaveBuilder::new_with_cache(
+        enclave_build::enclave_source_url(&enclave_build_nitro::build::resolve_enclaveos_commit()),
         "unused",
         &framework_source,
         "local",
         &cache_key,
-        enclave_builder::CacheType::Build,
+        enclave_build::BuildCacheType::Build,
         no_cache,
         &cache_dir,
     )
@@ -1200,7 +1200,7 @@ pub(crate) async fn build_local(client: &ApiClient, no_cache: bool) -> Result<()
 
     let work_dir = builder.work_dir.clone();
 
-    let user_image = enclave_builder::UserImage {
+    let user_image = enclave_build::UserImage {
         reference: image_ref.clone(),
     };
 
@@ -1474,7 +1474,7 @@ pub(crate) enum BuildAndGetPcrsError {
 
 async fn build_and_get_pcrs(
     client: &ApiClient,
-    external_manifest: Option<enclave_builder::EnclaveManifest>,
+    external_manifest: Option<enclave_build::EnclaveManifest>,
     no_cache: bool,
     local_source: Option<&StagedSource>,
 ) -> Result<ReproductionResult, BuildAndGetPcrsError> {
@@ -1509,23 +1509,23 @@ async fn build_and_get_pcrs(
 
     let (enclave_source, enclave_version) = if let Some(ref manifest) = external_manifest {
         match &manifest.enclave_source {
-            enclave_builder::EnclaveSource::GitArchive { urls, commit } => {
+            enclave_build::EnclaveSource::GitArchive { urls, commit } => {
                 let url = urls.first().cloned().unwrap_or_default();
                 let pinned = if let Some(commit) = commit {
-                    enclave_builder::pin_archive_url_to_commit(&url, commit)
+                    enclave_build::pin_archive_url_to_commit(&url, commit)
                 } else {
                     url
                 };
                 (pinned, "unused".to_string())
             }
-            enclave_builder::EnclaveSource::GitRepository { url, branch, .. } => {
+            enclave_build::EnclaveSource::GitRepository { url, branch, .. } => {
                 (url.clone(), branch.clone())
             }
-            enclave_builder::EnclaveSource::Local { path } => (path.clone(), "local".to_string()),
+            enclave_build::EnclaveSource::Local { path } => (path.clone(), "local".to_string()),
         }
     } else {
-        let source = enclave_builder::enclave_source_url(
-            &enclave_builder::build::resolve_enclaveos_commit(),
+        let source = enclave_build::enclave_source_url(
+            &enclave_build_nitro::build::resolve_enclaveos_commit(),
         );
         output::verbose(
             client.verbose,
@@ -1536,9 +1536,9 @@ async fn build_and_get_pcrs(
 
     let framework_source = if let Some(ref manifest) = external_manifest {
         match &manifest.framework_source {
-            enclave_builder::FrameworkSource::GitArchive { url, commit } => {
+            enclave_build::FrameworkSource::GitArchive { url, commit } => {
                 if let Some(commit) = commit {
-                    enclave_builder::pin_archive_url_to_commit(url, commit)
+                    enclave_build::pin_archive_url_to_commit(url, commit)
                 } else {
                     url.clone()
                 }
@@ -1671,7 +1671,7 @@ async fn build_and_get_pcrs(
             let steve_commit = e2e.then(|| {
                 manifest_steve_commit
                     .cloned()
-                    .unwrap_or_else(enclave_builder::build::resolve_steve_commit)
+                    .unwrap_or_else(enclave_build_nitro::build::resolve_steve_commit)
             });
             measured_build_cache_key(&source_cache_key, cfg, steve_commit.as_deref())
                 .with_context(Ctx::measured_build_cache_key())?
@@ -1682,13 +1682,13 @@ async fn build_and_get_pcrs(
     };
 
     let cache_dir = client.get_cache_dir().with_context(Ctx::get_cache_dir())?;
-    let builder = enclave_builder::EnclaveBuilder::new_with_cache(
+    let builder = enclave_build_nitro::EnclaveBuilder::new_with_cache(
         &enclave_source,
         &enclave_version,
         &framework_source,
         "local",
         &cache_key,
-        enclave_builder::CacheType::Reproduction,
+        enclave_build::BuildCacheType::Reproduction,
         no_cache,
         &cache_dir,
     )
@@ -1735,7 +1735,7 @@ async fn build_and_get_pcrs(
         "Building EIF locally to calculate expected PCRs...",
     );
 
-    let user_image = enclave_builder::UserImage {
+    let user_image = enclave_build::UserImage {
         reference: image_ref.clone(),
     };
 
@@ -2030,13 +2030,13 @@ pub(crate) struct ReadPcrsFromFileError {
     source: Option<BoxError>,
 }
 
-fn read_pcrs_from_file(path: &str) -> Result<enclave_builder::PcrValues, ReadPcrsFromFileError> {
+fn read_pcrs_from_file(path: &str) -> Result<enclave_build::PcrValues, ReadPcrsFromFileError> {
     use ReadPcrsFromFileErrorCtx as Ctx;
 
     let content =
         fs::read_to_string(path).with_context(Ctx::new(path, ReadPcrsFromFileErrorKind::Read))?;
 
-    if let Ok(pcrs) = serde_json::from_str::<enclave_builder::PcrValues>(&content) {
+    if let Ok(pcrs) = serde_json::from_str::<enclave_build::PcrValues>(&content) {
         return Ok(pcrs);
     }
 
@@ -2062,7 +2062,7 @@ fn read_pcrs_from_file(path: &str) -> Result<enclave_builder::PcrValues, ReadPcr
     }
 
     match (pcr0, pcr1, pcr2) {
-        (Some(pcr0), Some(pcr1), Some(pcr2)) => Ok(enclave_builder::PcrValues {
+        (Some(pcr0), Some(pcr1), Some(pcr2)) => Ok(enclave_build::PcrValues {
             pcr0,
             pcr1,
             pcr2,
@@ -2756,7 +2756,7 @@ async fn verify_result(
         }
     }
 
-    let manifest: Option<enclave_builder::EnclaveManifest> = attest_resp
+    let manifest: Option<enclave_build::EnclaveManifest> = attest_resp
         .get("manifest")
         .cloned()
         .map(serde_json::from_value)
@@ -2791,7 +2791,7 @@ async fn verify_result(
         }
 
         match &m.enclave_source {
-            enclave_builder::EnclaveSource::GitArchive { urls, commit } => {
+            enclave_build::EnclaveSource::GitArchive { urls, commit } => {
                 if urls.len() == 1 {
                     output::status(format!(
                         "  Enclave source: {}{}",
@@ -2817,7 +2817,7 @@ async fn verify_result(
                     }
                 }
             }
-            enclave_builder::EnclaveSource::GitRepository {
+            enclave_build::EnclaveSource::GitRepository {
                 url,
                 branch,
                 commit,
@@ -2832,12 +2832,12 @@ async fn verify_result(
                     branch
                 ));
             }
-            enclave_builder::EnclaveSource::Local { path } => {
+            enclave_build::EnclaveSource::Local { path } => {
                 output::status(format!("  Enclave source: {} (local)", path));
             }
         }
         match &m.framework_source {
-            enclave_builder::FrameworkSource::GitArchive { url, commit } => {
+            enclave_build::FrameworkSource::GitArchive { url, commit } => {
                 output::status(format!(
                     "  Framework source: {}{}",
                     url,
@@ -2900,7 +2900,7 @@ async fn verify_result(
                 .as_ref()
                 .map(|s| s.commit.clone())
                 .unwrap_or_else(|| "HEAD".to_string());
-            modified_manifest.app_source = Some(enclave_builder::AppSource {
+            modified_manifest.app_source = Some(enclave_build::AppSource {
                 urls: vec![source_url.clone()],
                 commit,
                 branch: None,
@@ -3733,7 +3733,7 @@ async fn download_and_extract_app_source(
     }
 
     let http = reqwest::Client::builder()
-        .redirect(enclave_builder::source_transport::redirect_policy())
+        .redirect(enclave_build_nitro::source_transport::redirect_policy())
         .connect_timeout(std::time::Duration::from_secs(30))
         .timeout(std::time::Duration::from_secs(300)) // 5 minutes for full download
         .build()
@@ -3899,7 +3899,7 @@ async fn preflight_archive_url(
         return Ok(());
     }
 
-    let candidates = enclave_builder::archive_url_candidates(url);
+    let candidates = enclave_build::archive_url_candidates(url);
     preflight_archive_urls(client, label, &candidates)
         .await
         .with_context(Ctx::preflight())
@@ -4004,7 +4004,7 @@ pub(crate) async fn preflight_archive_urls(
     // Forges may redirect to HTTPS mirrors/CDNs, but must never downgrade a
     // reviewed HTTPS source to an unauthenticated HTTP transport.
     let http_client = reqwest::Client::builder()
-        .redirect(enclave_builder::source_transport::redirect_policy())
+        .redirect(enclave_build_nitro::source_transport::redirect_policy())
         .build()
         .with_context(Ctx::build_client())?;
     let attempts = ARCHIVE_PREFLIGHT_ATTEMPTS;

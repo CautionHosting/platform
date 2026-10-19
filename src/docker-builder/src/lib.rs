@@ -1,6 +1,18 @@
 // SPDX-FileCopyrightText: 2025 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+//! Builds the user's provided application into a Docker image from its Procfile
+//! build configuration. This is the mechanism-independent input step for every
+//! enclave build mechanism.
+
+// The `CtxError` derive generates a `{Error}Ctx` mirror type per error enum;
+// the generated struct initializations trip `redundant_field_names`, and the
+// lint cannot be placed on the generated items themselves.
+#![allow(
+    clippy::redundant_field_names,
+    reason = "generated {Error}Ctx mirrors trip redundant_field_names"
+)]
+
 use dterror::ResultExt;
 use std::path::{Component, Path};
 use tokio::process::Command;
@@ -513,7 +525,7 @@ mod tests {
         let output = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "docker::tests::test_default_build_preserves_literal_arguments",
+                "tests::test_default_build_preserves_literal_arguments",
                 "--nocapture",
             ])
             .env("CAUTION_LITERAL_BUILD_TEST_DIR", work_dir.path())
