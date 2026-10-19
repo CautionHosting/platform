@@ -4944,10 +4944,6 @@ async fn deploy_logic(
             .as_ref()
             .map(|artifacts| artifacts.tap_framer_sha256().to_owned()),
     };
-    let nitro_request = deployer
-        .build_request(&config_file, &deploy_artifacts, &deploy_ctx)
-        .with_context(Ctx::nitro_deploy())?;
-
     let _ = tx.send(Ok(milestone("Uploading and launching..."))).await;
 
     let deployment_result: Result<_, DeployLogicError> = match deploy_target {
@@ -4955,20 +4951,25 @@ async fn deploy_logic(
             .deploy(&config_file, &deploy_artifacts, &deploy_ctx)
             .await
             .with_context(Ctx::nitro_deploy()),
-        DeployTarget::Candidate { deployment_id } => provision_candidate(
-            &state,
-            &req,
-            resource_id,
-            deployment_id,
-            app_network,
-            &nitro_request,
-            &builder_eif_s3_key,
-            &aws_account_id,
-            &deployed_region,
-            &deployment_requirements,
-        )
-        .await
-        .with_context(Ctx::nitro_deploy()),
+        DeployTarget::Candidate { deployment_id } => {
+            let nitro_request = deployer
+                .build_request(&config_file, &deploy_artifacts, &deploy_ctx)
+                .with_context(Ctx::nitro_deploy())?;
+            provision_candidate(
+                &state,
+                &req,
+                resource_id,
+                deployment_id,
+                app_network,
+                &nitro_request,
+                &builder_eif_s3_key,
+                &aws_account_id,
+                &deployed_region,
+                &deployment_requirements,
+            )
+            .await
+            .with_context(Ctx::nitro_deploy())
+        }
     };
     match &deployment_result {
         Ok(result) => {

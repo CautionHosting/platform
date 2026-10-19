@@ -530,8 +530,8 @@ separate harness requirements.
 
 Validation on 2026-09-19 against Locksmith `2da3be50`: API quorum checks passed
 (20; one database test ignored), CLI quorum-init checks passed (24), CLI recovery
-checks passed (26; one hosted metadata test ignored), enclave-image build tests passed
-(95), and the standalone soft-authenticator passed `cargo check`. This includes
+checks passed (26; one hosted metadata test ignored), enclave-build-nitro tests passed
+(98), and the standalone soft-authenticator passed `cargo check`. This includes
 the capped-backoff sequence and concurrent approvals through the real gateway
 middleware.
 

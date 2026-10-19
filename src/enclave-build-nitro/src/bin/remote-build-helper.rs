@@ -84,13 +84,6 @@ enum RemoteBuildError {
         #[source]
         source: BoxError,
     },
-    #[error("failed to initialize enclave builder [{location}]")]
-    NewBuilder {
-        #[location]
-        location: Location,
-        #[source]
-        source: BoxError,
-    },
     #[error("enclave build failed [{location}]")]
     Build {
         #[location]

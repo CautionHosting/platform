@@ -1332,7 +1332,8 @@ mod tests {
 
     #[test]
     fn public_ip_publisher_reads_imds_and_reloads_dnsmasq() {
-        // `cargo test` runs in `src/api`; `nitro_module_path()` is relative to the repo root.
+        // `CARGO_MANIFEST_DIR` is `src/caution-deploy-aws`; the repo root is two
+        // levels up.
         let script = std::fs::read_to_string(
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../..")
