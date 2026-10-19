@@ -11,10 +11,13 @@
 
 use std::path::{Path, PathBuf};
 
+use caution_config::ConfigurationFile;
 use dterror::{BoxError, CtxError, Location, ResultExt as _};
-use enclave_build_nitro::{
-    EnclaveBuilder, EnclaveManifest, EnclaveSource, FrameworkSource, UserImage,
+use enclave_build::{
+    BuildInput, BuildWorkspace, EnclaveManifest, EnclaveSource, FrameworkSource,
+    ImageBuildMechanism, UserImage,
 };
+use enclave_build_nitro::NitroEifMechanism;
 
 #[derive(Debug, thiserror::Error, CtxError)]
 enum RemoteBuildError {
@@ -27,14 +30,30 @@ enum RemoteBuildError {
         #[source]
         source: BoxError,
     },
-    #[error("unsupported CAUTION_KEY_EXCHANGE '{value}' [{location}]")]
-    KeyExchange {
-        #[context(borrow = str)]
-        value: String,
+    #[error("failed to read configuration file {} [{location}]", path.display())]
+    ReadConfig {
+        #[context(borrow = Path)]
+        path: PathBuf,
         #[location]
         location: Location,
         #[source]
         source: BoxError,
+    },
+    #[error("failed to parse configuration file {} [{location}]", path.display())]
+    ParseConfig {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("no caution.hcl or Procfile found in repository {} [{location}]", path.display())]
+    NoConfigFile {
+        #[context(borrow = Path)]
+        path: PathBuf,
+        #[location]
+        location: Location,
     },
     #[error("manifest enclave_source.urls is empty [{location}]")]
     EmptyEnclaveUrls { location: Location },
@@ -123,43 +142,34 @@ fn env_required(name: &str) -> Result<String, RemoteBuildError> {
     std::env::var(name).with_context(Ctx::env_var(name))
 }
 
-fn ports_from_env() -> Vec<u16> {
-    std::env::var("CAUTION_PORTS")
-        .ok()
-        .map(|value| {
-            value
-                .split(',')
-                .filter_map(|part| {
-                    let trimmed = part.trim();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        trimmed.parse::<u16>().ok()
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn http_port_from_env() -> Option<u16> {
-    std::env::var("CAUTION_HTTP_PORT").ok().and_then(|value| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            trimmed.parse::<u16>().ok()
-        }
-    })
-}
-
-fn key_exchange_from_env() -> Result<String, RemoteBuildError> {
+/// Read the enclave configuration from the checked-out repository. The API
+/// builds the manifest from the same commit, so the configuration is present in
+/// the source archive the builder already extracted.
+#[tracing::instrument(skip_all, err)]
+async fn read_configuration(repo_dir: &Path) -> Result<ConfigurationFile, RemoteBuildError> {
     use RemoteBuildErrorCtx as Ctx;
-    let value = std::env::var("CAUTION_KEY_EXCHANGE")
-        .unwrap_or_else(|_| enclave_build_nitro::build::DEFAULT_KEY_EXCHANGE.to_string());
-    enclave_build_nitro::build::validate_key_exchange(&value)
-        .with_context(Ctx::key_exchange(&value))?;
-    Ok(value)
+
+    let hcl_path = repo_dir.join("caution.hcl");
+    if hcl_path.is_file() {
+        let content = tokio::fs::read_to_string(&hcl_path)
+            .await
+            .with_context(Ctx::read_config(&hcl_path))?;
+        return ConfigurationFile::from_str(&content).with_context(Ctx::parse_config(&hcl_path));
+    }
+
+    let procfile_path = repo_dir.join("Procfile");
+    if procfile_path.is_file() {
+        let content = tokio::fs::read_to_string(&procfile_path)
+            .await
+            .with_context(Ctx::read_config(&procfile_path))?;
+        return ConfigurationFile::from_procfile(&content)
+            .with_context(Ctx::parse_config(&procfile_path));
+    }
+
+    Err(RemoteBuildError::NoConfigFile {
+        path: repo_dir.to_path_buf(),
+        location: std::panic::Location::caller(),
+    })
 }
 
 fn enclave_source_from_manifest(
@@ -210,29 +220,10 @@ async fn main() -> Result<(), RemoteBuildError> {
     let work_dir = PathBuf::from(env_required("CAUTION_WORK_DIR")?);
     let output_eif = PathBuf::from(env_required("CAUTION_OUTPUT_EIF")?);
     let output_pcrs = PathBuf::from(env_required("CAUTION_OUTPUT_PCRS")?);
-    let e2e = env_flag("CAUTION_E2E");
-    let e2e_mode = std::env::var("CAUTION_E2E_MODE").unwrap_or_else(|_| {
-        if e2e {
-            "steve".to_string()
-        } else {
-            "disabled".to_string()
-        }
-    });
-    let e2e_key_exchange = key_exchange_from_env()?;
-    let allow_plaintext_fallback = env_flag("CAUTION_ALLOW_PLAINTEXT_FALLBACK");
-    let domain = std::env::var("CAUTION_DOMAIN")
-        .ok()
-        .filter(|s| !s.is_empty());
-    let http_upstream_protocol =
-        std::env::var("CAUTION_HTTP_UPSTREAM_PROTOCOL").unwrap_or_else(|_| "http".to_string());
-    let locksmith = env_flag("CAUTION_LOCKSMITH");
-    let e2e_cors_origins = std::env::var("CAUTION_CORS_ORIGINS")
-        .ok()
-        .filter(|s| !s.is_empty());
-    let egress = env_flag("CAUTION_EGRESS");
     let no_cache = env_flag("CAUTION_NO_CACHE");
-    let ports = ports_from_env();
-    let http_port = http_port_from_env();
+    let repo_dir = std::env::var("CAUTION_REPO_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/build/repo"));
 
     tokio::fs::create_dir_all(&work_dir)
         .await
@@ -247,91 +238,36 @@ async fn main() -> Result<(), RemoteBuildError> {
         .await
         .with_context(Ctx::read_manifest(&manifest_path))?;
 
+    let config = read_configuration(&repo_dir).await?;
+
     let (enclave_source, enclave_version) = enclave_source_from_manifest(&manifest)?;
     let framework_source = framework_source_from_manifest(&manifest);
-    let app_source_urls = manifest
-        .app_source
-        .as_ref()
-        .map(|source| source.urls.clone());
-    let app_branch = manifest
-        .app_source
-        .as_ref()
-        .and_then(|source| source.branch.clone());
-    let app_commit = manifest
-        .app_source
-        .as_ref()
-        .map(|source| source.commit.clone());
-    let binary_path = manifest.binary.clone();
-    let run_command = manifest.run_command.clone();
-    let metadata = manifest.metadata.clone();
-
-    let builder = EnclaveBuilder::new(enclave_source, enclave_version, framework_source, &work_dir)
-        .with_context(Ctx::new_builder())?
-        .with_no_cache(no_cache);
-    let builder = match std::env::var("CAUTION_COMPONENTS_PATH")
+    let prebuilt_components = std::env::var("CAUTION_COMPONENTS_PATH")
         .ok()
         .filter(|path| !path.is_empty())
-    {
-        Some(path) => builder.with_prebuilt_components(PathBuf::from(path)),
-        None => builder,
+        .map(PathBuf::from);
+
+    let input = BuildInput {
+        docker_image: UserImage {
+            reference: image_ref,
+        },
+        enclave_source,
+        enclave_version,
+        framework_source,
+        workspace: BuildWorkspace::Directory(work_dir.clone()),
+        manifest: Some(manifest),
+        app_source: None,
+        metadata: None,
+        prebuilt_components,
+        no_cache,
     };
 
-    let user_image = UserImage {
-        reference: image_ref,
-    };
-    let deployment = if let Some(binary_path) = binary_path {
-        builder
-            .build_enclave_auto(
-                &user_image,
-                &binary_path,
-                run_command,
-                app_source_urls,
-                app_branch,
-                app_commit,
-                metadata,
-                Some(manifest),
-                &ports,
-                http_port,
-                e2e,
-                &e2e_mode,
-                &e2e_key_exchange,
-                allow_plaintext_fallback,
-                domain.as_deref(),
-                &http_upstream_protocol,
-                locksmith,
-                e2e_cors_origins,
-                egress,
-            )
-            .await
-            .with_context(Ctx::build())?
-    } else {
-        builder
-            .build_enclave(
-                &user_image,
-                None,
-                run_command,
-                app_source_urls,
-                app_branch,
-                app_commit,
-                metadata,
-                Some(manifest),
-                &ports,
-                http_port,
-                e2e,
-                &e2e_mode,
-                &e2e_key_exchange,
-                allow_plaintext_fallback,
-                domain.as_deref(),
-                &http_upstream_protocol,
-                locksmith,
-                e2e_cors_origins,
-                egress,
-            )
-            .await
-            .with_context(Ctx::build())?
-    };
+    let artifacts = NitroEifMechanism::new()
+        .build(input, &config)
+        .await
+        .with_context(Ctx::build())?;
 
-    let generated_pcrs = deployment.eif.path.with_extension("pcrs");
+    let generated_pcrs = artifacts.image.path.with_extension("pcrs");
     if !generated_pcrs.exists() {
         return Err(RemoteBuildError::MissingPcrs {
             path: generated_pcrs,
@@ -339,17 +275,20 @@ async fn main() -> Result<(), RemoteBuildError> {
         });
     }
 
-    tokio::fs::copy(&deployment.eif.path, &output_eif)
+    tokio::fs::copy(&artifacts.image.path, &output_eif)
         .await
         .with_context(Ctx::copy_eif(&output_eif))?;
     tokio::fs::copy(&generated_pcrs, &output_pcrs)
         .await
         .with_context(Ctx::copy_pcrs(&output_pcrs))?;
 
-    if egress {
-        enclave_build_nitro::tap_framer::export_binary(&builder.work_dir, &output_eif)
-            .await
-            .with_context(Ctx::export_tap_framer())?;
+    if let Some(tap_framer) = &artifacts.tap_framer {
+        if tap_framer.exists() {
+            let sidecar = output_eif.with_extension("tap-framer");
+            tokio::fs::copy(tap_framer, &sidecar)
+                .await
+                .with_context(Ctx::export_tap_framer())?;
+        }
     }
 
     println!("EIF written to {}", output_eif.display());

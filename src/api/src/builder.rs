@@ -1711,6 +1711,7 @@ CAUTION_COMPONENTS_PATH="$PREBUILT_COMPONENTS" \
 CAUTION_WORK_DIR="/build/remote-helper-work" \
 CAUTION_OUTPUT_EIF="/build/output/enclave.eif" \
 CAUTION_OUTPUT_PCRS="/build/output/enclave.pcrs" \
+CAUTION_REPO_DIR="/build/repo" \
 CAUTION_PORTS="$PORTS" \
 CAUTION_HTTP_PORT="$HTTP_PORT" \
 CAUTION_E2E="$E2E" \
