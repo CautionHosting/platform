@@ -1817,13 +1817,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "caution-deploy"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "caution-config",
+ "dterror 0.3.0",
+ "serde",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
 name = "caution-deploy-aws"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "aws-config",
  "aws-sdk-s3",
  "base64 0.22.1",
  "caution-config",
+ "caution-deploy",
  "chrono",
  "dterror 0.3.0",
  "enclave-build",
@@ -3189,11 +3203,13 @@ dependencies = [
 name = "enclave-build-nitro"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "aws-config",
  "aws-sdk-s3",
  "base64 0.22.1",
  "bollard",
  "bootproof-sdk",
+ "caution-config",
  "clap",
  "coset 0.3.8",
  "dterror 0.3.0",

@@ -17,6 +17,7 @@ pub mod build;
 pub mod compile;
 mod component_stage;
 pub mod extract;
+mod mechanism;
 pub mod pcrs;
 pub mod source_transport;
 pub mod tap_framer;
@@ -31,6 +32,7 @@ pub use enclave_build::{
     AppSource, EifFile, EnclaveManifest, EnclaveSource, FrameworkSource, PcrValues, UserImage,
     FRAMEWORK_SOURCE,
 };
+pub use mechanism::NitroEifMechanism;
 
 #[derive(Debug, Clone)]
 pub struct EnclaveBuilder {

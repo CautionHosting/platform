@@ -4958,6 +4958,7 @@ async fn deploy_logic(
         credentials: deployment_credentials,
         managed_onprem: managed_onprem_config,
         tls_await_app_address,
+        user_data: enclave_build_nitro::NitroEifMechanism::user_data_template().to_string(),
     };
 
     let _ = tx.send(Ok(milestone("Uploading and launching..."))).await;

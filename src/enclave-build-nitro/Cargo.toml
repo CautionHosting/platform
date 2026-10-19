@@ -17,6 +17,7 @@ required-features = ["s3-components"]
 
 [dependencies]
 enclave-build = { path = "../enclave-build" }
+caution-config = { version = "0.1.0", path = "../caution-config" }
 aws-config = { version = "1.1", features = ["behavior-version-latest"], optional = true }
 aws-sdk-s3 = { version = "1.144", default-features = false, features = ["sigv4a", "http-1x", "default-https-client", "rt-tokio"], optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
@@ -31,6 +32,7 @@ serde_json = { workspace = true }
 # Async
 tokio = { workspace = true }
 futures-util = "0.3"
+async-trait = { workspace = true }
 
 # Docker interaction
 bollard = "0.17"
