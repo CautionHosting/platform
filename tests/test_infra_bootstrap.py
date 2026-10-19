@@ -264,17 +264,20 @@ class BootstrapTests(unittest.TestCase):
                     self.assertEqual(value, {**self.env, "AWS_PROFILE": "synthetic-profile", "AWS_REGION": "eu-central-1"}[key])
 
     def test_setup_installs_and_preserves_configuration_without_starting_services(self):
+        self.addCleanup(os.umask, os.umask(0o077))
         config = self.home / ".config/caution"
         self.env["XDG_CONFIG_HOME"] = str(self.home / "custom config")
         units = Path(self.env["XDG_CONFIG_HOME"]) / "systemd/user"
         result = self.run_script("scripts/setup-platform.sh")
         self.assertEqual(result.returncode, 0, result.stderr)
+        for directory in (config, units):
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
         self.assertEqual(self.args("docker"), [["info"]])
         self.assertEqual(self.args("systemctl"), [["--user", "show-environment"], ["--user", "daemon-reload"]])
         for name, example in ((".env", "env.example"), ("prices.json", "prices.json.example"), ("config.json", "config.json.example")):
             path = config / name
             self.assertEqual(path.read_bytes(), (ROOT / example).read_bytes())
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o644 if name == "prices.json" else 0o600)
             path.write_text("operator configuration")
             path.chmod(0o640)
         target = self.home / "operator-config.json"
@@ -287,7 +290,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         for path in config.iterdir():
             self.assertEqual(path.read_text(), "operator configuration")
-            self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o644 if path.name == "prices.json" else 0o640)
         self.assertTrue((config / "config.json").is_symlink())
         for source in (ROOT / "systemd").glob("*.service"):
             self.assertEqual((units / source.name).read_bytes(), source.read_bytes())
@@ -296,6 +299,56 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((config / "prices.json").read_bytes(), (ROOT / "prices.json.example").read_bytes())
         self.assertEqual((config / ".env").read_text(), "operator configuration")
+
+    def test_setup_repairs_private_pricing_without_replacing_custom_configuration(self):
+        self.addCleanup(os.umask, os.umask(0o077))
+        config = self.home / ".config/caution"
+        units = self.home / ".config/systemd/user"
+        for directory in (config, units):
+            directory.mkdir(parents=True)
+            directory.chmod(0o750)
+        contents = {".env": b"OPERATOR_SETTING=custom\n", "config.json": b'{"operator":"custom"}\n',
+                    "prices.json": b'{"operator":"custom prices"}\n'}
+        for name, content in contents.items():
+            (config / name).write_bytes(content)
+            (config / name).chmod(0o600)
+        pricing_inode = (config / "prices.json").stat().st_ino
+        for _ in range(2):
+            result = self.run_script("scripts/setup-platform.sh")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for name, content in contents.items():
+                self.assertEqual((config / name).read_bytes(), content)
+                self.assertEqual((config / name).stat().st_mode & 0o777,
+                                 0o644 if name == "prices.json" else 0o600)
+            self.assertEqual((config / "prices.json").stat().st_ino, pricing_inode)
+            for directory in (config, units):
+                self.assertEqual(directory.stat().st_mode & 0o777, 0o750)
+
+    def test_setup_preserves_linked_pricing_targets(self):
+        config = self.home / ".config/caution"
+        config.mkdir(parents=True)
+        prices = config / "prices.json"
+        for kind in ("symlink", "hardlink"):
+            for mode in (0o600, 0o644):
+                with self.subTest(kind=kind, mode=oct(mode)):
+                    prices.unlink(missing_ok=True)
+                    target = config / (".env" if mode == 0o600 else "operator-prices.json")
+                    content = b"OPERATOR_SETTING=private\n" if mode == 0o600 else b'{"operator":"prices"}\n'
+                    target.write_bytes(content)
+                    target.chmod(mode)
+                    if kind == "symlink":
+                        prices.symlink_to(target)
+                    else:
+                        prices.hardlink_to(target)
+                    inode = prices.lstat().st_ino
+                    for _ in range(2):
+                        result = self.run_script("scripts/setup-platform.sh")
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(target.stat().st_mode & 0o777, mode)
+                        self.assertEqual(target.read_bytes(), content)
+                        self.assertEqual(prices.lstat().st_ino, inode)
+                        self.assertTrue(prices.samefile(target))
+                        self.assertIn("permissions left unchanged", result.stderr)
 
     def test_setup_reports_prerequisite_and_reload_failures(self):
         for failure in ("systemctl:show-environment", "docker:info"):

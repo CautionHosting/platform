@@ -29,11 +29,20 @@ for file in .env prices.json config.json; do
             printf 'Error: %s must be a readable regular file; left unchanged.\n' "$CONFIG_DIR/$file" >&2
             exit 1
         fi
+        if [[ "$file" == prices.json ]]; then
+            if [[ -L "$CONFIG_DIR/$file" || "$(stat -c %h "$CONFIG_DIR/$file")" != 1 ]]; then
+                printf 'Warning: %s is linked; permissions left unchanged. Verify container readability separately.\n' "$CONFIG_DIR/$file" >&2
+            else
+                chmod 0644 "$CONFIG_DIR/$file"
+            fi
+        fi
         continue
     fi
     example="$file.example"
     [[ "$file" != .env ]] || example=env.example
-    install -m 0600 "$REPO_ROOT/$example" "$CONFIG_DIR/$file"
+    mode=0600
+    [[ "$file" != prices.json ]] || mode=0644
+    install -m "$mode" "$REPO_ROOT/$example" "$CONFIG_DIR/$file"
 done
 install -m 0644 "$REPO_ROOT"/systemd/*.service "$UNIT_DIR/"
 systemctl --user daemon-reload
