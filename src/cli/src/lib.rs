@@ -11,10 +11,10 @@
 
 use base64::{Engine as _, engine::general_purpose};
 use clap::{Parser, Subcommand};
-use dterror::{BoxError, CtxError, FromContext, Location, ResultExt};
-use enclave_builder::{
+use docker_builder::{
     has_explicit_build_command, resolve_build_command_in_dir, validate_explicit_containerfile_path,
 };
+use dterror::{BoxError, CtxError, FromContext, Location, ResultExt};
 use sequoia_openpgp as openpgp;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1254,8 +1254,8 @@ fn pinned_platform_framework_source(
             source: None,
         });
     }
-    Ok(enclave_builder::pin_archive_url_to_commit(
-        enclave_builder::FRAMEWORK_SOURCE,
+    Ok(enclave_build::pin_archive_url_to_commit(
+        enclave_build::FRAMEWORK_SOURCE,
         &normalized.to_ascii_lowercase(),
     ))
 }

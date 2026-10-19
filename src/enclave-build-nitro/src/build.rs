@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::process::Command;
 
-use crate::manifest::EnclaveManifest;
 use crate::EifFile;
+use enclave_build::manifest::EnclaveManifest;
 
 const DEFAULT_ENCLAVEOS_COMMIT: &str = "9582e25239430070667fdd0a6b64d887f1c308df";
 const DEFAULT_BOOTPROOF_COMMIT: &str = "b03721957e3850931f5b53627e7c3d1c302a06fe";
@@ -836,7 +836,7 @@ async fn render_containerfile_template(
         enabled_blocks.push("EGRESS");
     }
     let mut processed = process_template_blocks(&template, &enabled_blocks);
-    use crate::components::{recipe, Component};
+    use enclave_build::components::{recipe, Component};
     let recipes = recipe::read_selected(
         template_path.parent().unwrap_or_else(|| Path::new(".")),
         &processed,
@@ -1869,10 +1869,10 @@ mod tests {
     fn test_manifest() -> EnclaveManifest {
         EnclaveManifest::new(
             None,
-            crate::manifest::EnclaveSource::Local {
+            enclave_build::manifest::EnclaveSource::Local {
                 path: ".".to_string(),
             },
-            crate::manifest::FrameworkSource::GitArchive {
+            enclave_build::manifest::FrameworkSource::GitArchive {
                 url: "https://example.com/platform/archive/main.tar.gz".to_string(),
                 commit: None,
             },
@@ -2481,7 +2481,9 @@ mod tests {
     async fn test_stage_tap_framer_egress_selection() {
         for egress in [false, true] {
             let dir = tempfile::tempdir().unwrap();
-            let templates = dir.path().join("selected/src/enclave-builder/templates");
+            let templates = dir
+                .path()
+                .join("selected/src/enclave-build-nitro/templates");
             let user_dir = dir.path().join("user.tar");
             case_colliding_tar(&user_dir);
             let enclave_dir = dir.path().join("enclave");
@@ -2499,8 +2501,8 @@ mod tests {
             )
             .unwrap();
             for component in [
-                crate::components::Component::Init,
-                crate::components::Component::Bootproof,
+                enclave_build::components::Component::Init,
+                enclave_build::components::Component::Bootproof,
             ] {
                 let path = templates
                     .join("../../..")
@@ -2624,7 +2626,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_component_containerfiles_compose_across_feature_matrix() {
-        use crate::components::{recipe, Component};
+        use enclave_build::components::{recipe, Component};
         let commit = "a".repeat(40);
         for flags in 0..16 {
             let steve = flags & 1 != 0;
@@ -2632,7 +2634,9 @@ mod tests {
             let locksmith = flags & 4 != 0;
             let egress = flags & 8 != 0;
             let dir = tempfile::tempdir().unwrap();
-            let templates = dir.path().join("selected/src/enclave-builder/templates");
+            let templates = dir
+                .path()
+                .join("selected/src/enclave-build-nitro/templates");
             std::fs::create_dir_all(&templates).unwrap();
             let template = templates.join("Containerfile.eif");
             std::fs::write(&template, include_str!("../templates/Containerfile.eif")).unwrap();
@@ -2641,6 +2645,7 @@ mod tests {
                 Component::Steve => steve,
                 Component::Locksmith => locksmith,
                 Component::TapFramer => egress,
+                _ => false,
             };
             for component in Component::ALL.into_iter().filter(|c| enabled(*c)) {
                 let path = dir
@@ -2687,7 +2692,9 @@ mod tests {
     #[tokio::test]
     async fn test_render_selected_bootproof_recipe() {
         let dir = tempfile::tempdir().unwrap();
-        let templates = dir.path().join("selected/src/enclave-builder/templates");
+        let templates = dir
+            .path()
+            .join("selected/src/enclave-build-nitro/templates");
         let recipes = templates.join("../../../containerfiles");
         std::fs::create_dir_all(&templates).unwrap();
         std::fs::create_dir_all(&recipes).unwrap();
@@ -2730,7 +2737,7 @@ mod tests {
     async fn test_render_selected_tap_framer_recipe() {
         let dir = tempfile::tempdir().unwrap();
         let selected = dir.path().join("selected");
-        let templates = selected.join("src/enclave-builder/templates");
+        let templates = selected.join("src/enclave-build-nitro/templates");
         std::fs::create_dir_all(&templates).unwrap();
         std::fs::create_dir_all(selected.join("containerfiles")).unwrap();
         let template = templates.join("Containerfile.eif");

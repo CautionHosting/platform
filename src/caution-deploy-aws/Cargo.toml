@@ -14,7 +14,7 @@ dterror = { workspace = true }
 # Configuration input
 caution-config = { version = "0.1.0", path = "../caution-config" }
 # Shared component digest validation
-enclave-builder = { path = "../enclave-builder" }
+enclave-build = { path = "../enclave-build" }
 
 # Serialization
 serde = { workspace = true }

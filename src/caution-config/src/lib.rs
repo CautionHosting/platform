@@ -48,6 +48,37 @@ pub struct AwsProviderConfig {
     pub security_group_id: Option<String>,
 }
 
+/// Deploy-target discriminant for a [`Provider`].
+///
+/// Kept separate from [`Provider`] because dispatch sites need a small, `Copy`
+/// platform tag, not the provider's configuration payload.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Platform {
+    Aws,
+}
+
+impl Platform {
+    /// Platform selected by the configuration file, defaulting to AWS when no
+    /// `caution { provider { } }` block is present (the only value supported today).
+    pub fn from_config(config: &ConfigurationFile) -> Self {
+        config
+            .caution
+            .as_ref()
+            .and_then(|caution| caution.provider.as_ref())
+            .map(Self::from)
+            .unwrap_or(Platform::Aws)
+    }
+}
+
+impl From<&Provider> for Platform {
+    fn from(provider: &Provider) -> Self {
+        match provider {
+            Provider::Aws(_) => Platform::Aws,
+        }
+    }
+}
+
 /// Top-level `caution { }` block.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -816,6 +847,38 @@ fn validate_provider(provider: &Provider) -> Result<(), AwsIdValidationError> {
 }
 
 impl ConfigurationFile {
+    /// The first enclave definition. The platform currently assumes a single
+    /// enclave per configuration file.
+    pub fn configured_enclave(&self) -> Option<&EnclaveConfig> {
+        self.enclave
+            .as_ref()
+            .and_then(|enclaves| enclaves.values().next())
+    }
+
+    /// Ingress ports, expanding `from_port..=to_port` ranges, sorted and deduped.
+    pub fn ingress_ports(&self) -> Vec<u16> {
+        let mut ports: Vec<u16> = self
+            .configured_enclave()
+            .and_then(|enclave| enclave.network.as_ref())
+            .map(|network| {
+                network
+                    .ingress
+                    .iter()
+                    .flat_map(|rule| match &rule.port_spec {
+                        Some(PortSpec::Exact { port }) => vec![*port],
+                        Some(PortSpec::FromTo {
+                            start_port,
+                            end_port,
+                        }) => (*start_port..=*end_port).collect::<Vec<u16>>(),
+                        None => Vec::new(),
+                    })
+                    .collect::<Vec<u16>>()
+            })
+            .unwrap_or_default();
+        ports.sort();
+        ports.dedup();
+        ports
+    }
     #[tracing::instrument(skip_all, err)]
     pub fn from_procfile(content: &str) -> Result<Self, FromProcfileError> {
         Self::parse_procfile(content, false)

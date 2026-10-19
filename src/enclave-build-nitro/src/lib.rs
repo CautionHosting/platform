@@ -13,109 +13,24 @@ mod artifacts;
 #[cfg(test)]
 mod reproduction_tests;
 
-const ENCLAVE_SOURCE_BASE: &str = "https://git.caution.co/public/enclaveos/archive";
-pub const FRAMEWORK_SOURCE: &str = "https://git.caution.co/public/platform/archive/main.tar.gz";
-/// Canonical archives, historical Codeberg aliases, and their GitHub mirrors.
-const ARCHIVE_MIRRORS: [(&str, &str, &str); 2] = [
-    (
-        "https://git.caution.co/public/platform/archive/",
-        "https://codeberg.org/caution/platform/archive/",
-        "https://github.com/CautionHosting/platform/archive/",
-    ),
-    (
-        "https://git.caution.co/public/enclaveos/archive/",
-        "https://codeberg.org/caution/enclaveos/archive/",
-        "https://github.com/CautionHosting/enclaveos/archive/",
-    ),
-];
-
-pub fn enclave_source_url(commit: &str) -> String {
-    format!("{}/{}.tar.gz", ENCLAVE_SOURCE_BASE, commit)
-}
-
-pub fn pin_archive_url_to_commit(url: &str, commit: &str) -> String {
-    if let Some(archive_pos) = url.find("/archive/") {
-        format!("{}/archive/{}.tar.gz", &url[..archive_pos], commit)
-    } else {
-        url.to_string()
-    }
-}
-
-/// Return the canonical archive URL followed by any explicitly configured mirrors.
-pub fn archive_url_candidates(url: &str) -> Vec<String> {
-    let mut candidates = vec![url.to_string()];
-
-    for (canonical, historical, mirror) in ARCHIVE_MIRRORS {
-        if let Some(archive_name) = url.strip_prefix(canonical) {
-            candidates.push([mirror, archive_name].concat());
-        } else if let Some(archive_name) = url.strip_prefix(historical) {
-            candidates.push([canonical, archive_name].concat());
-            candidates.push([mirror, archive_name].concat());
-        }
-    }
-
-    candidates
-}
-
-/// Classify `enclave_source` (archive URL, git URL, or local path) into the
-/// matching `EnclaveSource`. `resolved_commit` is the commit already resolved
-/// from the source (git rev-parse / ref lookup), if any. For a local path with
-/// no resolved commit, fall back to ENCLAVEOS_COMMIT, and with neither build the
-/// on-disk files directly.
-fn classify_enclave_source(
-    enclave_source: &str,
-    enclave_version: &str,
-    resolved_commit: Option<String>,
-) -> EnclaveSource {
-    if enclave_source.ends_with(".tar.gz") {
-        EnclaveSource::GitArchive {
-            urls: vec![enclave_source.to_string()],
-            commit: resolved_commit,
-        }
-    } else if enclave_source.starts_with("http") || enclave_source.starts_with("git@") {
-        EnclaveSource::GitRepository {
-            url: enclave_source.to_string(),
-            branch: enclave_version.to_string(),
-            commit: resolved_commit,
-        }
-    } else {
-        let commit = resolved_commit.or_else(|| std::env::var("ENCLAVEOS_COMMIT").ok());
-        if let Some(commit) = commit {
-            EnclaveSource::GitArchive {
-                urls: vec![enclave_source_url(&commit)],
-                commit: Some(commit),
-            }
-        } else {
-            EnclaveSource::Local {
-                path: enclave_source.to_string(),
-            }
-        }
-    }
-}
-
 pub mod build;
 pub mod compile;
 mod component_stage;
-pub mod components;
-pub mod docker;
 pub mod extract;
-pub mod manifest;
 pub mod pcrs;
 pub mod source_transport;
 pub mod tap_framer;
 
 use dterror::ResultExt;
-use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub use compile::{resolve_ref_to_commit, EnclaveSourceResult};
-pub use docker::{
-    build_user_image, has_explicit_build_command, resolve_build_command,
-    resolve_build_command_in_dir, validate_explicit_containerfile_path, BuildConfig,
+pub use enclave_build::BuildCacheType as CacheType;
+pub use enclave_build::{
+    archive_url_candidates, classify_enclave_source, enclave_source_url, pin_archive_url_to_commit,
+    AppSource, EifFile, EnclaveManifest, EnclaveSource, FrameworkSource, PcrValues, UserImage,
+    FRAMEWORK_SOURCE,
 };
-pub use manifest::{AppSource, EnclaveManifest, EnclaveSource, FrameworkSource};
-
-pub use CacheType as BuildCacheType;
 
 #[derive(Debug, Clone)]
 pub struct EnclaveBuilder {
@@ -134,46 +49,10 @@ pub struct EnclaveBuilder {
 }
 
 #[derive(Debug, Clone)]
-pub struct UserImage {
-    pub reference: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct EifFile {
-    pub path: PathBuf,
-    pub size: u64,
-    pub sha256: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PcrValues {
-    pub pcr0: String,
-    pub pcr1: String,
-    pub pcr2: String,
-    pub pcr3: Option<String>,
-    pub pcr4: Option<String>,
-}
-
-#[derive(Debug, Clone)]
 pub struct Deployment {
     pub eif: EifFile,
     pub pcrs: PcrValues,
     pub image_ref: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CacheType {
-    Build,
-    Reproduction,
-}
-
-impl CacheType {
-    fn dir_name(&self) -> &'static str {
-        match self {
-            CacheType::Build => "build",
-            CacheType::Reproduction => "reproductions",
-        }
-    }
 }
 
 /// Error type for [`EnclaveBuilder::new_with_cache`].
@@ -787,7 +666,7 @@ impl EnclaveBuilder {
         };
         let templates_dir = framework_source_path
             .as_ref()
-            .map(|p| p.join("src/enclave-builder/templates"));
+            .map(|p| p.join("src/enclave-build-nitro/templates"));
 
         let manifest = if let Some(ext_manifest) = external_manifest {
             tracing::info!("Using external manifest for reproducible build");
@@ -940,7 +819,7 @@ impl EnclaveBuilder {
         };
         let templates_dir = framework_source_path
             .as_ref()
-            .map(|p| p.join("src/enclave-builder/templates"));
+            .map(|p| p.join("src/enclave-build-nitro/templates"));
 
         let manifest = if let Some(ext_manifest) = external_manifest {
             tracing::info!("Using external manifest for reproducible build");
@@ -1271,26 +1150,6 @@ mod tests {
             pin_archive_url_to_commit(url, "abc123"),
             "https://git.caution.co/public/platform/archive/abc123.tar.gz"
         );
-    }
-
-    #[test]
-    fn test_archive_url_candidates_adds_configured_mirrors() {
-        for (canonical_prefix, historical_prefix, github_prefix) in ARCHIVE_MIRRORS {
-            for archive_name in ["main.tar.gz", "abc123.tar.gz"] {
-                let canonical = [canonical_prefix, archive_name].concat();
-                let historical = [historical_prefix, archive_name].concat();
-                let github = [github_prefix, archive_name].concat();
-
-                assert_eq!(
-                    archive_url_candidates(&canonical),
-                    vec![canonical.clone(), github.clone()]
-                );
-                assert_eq!(
-                    archive_url_candidates(&historical),
-                    vec![historical, canonical, github]
-                );
-            }
-        }
     }
 
     #[test]

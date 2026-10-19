@@ -9,11 +9,11 @@
 //! Network routing assistance, if needed, must retain original/effective recipes
 //! externally and must not be represented as canonical-production build proof.
 
-use enclave_builder::{
-    build,
+use enclave_build::{
     components::{self, Component, ComponentSet},
     EnclaveManifest, EnclaveSource, FrameworkSource,
 };
+use enclave_build_nitro::build;
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
 
 #[tokio::test]
@@ -43,7 +43,7 @@ async fn source_and_prebuilt_use_production_composition() {
     let mut manifest = EnclaveManifest::new(
         None,
         EnclaveSource::GitArchive {
-            urls: vec![enclave_builder::enclave_source_url(&enclave_pin)],
+            urls: vec![enclave_build::enclave_source_url(&enclave_pin)],
             commit: Some(enclave_pin.clone()),
         },
         FrameworkSource::GitArchive {
@@ -66,7 +66,7 @@ async fn source_and_prebuilt_use_production_composition() {
         "Synthetic tiny rootfs; no production deployment.\n",
     )
     .unwrap();
-    let templates = root.join("framework/src/enclave-builder/templates");
+    let templates = root.join("framework/src/enclave-build-nitro/templates");
     let downloads = root.join("downloads");
     for mode in ["source", "prebuilt"] {
         let work = root.join(format!("eif-{mode}"));

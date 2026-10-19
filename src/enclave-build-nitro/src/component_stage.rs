@@ -8,8 +8,8 @@ use tokio::io::AsyncReadExt;
 
 use dterror::ResultExt;
 
-use crate::components::{recipe, Component, ComponentSet, SelectedComponent};
-use crate::manifest::{EnclaveManifest, FrameworkSource};
+use enclave_build::components::{recipe, Component, ComponentSet, SelectedComponent};
+use enclave_build::manifest::{EnclaveManifest, FrameworkSource};
 
 #[derive(Debug, thiserror::Error, dterror::CtxError)]
 #[error("could not {operation} component staging [{location}]")]
@@ -203,8 +203,8 @@ async fn stage_verified_files(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::{ArtifactFile, ComponentArtifact, ComponentSpec};
-    use crate::manifest::{EnclaveSource, FrameworkSource};
+    use enclave_build::components::{ArtifactFile, ComponentArtifact, ComponentSpec};
+    use enclave_build::manifest::{EnclaveSource, FrameworkSource};
 
     fn fixture() -> (tempfile::TempDir, EnclaveManifest) {
         let dir = tempfile::tempdir().unwrap();
@@ -217,10 +217,10 @@ mod tests {
             );
         }
         std::fs::write(dir.path().join("Containerfile.eif"), rendered).unwrap();
-        std::fs::create_dir_all(dir.path().join("src/enclave-builder/templates")).unwrap();
+        std::fs::create_dir_all(dir.path().join("src/enclave-build-nitro/templates")).unwrap();
         std::fs::write(
             dir.path()
-                .join("src/enclave-builder/templates/Containerfile.eif"),
+                .join("src/enclave-build-nitro/templates/Containerfile.eif"),
             template,
         )
         .unwrap();
@@ -308,7 +308,7 @@ mod tests {
             let downloads = dir.path().join("downloads");
             configure(
                 dir.path(),
-                &dir.path().join("src/enclave-builder/templates"),
+                &dir.path().join("src/enclave-build-nitro/templates"),
                 Some(&manifest),
                 prebuilt.then_some(downloads.as_path()),
                 true,
@@ -341,7 +341,7 @@ mod tests {
             }
             assert!(configure(
                 dir.path(),
-                &dir.path().join("src/enclave-builder/templates"),
+                &dir.path().join("src/enclave-build-nitro/templates"),
                 Some(&manifest),
                 None,
                 true,
@@ -358,7 +358,7 @@ mod tests {
         std::fs::write(dir.path().join("downloads/tap-framer"), "corrupt").unwrap();
         configure(
             dir.path(),
-            &dir.path().join("src/enclave-builder/templates"),
+            &dir.path().join("src/enclave-build-nitro/templates"),
             Some(&manifest),
             None,
             true,
@@ -378,7 +378,7 @@ mod tests {
         let (dir, manifest) = fixture();
         configure(
             dir.path(),
-            &dir.path().join("src/enclave-builder/templates"),
+            &dir.path().join("src/enclave-build-nitro/templates"),
             Some(&manifest),
             Some(&dir.path().join("downloads")),
             true,
@@ -454,7 +454,7 @@ mod tests {
             assert!(
                 configure(
                     dir.path(),
-                    &dir.path().join("src/enclave-builder/templates"),
+                    &dir.path().join("src/enclave-build-nitro/templates"),
                     Some(&manifest),
                     Some(&dir.path().join("downloads")),
                     true,
@@ -487,7 +487,7 @@ mod tests {
                 }
                 configure(
                     dir.path(),
-                    &dir.path().join("src/enclave-builder/templates"),
+                    &dir.path().join("src/enclave-build-nitro/templates"),
                     Some(&manifest),
                     Some(&dir.path().join("downloads")),
                     steve,
@@ -519,7 +519,7 @@ mod tests {
         manifest.component_set = None;
         assert!(configure(
             dir.path(),
-            &dir.path().join("src/enclave-builder/templates"),
+            &dir.path().join("src/enclave-build-nitro/templates"),
             Some(&manifest),
             Some(&dir.path().join("downloads")),
             false,

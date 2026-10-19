@@ -213,7 +213,7 @@ pub struct StagedArtifact {
 
 /// Input parameters for a build.
 pub struct BuildRequest {
-    pub component_set: Option<enclave_builder::components::ComponentSet>,
+    pub component_set: Option<enclave_build::components::ComponentSet>,
     pub org_id: Uuid,
     pub app_id: Uuid,
     pub app_name: String,
@@ -267,7 +267,7 @@ pub enum ValidateRemoteContainerfilePathError {
 pub fn validate_remote_containerfile_path(
     containerfile: &str,
 ) -> Result<String, ValidateRemoteContainerfilePathError> {
-    let containerfile = match enclave_builder::validate_explicit_containerfile_path(containerfile) {
+    let containerfile = match docker_builder::validate_explicit_containerfile_path(containerfile) {
         Ok(containerfile) => containerfile,
         Err(source) => {
             return Err(ValidateRemoteContainerfilePathError::InvalidPath {
@@ -431,7 +431,7 @@ pub fn compute_cache_key(
     }
     // Only a non-default key exchange reaches run.sh, so hashing it otherwise
     // would invalidate cached builds whose output is byte-identical.
-    if e2e && e2e_key_exchange != enclave_builder::build::DEFAULT_KEY_EXCHANGE {
+    if e2e && e2e_key_exchange != enclave_build_nitro::build::DEFAULT_KEY_EXCHANGE {
         hasher.update(e2e_key_exchange.as_bytes());
     }
     hasher.update(b"|");
@@ -1465,12 +1465,12 @@ fn generate_builder_userdata(
         crate::component_artifacts::validate_source_pins(
             set,
             &request.enclaveos_commit,
-            &enclave_builder::build::resolve_bootproof_commit(),
+            &enclave_build_nitro::build::resolve_bootproof_commit(),
             &request.framework_commit,
             request.e2e.then_some(request.steve_commit.as_str()),
             request
                 .locksmith
-                .then_some(enclave_builder::build::resolve_locksmith_commit().as_str()),
+                .then_some(enclave_build_nitro::build::resolve_locksmith_commit().as_str()),
         )
         .with_context(Ctx::components())?;
     }
@@ -1501,8 +1501,8 @@ fn generate_builder_userdata(
 
     // STEVE and Platform are resolved before the cache lookup and carried on
     // BuildRequest, so the cache key, manifest, and EIF build use the same commits.
-    let bootproof_commit = enclave_builder::build::resolve_bootproof_commit();
-    let locksmith_commit = enclave_builder::build::resolve_locksmith_commit();
+    let bootproof_commit = enclave_build_nitro::build::resolve_bootproof_commit();
+    let locksmith_commit = enclave_build_nitro::build::resolve_locksmith_commit();
 
     let e2e_flag = if request.e2e { "true" } else { "false" };
     let key_exchange = &request.e2e_key_exchange;
@@ -1521,25 +1521,23 @@ fn generate_builder_userdata(
     let app_source = if request.app_sources.is_empty() {
         None
     } else {
-        Some(enclave_builder::AppSource {
+        Some(enclave_build::AppSource {
             urls: request.app_sources.clone(),
             commit: request.commit_sha.clone(),
             branch: Some(request.branch.clone()),
         })
     };
-    let framework_url = enclave_builder::pin_archive_url_to_commit(
-        enclave_builder::FRAMEWORK_SOURCE,
+    let framework_url = enclave_build::pin_archive_url_to_commit(
+        enclave_build::FRAMEWORK_SOURCE,
         &request.framework_commit,
     );
-    let mut manifest = enclave_builder::EnclaveManifest::new(
+    let mut manifest = enclave_build::EnclaveManifest::new(
         app_source,
-        enclave_builder::EnclaveSource::GitArchive {
-            urls: vec![enclave_builder::enclave_source_url(
-                &request.enclaveos_commit,
-            )],
+        enclave_build::EnclaveSource::GitArchive {
+            urls: vec![enclave_build::enclave_source_url(&request.enclaveos_commit)],
             commit: Some(request.enclaveos_commit.clone()),
         },
-        enclave_builder::FrameworkSource::GitArchive {
+        enclave_build::FrameworkSource::GitArchive {
             url: framework_url,
             commit: Some(request.framework_commit.clone()),
         },
@@ -1553,7 +1551,7 @@ fn generate_builder_userdata(
     if request.e2e {
         manifest.steve_commit = Some(request.steve_commit.clone());
         manifest.steve_allow_plaintext_fallback = request.allow_plaintext_fallback;
-        if request.e2e_key_exchange != enclave_builder::build::DEFAULT_KEY_EXCHANGE {
+        if request.e2e_key_exchange != enclave_build_nitro::build::DEFAULT_KEY_EXCHANGE {
             manifest.steve_key_exchange = Some(request.e2e_key_exchange.clone());
         }
     }

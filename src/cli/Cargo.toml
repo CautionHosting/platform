@@ -31,7 +31,9 @@ dirs = { workspace = true }
 url = { workspace = true }
 
 # Internal dependencies
-enclave-builder = { path = "../enclave-builder" }
+enclave-build = { path = "../enclave-build" }
+enclave-build-nitro = { path = "../enclave-build-nitro" }
+docker-builder = { path = "../docker-builder" }
 
 # CLI-specific dependencies
 clap = { version = "4.5", features = ["derive", "env"] }

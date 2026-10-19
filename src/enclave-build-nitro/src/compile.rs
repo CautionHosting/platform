@@ -662,7 +662,7 @@ pub async fn get_or_clone_enclave_source(
 /// Download and extract the framework (platform) source archive.
 ///
 /// Returns the path to the extracted source directory. Templates are at
-/// `src/enclave-builder/templates/` within the returned path.
+/// `src/enclave-build-nitro/templates/` within the returned path.
 #[tracing::instrument(skip_all, err)]
 pub async fn get_or_clone_framework_source(
     framework_source_url: &str,

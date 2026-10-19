@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use dterror::ResultExt;
-use enclave_builder::components::{Component, ComponentSet};
+use enclave_build::components::{Component, ComponentSet};
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, thiserror::Error)]
@@ -79,7 +79,7 @@ impl ComponentSelection {
                 location: std::panic::Location::caller(),
             });
         };
-        if enclave_builder::components::validate_digest(&digest).is_err() {
+        if enclave_build::components::validate_digest(&digest).is_err() {
             return Err(SelectionError::InvalidDigest {
                 location: std::panic::Location::caller(),
             });
@@ -195,7 +195,7 @@ pub(crate) struct StartupComponentsError {
 fn validate_startup_pins(
     set: &ComponentSet,
     platform_git_sha: Option<&str>,
-    tools: &enclave_builder::build::ToolCommits,
+    tools: &enclave_build_nitro::build::ToolCommits,
 ) -> Result<(), StartupComponentsError> {
     use StartupComponentsErrorCtx as Ctx;
     let framework = crate::builder::require_platform_framework_commit(platform_git_sha)
@@ -216,14 +216,14 @@ fn validate_startup_pins(
         (Component::Steve, &tools.steve.commit),
         (Component::Locksmith, &tools.locksmith.commit),
     ] {
-        let recipe = enclave_builder::components::recipe::render_component(
-            include_str!("../../enclave-builder/templates/Containerfile.eif"),
+        let recipe = enclave_build::components::recipe::render_component(
+            include_str!("../../enclave-build-nitro/templates/Containerfile.eif"),
             component,
             commit,
             Some(component.embedded_containerfile()),
         )
         .with_context(Ctx::new("render active component recipe"))?;
-        let expected = enclave_builder::components::sha256(recipe.as_bytes());
+        let expected = enclave_build::components::sha256(recipe.as_bytes());
         if set
             .get(component)
             .is_none_or(|artifact| artifact.spec().recipe_sha256() != expected)
@@ -248,7 +248,7 @@ pub(crate) async fn validate_startup(
     bucket: Option<String>,
     default_bucket: &str,
     platform_git_sha: Option<&str>,
-    tools: &enclave_builder::build::ToolCommits,
+    tools: &enclave_build_nitro::build::ToolCommits,
 ) -> Result<(), StartupComponentsError> {
     use StartupComponentsErrorCtx as Ctx;
     let Some(selection) = ComponentSelection::parse_with_mode(mode, digest, bucket, default_bucket)
@@ -296,7 +296,7 @@ impl BuildComponentArtifacts {
             })
             .with_context(Ctx::new("pin host helper for"))?;
         Ok(Self {
-            component_set_sha256: enclave_builder::components::sha256(&canonical),
+            component_set_sha256: enclave_build::components::sha256(&canonical),
             tap_framer_s3_key: format!("{eif_s3_key}.tap-framer"),
             tap_framer_sha256: file.sha256().to_owned(),
         })
@@ -331,7 +331,7 @@ pub(crate) fn required_components(steve: bool, locksmith: bool, egress: bool) ->
 pub(crate) struct SelectedComponents {
     selection: ComponentSelection,
     set: ComponentSet,
-    source: enclave_builder::components::store::S3ComponentStore,
+    source: enclave_build::components::store::S3ComponentStore,
 }
 
 impl SelectedComponents {
@@ -343,7 +343,7 @@ impl SelectedComponents {
         let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .load()
             .await;
-        let source = enclave_builder::components::store::S3ComponentStore::new(
+        let source = enclave_build::components::store::S3ComponentStore::new(
             aws_sdk_s3::Client::new(&config),
             selection.bucket().to_owned(),
         );
@@ -386,7 +386,7 @@ impl SelectedComponents {
                     })
                     .with_context(Ctx::new("select platform"))?;
                 for (name, file) in artifact.files() {
-                    let key = enclave_builder::components::artifact_key(file.sha256(), name)
+                    let key = enclave_build::components::artifact_key(file.sha256(), name)
                         .with_context(Ctx::new("resolve artifact key for"))?;
                     self.source
                         .get_verified(&key, file)
@@ -403,7 +403,7 @@ impl SelectedComponents {
             }
             return Ok(());
         }
-        let destination = enclave_builder::components::store::S3ComponentStore::new(
+        let destination = enclave_build::components::store::S3ComponentStore::new(
             destination_client,
             destination_bucket,
         );
@@ -420,13 +420,13 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn fixture() -> (ComponentSet, BTreeMap<String, Vec<u8>>) {
-        use enclave_builder::components::{ArtifactFile, ComponentArtifact, ComponentSpec};
+        use enclave_build::components::{ArtifactFile, ComponentArtifact, ComponentSpec};
         let mut objects = BTreeMap::new();
         let artifacts = Component::ALL
             .into_iter()
             .map(|component| {
-                let recipe = enclave_builder::components::recipe::render_component(
-                    include_str!("../../enclave-builder/templates/Containerfile.eif"),
+                let recipe = enclave_build::components::recipe::render_component(
+                    include_str!("../../enclave-build-nitro/templates/Containerfile.eif"),
                     component,
                     &"a".repeat(40),
                     Some(component.embedded_containerfile()),
@@ -435,7 +435,7 @@ mod tests {
                 let spec = ComponentSpec::new(
                     component,
                     "a".repeat(40),
-                    enclave_builder::components::sha256(recipe.as_bytes()),
+                    enclave_build::components::sha256(recipe.as_bytes()),
                     component.source_subdir().map(|_| "c".repeat(64)),
                 )
                 .unwrap();
@@ -460,24 +460,24 @@ mod tests {
         (ComponentSet::new(artifacts).unwrap(), objects)
     }
 
-    fn startup_tools() -> enclave_builder::build::ToolCommits {
-        use enclave_builder::build::{ToolCommits, ToolSource};
+    fn startup_tools() -> enclave_build_nitro::build::ToolCommits {
+        use enclave_build_nitro::build::{ToolCommits, ToolSource};
         ToolCommits {
             enclaveos: ToolSource {
                 commit: "a".repeat(40),
-                repo: enclave_builder::build::ENCLAVEOS_REPO,
+                repo: enclave_build_nitro::build::ENCLAVEOS_REPO,
             },
             bootproof: ToolSource {
                 commit: "a".repeat(40),
-                repo: enclave_builder::build::BOOTPROOF_REPO,
+                repo: enclave_build_nitro::build::BOOTPROOF_REPO,
             },
             steve: ToolSource {
                 commit: "a".repeat(40),
-                repo: enclave_builder::build::STEVE_REPO,
+                repo: enclave_build_nitro::build::STEVE_REPO,
             },
             locksmith: ToolSource {
                 commit: "a".repeat(40),
-                repo: enclave_builder::build::LOCKSMITH_REPO,
+                repo: enclave_build_nitro::build::LOCKSMITH_REPO,
             },
         }
     }
@@ -543,15 +543,15 @@ mod tests {
         ] {
             value["components"][component.as_str()]["spec"]["source_commit"] =
                 serde_json::json!(commit);
-            let recipe = enclave_builder::components::recipe::render_component(
-                include_str!("../../enclave-builder/templates/Containerfile.eif"),
+            let recipe = enclave_build::components::recipe::render_component(
+                include_str!("../../enclave-build-nitro/templates/Containerfile.eif"),
                 component,
                 commit,
                 Some(component.embedded_containerfile()),
             )
             .unwrap();
             value["components"][component.as_str()]["spec"]["recipe_sha256"] =
-                serde_json::json!(enclave_builder::components::sha256(recipe.as_bytes()));
+                serde_json::json!(enclave_build::components::sha256(recipe.as_bytes()));
         }
         let set: ComponentSet = serde_json::from_value(value).unwrap();
         validate_startup_pins(&set, Some(&framework), &tools).unwrap();
@@ -671,7 +671,7 @@ mod tests {
         let record = BuildComponentArtifacts::from_set(&set, "eifs/org/release.eif").unwrap();
         assert_eq!(
             record.component_set_sha256(),
-            enclave_builder::components::sha256(&set.canonical_bytes().unwrap())
+            enclave_build::components::sha256(&set.canonical_bytes().unwrap())
         );
         assert_eq!(
             record.tap_framer_s3_key(),
@@ -679,7 +679,7 @@ mod tests {
         );
         assert_eq!(
             record.tap_framer_sha256(),
-            enclave_builder::components::sha256(b"tap-framer")
+            enclave_build::components::sha256(b"tap-framer")
         );
         let persisted = serde_json::to_vec(&record).unwrap();
         assert_eq!(
@@ -827,7 +827,7 @@ mod tests {
                 .build();
             let client = aws_sdk_s3::Client::from_conf(config);
             let selection = ComponentSelection::parse(
-                Some(enclave_builder::components::sha256(
+                Some(enclave_build::components::sha256(
                     &set.canonical_bytes().unwrap(),
                 )),
                 None,
@@ -838,7 +838,7 @@ mod tests {
             let selected = SelectedComponents {
                 selection,
                 set,
-                source: enclave_builder::components::store::S3ComponentStore::new(
+                source: enclave_build::components::store::S3ComponentStore::new(
                     client.clone(),
                     "platform-bucket".into(),
                 ),
@@ -875,7 +875,7 @@ mod tests {
                 .map(|name| {
                     format!(
                         "GET /platform-bucket/components/v1/blobs/sha256/{}/{name}",
-                        enclave_builder::components::sha256(name.as_bytes())
+                        enclave_build::components::sha256(name.as_bytes())
                     )
                 })
                 .collect::<Vec<_>>();

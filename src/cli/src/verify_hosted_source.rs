@@ -11,7 +11,7 @@
 //! the old URL-keyed download cache. The measured manifest is kept unchanged.
 use super::{StagedSource, extract_tarball_bytes_to_dir};
 use dterror::{BoxError, CtxError, Location, ResultExt};
-use enclave_builder::AppSource;
+use enclave_build::AppSource;
 use reqwest::Url;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -124,7 +124,7 @@ pub(crate) fn archive_urls(source: &AppSource) -> Result<Vec<Url>, Error> {
 fn http_client() -> Result<reqwest::Client, Error> {
     reqwest::Client::builder()
         .https_only(true)
-        .redirect(enclave_builder::source_transport::redirect_policy())
+        .redirect(enclave_build_nitro::source_transport::redirect_policy())
         .connect_timeout(Duration::from_secs(30))
         .timeout(Duration::from_secs(300))
         .build()

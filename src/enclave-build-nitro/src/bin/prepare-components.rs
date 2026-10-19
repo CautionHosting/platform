@@ -12,15 +12,13 @@
 
 use clap::Parser;
 use dterror::ResultExt;
-use enclave_builder::{
-    build,
-    components::{
-        recipe, sha256,
-        store::{build_key, S3ComponentStore},
-        validate_commit, ArtifactFile, Component, ComponentArtifact, ComponentSet, ComponentSpec,
-        MAX_ARTIFACT_SIZE, MAX_MANIFEST_SIZE,
-    },
+use enclave_build::components::{
+    recipe, sha256,
+    store::{build_key, S3ComponentStore},
+    validate_commit, ArtifactFile, Component, ComponentArtifact, ComponentSet, ComponentSpec,
+    MAX_ARTIFACT_SIZE, MAX_MANIFEST_SIZE,
 };
+use enclave_build_nitro::build;
 use std::{
     collections::BTreeMap,
     ffi::OsString,
@@ -30,7 +28,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-const TEMPLATE_PATH: &str = "src/enclave-builder/templates/Containerfile.eif";
+const TEMPLATE_PATH: &str = "src/enclave-build-nitro/templates/Containerfile.eif";
 const TAP_PATH: &str = "src/tap-framer";
 const TAP_FILES: [&str; 4] = ["Cargo.toml", "Cargo.lock", "src/main.rs", "src/vsock.rs"];
 
@@ -163,7 +161,7 @@ async fn prepare(args: Arguments) -> Result<(), PrepareError> {
         &args.framework_source,
         &args.framework_commit,
         &[
-            "src/enclave-builder/templates",
+            "src/enclave-build-nitro/templates",
             "containerfiles/Containerfile.init",
             "containerfiles/Containerfile.bootproof",
             "containerfiles/Containerfile.steve",
@@ -748,7 +746,7 @@ mod tests {
 
     #[tokio::test]
     async fn unaccepted_spec_requires_compilation_despite_valid_remote_candidate() {
-        use enclave_builder::components::artifact_key;
+        use enclave_build::components::artifact_key;
 
         let set = test_set();
         let candidate = &set.components()[&Component::Init];
@@ -775,7 +773,7 @@ mod tests {
 
     #[tokio::test]
     async fn accepted_spec_reuses_only_complete_verified_remote_output() {
-        use enclave_builder::components::artifact_key;
+        use enclave_build::components::artifact_key;
 
         let set = test_set();
         let accepted = &set.components()[&Component::Init];
