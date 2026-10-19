@@ -1197,6 +1197,31 @@ pub(crate) async fn build_local(client: &ApiClient, no_cache: bool) -> Result<()
         no_cache,
     };
 
+    let http_port = enclave
+        .and_then(|e| e.network.as_ref())
+        .and_then(|n| n.http.as_ref())
+        .map(|http| http.port);
+    output::verbose(client.verbose, format!("HTTP port: {:?}", http_port));
+    output::verbose(client.verbose, format!("E2E encryption: {}", e2e));
+    output::verbose(
+        client.verbose,
+        format!("Locksmith secrets: {}", cfg.has_vault_env()),
+    );
+    output::verbose(
+        client.verbose,
+        format!("Egress: {}", config_egress_enabled(&cfg)),
+    );
+    let http_upstream_protocol = enclave
+        .and_then(|e| e.network.as_ref())
+        .and_then(|n| n.http.as_ref())
+        .and_then(|http| http.upstream_protocol)
+        .map(|protocol| protocol.as_str())
+        .unwrap_or("http");
+    output::verbose(
+        client.verbose,
+        format!("HTTP upstream protocol: {}", http_upstream_protocol),
+    );
+
     let loader = Spinner::new("Building enclave image", SpinnerStyle::Processing);
     output::verbose(client.verbose, "Using NitroEifMechanism");
     let artifacts = enclave_build_nitro::NitroEifMechanism::new()
