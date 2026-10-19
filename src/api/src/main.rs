@@ -4944,7 +4944,9 @@ async fn deploy_logic(
             .as_ref()
             .map(|artifacts| artifacts.tap_framer_sha256().to_owned()),
     };
-    let nitro_request = deployer.build_request(&config_file, &deploy_artifacts, &deploy_ctx);
+    let nitro_request = deployer
+        .build_request(&config_file, &deploy_artifacts, &deploy_ctx)
+        .with_context(Ctx::nitro_deploy())?;
 
     let _ = tx.send(Ok(milestone("Uploading and launching..."))).await;
 

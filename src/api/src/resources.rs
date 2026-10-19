@@ -1224,15 +1224,19 @@ pub(crate) async fn destroy_resource_by_id(
     }
 
     let terraform_result = match destroy_credentials {
-        Ok((aws_credentials, asg_name)) => deployment::destroy_app_with_credentials(
-            org_id,
-            resource_id,
-            resource_name,
-            aws_credentials,
-            asg_name,
-        )
-        .await
-        .map_err(|error| -> BoxError { error.into() }),
+        Ok((aws_credentials, asg_name)) => {
+            let destroyer = caution_deploy_aws::AwsNitroDeployer::new();
+            let destroy_ctx = caution_deploy_aws::AwsDestroyContext {
+                org_id,
+                resource_id,
+                resource_name: resource_name.clone(),
+                credentials: aws_credentials,
+                asg_name,
+            };
+            caution_deploy::EnclaveDeployer::destroy(&destroyer, &destroy_ctx)
+                .await
+                .map_err(|error| -> BoxError { error.into() })
+        }
         Err(error) => Err(error),
     };
     if let Err(source) = terraform_result {
