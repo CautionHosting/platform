@@ -8,7 +8,7 @@ from pathlib import Path
 import subprocess
 import unittest
 
-ROOT = Path(os.environ.get("PLATFORM_TEST_ROOT", Path(__file__).resolve().parents[2]))
+ROOT = Path(os.environ.get("PLATFORM_TEST_ROOT", Path(__file__).resolve().parents[1]))
 spec = importlib.util.spec_from_file_location(
     "ports_contracts", ROOT / "tests/e2e/test_platform_ports_contracts.py"
 )
