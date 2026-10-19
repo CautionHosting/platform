@@ -226,18 +226,12 @@ pub struct BuildRequest {
     pub procfile_content: String,
     pub run_command: Option<String>,
     pub containerfile: String,
-    pub ports: Vec<u16>,
-    pub http_port: Option<u16>,
     pub e2e: bool,
-    pub e2e_mode: String,
     pub e2e_key_exchange: String,
     pub allow_plaintext_fallback: bool,
-    pub domain: Option<String>,
-    pub http_upstream_protocol: String,
     pub framework_commit: String,
     pub locksmith: bool,
     pub egress: bool,
-    pub e2e_cors_origins: Option<String>,
     pub no_cache: bool,
     pub enclaveos_commit: String,
     pub steve_commit: String,
@@ -1478,16 +1472,6 @@ fn generate_builder_userdata(
     let bucket = &config.eif_s3_bucket;
     let source_s3_key = &request.source_s3_key;
     let source_sha256 = &request.source_sha256;
-    let ports_csv = request
-        .ports
-        .iter()
-        .map(u16::to_string)
-        .collect::<Vec<_>>()
-        .join(",");
-    let http_port = request
-        .http_port
-        .map(|port| port.to_string())
-        .unwrap_or_default();
 
     let containerfile = match validate_remote_containerfile_path(&request.containerfile) {
         Ok(containerfile) => containerfile,
@@ -1505,16 +1489,8 @@ fn generate_builder_userdata(
     let locksmith_commit = enclave_build_nitro::build::resolve_locksmith_commit();
 
     let e2e_flag = if request.e2e { "true" } else { "false" };
-    let key_exchange = &request.e2e_key_exchange;
-    let plaintext_fallback_flag = if request.allow_plaintext_fallback {
-        "true"
-    } else {
-        "false"
-    };
     let locksmith_flag = if request.locksmith { "true" } else { "false" };
     let egress_flag = if request.egress { "true" } else { "false" };
-    let cors_origins_value = request.e2e_cors_origins.as_deref().unwrap_or("");
-    let cors_origins_escaped = cors_origins_value.replace('\'', "'\\''");
     let no_cache_flag = if request.no_cache { "true" } else { "false" };
 
     // Build manifest using the same EnclaveManifest struct as the inline build path
@@ -1583,17 +1559,9 @@ APP_BUILD_LOG_KEY="builds/$BUILD_ID/app-build.log"
 COMMIT_SHA="{commit_sha}"
 ENCLAVEOS_COMMIT="{enclaveos_commit}"
 CONTAINERFILE="{containerfile}"
-PORTS="{ports_csv}"
-HTTP_PORT="{http_port}"
 E2E="{e2e_flag}"
-E2E_MODE="{e2e_mode}"
-KEY_EXCHANGE="{key_exchange}"
-ALLOW_PLAINTEXT_FALLBACK="{plaintext_fallback_flag}"
-DOMAIN="{domain}"
-HTTP_UPSTREAM_PROTOCOL="{http_upstream_protocol}"
 LOCKSMITH="{locksmith_flag}"
 EGRESS="{egress_flag}"
-CORS_ORIGINS='{cors_origins_escaped}'
 NO_CACHE="{no_cache_flag}"
 
 # Install script dependencies
@@ -1712,17 +1680,6 @@ CAUTION_WORK_DIR="/build/remote-helper-work" \
 CAUTION_OUTPUT_EIF="/build/output/enclave.eif" \
 CAUTION_OUTPUT_PCRS="/build/output/enclave.pcrs" \
 CAUTION_REPO_DIR="/build/repo" \
-CAUTION_PORTS="$PORTS" \
-CAUTION_HTTP_PORT="$HTTP_PORT" \
-CAUTION_E2E="$E2E" \
-CAUTION_E2E_MODE="$E2E_MODE" \
-CAUTION_DOMAIN="$DOMAIN" \
-CAUTION_HTTP_UPSTREAM_PROTOCOL="$HTTP_UPSTREAM_PROTOCOL" \
-CAUTION_KEY_EXCHANGE="$KEY_EXCHANGE" \
-CAUTION_ALLOW_PLAINTEXT_FALLBACK="$ALLOW_PLAINTEXT_FALLBACK" \
-CAUTION_LOCKSMITH="$LOCKSMITH" \
-CAUTION_EGRESS="$EGRESS" \
-CAUTION_CORS_ORIGINS="$CORS_ORIGINS" \
 CAUTION_NO_CACHE="$NO_CACHE" \
 /usr/local/bin/remote-build-helper 2>&1 | tee "$HELPER_LOG"; then
     :
@@ -1781,15 +1738,9 @@ echo "Build complete: $EIF_SHA256 ($EIF_SIZE bytes)"
         commit_sha = request.commit_sha,
         enclaveos_commit = request.enclaveos_commit,
         containerfile = containerfile,
-        ports_csv = ports_csv,
-        http_port = http_port,
         e2e_flag = e2e_flag,
-        e2e_mode = request.e2e_mode.as_str(),
-        domain = request.domain.as_deref().unwrap_or(""),
-        http_upstream_protocol = request.http_upstream_protocol.as_str(),
         locksmith_flag = locksmith_flag,
         egress_flag = egress_flag,
-        cors_origins_escaped = cors_origins_escaped,
         no_cache_flag = no_cache_flag,
         manifest_json = manifest_json,
     ))
@@ -3126,19 +3077,13 @@ mod tests {
             procfile_content: "run: /app\n".to_string(),
             run_command: Some("/app".to_string()),
             containerfile: "Dockerfile".to_string(),
-            ports: vec![],
-            http_port: None,
             e2e: true,
-            e2e_mode: "steve".to_string(),
             e2e_key_exchange: "X25519".to_string(),
             allow_plaintext_fallback: true,
-            domain: None,
-            http_upstream_protocol: "http".to_string(),
             framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
             tls_await_app_address: false,
             locksmith: false,
             egress: false,
-            e2e_cors_origins: None,
             no_cache: true,
             enclaveos_commit: "enclave-abc".to_string(),
             steve_commit: "steve-from-cache-key".to_string(),
@@ -3220,22 +3165,12 @@ mod tests {
             "should pass manifest to helper"
         );
         assert!(
-            userdata.contains("E2E_MODE=\"steve\"")
-                && userdata.contains("CAUTION_E2E_MODE=\"$E2E_MODE\""),
-            "should pass e2e mode to helper"
-        );
-        assert!(
-            userdata.contains("KEY_EXCHANGE=\"X25519\"")
-                && userdata.contains("CAUTION_KEY_EXCHANGE=\"$KEY_EXCHANGE\""),
-            "should pass the default key exchange to helper"
+            userdata.contains("CAUTION_REPO_DIR=\"/build/repo\""),
+            "should pass the checked-out repository so the helper can read config"
         );
         assert!(
             !userdata.contains("\"steve_key_exchange\""),
             "default key exchange should stay implicit in the manifest"
-        );
-        assert!(
-            userdata.contains("DOMAIN=\"\"") && userdata.contains("CAUTION_DOMAIN=\"$DOMAIN\""),
-            "should pass HTTP domain to helper"
         );
         assert!(
             userdata.contains("NO_CACHE=\"true\"")
@@ -3251,11 +3186,8 @@ mod tests {
             "manifest should use the Platform commit resolved before cache lookup"
         );
         assert!(
-            userdata.contains("ALLOW_PLAINTEXT_FALLBACK=\"true\"")
-                && userdata
-                    .contains("CAUTION_ALLOW_PLAINTEXT_FALLBACK=\"$ALLOW_PLAINTEXT_FALLBACK\"",)
-                && userdata.contains("\"steve_allow_plaintext_fallback\":true"),
-            "explicit plaintext fallback should reach the helper and manifest"
+            userdata.contains("\"steve_allow_plaintext_fallback\":true"),
+            "explicit plaintext fallback should reach the manifest"
         );
 
         // Should upload EIF to S3
@@ -3373,19 +3305,13 @@ mod tests {
             procfile_content: "run: /app\n".to_string(),
             run_command: Some("/app".to_string()),
             containerfile: "Containerfile".to_string(),
-            ports: vec![],
-            http_port: None,
             e2e: false,
-            e2e_mode: "disabled".to_string(),
             e2e_key_exchange: "X25519".to_string(),
             allow_plaintext_fallback: false,
-            domain: None,
-            http_upstream_protocol: "http".to_string(),
             framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
             tls_await_app_address: false,
             locksmith: false,
             egress: false,
-            e2e_cors_origins: None,
             no_cache: false,
             enclaveos_commit: "abc".to_string(),
             steve_commit: "steve-test".to_string(),
@@ -3434,19 +3360,13 @@ mod tests {
             procfile_content: "containerfile: Custom.Containerfile\nrun: /app\n".to_string(),
             run_command: Some("/app".to_string()),
             containerfile: "Custom.Containerfile".to_string(),
-            ports: vec![],
-            http_port: None,
             e2e: false,
-            e2e_mode: "disabled".to_string(),
             e2e_key_exchange: "X25519".to_string(),
             allow_plaintext_fallback: false,
-            domain: None,
-            http_upstream_protocol: "http".to_string(),
             framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
             tls_await_app_address: false,
             locksmith: false,
             egress: false,
-            e2e_cors_origins: None,
             no_cache: false,
             enclaveos_commit: "abc".to_string(),
             steve_commit: "steve-test".to_string(),
@@ -3493,19 +3413,13 @@ mod tests {
             procfile_content: "run: /app\n".to_string(),
             run_command: Some("/app".to_string()),
             containerfile: "Dockerfile".to_string(),
-            ports: vec![],
-            http_port: None,
             e2e: false,
-            e2e_mode: "disabled".to_string(),
             e2e_key_exchange: "X25519".to_string(),
             allow_plaintext_fallback: false,
-            domain: None,
-            http_upstream_protocol: "http".to_string(),
             framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
             tls_await_app_address: false,
             locksmith: false,
             egress: false,
-            e2e_cors_origins: None,
             no_cache: false,
             enclaveos_commit: "abc".to_string(),
             steve_commit: "steve-test".to_string(),
@@ -3560,19 +3474,13 @@ mod tests {
             procfile_content: "run: /app\n".to_string(),
             run_command: Some("/app".to_string()),
             containerfile: "Dockerfile$(aws)".to_string(),
-            ports: vec![],
-            http_port: None,
             e2e: false,
-            e2e_mode: "disabled".to_string(),
             e2e_key_exchange: "X25519".to_string(),
             allow_plaintext_fallback: false,
-            domain: None,
-            http_upstream_protocol: "http".to_string(),
             framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
             tls_await_app_address: false,
             locksmith: false,
             egress: false,
-            e2e_cors_origins: None,
             no_cache: false,
             enclaveos_commit: "abc".to_string(),
             steve_commit: "steve-test".to_string(),
@@ -3624,19 +3532,13 @@ mod tests {
             procfile_content: "run: /app\n".to_string(),
             run_command: Some("/app".to_string()),
             containerfile: "Dockerfile".to_string(),
-            ports: vec![],
-            http_port: None,
             e2e: false,
-            e2e_mode: "disabled".to_string(),
             e2e_key_exchange: "X25519".to_string(),
             allow_plaintext_fallback: false,
-            domain: None,
-            http_upstream_protocol: "http".to_string(),
             framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
             tls_await_app_address: false,
             locksmith: false,
             egress: false,
-            e2e_cors_origins: None,
             no_cache: false,
             enclaveos_commit: "abc".to_string(),
             steve_commit: "steve-test".to_string(),
@@ -3684,19 +3586,13 @@ mod tests {
             procfile_content: "run: /app\n".to_string(),
             run_command: Some("/app".to_string()),
             containerfile: "Dockerfile".to_string(),
-            ports: vec![],
-            http_port: None,
             e2e: false,
-            e2e_mode: "disabled".to_string(),
             e2e_key_exchange: "X25519".to_string(),
             allow_plaintext_fallback: false,
-            domain: None,
-            http_upstream_protocol: "http".to_string(),
             framework_commit: TEST_FRAMEWORK_COMMIT.to_string(),
             tls_await_app_address: false,
             locksmith: false,
             egress,
-            e2e_cors_origins: None,
             no_cache: false,
             enclaveos_commit: "abc".to_string(),
             steve_commit: "steve-test".to_string(),
@@ -3720,7 +3616,6 @@ mod tests {
         };
         let mut request = make_test_build_request_with_egress(false);
         request.e2e = true;
-        request.e2e_mode = "steve".to_string();
         request.e2e_key_exchange = "XWING-DRAFT10".to_string();
 
         let userdata = generate_builder_userdata(
@@ -3733,9 +3628,6 @@ mod tests {
         )
         .unwrap();
 
-        assert!(userdata.contains("E2E_MODE=\"steve\""));
-        assert!(userdata.contains("KEY_EXCHANGE=\"XWING-DRAFT10\""));
-        assert!(userdata.contains("CAUTION_KEY_EXCHANGE=\"$KEY_EXCHANGE\""));
         assert!(userdata.contains("\"steve_key_exchange\":\"XWING-DRAFT10\""));
         assert!(userdata.contains(&format!("\"commit\":\"{TEST_FRAMEWORK_COMMIT}\"")));
     }
@@ -3764,7 +3656,6 @@ mod tests {
         )
         .unwrap();
         assert!(script.contains("EGRESS=\"true\""));
-        assert!(script.contains("CAUTION_EGRESS=\"$EGRESS\""));
         let helper_upload = script
             .find("aws s3 cp /build/output/enclave.tap-framer")
             .unwrap();
@@ -3788,11 +3679,6 @@ mod tests {
         };
         let platform_commit = "0123456789abcdef0123456789abcdef01234567";
         let mut request = make_test_build_request_with_egress(true);
-        request.e2e_mode = "tls".to_string();
-        request.domain = Some("app.example.com".to_string());
-        request.http_upstream_protocol = "h2c".to_string();
-        request.ports = vec![8080];
-        request.http_port = Some(8080);
         request.framework_commit = platform_commit.to_string();
 
         let userdata = generate_builder_userdata(
@@ -3805,10 +3691,6 @@ mod tests {
         )
         .unwrap();
 
-        assert!(userdata.contains("E2E_MODE=\"tls\""));
-        assert!(userdata.contains("DOMAIN=\"app.example.com\""));
-        assert!(userdata.contains("HTTP_UPSTREAM_PROTOCOL=\"h2c\""));
-        assert!(userdata.contains("CAUTION_HTTP_UPSTREAM_PROTOCOL=\"$HTTP_UPSTREAM_PROTOCOL\""));
         assert!(userdata.contains(&format!(
             "https://git.caution.co/public/platform/archive/{platform_commit}.tar.gz"
         )));
