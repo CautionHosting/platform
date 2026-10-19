@@ -26,6 +26,7 @@ use bootproof_sdk::VerifiableSignedAttestationFormat;
 use bootproof_sdk::format::nitro::{Nitro, NitroPcrs};
 use docker_builder::{BuildConfig, build_user_image};
 use dterror::{BoxError, CtxError, FromContext, Location, ResultExt};
+use enclave_build::ImageBuildMechanism;
 use reqwest::tls::TlsInfo;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1164,7 +1165,6 @@ pub(crate) async fn build_local(client: &ApiClient, no_cache: bool) -> Result<()
         .and_then(|h| h.e2e_encryption.as_ref());
     let e2e_mode = e2e_config.and_then(|config| config.effective_mode());
     let e2e = e2e_mode == Some(caution_config::E2eMode::Steve);
-    let e2e_mode_value = e2e_mode.map(|mode| mode.as_str()).unwrap_or("disabled");
     let steve_commit = e2e.then(enclave_build_nitro::build::resolve_steve_commit);
     let measured_cache_key =
         measured_build_cache_key(&source_cache_key, &cfg, steve_commit.as_deref())
@@ -1186,119 +1186,64 @@ pub(crate) async fn build_local(client: &ApiClient, no_cache: bool) -> Result<()
     output::success(format!("✓ Application image built: {}", image_ref));
 
     let cache_dir = client.get_cache_dir().with_context(Ctx::cache_dir())?;
-    let builder = enclave_build_nitro::EnclaveBuilder::new_with_cache(
-        enclave_build::enclave_source_url(&enclave_build_nitro::build::resolve_enclaveos_commit()),
-        "unused",
-        &framework_source,
-        "local",
-        &cache_key,
-        enclave_build::BuildCacheType::Build,
-        no_cache,
-        &cache_dir,
-    )
-    .with_context(Ctx::init_builder())?;
 
-    let work_dir = builder.work_dir.clone();
-
-    let user_image = enclave_build::UserImage {
-        reference: image_ref.clone(),
-    };
-
-    let run_command = enclave
-        .and_then(|e| e.unit.as_ref())
-        .and_then(|u| u.values().next())
-        .map(|u| u.run_command_string())
-        .transpose()
-        .with_context(Ctx::parse_run_command())?;
-
-    let app_source_urls_opt = enclave
+    let app_source_urls = enclave
         .and_then(|e| e.build.as_ref())
         .map(|b| b.app_sources.clone())
-        .filter(|s| !s.is_empty());
+        .filter(|urls| !urls.is_empty());
+    let app_source = match (app_source_urls, app_commit.clone()) {
+        (Some(urls), Some(commit)) => Some(enclave_build::AppSource {
+            urls,
+            commit,
+            branch: app_branch.clone(),
+        }),
+        _ => None,
+    };
 
-    let ports = configured_ingress_ports(enclave.and_then(|e| e.network.as_ref()))
-        .with_context(Ctx::network_policy())?;
-
-    let http_port = enclave
-        .and_then(|config| config.network.as_ref())
-        .and_then(|network| network.http.as_ref())
-        .map(|http| http.port);
-    output::verbose(client.verbose, format!("HTTP port: {:?}", http_port));
-
-    let domain = enclave
-        .and_then(|config| config.network.as_ref())
-        .and_then(|network| network.http.as_ref())
-        .and_then(|http| http.domain.clone());
-
-    let e2e_key_exchange = e2e_config
-        .map(|ee| ee.key_exchange().steve_env_value())
-        .unwrap_or(caution_config::KeyExchange::X25519.steve_env_value());
-    let allow_plaintext_fallback = e2e_config
-        .map(|ee| ee.allow_plaintext_fallback())
-        .unwrap_or(false);
-    output::verbose(client.verbose, format!("E2E encryption: {}", e2e));
-
-    let locksmith = cfg.has_vault_env();
-    output::verbose(client.verbose, format!("Locksmith secrets: {}", locksmith));
-
-    let egress = config_egress_enabled(&cfg);
-    output::verbose(client.verbose, format!("Egress: {}", egress));
-
-    let e2e_cors_origins = e2e_config
-        .and_then(|e2e| e2e.cors_origins.as_ref())
-        .map(|origins| origins.join(","));
-
-    let http_upstream_protocol = enclave
-        .and_then(|config| config.network.as_ref())
-        .and_then(|network| network.http.as_ref())
-        .and_then(|http| http.upstream_protocol)
-        .map(|protocol| protocol.as_str())
-        .unwrap_or("http");
-    output::verbose(
-        client.verbose,
-        format!("HTTP upstream protocol: {}", http_upstream_protocol),
-    );
+    let input = enclave_build::BuildInput {
+        docker_image: enclave_build::UserImage {
+            reference: image_ref.clone(),
+        },
+        enclave_source: enclave_build::enclave_source_url(
+            &enclave_build_nitro::build::resolve_enclaveos_commit(),
+        ),
+        enclave_version: "unused".to_string(),
+        framework_source: framework_source.clone(),
+        workspace: enclave_build::BuildWorkspace::Cache {
+            base_dir: cache_dir,
+            org_id: "local".to_string(),
+            cache_key,
+            cache_type: enclave_build::BuildCacheType::Build,
+        },
+        manifest: None,
+        app_source,
+        metadata: None,
+        prebuilt_components: None,
+        no_cache,
+    };
 
     let loader = Spinner::new("Building enclave image", SpinnerStyle::Processing);
-    output::verbose(client.verbose, "Using build_enclave");
-    let deployment = builder
-        .build_enclave(
-            &user_image,
-            None,
-            run_command,
-            app_source_urls_opt,
-            app_branch.clone(),
-            app_commit.clone(),
-            None,
-            None,
-            &ports,
-            http_port,
-            e2e,
-            e2e_mode_value,
-            e2e_key_exchange,
-            allow_plaintext_fallback,
-            domain.as_deref(),
-            http_upstream_protocol,
-            locksmith,
-            e2e_cors_origins,
-            egress,
-        )
+    output::verbose(client.verbose, "Using NitroEifMechanism");
+    let artifacts = enclave_build_nitro::NitroEifMechanism::new()
+        .build(input, &cfg)
         .await
         .with_context(Ctx::build_enclave())?;
     loader.finish();
 
     output::success("✓ Enclave built successfully!");
 
-    let stage_dir = work_dir.join("eif-stage");
+    let stage_dir = artifacts.work_dir.join("eif-stage");
     output::status("=== Build Artifacts ===");
-    output::status(format!("EIF file: {}", deployment.eif.path.display()));
-    output::status(format!("Size: {} bytes", deployment.eif.size));
-    output::status(format!("SHA256: {}", deployment.eif.sha256));
+    output::status(format!("EIF file: {}", artifacts.image.path.display()));
+    output::status(format!("Size: {} bytes", artifacts.image.size));
+    output::status(format!("SHA256: {}", artifacts.image.sha256));
 
-    output::status("=== PCR Values ===");
-    output::status(format!("PCR0 (Enclave image): {}", deployment.pcrs.pcr0));
-    output::status(format!("PCR1 (Kernel/boot): {}", deployment.pcrs.pcr1));
-    output::status(format!("PCR2 (Application): {}", deployment.pcrs.pcr2));
+    if let Some(pcrs) = &artifacts.pcrs {
+        output::status("=== PCR Values ===");
+        output::status(format!("PCR0 (Enclave image): {}", pcrs.pcr0));
+        output::status(format!("PCR1 (Kernel/boot): {}", pcrs.pcr1));
+        output::status(format!("PCR2 (Application): {}", pcrs.pcr2));
+    }
 
     output::status("=== Build Directory ===");
     output::status(format!("Location: {}", stage_dir.display()));
