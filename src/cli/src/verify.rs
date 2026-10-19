@@ -1054,13 +1054,6 @@ struct StagedSource {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum BuildLocalError {
-    #[error("failed to normalize configured ingress ports [{location}]")]
-    NetworkPolicy {
-        #[location]
-        location: Location,
-        #[source]
-        source: BoxError,
-    },
     #[error("failed to read deployment config")]
     ReadConfig {
         #[location]

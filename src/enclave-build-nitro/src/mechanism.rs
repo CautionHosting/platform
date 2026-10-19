@@ -65,7 +65,13 @@ fn build_params(config: &ConfigurationFile) -> Result<BuildParams, ImageBuildErr
     let network = enclave.and_then(|e| e.network.as_ref());
     let http = network.and_then(|n| n.http.as_ref());
 
-    let ports = config.ingress_ports();
+    let ports = match network {
+        Some(network) => network
+            .policy()
+            .with_context(Ctx::invalid_configuration())?
+            .ports(),
+        None => Vec::new(),
+    };
 
     let e2e_config = http.and_then(|h| h.e2e_encryption.as_ref());
     let e2e_mode = e2e_config.and_then(|e| e.effective_mode());

@@ -67,6 +67,14 @@ pub enum DeployError {
         location: Location,
     },
 
+    #[error("deployment configuration is invalid [{location}]")]
+    InvalidConfiguration {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
     #[error("deployment failed [{location}]")]
     Deploy {
         #[location]

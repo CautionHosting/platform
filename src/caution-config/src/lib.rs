@@ -855,30 +855,6 @@ impl ConfigurationFile {
             .and_then(|enclaves| enclaves.values().next())
     }
 
-    /// Ingress ports, expanding `from_port..=to_port` ranges, sorted and deduped.
-    pub fn ingress_ports(&self) -> Vec<u16> {
-        let mut ports: Vec<u16> = self
-            .configured_enclave()
-            .and_then(|enclave| enclave.network.as_ref())
-            .map(|network| {
-                network
-                    .ingress
-                    .iter()
-                    .flat_map(|rule| match &rule.port_spec {
-                        Some(PortSpec::Exact { port }) => vec![*port],
-                        Some(PortSpec::FromTo {
-                            start_port,
-                            end_port,
-                        }) => (*start_port..=*end_port).collect::<Vec<u16>>(),
-                        None => Vec::new(),
-                    })
-                    .collect::<Vec<u16>>()
-            })
-            .unwrap_or_default();
-        ports.sort();
-        ports.dedup();
-        ports
-    }
     #[tracing::instrument(skip_all, err)]
     pub fn from_procfile(content: &str) -> Result<Self, FromProcfileError> {
         Self::parse_procfile(content, false)

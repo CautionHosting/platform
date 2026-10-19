@@ -63,15 +63,15 @@ impl AwsNitroDeployer {
     /// and non-configuration context. Exposed so callers that need the request
     /// (e.g. per-deployment candidate provisioning) share one interpretation of
     /// the configuration.
-    #[tracing::instrument(skip_all)]
+    #[tracing::instrument(skip_all, err)]
     pub fn build_request(
         &self,
         config: &ConfigurationFile,
         artifacts: &DeployArtifacts,
         ctx: &AwsDeployContext,
-    ) -> NitroDeploymentRequest {
-        let params = deploy_params(config);
-        NitroDeploymentRequest {
+    ) -> Result<NitroDeploymentRequest, DeployError> {
+        let params = deploy_params(config)?;
+        Ok(NitroDeploymentRequest {
             org_id: ctx.org_id,
             resource_id: ctx.resource_id,
             resource_name: ctx.resource_name.clone(),
@@ -99,7 +99,7 @@ impl AwsNitroDeployer {
             managed_onprem: ctx.managed_onprem.clone(),
             tls_await_app_address: ctx.tls_await_app_address,
             user_data: artifacts.user_data.clone(),
-        }
+        })
     }
 }
 
@@ -120,8 +120,8 @@ struct DeployParams {
     restart: caution_config::RestartConfig,
 }
 
-#[tracing::instrument(skip_all)]
-fn deploy_params(config: &ConfigurationFile) -> DeployParams {
+#[tracing::instrument(skip_all, err)]
+fn deploy_params(config: &ConfigurationFile) -> Result<DeployParams, DeployError> {
     let enclave = config.configured_enclave();
 
     let resources = enclave.and_then(|e| e.resources.as_ref());
@@ -129,12 +129,18 @@ fn deploy_params(config: &ConfigurationFile) -> DeployParams {
     let network = enclave.and_then(|e| e.network.as_ref());
     let http = network.and_then(|n| n.http.as_ref());
 
-    let ports = config.ingress_ports();
+    let ports = match network {
+        Some(network) => network
+            .policy()
+            .with_context(Ctx::invalid_configuration())?
+            .ports(),
+        None => Vec::new(),
+    };
 
     let e2e_config = http.and_then(|h| h.e2e_encryption.as_ref());
     let e2e_mode = e2e_config.and_then(|e| e.effective_mode());
 
-    DeployParams {
+    Ok(DeployParams {
         memory_mb: resources.map(|r| r.memory_mb).unwrap_or(512),
         cpu_count: resources.map(|r| r.cpu).unwrap_or(2),
         debug_mode: debug.and_then(|d| d.enabled).unwrap_or(false),
@@ -158,7 +164,7 @@ fn deploy_params(config: &ConfigurationFile) -> DeployParams {
         locksmith: config.has_vault_env(),
         egress: network.map(|n| n.egress_enabled()).unwrap_or(false),
         restart: enclave.and_then(|e| e.restart).unwrap_or_default(),
-    }
+    })
 }
 
 #[async_trait::async_trait]
@@ -177,7 +183,7 @@ impl EnclaveDeployer for AwsNitroDeployer {
         artifacts: &DeployArtifacts,
         ctx: &Self::DeployContext,
     ) -> Result<DeploymentResult, DeployError> {
-        let request = self.build_request(config, artifacts, ctx);
+        let request = self.build_request(config, artifacts, ctx)?;
         deploy_nitro_enclave(request)
             .await
             .with_context(Ctx::deploy())
