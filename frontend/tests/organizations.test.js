@@ -8,6 +8,7 @@ import {
   ORGANIZATION_CREATION_OUTCOME,
   ORGANIZATION_NAME_MAX_LENGTH,
   ORGANIZATION_NAME_MIN_LENGTH,
+  canRemoveOrganizationMember,
   needsOrganizationSetup,
   organizationCreationErrorMessage,
   organizationCreationOutcome,
@@ -132,4 +133,45 @@ test('failed creation messages prefer the API wording', () => {
   assert.equal(organizationCreationErrorMessage(null, ' plain text ', 'fallback'), 'plain text')
   assert.equal(organizationCreationErrorMessage(null, '   ', 'fallback'), 'fallback')
   assert.equal(organizationCreationErrorMessage(null, '', 'fallback'), 'fallback')
+})
+
+test('member removal is limited to owners and admins acting on other members', () => {
+  const options = { currentUserId: 'me', memberUserId: 'them', memberRole: 'member' }
+
+  assert.equal(canRemoveOrganizationMember({ ...options, role: 'owner' }), true)
+  assert.equal(canRemoveOrganizationMember({ ...options, role: 'admin' }), true)
+  assert.equal(canRemoveOrganizationMember({ ...options, role: 'Owner' }), true)
+  // Roles the API refuses to let manage the organization.
+  assert.equal(canRemoveOrganizationMember({ ...options, role: 'member' }), false)
+  assert.equal(canRemoveOrganizationMember({ ...options, role: 'viewer' }), false)
+  assert.equal(canRemoveOrganizationMember({ ...options, role: null }), false)
+  assert.equal(canRemoveOrganizationMember({ ...options, role: '' }), false)
+  // A user never removes themselves from this page.
+  assert.equal(
+    canRemoveOrganizationMember({ role: 'owner', currentUserId: 'me', memberUserId: 'me' }),
+    false,
+  )
+  // Only an owner may remove an owner, so the organization keeps an owner.
+  assert.equal(
+    canRemoveOrganizationMember({ ...options, role: 'owner', memberRole: 'owner' }),
+    true,
+  )
+  assert.equal(
+    canRemoveOrganizationMember({ ...options, role: 'admin', memberRole: 'owner' }),
+    false,
+  )
+  assert.equal(
+    canRemoveOrganizationMember({ ...options, role: 'admin', memberRole: 'Owner' }),
+    false,
+  )
+  // Without the caller's identity the action is not offered.
+  assert.equal(
+    canRemoveOrganizationMember({ role: 'owner', currentUserId: null, memberUserId: 'them' }),
+    false,
+  )
+  assert.equal(
+    canRemoveOrganizationMember({ role: 'owner', currentUserId: 'me', memberUserId: null }),
+    false,
+  )
+  assert.equal(canRemoveOrganizationMember(), false)
 })

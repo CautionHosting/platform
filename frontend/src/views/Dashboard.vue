@@ -842,8 +842,18 @@ make build-cli
               <span>Joined {{ formatDate(member.joined_at) }}</span>
             </div>
           </div>
+          <button
+            v-if="canRemoveMember(member)"
+            type="button"
+            class="btn-danger"
+            :disabled="removingMember === member.user_id"
+            @click="removeMember(member)"
+          >
+            {{ removingMember === member.user_id ? "Removing..." : "Remove" }}
+          </button>
         </div>
       </div>
+      <div v-if="removeMemberError" class="message message--error">{{ removeMemberError }}</div>
     </div>
 
     <!-- SSH Keys Tab -->
@@ -2038,6 +2048,7 @@ import {
   readAppListPreferences,
 } from "../utils/appList.js";
 import { formatLocalDate, formatLocalTime } from "../utils/dateTime.js";
+import { canRemoveOrganizationMember } from "../utils/organizations.js";
 import { getSubscriptionPlanAction } from "../utils/subscriptionPlan.js";
 import { getCurrentTheme } from "../utils/theme.js";
 import { isLegacyBundle, getQuorumBundleFiles, getQuorumBundleSummary, serializeQuorumBundle, bundleTitle, bundleIdentifiers, getEmbeddedBundleId, selectBundles } from "../utils/quorumBundle.js";
@@ -2496,6 +2507,10 @@ export default {
     const orgNameMessage = ref("");
     const organizationMembers = ref([]);
     const loadingMembers = ref(false);
+    const currentUserId = ref(null);
+    const currentMemberRole = ref(null);
+    const removingMember = ref(null);
+    const removeMemberError = ref("");
     const inviteEmail = ref("");
     const invitingUser = ref(false);
     const inviteMessage = ref("");
@@ -2643,6 +2658,7 @@ export default {
     const loadMembers = async () => {
       loadingMembers.value = true;
       inviteError.value = "";
+      removeMemberError.value = "";
 
       try {
         const orgId = await ensureCurrentOrgId();
@@ -2656,6 +2672,7 @@ export default {
           throw new Error(await readResponseError(response, "Failed to load users"));
         }
         organizationMembers.value = await response.json();
+        await loadCurrentMembership();
       } catch (err) {
         inviteError.value = err.message || "Failed to load users";
       } finally {
@@ -2754,6 +2771,79 @@ export default {
         showToast(inviteError.value, "error");
       } finally {
         cancelingInvitation.value = null;
+      }
+    };
+
+    // Removal is offered only to owners and admins, and never on their own row.
+    // Both facts come from the API: the member list carries every role, and
+    // /api/users/me carries the caller's id.
+    const canRemoveMember = (member) =>
+      canRemoveOrganizationMember({
+        role: currentMemberRole.value,
+        memberRole: member.role,
+        currentUserId: currentUserId.value,
+        memberUserId: member.user_id,
+      });
+
+    const loadCurrentMembership = async () => {
+      try {
+        const response = await authFetch("/api/users/me", { cache: "no-store" });
+        if (!response.ok) {
+          currentUserId.value = null;
+          currentMemberRole.value = null;
+          return;
+        }
+
+        const me = await response.json();
+        currentUserId.value = me.id || null;
+        const ownMembership = organizationMembers.value.find(
+          (member) => member.user_id === currentUserId.value,
+        );
+        currentMemberRole.value = ownMembership ? ownMembership.role : null;
+      } catch {
+        // Without the caller's own membership the action stays hidden rather
+        // than being offered and then refused.
+        currentUserId.value = null;
+        currentMemberRole.value = null;
+      }
+    };
+
+    const removeMember = async (member) => {
+      const label = member.email || member.username || member.user_id;
+      const confirmed = confirm(
+        `Remove ${label} from this organization?\n\n` +
+          "They lose access to its applications, secrets, users and credit balance. " +
+          "If this was their only organization, they must create a new one the next time they sign in.",
+      );
+      if (!confirmed) return;
+
+      removingMember.value = member.user_id;
+      removeMemberError.value = "";
+
+      try {
+        const orgId = await ensureCurrentOrgId();
+        if (!orgId) {
+          throw new Error("No organization found.");
+        }
+
+        const response = await authFetch(`/api/organizations/${orgId}/members/${member.user_id}`, {
+          method: "DELETE",
+        });
+
+        if (!response.ok) {
+          throw new Error(await readResponseError(response, "Failed to remove user"));
+        }
+
+        organizationMembers.value = organizationMembers.value.filter(
+          (item) => item.user_id !== member.user_id,
+        );
+        await loadCurrentMembership();
+        showToast("User removed");
+      } catch (err) {
+        removeMemberError.value = err.message || "Failed to remove user";
+        showToast(removeMemberError.value, "error");
+      } finally {
+        removingMember.value = null;
       }
     };
 
@@ -5400,6 +5490,10 @@ export default {
       saveOrganizationName,
       organizationMembers,
       loadingMembers,
+      canRemoveMember,
+      removingMember,
+      removeMemberError,
+      removeMember,
       inviteEmail,
       invitingUser,
       inviteMessage,

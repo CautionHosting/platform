@@ -88,6 +88,28 @@ export function organizationCreationErrorMessage(body, text, fallback) {
 }
 
 /**
+ * Whether the caller may remove a member from their organization.
+ *
+ * Mirrors the API's `can_manage_org` check (owner or admin) and adds two rules
+ * the API does not enforce: the caller's own row is never offered, and only an
+ * owner may remove an owner. Together they keep the organization with at least
+ * one owner, because the caller always keeps their own membership.
+ */
+export function canRemoveOrganizationMember({
+  role,
+  memberRole,
+  currentUserId,
+  memberUserId,
+} = {}) {
+  const callerRole = String(role || '').toLowerCase()
+  if (!['owner', 'admin'].includes(callerRole)) return false
+  if (!currentUserId || !memberUserId) return false
+  if (memberUserId === currentUserId) return false
+  if (String(memberRole || '').toLowerCase() === 'owner' && callerRole !== 'owner') return false
+  return true
+}
+
+/**
  * Mirrors the Platform API's organization-name validation so the form can
  * reject a bad name before a round trip. The API stays authoritative; the
  * messages here describe the same rules.
