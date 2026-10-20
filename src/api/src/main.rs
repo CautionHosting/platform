@@ -6343,12 +6343,28 @@ async fn main() -> Result<(), MainError> {
             middleware::auth_middleware,
         ));
 
+    // A user can end up belonging to no organization at all (for example after
+    // being removed from their last one). Every organization-scoped route is
+    // behind `onboarding_middleware`, which answers 500 for a user without an
+    // organization, so these two routes sit outside it: without them the state
+    // would be unrecoverable, because the user could never create the
+    // organization the rest of the API demands.
+    let organization_bootstrap_routes = Router::new()
+        .route("/organizations", get(organizations::list_organizations))
+        .route("/organizations", post(organizations::create_organization))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::legal_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::auth_middleware,
+        ));
+
     let resource_routes = Router::new()
         .route("/users/me", get(users::get_current_user))
         .route("/users/me", patch(users::update_current_user))
         .route("/users/me", delete(users::delete_current_user))
-        .route("/organizations", get(organizations::list_organizations))
-        .route("/organizations", post(organizations::create_organization))
         .route("/organizations/{id}", get(organizations::get_organization))
         .route(
             "/organizations/{id}",
@@ -6611,6 +6627,7 @@ async fn main() -> Result<(), MainError> {
 
     let app = Router::new()
         .merge(onboarding_routes)
+        .merge(organization_bootstrap_routes)
         .merge(resource_routes)
         .merge(internal_routes)
         .merge(public_routes)

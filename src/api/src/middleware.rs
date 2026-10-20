@@ -269,9 +269,12 @@ pub async fn ensure_user_has_org(db: &PgPool, user_id: Uuid) -> Result<(), Ensur
             .with_context(Ctx::membership())?;
 
     if !has_org {
-        // Organizations are created with the user in the gateway at signup.
+        // Organizations are created with the user in the gateway at signup, and
+        // the frontend offers creation to a user who has none, so an org-less
+        // user reaching an organization-scoped route is a bug or an interrupted
+        // flow rather than a state the API should have produced.
         tracing::error!(
-            "User {} has no organization; organizations are created during signup",
+            "User {} has no organization; organizations are created during signup or by the user",
             user_id
         );
         return Err(EnsureUserHasOrgError::MissingOrganization {

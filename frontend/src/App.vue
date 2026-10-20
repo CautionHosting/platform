@@ -29,6 +29,7 @@ import Onboarding from './views/Onboarding.vue'
 import Register from './views/Login.vue'
 import AuthLogin from './views/AuthLogin.vue'
 import Dashboard from './views/Dashboard.vue'
+import CreateOrganization from './views/CreateOrganization.vue'
 import QrLogin from './views/QrLogin.vue'
 import QrRelease from './views/QrRelease.vue'
 import InviteAccept from './views/InviteAccept.vue'
@@ -38,6 +39,7 @@ import PublicAttestation from './views/PublicAttestation.vue'
 import PublicE2ee from './views/PublicE2ee.vue'
 import LegalAcceptanceModal from './components/LegalAcceptanceModal.vue'
 import { authFetch, getCsrfToken } from './composables/useWebAuthn.js'
+import { needsOrganizationSetup } from './utils/organizations.js'
 
 const dashboardPreviewEnabled =
   typeof __CAUTION_DASHBOARD_PREVIEW__ !== 'undefined' && __CAUTION_DASHBOARD_PREVIEW__
@@ -49,6 +51,7 @@ export default {
     Register,
     AuthLogin,
     Dashboard,
+    CreateOrganization,
     QrLogin,
     QrRelease,
     InviteAccept,
@@ -229,6 +232,24 @@ export default {
         : ''
     }
 
+    const organizationSetupPageMeta = {
+      title: 'Create an organization • Caution',
+      description: 'Create the organization your Caution account belongs to.',
+      path: '/'
+    }
+
+    // A user without an organization cannot use the dashboard: every
+    // organization-scoped endpoint refuses them with a 500. The account tab is
+    // exempt because it is where a username is claimed, and organization
+    // creation is refused until one is.
+    const organizationSetupRequired = computed(() =>
+      needsOrganizationSetup({
+        isAuthenticated: isAuthenticated.value,
+        userStatus: userStatus.value,
+        hash: currentLocation.value.hash,
+      })
+    )
+
     const isDashboardLocation = (path, isUserAuthenticated) => {
       return path === '/dashboard' || (path === '/' && isUserAuthenticated)
     }
@@ -258,7 +279,10 @@ export default {
       canonical.setAttribute('href', url)
     }
 
-    const resolvePageMeta = (path, hash, isUserAuthenticated) => {
+    const resolvePageMeta = (path, hash, isUserAuthenticated, organizationSetup) => {
+      if (organizationSetup) {
+        return organizationSetupPageMeta
+      }
       if (isDashboardLocation(path, isUserAuthenticated)) {
         return dashboardPageMeta[dashboardHash(hash)]
       }
@@ -371,16 +395,19 @@ export default {
       const { path, hash } = currentLocation.value
 
       // Update page metadata
-      updatePageMeta(resolvePageMeta(path, hash, isAuthenticated.value))
+      updatePageMeta(
+        resolvePageMeta(path, hash, isAuthenticated.value, organizationSetupRequired.value),
+      )
 
       if (path === '/') {
         if (!authChecked.value) return null
-        return isAuthenticated.value ? 'Dashboard' : 'Register'
+        if (!isAuthenticated.value) return 'Register'
+        return organizationSetupRequired.value ? 'CreateOrganization' : 'Dashboard'
       } else if (path === '/login') {
         if (!authChecked.value) return null
         if (isAuthenticated.value) {
           replaceRoute('/')
-          return 'Dashboard'
+          return organizationSetupRequired.value ? 'CreateOrganization' : 'Dashboard'
         }
         // Login page (WebAuthn authentication)
         return 'AuthLogin'
@@ -405,7 +432,7 @@ export default {
           return 'Register'
         }
         replaceRoute('/', window.location.hash)
-        return 'Dashboard'
+        return organizationSetupRequired.value ? 'CreateOrganization' : 'Dashboard'
       } else if (path === '/qr-login') {
         // Public route - QR code CLI login (no auth required)
         return 'QrLogin'
@@ -427,7 +454,8 @@ export default {
 
       // Unknown path - redirect to home
       replaceRoute('/')
-      return isAuthenticated.value ? 'Dashboard' : 'Register'
+      if (!isAuthenticated.value) return 'Register'
+      return organizationSetupRequired.value ? 'CreateOrganization' : 'Dashboard'
     })
 
     const showPreviewBanner = computed(() => {

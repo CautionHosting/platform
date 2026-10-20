@@ -38,6 +38,10 @@ PLATFORM_GIT_SHA=0000000000000000000000000000000000000000 \
 # The API middleware requires an existing organization per user; run against the same schema.
 cargo test -p api middleware::db_tests --locked \
     -- --ignored --test-threads=1 --nocapture
+# A user without an organization must be able to create one, which is what makes
+# being removed from a last organization recoverable.
+cargo test -p api organizations::db_tests --locked \
+    -- --ignored --test-threads=1 --nocapture
 # Provider accounts are provisioned lazily on first use; the insert must be idempotent.
 AWS_ACCOUNT_ID=900896541515 \
     cargo test -p api provider_account_db_tests --locked \

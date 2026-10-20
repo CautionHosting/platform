@@ -319,9 +319,10 @@ Every other test stack runs with `APP_DEPLOYMENTS_ENABLED=false`
 test Legacy on a host that enables the flag. It defaults both flags off: an override
 that omits `APP_DEPLOYMENTS_BYOC_ENABLED` takes it from `~/.config/caution/.env`.
 
-- `make test-app-deployments-db`: concurrency and reconciliation tests, the API middleware's
-  organization contract, provider-account idempotency, gateway signup, and metering tests on
-  an isolated Postgres (anonymous container, random port; safe on a shared host).
+- `make test-app-deployments-db`: concurrency and reconciliation tests, the API
+  middleware's organization contract, organization creation for a user without one,
+  provider-account idempotency, gateway signup, and metering tests on an isolated
+  Postgres (anonymous container, random port; safe on a shared host).
 - `make test-e2e-app-deployments-schema`: schema checks against the test stack.
 - `make test-e2e-app-deployments`: AWS-backed lifecycle E2E (real enclave builds, three
   deployments). It starts the test stack with the flag and `MAX_CANDIDATES_PER_APP=1`

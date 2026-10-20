@@ -263,26 +263,43 @@ pub async fn create_organization(
     Extension(auth): Extension<AuthContext>,
     validated_types::Validated(payload): validated_types::Validated<CreateOrganizationRequest>,
 ) -> Result<Json<Organization>, CreateOrganizationError> {
+    create_organization_for_user(&state.db, auth.user_id, &payload.name)
+        .await
+        .map(Json)
+}
+
+/// Creates an organization owned by `user_id` with one owner membership.
+///
+/// Fails with [`CreateOrganizationError::AlreadyMember`] when the user already
+/// belongs to an organization, because a user may belong to exactly one. This is
+/// what makes an orphaned account recoverable: the organization-creating route
+/// is reachable without an organization, unlike the rest of the API.
+#[tracing::instrument(skip_all, err(Debug))]
+pub(crate) async fn create_organization_for_user(
+    pool: &PgPool,
+    user_id: Uuid,
+    name: &str,
+) -> Result<Organization, CreateOrganizationError> {
     use CreateOrganizationErrorCtx as Ctx;
 
-    if user_has_organization(&state.db, auth.user_id)
+    if user_has_organization(pool, user_id)
         .await
         .with_context(Ctx::has_org_check())?
     {
         return Err(CreateOrganizationError::AlreadyMember {
-            user_id: auth.user_id,
+            user_id,
             location: std::panic::Location::caller(),
         });
     }
 
-    let mut tx = state.db.begin().await.with_context(Ctx::begin())?;
+    let mut tx = pool.begin().await.with_context(Ctx::begin())?;
 
     let org = sqlx::query_as::<_, Organization>(
         "INSERT INTO organizations (name)
          VALUES ($1)
          RETURNING id, name, is_active, created_at, updated_at",
     )
-    .bind(&payload.name)
+    .bind(name)
     .fetch_one(&mut *tx)
     .await
     .with_context(Ctx::insert_org())?;
@@ -292,7 +309,7 @@ pub async fn create_organization(
          VALUES ($1, $2, $3)",
     )
     .bind(org.id)
-    .bind(auth.user_id)
+    .bind(user_id)
     .bind(types::UserRole::Owner)
     .execute(&mut *tx)
     .await
@@ -315,7 +332,7 @@ pub async fn create_organization(
 
     tx.commit().await.with_context(Ctx::commit())?;
 
-    Ok(Json(org))
+    Ok(org)
 }
 
 /// Failure modes for [`get_organization`].
@@ -1396,11 +1413,11 @@ pub async fn remove_member(
         });
     }
 
-    // TODO: removing a user's last membership leaves them with no organization,
-    // which the onboarding middleware reports as a 500 on every later request.
-    // That 500 is deliberate for now so the problem stays visible rather than
-    // silently orphaning the account; work out the intended semantics (create a
-    // personal organization, or require multi-organization support) later.
+    // Removing a user's last membership does leave them with no organization,
+    // which the onboarding middleware reports as a 500 on every later
+    // organization-scoped request. That is now recoverable rather than a dead
+    // end: creation and listing are reachable without an organization, and the
+    // frontend sends an org-less user to the organization creation page.
     sqlx::query(
         "DELETE FROM organization_members
          WHERE organization_id = $1 AND user_id = $2",
@@ -1413,3 +1430,6 @@ pub async fn remove_member(
 
     Ok(StatusCode::NO_CONTENT)
 }
+
+#[cfg(test)]
+mod db_tests;

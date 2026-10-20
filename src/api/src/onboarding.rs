@@ -28,11 +28,13 @@ use crate::{AppState, AuthContext};
 
 pub(crate) const EMAIL_VERIFICATION_RESEND_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 
-/// A `users` row carrying the onboarding-completion signals.
+/// A `users` row carrying the onboarding-completion signals, plus whether the
+/// user currently belongs to an organization.
 type UserStatusRow = (
     Option<DateTime<Utc>>,
     Option<DateTime<Utc>>,
     Option<uuid::Uuid>,
+    bool,
 );
 
 #[derive(Debug, PartialEq, Eq)]
@@ -73,6 +75,10 @@ pub struct UserStatus {
     pub email_verified: bool,
     pub payment_method_added: bool,
     pub onboarding_complete: bool,
+    /// Whether the user currently belongs to an organization. The frontend uses
+    /// this to offer organization creation instead of the dashboard, because
+    /// every organization-scoped endpoint refuses a user who has none.
+    pub has_organization: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub legal: Option<crate::legal::UserLegalStatus>,
 }
@@ -136,9 +142,16 @@ pub async fn get_user_status(
     use GetUserStatusErrorCtx as Ctx;
 
     let result: Option<UserStatusRow> = sqlx::query_as(
-        "SELECT email_verified_at, payment_method_added_at, beta_code_id
-         FROM users
-         WHERE id = $1",
+        "SELECT u.email_verified_at,
+                u.payment_method_added_at,
+                u.beta_code_id,
+                EXISTS (
+                    SELECT 1
+                    FROM organization_members om
+                    WHERE om.user_id = u.id
+                )
+         FROM users u
+         WHERE u.id = $1",
     )
     .bind(auth.user_id)
     .fetch_optional(&state.db)
@@ -146,8 +159,8 @@ pub async fn get_user_status(
     .inspect_err(|e| tracing::error!("Failed to get user status: {:?}", e))
     .with_context(Ctx::query())?;
 
-    let (email_verified_at, payment_method_added_at, alpha_code_id) =
-        result.ok_or_else(|| GetUserStatusError::NotFound {
+    let (email_verified_at, payment_method_added_at, alpha_code_id, has_organization) = result
+        .ok_or_else(|| GetUserStatusError::NotFound {
             user_id: auth.user_id,
             location: std::panic::Location::caller(),
         })?;
@@ -173,6 +186,7 @@ pub async fn get_user_status(
         email_verified,
         payment_method_added,
         onboarding_complete,
+        has_organization,
         legal,
     }))
 }
