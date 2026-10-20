@@ -499,8 +499,8 @@ docker exec "$DB_CONTAINER" psql -U postgres -d "$DB_NAME" -c "
 UPDATE users SET email_verified_at = NOW(), payment_method_added_at = NOW() WHERE id = '$USER_ID';
 " >/dev/null 2>&1 || log "  Warning: could not mark user as onboarded"
 
-# Trigger API-side account provisioning now that onboarding flags are set
-curl -sf "$API_URL/resources" -H "X-Session-ID: $SESSION_ID" >/dev/null 2>&1 || log "  Warning: could not trigger org provisioning"
+# The e2e-login seed already created this user's organization at signup, so no
+# request needs to trigger organization provisioning here.
 
 ORG_ID=""
 for _ in $(seq 1 10); do

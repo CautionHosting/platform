@@ -1396,6 +1396,11 @@ pub async fn remove_member(
         });
     }
 
+    // TODO: removing a user's last membership leaves them with no organization,
+    // which the onboarding middleware reports as a 500 on every later request.
+    // That 500 is deliberate for now so the problem stays visible rather than
+    // silently orphaning the account; work out the intended semantics (create a
+    // personal organization, or require multi-organization support) later.
     sqlx::query(
         "DELETE FROM organization_members
          WHERE organization_id = $1 AND user_id = $2",

@@ -56,4 +56,11 @@ ALPHA_CODE="$ALPHA_CODE" \
 USERNAME="$USERNAME" \
     "$BIN_DIR/target/debug/soft-authenticator" || fail "round-trip failed"
 
+# ── Step 5: the signup route created the user's organization ─────────
+ROUNDTRIP_USER_ID=$(psql_q "SELECT id FROM users WHERE username = '$USERNAME'")
+[ -n "$ROUNDTRIP_USER_ID" ] || fail "registered user $USERNAME not found"
+OWNER_ORGS=$(psql_q "SELECT COUNT(*) FROM organization_members WHERE user_id = '$ROUNDTRIP_USER_ID' AND role = 'owner'")
+[ "$OWNER_ORGS" = "1" ] || fail "expected exactly one owner organization, got $OWNER_ORGS"
+log "organization created at signup (owner memberships: $OWNER_ORGS)"
+
 log "✓ PASS"

@@ -123,7 +123,7 @@ CLAIM_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$GATEWAY_URL/user/u
 [ "$CLAIM_CODE" = "200" ] || step_fail "Claim username (HTTP $CLAIM_CODE)"
 psql_exec "UPDATE users SET email_verified_at = NOW(), payment_method_added_at = NOW() WHERE id = '$USER_ID'" \
     || step_fail "Mark test user as onboarded"
-curl -sf "$GATEWAY_URL/api/resources" -H "X-Session-ID: $SESSION_ID" >/dev/null || true # provisions the org
+# The organization was created at signup (e2e-login), so nothing to provision here.
 for _ in $(seq 1 10); do
     [ -n "$(psql_value "SELECT organization_id FROM organization_members WHERE user_id = '$USER_ID' LIMIT 1")" ] && break
     sleep 1

@@ -420,15 +420,6 @@ pub async fn verify_email(
 
     tracing::info!("Email verified for user {}", user_id);
 
-    if let Err(e) = crate::provisioning::initialize_user_account(&state.db, user_id).await {
-        tracing::error!("Failed to initialize account for user {}: {:?}", user_id, e);
-    } else {
-        tracing::info!(
-            "Account initialized for user {} after email verification",
-            user_id
-        );
-    }
-
     let frontend_url =
         std::env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:8000".to_string());
 

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-FileCopyrightText: 2026 Caution SEZC
 # SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Caution-Commercial
-# App deployments concurrency, reconciliation and metering reconcile tests against an isolated,
-# fully migrated PostgreSQL database (anonymous container on a random port; no test stack).
+# App deployments concurrency and reconciliation, the API middleware's organization contract, and
+# metering reconcile tests against an isolated, fully migrated PostgreSQL database (anonymous
+# container on a random port; no test stack).
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 WORK=$(mktemp -d)
@@ -33,6 +34,19 @@ export APP_DEPLOYMENTS_TEST_DATABASE_URL="postgresql://postgres:postgres@127.0.0
 # A syntactically valid framework commit lets /deploy reach its later gates.
 PLATFORM_GIT_SHA=0000000000000000000000000000000000000000 \
     cargo test -p api app_deployments::lifecycle::db_tests --locked \
+    -- --ignored --test-threads=1 --nocapture
+# The API middleware requires an existing organization per user; run against the same schema.
+cargo test -p api middleware::db_tests --locked \
+    -- --ignored --test-threads=1 --nocapture
+# Provider accounts are provisioned lazily on first use; the insert must be idempotent.
+AWS_ACCOUNT_ID=900896541515 \
+    cargo test -p api provider_account_db_tests --locked \
+    -- --ignored --test-threads=1 --nocapture
+# The gateway creates users (and their organization) at signup; these use sqlx::test to build
+# disposable databases, so DATABASE_URL points at any database whose role can create databases
+# (the container's default `postgres` database).
+DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$PORT/postgres" \
+    cargo test -p gateway organization_tests --locked \
     -- --ignored --test-threads=1 --nocapture
 # The metering service's reconcile SQL runs against the same schema.
 cargo test -p metering handlers::collection::tests --locked \
