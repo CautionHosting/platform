@@ -63,6 +63,9 @@ mod validated_types;
 mod validation;
 mod webauthn_reset;
 
+#[cfg(test)]
+mod provider_account_db_tests;
+
 const DEFAULT_DEPLOYMENT_HEALTH_TIMEOUT_SECS: u64 = 600;
 const LIFECYCLE_RECONCILE_INTERVAL_SECS: u64 = 30;
 const TEARDOWN_CONCURRENCY: usize = 2;
@@ -360,6 +363,7 @@ pub(crate) async fn get_or_create_provider_account(
         "SELECT pa.id, pa.role_arn, pa.is_active FROM provider_accounts pa
          JOIN providers p ON pa.provider_id = p.id
          WHERE pa.organization_id = $1 AND p.provider_type = 'aws'
+         ORDER BY pa.created_at ASC
          LIMIT 1",
     )
     .bind(org_id)
@@ -397,22 +401,30 @@ pub(crate) async fn get_or_create_provider_account(
         aws_account_id
     );
 
+    // Concurrent first uses for a brand-new organization (for example two
+    // parallel `POST /resources`) can each find no row and then try to insert.
+    // The unique constraint on (organization_id, provider_id,
+    // external_account_id) turns the losing insert into an upsert, so a single
+    // statement always returns the row id.
     let account_id: (Uuid,) = sqlx::query_as(
         "INSERT INTO provider_accounts
-         (organization_id, provider_id, external_account_id, account_name, role_arn, is_active)
-         VALUES ($1, (SELECT id FROM providers WHERE provider_type = 'aws'), $2, $3, $4, true)
+         (organization_id, provider_id, external_account_id, account_name, description, role_arn, is_active)
+         VALUES ($1, (SELECT id FROM providers WHERE provider_type = 'aws'), $2, $3, $4, $5, true)
+         ON CONFLICT (organization_id, provider_id, external_account_id)
+             DO UPDATE SET updated_at = NOW()
          RETURNING id",
     )
     .bind(org_id)
     .bind(&aws_account_id)
-    .bind(format!("AWS Account {}", aws_account_id))
+    .bind(format!("Org {} AWS Account", org_id))
+    .bind("AWS root account (shared)")
     .bind(&role_arn)
     .fetch_one(db)
     .await
     .with_context(Ctx::insert())?;
 
     tracing::info!(
-        "Created provider account {} for org {} using AWS account {}",
+        "Ensured provider account {} for org {} using AWS account {}",
         account_id.0,
         org_id,
         aws_account_id
@@ -6331,12 +6343,28 @@ async fn main() -> Result<(), MainError> {
             middleware::auth_middleware,
         ));
 
+    // A user can end up belonging to no organization at all (for example after
+    // being removed from their last one). Every organization-scoped route is
+    // behind `onboarding_middleware`, which answers 500 for a user without an
+    // organization, so these two routes sit outside it: without them the state
+    // would be unrecoverable, because the user could never create the
+    // organization the rest of the API demands.
+    let organization_bootstrap_routes = Router::new()
+        .route("/organizations", get(organizations::list_organizations))
+        .route("/organizations", post(organizations::create_organization))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::legal_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::auth_middleware,
+        ));
+
     let resource_routes = Router::new()
         .route("/users/me", get(users::get_current_user))
         .route("/users/me", patch(users::update_current_user))
         .route("/users/me", delete(users::delete_current_user))
-        .route("/organizations", get(organizations::list_organizations))
-        .route("/organizations", post(organizations::create_organization))
         .route("/organizations/{id}", get(organizations::get_organization))
         .route(
             "/organizations/{id}",
@@ -6599,6 +6627,7 @@ async fn main() -> Result<(), MainError> {
 
     let app = Router::new()
         .merge(onboarding_routes)
+        .merge(organization_bootstrap_routes)
         .merge(resource_routes)
         .merge(internal_routes)
         .merge(public_routes)

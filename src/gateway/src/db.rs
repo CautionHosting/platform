@@ -117,6 +117,9 @@ pub struct OrganizationInvitation {
 
 const LEGACY_DEFAULT_ORG_PREFIX: &str = "Organization for user ";
 
+/// Name of the default organization created for every new user at signup.
+const DEFAULT_ORGANIZATION_NAME: &str = "My organization";
+
 fn public_organization_name(name: &str) -> String {
     let trimmed = name.trim();
     if let Some(user_id) = trimmed.strip_prefix(LEGACY_DEFAULT_ORG_PREFIX) {
@@ -204,21 +207,57 @@ pub async fn get_username_status(pool: &PgPool, user_id: Uuid) -> Result<(String
     Ok(row)
 }
 
-/// Creates a user and records legal consent events in a single transaction.
-/// If either the user creation or legal event recording fails, the entire
-/// transaction rolls back — no account exists without consent records.
+/// Creates a user's default organization and owner membership inside `tx`.
+///
+/// The route that creates a non-org-bound user calls this next to
+/// [`create_user`]; invitation registrations join an existing organization
+/// instead and must not call it.
+#[tracing::instrument(skip_all, err)]
+pub(crate) async fn create_default_organization(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+) -> Result<Uuid, DbError> {
+    let org_id: Uuid =
+        sqlx::query_scalar("INSERT INTO organizations (name) VALUES ($1) RETURNING id")
+            .bind(DEFAULT_ORGANIZATION_NAME)
+            .fetch_one(&mut **tx)
+            .await
+            .with_context(DbErrorCtx::new(
+                DbErrorKind::QueryFailed,
+                "create_default_organization: insert organization",
+            ))?;
+
+    sqlx::query(
+        "INSERT INTO organization_members (organization_id, user_id, role)
+         VALUES ($1, $2, $3::user_role)",
+    )
+    .bind(org_id)
+    .bind(user_id)
+    .bind("owner")
+    .execute(&mut **tx)
+    .await
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "create_default_organization: add owner",
+    ))?;
+
+    tracing::info!("Created organization {} for user {}", org_id, user_id);
+
+    Ok(org_id)
+}
+
+/// Creates a user and records legal consent events. The caller owns the
+/// transaction and must commit it, so user creation can be composed atomically
+/// with the rest of a signup flow (for example creating the organization for a
+/// non-org-bound user).
+#[tracing::instrument(skip_all, err)]
 pub async fn create_user(
-    pool: &PgPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     fido2_user_handle: &[u8],
     alpha_code_id: Uuid,
     username: &str,
     legal: &SignupLegalContext,
 ) -> Result<Uuid, DbError> {
-    let mut tx = pool.begin().await.with_context(DbErrorCtx::new(
-        DbErrorKind::QueryFailed,
-        "create_user: begin",
-    ))?;
-
     let redemption = sqlx::query(
         "UPDATE beta_codes
          SET used_at = NOW()
@@ -227,7 +266,7 @@ pub async fn create_user(
            AND (expires_at IS NULL OR expires_at > NOW())",
     )
     .bind(alpha_code_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .with_context(DbErrorCtx::new(
         DbErrorKind::QueryFailed,
@@ -244,7 +283,7 @@ pub async fn create_user(
     }
 
     let user_id = insert_user_with_legal_events(
-        &mut tx,
+        tx,
         CreateUserInput {
             fido2_user_handle,
             email: None,
@@ -256,11 +295,6 @@ pub async fn create_user(
         legal,
     )
     .await?;
-
-    tx.commit().await.with_context(DbErrorCtx::new(
-        DbErrorKind::QueryFailed,
-        "create_user: commit",
-    ))?;
 
     Ok(user_id)
 }
@@ -1864,6 +1898,11 @@ pub async fn create_e2e_user(pool: &PgPool) -> Result<(Uuid, Vec<u8>), DbError> 
     // `POST /user/username` to lift the gate. A non-placeholder seed would
     // make the gate never fire (the gate test sees 200, not 403) and make the
     // one-time claim return 409 already-claimed instead of 200.
+    let mut tx = pool.begin().await.with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "create_e2e_user: begin",
+    ))?;
+
     let user_id: Uuid = sqlx::query_scalar(
         "INSERT INTO users (fido2_user_handle, username, email, beta_code_id, username_is_placeholder)
          VALUES ($1, $2, NULL, NULL, true)
@@ -1871,11 +1910,18 @@ pub async fn create_e2e_user(pool: &PgPool) -> Result<(Uuid, Vec<u8>), DbError> 
     )
     .bind(&user_handle[..])
     .bind(&username)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .with_context(DbErrorCtx::new(
         DbErrorKind::QueryFailed,
         "create_e2e_user",
+    ))?;
+
+    create_default_organization(&mut tx, user_id).await?;
+
+    tx.commit().await.with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "create_e2e_user: commit",
     ))?;
 
     // Insert a dummy credential row so session validation joins work. Store a
@@ -2059,6 +2105,10 @@ mod credential_uv_tests {
 #[cfg(test)]
 #[path = "db/passkey_usage_tests.rs"]
 mod passkey_usage_tests;
+
+#[cfg(test)]
+#[path = "db/organization_tests.rs"]
+mod organization_tests;
 
 #[cfg(test)]
 mod credential_owner_tests {

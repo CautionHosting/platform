@@ -165,8 +165,14 @@ pub(crate) async fn finish_register_handler(
 
     let user_id = match pending.kind {
         PendingRegistrationKind::AlphaCode { alpha_code_id } => {
+            // A non-org-bound user gets a personal organization next to the user
+            // in one transaction, so neither exists without the other. The
+            // invitation registration below joins an existing organization
+            // instead and must not create one.
+            let mut tx = state.db.begin().await.with_context(Ctx::internal())?;
+
             let user_id = match db::create_user(
-                &state.db,
+                &mut tx,
                 &user_unique_id.as_bytes()[..],
                 alpha_code_id,
                 &pending.username,
@@ -193,7 +199,12 @@ pub(crate) async fn finish_register_handler(
                 }
             };
 
-            tracing::debug!("User registered and alpha code redeemed");
+            db::create_default_organization(&mut tx, user_id)
+                .await
+                .with_context(Ctx::internal())?;
+            tx.commit().await.with_context(Ctx::internal())?;
+
+            tracing::debug!("User registered, alpha code redeemed, organization created");
             user_id
         }
         PendingRegistrationKind::OrganizationInvite {

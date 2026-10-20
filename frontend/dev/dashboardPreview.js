@@ -10,6 +10,7 @@ const previewUserStatus = {
   username: 'preview-operator',
   username_is_placeholder: false,
   email_verified: true,
+  has_organization: true,
   legal: {
     privacy_notice: {
       title: 'Privacy Notice',

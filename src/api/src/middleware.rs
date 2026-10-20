@@ -226,7 +226,7 @@ pub async fn validate_session(db: &PgPool, session_id: &str) -> Result<Uuid, Val
     })
 }
 
-/// Failure modes for [`ensure_user_has_org`] (leaf error; callers map into their own type).
+/// Failure modes for [`ensure_user_has_org`] (callers map them into their own type).
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum EnsureUserHasOrgError {
     #[error("could not check onboarding status [{location}]")]
@@ -248,13 +248,8 @@ pub enum EnsureUserHasOrgError {
         source: BoxError,
     },
 
-    #[error("failed to initialize user account [{location}]")]
-    Initialize {
-        #[location]
-        location: Location,
-        #[source]
-        source: BoxError,
-    },
+    #[error("user {user_id} has no organization [{location}]")]
+    MissingOrganization { user_id: Uuid, location: Location },
 }
 
 #[tracing::instrument(skip_all)]
@@ -262,6 +257,31 @@ pub async fn ensure_user_has_org(db: &PgPool, user_id: Uuid) -> Result<(), Ensur
     use EnsureUserHasOrgErrorCtx as Ctx;
 
     tracing::debug!("ensure_user_has_org: checking user {}", user_id);
+
+    // Membership is checked first so an org-less user is always reported as the
+    // invariant violation it is, rather than hidden behind the onboarding gate.
+    let has_org: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM organization_members WHERE user_id = $1)")
+            .bind(user_id)
+            .fetch_one(db)
+            .await
+            .inspect_err(|e| tracing::error!("Failed to check user org membership: {:?}", e))
+            .with_context(Ctx::membership())?;
+
+    if !has_org {
+        // Organizations are created with the user in the gateway at signup, and
+        // the frontend offers creation to a user who has none, so an org-less
+        // user reaching an organization-scoped route is a bug or an interrupted
+        // flow rather than a state the API should have produced.
+        tracing::error!(
+            "User {} has no organization; organizations are created during signup or by the user",
+            user_id
+        );
+        return Err(EnsureUserHasOrgError::MissingOrganization {
+            user_id,
+            location: std::panic::Location::caller(),
+        });
+    }
 
     let is_onboarded = crate::onboarding::check_onboarding_status(db, user_id)
         .await
@@ -275,30 +295,10 @@ pub async fn ensure_user_has_org(db: &PgPool, user_id: Uuid) -> Result<(), Ensur
         });
     }
 
-    let has_org: bool =
-        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM organization_members WHERE user_id = $1)")
-            .bind(user_id)
-            .fetch_one(db)
-            .await
-            .inspect_err(|e| tracing::error!("Failed to check user org membership: {:?}", e))
-            .with_context(Ctx::membership())?;
-
-    if has_org {
-        tracing::debug!("User {} already has organization", user_id);
-        return Ok(());
-    }
-
-    tracing::info!(
-        "User {} has no organization, initializing new account",
+    tracing::debug!(
+        "User {} has an organization and completed onboarding",
         user_id
     );
-
-    crate::provisioning::initialize_user_account(db, user_id)
-        .await
-        .inspect_err(|e| tracing::error!("Failed to initialize user account: {:?}", e))
-        .with_context(Ctx::initialize())?;
-
-    tracing::info!("Successfully initialized account for user {}", user_id);
     Ok(())
 }
 
@@ -527,3 +527,6 @@ mod tests {
         assert_eq!(parse_auth_method(""), None);
     }
 }
+
+#[cfg(test)]
+mod db_tests;

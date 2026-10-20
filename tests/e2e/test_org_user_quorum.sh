@@ -107,12 +107,11 @@ fi
 step_pass "E2E login (user: $USER_ID)"
 
 STEP_NUM=3
-log "Marking user onboarded and provisioning organization membership..."
+log "Marking user onboarded (organization was created at signup)..."
 docker exec postgres-test psql -U postgres -d caution_test -c "
 UPDATE users SET email_verified_at = NOW(), payment_method_added_at = NOW(), username_is_placeholder = false WHERE id = '$USER_ID';
 " >/dev/null 2>&1 || step_fail "Mark e2e user onboarded"
 
-curl -sf "$API_URL/resources" -H "X-Session-ID: $SESSION_ID" >/dev/null 2>&1 || true
 ORG_ID=""
 for _ in $(seq 1 10); do
     ORG_ID=$(docker exec postgres-test psql -U postgres -d caution_test -t -A -c "
@@ -123,9 +122,9 @@ SELECT organization_id FROM organization_members WHERE user_id = '$USER_ID' LIMI
 done
 
 if [ -z "$ORG_ID" ]; then
-    step_fail "Organization membership was provisioned"
+    step_fail "Organization membership exists from signup"
 fi
-step_pass "Organization membership provisioned"
+step_pass "Organization membership exists from signup"
 
 STEP_NUM=4
 log "Verifying authenticated discovery contains the expected organization member..."
