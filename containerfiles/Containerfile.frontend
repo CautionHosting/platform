@@ -6,7 +6,7 @@ FROM stagex/core-busybox@sha256:e4a30addc8939c8e232472de904d1d9e97fc2e735fca9a97
 FROM stagex/core-libzstd@sha256:bfe96f975a2a2a7a48aeb418b44accc79dd26d601a94d9f02b0562eaa0f89fdd AS libzstd
 FROM stagex/pallet-gcc-gnu-busybox@sha256:67f4a035c680065fc0278517594ab07bf1b9416dc054508a8893ca20df04e415 AS gcc
 
-FROM pallet-nodejs AS frontend-deps
+FROM pallet-nodejs AS frontend-packages
 
 COPY --from=npm . /
 COPY --from=git . /
@@ -19,11 +19,13 @@ WORKDIR /app
 
 COPY frontend/package.json frontend/package-lock.json* ./
 
+FROM frontend-packages AS frontend-deps
+
 RUN npm ci
 
-FROM frontend-deps AS npm-audit
+FROM frontend-packages AS npm-audit
 
-RUN npm audit --audit-level=high
+ENTRYPOINT ["timeout", "300", "npm", "audit", "--package-lock-only", "--include=dev", "--include=optional", "--audit-level=high"]
 
 FROM frontend-deps AS builder
 

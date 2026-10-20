@@ -603,6 +603,7 @@ up:
 .PHONY: up-components prepare-components test-prepare-components
 up-components:
 	@git diff --quiet HEAD -- || { echo "Commit tracked changes before make up"; exit 1; }
+	@$(MAKE) audit
 	@$(MAKE) build-api API_IMAGE=caution-api-components
 	@$(MAKE) build-gateway build-email build-metering
 	@$(MAKE) prepare-components API_IMAGE=caution-api-components
@@ -623,6 +624,23 @@ prepare-components: network
 
 test-prepare-components:
 	@python3 tests/test_prepare_components.py
+
+.PHONY: audit audit-npm audit-cargo test-audit
+audit:
+	@$(MAKE) audit-npm
+	@$(MAKE) audit-cargo
+
+audit-npm:
+	@docker build -t caution-npm-audit -f containerfiles/Containerfile.frontend --target npm-audit .
+	@docker run --rm caution-npm-audit
+
+audit-cargo:
+	@docker build -t caution-cargo-audit -f containerfiles/Containerfile.audit .
+	@docker run --rm caution-cargo-audit --file Cargo.lock
+	@docker run --rm caution-cargo-audit --file src/tap-framer/Cargo.lock
+
+test-audit:
+	@python3 tests/test_audit.py
 
 down:
 	@docker rm -f gateway api email metering 2>/dev/null || true
@@ -1278,7 +1296,7 @@ test-paddle-sandbox:
 		paddle::tests::test_full_billing_lifecycle_sandbox \
 		paddle::tests::test_duplicate_customer_sandbox
 
-test: test-unit test-cli-install test-bootstrap test-e2e-contracts test-prepare-components
+test: test-unit test-cli-install test-bootstrap test-e2e-contracts test-prepare-components test-audit
 
 .PHONY: test-share-release-browser
 test-share-release-browser:
