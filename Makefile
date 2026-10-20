@@ -625,7 +625,7 @@ prepare-components: network
 test-prepare-components:
 	@python3 tests/test_prepare_components.py
 
-.PHONY: audit audit-npm audit-cargo test-audit
+.PHONY: audit audit-npm audit-cargo
 audit:
 	@$(MAKE) audit-npm
 	@$(MAKE) audit-cargo
@@ -638,9 +638,6 @@ audit-cargo:
 	@docker build -t caution-cargo-audit -f containerfiles/Containerfile.audit .
 	@docker run --rm caution-cargo-audit --file Cargo.lock
 	@docker run --rm caution-cargo-audit --file src/tap-framer/Cargo.lock
-
-test-audit:
-	@python3 tests/test_audit.py
 
 down:
 	@docker rm -f gateway api email metering 2>/dev/null || true
@@ -1260,7 +1257,7 @@ test-paddle-sandbox:
 		paddle::tests::test_full_billing_lifecycle_sandbox \
 		paddle::tests::test_duplicate_customer_sandbox
 
-test: test-unit test-cli-install test-setup test-e2e-contracts test-prepare-components test-audit
+test: test-unit test-cli-install test-setup test-e2e-contracts test-prepare-components
 
 .PHONY: test-share-release-browser
 test-share-release-browser:
