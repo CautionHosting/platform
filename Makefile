@@ -603,6 +603,7 @@ up:
 .PHONY: up-components prepare-components test-prepare-components
 up-components:
 	@git diff --quiet HEAD -- || { echo "Commit tracked changes before make up"; exit 1; }
+	@$(MAKE) audit
 	@$(MAKE) build-api API_IMAGE=caution-api-components
 	@$(MAKE) build-gateway build-email build-metering
 	@$(MAKE) prepare-components API_IMAGE=caution-api-components
@@ -623,6 +624,20 @@ prepare-components: network
 
 test-prepare-components:
 	@python3 tests/test_prepare_components.py
+
+.PHONY: audit audit-npm audit-cargo
+audit:
+	@$(MAKE) audit-npm
+	@$(MAKE) audit-cargo
+
+audit-npm:
+	@docker build -t caution-npm-audit -f containerfiles/Containerfile.frontend --target npm-audit .
+	@docker run --rm caution-npm-audit
+
+audit-cargo:
+	@docker build -t caution-cargo-audit -f containerfiles/Containerfile.audit .
+	@docker run --rm caution-cargo-audit --file Cargo.lock
+	@docker run --rm caution-cargo-audit --file src/tap-framer/Cargo.lock
 
 down:
 	@docker rm -f gateway api email metering 2>/dev/null || true

@@ -1,0 +1,3 @@
+[advisories]
+# Unscored vulnerabilities also fail, as cargo-audit cannot establish their severity.
+severity_threshold = "high"

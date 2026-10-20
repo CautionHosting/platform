@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 Caution SEZC
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+
+FROM stagex/pallet-rust@sha256:9c38bf1066dd9ad1b6a6b584974dd798c2bf798985bf82e58024fbe0515592ca AS rust
+FROM stagex/core-ca-certificates@sha256:d135f1189e9b232eb7316626bf7858534c5540b2fc53dced80a4c9a95f26493e AS ca-certificates
+
+FROM rust
+COPY --from=ca-certificates . /
+ENV CARGO_HOME=/usr/local/cargo
+RUN cargo install --locked --version 0.22.2 --no-default-features cargo-audit
+
+WORKDIR /audit
+COPY .cargo/audit.toml .cargo/audit.toml
+COPY Cargo.lock Cargo.lock
+COPY src/tap-framer/Cargo.lock src/tap-framer/Cargo.lock
+
+# Fetch current advisories at runtime, even when the image build is cached.
+ENTRYPOINT ["timeout", "300", "cargo", "audit"]

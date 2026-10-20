@@ -16,7 +16,15 @@ keep operator configuration in `~/.config/caution/` rather than editing tracked
 defaults. Do not bypass the check: image, source and recipes must identify the
 same reviewed commit.
 
-Make still builds the service images, runs migrations and restarts the existing
+Before building service images, Make runs `make audit` in Docker against current
+npm and RustSec advisories. It checks `frontend/package-lock.json`, the workspace
+`Cargo.lock`, and the standalone `src/tap-framer/Cargo.lock`, including build/dev
+dependencies. High/critical vulnerabilities, unscored Rust vulnerabilities, and
+audit failures block deployment. Each scan has a five-minute timeout. Audit
+results are never taken from Docker's build cache, so each invocation needs
+network access. Run `make audit` separately to check before deployment.
+
+Make then builds the service images, runs migrations and restarts the existing
 systemd user services. Before migrations or restarts, a **component-only** step
 prepares and validates the API's enclave components. Operators do not calculate
 or paste hashes. Gateway, email and metering retain their existing launch commands

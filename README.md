@@ -98,10 +98,19 @@ Start the platform services after reviewing configuration:
 make up
 ```
 
-`make up` starts PostgreSQL, runs migrations, builds the API, gateway (including
-frontend assets), email, and metering images, then starts those services. No
-separate `make build-all` is needed; the first run requires network access for
-image pulls and build dependencies.
+`make up` first runs `make audit`: npm audit checks the frontend lockfile
+(including development dependencies), and cargo audit checks the workspace and
+tap-framer lockfiles. High or critical vulnerabilities block deployment; Rust
+vulnerabilities without a severity score also block it. Audit errors, including
+unavailable advisory services or a five-minute scan timeout, stop deployment
+before service builds, migrations, or restarts. The audits run in Docker, require
+network access on every invocation, and do not modify dependencies.
+
+After the audits pass, `make up` builds the API, gateway (including frontend
+assets), email, and metering images, prepares enclave components, starts
+PostgreSQL, runs migrations, and restarts the services. No separate
+`make build-all` is needed; the first run requires network access for image pulls
+and build dependencies.
 
 Run the local setup and migration-script regression tests with `make test-setup`;
 these also run as part of `make test` and use temporary directories and stubbed
