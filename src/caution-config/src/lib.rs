@@ -562,6 +562,12 @@ pub enum FromStrError {
         location: dterror::Location,
     },
 
+    #[error("a domain is required when e2e_encryption resolves to mode = \"tls\" [{location}]")]
+    TlsRequiresDomain {
+        #[location]
+        location: dterror::Location,
+    },
+
     #[error(
         "Invalid env expression for key '{key}'; only string literals and env::vault(...) are allowed [{location}]"
     )]
@@ -1210,13 +1216,20 @@ impl ConfigurationFile {
                         });
                     }
 
-                    if let Some(e2e) = http.e2e_encryption.as_ref()
-                        && e2e.key_exchange.is_some()
-                        && e2e.effective_mode() != Some(E2eMode::Steve)
-                    {
-                        return Err(FromStrError::KeyExchangeRequiresSteve {
-                            location: std::panic::Location::caller(),
-                        });
+                    if let Some(e2e) = http.e2e_encryption.as_ref() {
+                        if e2e.key_exchange.is_some()
+                            && e2e.effective_mode() != Some(E2eMode::Steve)
+                        {
+                            return Err(FromStrError::KeyExchangeRequiresSteve {
+                                location: std::panic::Location::caller(),
+                            });
+                        }
+
+                        if e2e.effective_mode() == Some(E2eMode::Tls) && http.domain.is_none() {
+                            return Err(FromStrError::TlsRequiresDomain {
+                                location: std::panic::Location::caller(),
+                            });
+                        }
                     }
                 }
 
@@ -3079,6 +3092,7 @@ enclave "main" {{
       port = 8080
     }}
     http {{
+      domain = "app.example.com"
       port = 8080
       e2e_encryption {{
         {body}
@@ -3124,6 +3138,49 @@ enclave "main" {{
                     Err(FromStrError::KeyExchangeRequiresSteve { .. })
                 ),
                 "expected key_exchange rejection: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn e2e_tls_requires_a_domain() {
+        let config = |domain: &str, e2e: &str| {
+            ConfigurationFile::from_str(&format!(
+                r#"
+enclave "main" {{
+  network {{
+    ingress {{
+      cidr_ipv4 = "0.0.0.0/0"
+      port = 8080
+    }}
+    http {{
+      {domain}
+      port = 8080
+      e2e_encryption {{
+        {e2e}
+      }}
+    }}
+  }}
+}}
+"#
+            ))
+        };
+
+        assert!(
+            matches!(
+                config("", r#"mode = "tls""#),
+                Err(FromStrError::TlsRequiresDomain { .. })
+            ),
+            "tls without a domain must be rejected"
+        );
+        assert!(
+            config(r#"domain = "app.example.com""#, r#"mode = "tls""#).is_ok(),
+            "tls with a domain must be accepted"
+        );
+        for e2e in [r#"mode = "steve""#, "enabled = false"] {
+            assert!(
+                config("", e2e).is_ok(),
+                "a domain is only required for tls: {e2e}"
             );
         }
     }

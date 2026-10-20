@@ -4408,7 +4408,10 @@ mod tests {
         );
     }
 
-    fn config_with_e2e(body: &str, domain: Option<&str>) -> ConfigurationFile {
+    fn config_with_e2e(
+        body: &str,
+        domain: Option<&str>,
+    ) -> Result<ConfigurationFile, caution_config::FromStrError> {
         let domain = domain
             .map(|domain| format!("domain = \"{domain}\""))
             .unwrap_or_default();
@@ -4431,12 +4434,12 @@ enclave "main" {{
 }}
 "#
         ))
-        .unwrap()
     }
 
     #[test]
     fn tls_expectation_requires_tls_mode_and_domain() {
-        let tls = config_with_e2e(r#"mode = "tls""#, Some("app.example.com"));
+        let tls =
+            config_with_e2e(r#"mode = "tls""#, Some("app.example.com")).expect("tls with a domain");
         assert_eq!(
             tls_expectation_from_config(&tls).unwrap(),
             Some(TlsExpectation {
@@ -4444,10 +4447,44 @@ enclave "main" {{
             })
         );
 
-        let steve = config_with_e2e(r#"mode = "steve""#, None);
+        let steve = config_with_e2e(r#"mode = "steve""#, None).expect("steve needs no domain");
         assert_eq!(tls_expectation_from_config(&steve).unwrap(), None);
 
-        let missing_domain = config_with_e2e(r#"mode = "tls""#, None);
+        assert!(matches!(
+            config_with_e2e(r#"mode = "tls""#, None),
+            Err(caution_config::FromStrError::TlsRequiresDomain { .. })
+        ));
+
+        let missing_domain = ConfigurationFile {
+            caution: None,
+            enclave: Some(std::collections::BTreeMap::from([(
+                "main".to_string(),
+                caution_config::EnclaveConfig {
+                    build: None,
+                    debug: None,
+                    resources: None,
+                    restart: None,
+                    unit: None,
+                    network: Some(caution_config::NetworkConfig {
+                        ingress: Vec::new(),
+                        egress: Vec::new(),
+                        recovery_ingress: None,
+                        http: Some(caution_config::HttpConfig {
+                            domain: None,
+                            port: 8080,
+                            upstream_protocol: None,
+                            e2e_encryption: Some(E2eEncryption {
+                                enabled: None,
+                                mode: Some(E2eMode::Tls),
+                                cors_origins: None,
+                                key_exchange: None,
+                                allow_plaintext_fallback: None,
+                            }),
+                        }),
+                    }),
+                },
+            )])),
+        };
         assert!(tls_expectation_from_config(&missing_domain).is_err());
     }
 
