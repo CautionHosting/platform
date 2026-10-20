@@ -269,8 +269,9 @@ struct SwitchRow {
 /// The target's switch facts; `suffix` appends a locking clause. Binds `$1`
 /// app, `$2` target deployment, `$3` caller (an org member) and `$4` the
 /// deployments lifecycle.
-fn switch_row_sql(suffix: &str) -> String {
-    format!(
+fn switch_row_sql(suffix: &'static str) -> sqlx::AssertSqlSafe<String> {
+    // Only static SQL fragments are interpolated; caller values use bind parameters.
+    sqlx::AssertSqlSafe(format!(
         "SELECT cr.organization_id, cr.state::text AS app_state, cr.live_deployment_id, cr.region,
         d.status AS target_status, d.instance_id AS target_instance_id,
         {TLS_AFTER_SWITCH_SQL} AS target_tls_after_switch,
@@ -281,7 +282,7 @@ fn switch_row_sql(suffix: &str) -> String {
      JOIN app_deployments d ON d.app_id = cr.id AND d.id = $2
      LEFT JOIN app_deployments l ON l.id = cr.live_deployment_id
      WHERE cr.id = $1 AND cr.lifecycle = $4 AND cr.destroyed_at IS NULL{suffix}"
-    )
+    ))
 }
 
 /// The plan, app region and target instance, or why the switch is refused.
@@ -369,7 +370,7 @@ async fn switch(
 ) -> Result<SwitchResponse, SwitchError> {
     // 1. Validate and health-check without locks: the health wait can take
     //    ~70 s and must not block pushes, destroys or other switches.
-    let row: Option<SwitchRow> = sqlx::query_as(&switch_row_sql(""))
+    let row: Option<SwitchRow> = sqlx::query_as(switch_row_sql(""))
         .bind(app_id)
         .bind(deployment_id)
         .bind(auth.user_id)
@@ -512,7 +513,7 @@ pub(super) async fn commit_switch(
     lock_app_operations(&mut tx, app_id)
         .await
         .with_context(Ctx::database())?;
-    let row: Option<SwitchRow> = sqlx::query_as(&switch_row_sql(" FOR UPDATE OF cr, d"))
+    let row: Option<SwitchRow> = sqlx::query_as(switch_row_sql(" FOR UPDATE OF cr, d"))
         .bind(app_id)
         .bind(deployment_id)
         .bind(user_id)

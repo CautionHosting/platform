@@ -14,11 +14,11 @@
     "attestation-widget": "git+https://git.caution.co/public/attestation-widget.git#7d60e623b4d1c151590d8d5dd925f88dc627e01e",
     "openpgp": "6.3.1",
     "tee-attestation-js": "git+https://git.caution.co/public/tee-attestation-js.git#ba0d0c57de673c8576c91a8730775a87575f5c10",
-    "vue": "3.5.34"
+    "vue": "3.5.44"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "6.0.6",
-    "vite": "8.2.1"
+    "vite": "8.3.4"
   },
   "optionalDependencies": {
     "lightningcss-linux-x64-gnu": "1.32.0",

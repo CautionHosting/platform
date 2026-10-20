@@ -34,7 +34,7 @@ bytes = "1.5"
 futures = "0.3"
 
 # Onboarding dependencies
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.12", features = ["json"] }
 url = { workspace = true }
 
 # Quorum integration: reuse upstream formats and proof verification.
@@ -55,8 +55,8 @@ rand = { workspace = true }
 
 # AWS SDK for S3 uploads and managed on-prem deployments
 aws-config = { version = "1.1", features = ["behavior-version-latest"] }
-aws-sdk-route53 = "1.15"
-aws-sdk-s3 = "1.15"
+aws-sdk-route53 = { version = "1.15", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-s3 = { version = "1.15", default-features = false, features = ["sigv4a", "http-1x", "default-https-client", "rt-tokio"] }
 
 hmac = { workspace = true }
 hex = { workspace = true }

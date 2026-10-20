@@ -227,10 +227,11 @@ const OPEN_ELSEWHERE: &str = "r.outcome = 'requested' AND r.owner_process_id IS 
 /// Called by live repair once it has confirmed the app's EIP holder, so a
 /// switch is settled from the association, never from a lagging pointer.
 pub(crate) async fn settle_switches(db: &PgPool, app_id: Uuid, holder: Option<Uuid>) {
-    let open: Result<Vec<(Uuid, Option<Uuid>)>, _> = sqlx::query_as(&format!(
+    // Only static SQL fragments are interpolated; runtime values are bound below.
+    let open: Result<Vec<(Uuid, Option<Uuid>)>, _> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT r.operation_id, r.target_deployment_id FROM deployment_events r
          WHERE r.app_id = $2 AND r.operation = 'switch' AND {OPEN_ELSEWHERE}"
-    ))
+    )))
     .bind(*PROCESS_ID)
     .bind(app_id)
     .fetch_all(db)
@@ -264,7 +265,8 @@ struct Interrupted {
 /// Destroys whose request ended without an outcome, and switches of apps
 /// destroyed meanwhile (live repair no longer visits them).
 pub(crate) async fn settle_interrupted(db: &PgPool) -> Result<usize, SettleError> {
-    let rows: Vec<Interrupted> = sqlx::query_as(&format!(
+    // Only static SQL fragments are interpolated; runtime values are bound below.
+    let rows: Vec<Interrupted> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT r.operation_id, r.operation, r.target_deployment_id,
                 cr.destroyed_at IS NOT NULL AS app_destroyed, cr.state::text AS app_state,
                 t.status AS target_status, t.cleaned_up_at IS NOT NULL AS target_cleaned_up
@@ -273,7 +275,7 @@ pub(crate) async fn settle_interrupted(db: &PgPool) -> Result<usize, SettleError
          LEFT JOIN app_deployments t ON t.id = r.target_deployment_id AND t.app_id = r.app_id
          WHERE {OPEN_ELSEWHERE}
            AND (r.operation <> 'switch' OR cr.destroyed_at IS NOT NULL)"
-    ))
+    )))
     .bind(*PROCESS_ID)
     .fetch_all(db)
     .await

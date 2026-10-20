@@ -590,7 +590,7 @@ run-drift-detector: network
 # Main targets
 # =============================================================================
 
-.PHONY: setup test-bootstrap
+.PHONY: setup test-setup
 
 setup:
 	@bash scripts/setup-platform.sh
@@ -954,8 +954,8 @@ test-live-caddy-nitro:
 test-cli-install:
 	@bash tests/test_cli_install.sh
 
-test-bootstrap:
-	@python3 -m unittest discover -s tests -p test_infra_bootstrap.py -v
+test-setup:
+	@python3 -m unittest discover -s tests -p test_platform_setup.py -v
 
 .PHONY: test-e2e-contracts
 test-e2e-contracts:
@@ -1232,47 +1232,11 @@ test-e2e-paddle-subscriptions:
 		bash tests/e2e/test_paddle_subscriptions.sh \
 	'
 
-setup-builder:
-	@echo "Bootstrapping dedicated builder infrastructure via infra-bootstrap..."
-	@if [ -n "$(BUILDER_VPC_ID)" ] && [ -z "$(BUILDER_SUBNET_ID)" ]; then \
-		echo "ERROR: Set both BUILDER_VPC_ID and BUILDER_SUBNET_ID, or neither."; \
-		exit 1; \
-	fi
-	@cd infra-bootstrap && \
-	TF_ARGS="" && \
-	if [ -n "$(TERRAFORM_STATE_BUCKET)" ]; then \
-		TF_ARGS="$$TF_ARGS -var=state_bucket_name=$(TERRAFORM_STATE_BUCKET)"; \
-	fi && \
-	if [ -n "$(EIF_S3_BUCKET)" ]; then \
-		TF_ARGS="$$TF_ARGS -var=eif_bucket_name=$(EIF_S3_BUCKET)"; \
-	fi && \
-	if [ -n "$(BUILDER_SUBNET_ID)" ]; then \
-		TF_ARGS="$$TF_ARGS -var=builder_subnet_id=$(BUILDER_SUBNET_ID)"; \
-	fi && \
-	if [ -n "$(BUILDER_VPC_ID)" ]; then \
-		TF_ARGS="$$TF_ARGS -var=builder_vpc_id=$(BUILDER_VPC_ID)"; \
-	fi && \
-	if [ -n "$(AWS_PROFILE)" ]; then \
-		unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN; \
-	fi && \
-	terraform init && \
-	terraform apply -auto-approve $$TF_ARGS
-	@cd infra-bootstrap && \
-	AMI=$$(terraform output -raw builder_ami_id) && \
-	SG=$$(terraform output -raw builder_security_group_id) && \
-	SUBNET=$$(terraform output -raw builder_subnet_id) && \
-	PROFILE=$$(terraform output -raw builder_instance_profile) && \
-	cd .. && \
-	grep -q "^BUILDER_AMI_ID" $(HOME)/.config/caution/.env 2>/dev/null && sed -i "s/^BUILDER_AMI_ID=.*/BUILDER_AMI_ID=$$AMI/" $(HOME)/.config/caution/.env || echo "BUILDER_AMI_ID=$$AMI" >> $(HOME)/.config/caution/.env && \
-	grep -q "^BUILDER_SECURITY_GROUP_ID" $(HOME)/.config/caution/.env 2>/dev/null && sed -i "s/^BUILDER_SECURITY_GROUP_ID=.*/BUILDER_SECURITY_GROUP_ID=$$SG/" $(HOME)/.config/caution/.env || echo "BUILDER_SECURITY_GROUP_ID=$$SG" >> $(HOME)/.config/caution/.env && \
-	grep -q "^BUILDER_SUBNET_ID" $(HOME)/.config/caution/.env 2>/dev/null && sed -i "s/^BUILDER_SUBNET_ID=.*/BUILDER_SUBNET_ID=$$SUBNET/" $(HOME)/.config/caution/.env || echo "BUILDER_SUBNET_ID=$$SUBNET" >> $(HOME)/.config/caution/.env && \
-	grep -q "^BUILDER_INSTANCE_PROFILE" $(HOME)/.config/caution/.env 2>/dev/null && sed -i "s/^BUILDER_INSTANCE_PROFILE=.*/BUILDER_INSTANCE_PROFILE=$$PROFILE/" $(HOME)/.config/caution/.env || echo "BUILDER_INSTANCE_PROFILE=$$PROFILE" >> $(HOME)/.config/caution/.env
-	@echo "Builder env vars written to $(HOME)/.config/caution/.env"
-
+.PHONY: test-e2e-builder
 test-e2e-builder:
-	@echo "Reading builder config from infra-bootstrap state..."
-	@cd infra-bootstrap && terraform output builder_ami_id > /dev/null 2>&1 || \
-		(echo "ERROR: Builder infrastructure not found. Run 'make setup-builder' first." && exit 1)
+	@bash -c 'for var in BUILDER_AMI_ID BUILDER_SECURITY_GROUP_ID BUILDER_SUBNET_ID BUILDER_INSTANCE_PROFILE; do \
+		test -n "$${!var:-}" || { echo "ERROR: Export $$var from the infrastructure-provided configuration before running this test." >&2; exit 1; }; \
+	 done'
 	@$(MAKE) build-cli
 	@$(MAKE) up-test
 	@CAUTION_BIN="$(PWD)/$(CLI_OUT_DIR)/$(CLI_BINARY)" bash tests/e2e/test_dedicated_builder.sh; \
@@ -1296,7 +1260,7 @@ test-paddle-sandbox:
 		paddle::tests::test_full_billing_lifecycle_sandbox \
 		paddle::tests::test_duplicate_customer_sandbox
 
-test: test-unit test-cli-install test-bootstrap test-e2e-contracts test-prepare-components test-audit
+test: test-unit test-cli-install test-setup test-e2e-contracts test-prepare-components test-audit
 
 .PHONY: test-share-release-browser
 test-share-release-browser:

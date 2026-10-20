@@ -18,7 +18,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 aws-config = "1.5"
-aws-sdk-ec2 = "1.82"
+aws-sdk-ec2 = { version = "1.82", default-features = false, features = ["default-https-client", "rt-tokio"] }
 
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 

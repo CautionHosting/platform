@@ -1095,7 +1095,7 @@ pub async fn run_cleanups(pool: &PgPool) {
     ];
 
     for (name, query) in tasks {
-        match sqlx::query(query).execute(pool).await {
+        match sqlx::query(*query).execute(pool).await {
             Ok(result) if result.rows_affected() > 0 => {
                 tracing::info!("Cleaned up {} {}", result.rows_affected(), name);
             }

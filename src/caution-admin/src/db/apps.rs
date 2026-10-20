@@ -68,7 +68,8 @@ impl Database {
             filter_predicate(filter),
             order::list(ResourceKind::App, Some(sort)),
         );
-        let rows = sqlx::query_as::<_, SummaryRow>(&sql)
+        // SQL fragments come from static allowlists; operator values are bound below.
+        let rows = sqlx::query_as::<_, SummaryRow>(sqlx::AssertSqlSafe(sql))
             .bind(i64::from(limit) + 1)
             .bind(i64::from(offset))
             .fetch_all(&self.pool)

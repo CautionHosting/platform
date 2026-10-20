@@ -138,7 +138,8 @@ impl Database {
             order::search(sort)
         );
 
-        let rows = sqlx::query_as::<_, SummaryRow>(&sql)
+        // SQL fragments come from static allowlists; operator values are bound below.
+        let rows = sqlx::query_as::<_, SummaryRow>(sqlx::AssertSqlSafe(sql))
             .bind(pattern)
             .bind(exact)
             .bind(i64::from(limit) + 1)
@@ -181,7 +182,8 @@ impl Database {
                      ORDER BY {ordering}
                      LIMIT $1 OFFSET $2"
                 );
-                sqlx::query_as::<_, SummaryRow>(&sql)
+                // SQL fragments come from static allowlists; operator values are bound below.
+                sqlx::query_as::<_, SummaryRow>(sqlx::AssertSqlSafe(sql))
                     .bind(fetch_limit)
                     .bind(offset)
                     .fetch_all(&self.pool)
@@ -201,7 +203,8 @@ impl Database {
                      ORDER BY {ordering}
                      LIMIT $1 OFFSET $2"
                 );
-                sqlx::query_as::<_, SummaryRow>(&sql)
+                // SQL fragments come from static allowlists; operator values are bound below.
+                sqlx::query_as::<_, SummaryRow>(sqlx::AssertSqlSafe(sql))
                     .bind(fetch_limit)
                     .bind(offset)
                     .fetch_all(&self.pool)
@@ -219,7 +222,8 @@ impl Database {
                      ORDER BY {ordering}
                      LIMIT $1 OFFSET $2"
                 );
-                sqlx::query_as::<_, SummaryRow>(&sql)
+                // SQL fragments come from static allowlists; operator values are bound below.
+                sqlx::query_as::<_, SummaryRow>(sqlx::AssertSqlSafe(sql))
                     .bind(fetch_limit)
                     .bind(offset)
                     .fetch_all(&self.pool)

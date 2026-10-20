@@ -1110,7 +1110,8 @@ pub(crate) async fn begin_termination(
     crate::app_deployments::lock_app_operations(&mut tx, resource_id)
         .await
         .with_context(Ctx::query())?;
-    let result = sqlx::query(&format!(
+    // Only static SQL fragments are interpolated; runtime values are bound below.
+    let result = sqlx::query(sqlx::AssertSqlSafe(format!(
         "UPDATE compute_resources
          SET state = 'terminating',
              dns_status = CASE WHEN dns_status = 'ready' THEN 'withdrawing' ELSE dns_status END,
@@ -1120,20 +1121,22 @@ pub(crate) async fn begin_termination(
              updated_at = NOW()
          WHERE id = $1 AND destroyed_at IS NULL AND state <> 'pending'
            AND NOT ({DEPLOYMENT_OPERATION_ACTIVE})"
-    ))
+    )))
     .bind(resource_id)
     .execute(&mut *tx)
     .await
     .with_context(Ctx::query())?;
     if result.rows_affected() == 0 {
-        let state: Option<(String, Option<DateTime<Utc>>, bool)> = sqlx::query_as(&format!(
-            "SELECT state::text, destroyed_at, {DEPLOYMENT_OPERATION_ACTIVE}
+        // Only static SQL fragments are interpolated; runtime values are bound below.
+        let state: Option<(String, Option<DateTime<Utc>>, bool)> =
+            sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                "SELECT state::text, destroyed_at, {DEPLOYMENT_OPERATION_ACTIVE}
              FROM compute_resources WHERE id = $1"
-        ))
-        .bind(resource_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .with_context(Ctx::query())?;
+            )))
+            .bind(resource_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .with_context(Ctx::query())?;
         if state.is_some_and(|(state, destroyed_at, deploying)| {
             destroyed_at.is_none() && (state == "pending" || deploying)
         }) {

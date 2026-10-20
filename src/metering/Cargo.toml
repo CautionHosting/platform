@@ -34,5 +34,5 @@ hex = { workspace = true }
 
 # AWS SDK
 aws-config = { version = "1.1", features = ["behavior-version-latest"] }
-aws-sdk-costexplorer = "1.15"
-aws-sdk-cloudwatch = "1.15"
+aws-sdk-costexplorer = { version = "1.15", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-cloudwatch = { version = "1.15", default-features = false, features = ["default-https-client", "rt-tokio"] }
