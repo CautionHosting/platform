@@ -271,9 +271,9 @@ pub async fn create_organization(
 /// Creates an organization owned by `user_id` with one owner membership.
 ///
 /// Fails with [`CreateOrganizationError::AlreadyMember`] when the user already
-/// belongs to an organization, because a user may belong to exactly one. This is
-/// what makes an orphaned account recoverable: the organization-creating route
-/// is reachable without an organization, unlike the rest of the API.
+/// belongs to an organization, because a user may belong to exactly one. An
+/// org-less account is recoverable because this route is reachable without an
+/// organization, unlike the rest of the API.
 #[tracing::instrument(skip_all, err(Debug))]
 pub(crate) async fn create_organization_for_user(
     pool: &PgPool,
