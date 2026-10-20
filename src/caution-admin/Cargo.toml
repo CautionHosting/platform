@@ -14,9 +14,9 @@ path = "src/main.rs"
 
 [dependencies]
 aws-config = "1.5"
-aws-sdk-costexplorer = "1.15"
-aws-sdk-ec2 = "1.82"
-aws-sdk-sts = "1"
+aws-sdk-costexplorer = { version = "1.15", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-ec2 = { version = "1.82", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-sts = { version = "1", default-features = false, features = ["sigv4a", "default-https-client", "rt-tokio"] }
 chrono = { workspace = true }
 clap = { version = "4.5", features = ["derive"] }
 crossterm = "0.29"

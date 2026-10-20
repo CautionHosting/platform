@@ -222,7 +222,8 @@ pub(super) async fn query_rows_with(
     deployment_id: Option<Uuid>,
     retained_only: bool,
 ) -> Result<Vec<DeploymentRow>, QueryRowsError> {
-    sqlx::query_as(&format!(
+    // Only static SQL fragments are interpolated; runtime values are bound below.
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT d.id, d.app_id, d.status, d.failure_kind, d.pushed_ref, d.commit_sha,
                 d.commit_subject, d.instance_id, d.instance_type,
                 COALESCE(d.region, cr.region) AS region, d.created_at, d.running_at,
@@ -242,7 +243,7 @@ pub(super) async fn query_rows_with(
                 OR d.status IN ('reserved', 'building', 'provisioning', 'running', 'destroying')
                 OR (d.status = 'failed' AND d.cleaned_up_at IS NULL))
          ORDER BY d.created_at DESC, d.id"
-    ))
+    )))
     .bind(user_id)
     .bind(app_id)
     .bind(deployment_id)

@@ -10,6 +10,9 @@ build-cache/
 caution-cache/
 tests/e2e/logs/
 
+# Retired bootstrap workspaces may still contain local state and credentials.
+/infra-bootstrap/
+
 # Terraform
 .terraform/
 *.tfstate

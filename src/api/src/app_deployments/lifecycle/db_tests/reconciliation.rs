@@ -384,7 +384,7 @@ async fn failure(pool: &PgPool, id: Uuid) -> (String, Option<String>, Option<Str
         .unwrap()
 }
 
-async fn update(pool: &PgPool, sql: &str, id: Uuid) {
+async fn update(pool: &PgPool, sql: &'static str, id: Uuid) {
     sqlx::query(sql).bind(id).execute(pool).await.unwrap();
 }
 

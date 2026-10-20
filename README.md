@@ -21,12 +21,25 @@ An enclave is **verifiable** when you can independently confirm that the code ru
 - Docker with BuildKit/buildx and <a href="https://docs.docker.com/engine/storage/containerd/#enable-containerd-image-store-on-docker-engine" target="_blank">containerd</a> enabled; the supplied units use `/usr/bin/docker` and require daemon access without `sudo`
 - GNU Make
 - Bash
-- Git, wget, coreutils, and OpenSSL; Python 3 and jq for the bootstrap regression tests
+- Git, wget, coreutils, and OpenSSL; Python 3 for the setup regression tests
 - Linux/x86_64 with a working systemd user session for the platform services; the CLI also supports macOS on Apple silicon
 
 ### 1. Bootstrap AWS infrastructure
 
-Follow the [bootstrapping guide](infra-bootstrap/README.md) to create the required AWS infrastructure (S3 buckets, IAM user, DynamoDB table, and the delegated `apps.caution.sh` Route53 zone).
+AWS account infrastructure is managed in the
+[Caution infrastructure repository](https://git.caution.co/public/infrastructure),
+not this repository. For a new dedicated development account, follow its
+[AWS Platform bootstrap runbook](https://git.caution.co/public/infrastructure/src/branch/main/runbooks/bootstrap-aws-platform.md).
+That workflow provisions the host, storage, IAM, DNS and builder resources and
+installs a pinned Platform checkout using the `make setup` / `make up` workflow below.
+
+Existing deployments should keep their current configuration and infrastructure
+state. Removing the former `infra-bootstrap/` source does **not** migrate or
+destroy AWS resources. Preserve any old local state, plans and credential exports
+securely; do not apply the new-account bootstrap to an existing deployment or run
+Terraform against the retired directory. Adopting existing resources requires a
+separate reviewed state migration. The application/BYOC provisioning code under
+`src/` remains part of Platform.
 
 ### 2. Run the platform
 
@@ -90,8 +103,15 @@ frontend assets), email, and metering images, then starts those services. No
 separate `make build-all` is needed; the first run requires network access for
 image pulls and build dependencies.
 
-Run the script/setup regression tests with `make test-bootstrap`; these also run
-as part of `make test` and use temporary directories and stubbed cloud commands.
+Run the local setup and migration-script regression tests with `make test-setup`;
+these also run as part of `make test` and use temporary directories and stubbed
+Docker, systemd and database commands.
+
+The opt-in `make test-e2e-builder` requires the four `BUILDER_*` values listed in
+`env.example` exported into the test environment, alongside the AWS credentials
+and bucket configuration. These must match the configuration used by `make up-test`.
+Provision them through the infrastructure repository first; this test no longer
+reads local bootstrap state and still creates real AWS resources.
 
 For Key Services setup, quorum creation, and secret recovery, see the
 [secrets operator runbook](docs/secrets-operations.md).

@@ -141,7 +141,8 @@ impl Database {
                      WHERE om.user_id = $1{order}
                      LIMIT $2 OFFSET $3"
                 );
-                sqlx::query_as::<_, RelatedRow>(&sql)
+                // SQL fragments come from static allowlists; operator values are bound below.
+                sqlx::query_as::<_, RelatedRow>(sqlx::AssertSqlSafe(sql))
                     .bind(source.id)
                     .bind(fetch_limit)
                     .bind(offset_value)
@@ -168,7 +169,8 @@ impl Database {
                      WHERE om.user_id = $1{order}
                      LIMIT $2 OFFSET $3"
                 );
-                sqlx::query_as::<_, RelatedRow>(&sql)
+                // SQL fragments come from static allowlists; operator values are bound below.
+                sqlx::query_as::<_, RelatedRow>(sqlx::AssertSqlSafe(sql))
                     .bind(source.id)
                     .bind(fetch_limit)
                     .bind(offset_value)
@@ -195,7 +197,8 @@ impl Database {
                      WHERE om.organization_id = $1{order}
                      LIMIT $2 OFFSET $3"
                 );
-                sqlx::query_as::<_, RelatedRow>(&sql)
+                // SQL fragments come from static allowlists; operator values are bound below.
+                sqlx::query_as::<_, RelatedRow>(sqlx::AssertSqlSafe(sql))
                     .bind(source.id)
                     .bind(fetch_limit)
                     .bind(offset_value)
@@ -220,7 +223,8 @@ impl Database {
                      WHERE cr.organization_id = $1{order}
                      LIMIT $2 OFFSET $3"
                 );
-                sqlx::query_as::<_, RelatedRow>(&sql)
+                // SQL fragments come from static allowlists; operator values are bound below.
+                sqlx::query_as::<_, RelatedRow>(sqlx::AssertSqlSafe(sql))
                     .bind(source.id)
                     .bind(fetch_limit)
                     .bind(offset_value)
@@ -246,7 +250,8 @@ impl Database {
                      WHERE cr.id = $1{order}
                      LIMIT $2 OFFSET $3"
                 );
-                sqlx::query_as::<_, RelatedRow>(&sql)
+                // SQL fragments come from static allowlists; operator values are bound below.
+                sqlx::query_as::<_, RelatedRow>(sqlx::AssertSqlSafe(sql))
                     .bind(source.id)
                     .bind(fetch_limit)
                     .bind(offset_value)
@@ -275,7 +280,8 @@ impl Database {
                      WHERE cr.id = $1{order}
                      LIMIT $2 OFFSET $3"
                 );
-                sqlx::query_as::<_, RelatedRow>(&sql)
+                // SQL fragments come from static allowlists; operator values are bound below.
+                sqlx::query_as::<_, RelatedRow>(sqlx::AssertSqlSafe(sql))
                     .bind(source.id)
                     .bind(fetch_limit)
                     .bind(offset_value)

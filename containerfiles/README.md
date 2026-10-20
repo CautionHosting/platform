@@ -65,9 +65,10 @@ Publication needs existing prefix-scoped `s3:ListBucket`, `s3:GetObject` and
 credentials can be reused; a new bucket or role is not required. Preparation does
 not create buckets or change IAM, policies or lifecycle settings. Same-bucket
 consumers need verified reads only. Alternate source buckets need separately
-authorized reader/relay access; `components_source_bucket_name` in
-[`infra-bootstrap`](../infra-bootstrap/README.md) does not grant publication
-rights. BYOC relay reads with platform credentials and writes verified bytes with
+authorized reader/relay access, reviewed and provisioned separately in the
+[infrastructure repository](https://git.caution.co/public/infrastructure). Relay
+permissions do not grant publication rights for build indexes. BYOC relay reads
+with platform credentials and writes verified bytes with
 customer credentials. Denial or corruption is never treated as missing output.
 
 ## Component preparation and API selection

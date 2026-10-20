@@ -189,9 +189,10 @@ pub(super) async fn recover_abandoned_work(
     state: &AppState,
     backend: &impl ReconcileBackend,
 ) -> Result<(), RecoverAbandonedWorkError> {
-    let abandoned: Vec<(Uuid, Uuid)> = sqlx::query_as(&format!(
+    // Only static SQL fragments are interpolated; runtime values are bound below.
+    let abandoned: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT d.app_id, d.id FROM app_deployments d WHERE {ABANDONED} ORDER BY d.created_at"
-    ))
+    )))
     .bind(*PROCESS_ID)
     .bind(CLEANUP_GRACE_SECS)
     .fetch_all(&state.db)
@@ -244,7 +245,7 @@ async fn reclaim(
     backend: &impl DestroyBackend,
     app_id: Uuid,
     deployment_id: Uuid,
-    predicate: &str,
+    predicate: &'static str,
 ) -> Result<Option<Adopted>, ReclaimError> {
     use ReclaimErrorCtx as Ctx;
 
@@ -266,14 +267,15 @@ async fn reclaim(
     if !teardown_idle {
         return Ok(None);
     }
-    let adopted: Option<Adopted> = sqlx::query_as(&format!(
+    // Only static SQL fragments are interpolated; runtime values are bound below.
+    let adopted: Option<Adopted> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "UPDATE app_deployments d SET owner_process_id = $1
          FROM compute_resources cr
          WHERE cr.id = d.app_id AND d.id = $3 AND ({predicate})
          RETURNING d.status, d.organization_id AS org_id, d.app_id, d.id AS deployment_id,
                    d.instance_id, d.region,
                    CASE WHEN d.cleaned_up_at IS NULL THEN d.state_key END AS state_key"
-    ))
+    )))
     .bind(*PROCESS_ID)
     .bind(CLEANUP_GRACE_SECS)
     .bind(deployment_id)
@@ -412,12 +414,13 @@ pub(super) async fn retry_cleanup(
         tracing::error!(error = %error, "failed to record failed attempts that provisioned nothing");
     }
 
-    let pending: Vec<(Uuid, Uuid)> = sqlx::query_as(&format!(
+    // Only static SQL fragments are interpolated; runtime values are bound below.
+    let pending: Vec<(Uuid, Uuid)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT d.app_id, d.id
          FROM app_deployments d JOIN compute_resources cr ON cr.id = d.app_id
          WHERE {CLEANUP_DUE}
          ORDER BY d.failed_at"
-    ))
+    )))
     .bind(*PROCESS_ID)
     .bind(CLEANUP_GRACE_SECS)
     .fetch_all(&state.db)
@@ -499,10 +502,11 @@ pub(super) async fn reconcile_apps(
     state: &AppState,
     backend: &impl ReconcileBackend,
 ) -> Result<(), ReconcileAppsError> {
-    let apps: Vec<DeploymentsApp> = sqlx::query_as(&format!(
+    // Only static SQL fragments are interpolated; runtime values are bound below.
+    let apps: Vec<DeploymentsApp> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT cr.id, cr.region, cr.live_deployment_id FROM compute_resources cr
          WHERE {RECONCILED_APP}"
-    ))
+    )))
     .bind(LIFECYCLE_DEPLOYMENTS)
     .fetch_all(&state.db)
     .await
@@ -638,13 +642,14 @@ pub(super) async fn repair_live(
     lock_app_operations(&mut tx, app.id)
         .await
         .with_context(Ctx::database(app.id))?;
-    let current: Option<(Option<Uuid>, String)> = sqlx::query_as(&format!(
+    // Only static SQL fragments are interpolated; runtime values are bound below.
+    let current: Option<(Option<Uuid>, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
         "SELECT cr.live_deployment_id, d.instance_id
          FROM compute_resources cr JOIN app_deployments d ON d.app_id = cr.id
          WHERE cr.id = $2 AND d.id = $3 AND d.status = 'running' AND d.instance_id IS NOT NULL
            AND {RECONCILED_APP}
          FOR UPDATE OF cr, d"
-    ))
+    )))
     .bind(LIFECYCLE_DEPLOYMENTS)
     .bind(app.id)
     .bind(deployment_id)
