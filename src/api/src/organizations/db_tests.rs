@@ -10,6 +10,9 @@
 //! has to be recoverable, so the creation path must accept a user with no
 //! membership, and it must not hand out a second organization to a user who
 //! already has one.
+//!
+//! These tests share one database with every other database-backed test in the
+//! runner, so they only ever assert on rows they created themselves.
 
 use super::*;
 
@@ -35,6 +38,11 @@ async fn create_org_less_user(pool: &PgPool) -> Uuid {
     .unwrap()
 }
 
+/// A name no other test or earlier run can have used.
+fn organization_name(label: &str) -> String {
+    format!("{label} {}", Uuid::new_v4())
+}
+
 async fn membership(pool: &PgPool, user_id: Uuid) -> Option<(Uuid, String)> {
     sqlx::query_as(
         "SELECT organization_id, role::text
@@ -47,17 +55,26 @@ async fn membership(pool: &PgPool, user_id: Uuid) -> Option<(Uuid, String)> {
     .unwrap()
 }
 
+async fn organizations_named(pool: &PgPool, name: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM organizations WHERE name = $1")
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 #[ignore = "run bash tests/e2e/test_app_deployments_db.sh (isolated PostgreSQL)"]
 async fn a_user_without_an_organization_can_create_one() {
     let pool = test_pool().await;
     let user = create_org_less_user(&pool).await;
+    let name = organization_name("Recovered Organization");
 
-    let org = create_organization_for_user(&pool, user, "Recovered Organization")
+    let org = create_organization_for_user(&pool, user, &name)
         .await
         .expect("an org-less user must be able to create an organization");
 
-    assert_eq!(org.name, "Recovered Organization");
+    assert_eq!(org.name, name);
     assert!(org.is_active, "a newly created organization must be active");
 
     let (member_org, role) = membership(&pool, user)
@@ -80,12 +97,14 @@ async fn a_user_without_an_organization_can_create_one() {
 async fn a_user_who_already_belongs_to_an_organization_is_refused() {
     let pool = test_pool().await;
     let user = create_org_less_user(&pool).await;
+    let first_name = organization_name("First Organization");
+    let refused_name = organization_name("Refused Organization");
 
-    let first = create_organization_for_user(&pool, user, "First Organization")
+    let first = create_organization_for_user(&pool, user, &first_name)
         .await
         .expect("the first organization must be created");
 
-    let error = create_organization_for_user(&pool, user, "Second Organization")
+    let error = create_organization_for_user(&pool, user, &refused_name)
         .await
         .expect_err("a user may belong to exactly one organization");
 
@@ -99,14 +118,10 @@ async fn a_user_who_already_belongs_to_an_organization_is_refused() {
         member_org, first.id,
         "the refused call must not move the user to another organization"
     );
-
-    let organizations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM organizations")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
     assert_eq!(
-        organizations, 1,
-        "the refused call must not commit an extra organization"
+        organizations_named(&pool, &refused_name).await,
+        0,
+        "the refused call must not commit an organization"
     );
 
     pool.close().await;
