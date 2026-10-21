@@ -26,6 +26,14 @@ Set these in `~/.config/caution/.env`, then restart the API (`env.example` lists
   ("Candidate limit reached (N / M)"). Suspended or terminating apps refuse pushes.
   The slot is reserved before `receive-pack`, so a push while a deployment is live
   can be refused busy or over the limit even when it would change nothing.
+  The API validates the pushed commit's configuration after ownership checks,
+  before loading components or claiming a build. Invalid configuration releases
+  the reserved slot; the gateway displays the validation error and fails the SSH
+  command. The Git commit is still stored. In particular,
+  `e2e_encryption { mode = "tls" }` requires `network.http.domain`; omitting it
+  returns HTTP 400 before the deployment stream starts. Client errors are not
+  reported to Sentry. HCL errors include their chained diagnostics; syntax errors
+  show the line and column without echoing the configuration line.
 - **Auto-live.** A deployment goes live on its own only when nothing is live (the
   first push, or after an app destroy). Otherwise it is a candidate: it runs and is
   billed, the live deployment is unchanged. A push whose ref did not change

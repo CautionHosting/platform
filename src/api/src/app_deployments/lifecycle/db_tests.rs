@@ -1824,7 +1824,7 @@ async fn deploy_error_recovery_touches_only_its_own_progress() {
     let reserved = admission::reserve(&pool, victim_org, app, victim)
         .await
         .unwrap();
-    let body = deploy(&state, user, victim_org, app, reserved).await;
+    let (_, body) = deploy(&state, user, victim_org, app, reserved).await;
     assert!(
         body.contains("User does not belong to this organization"),
         "{body}"
@@ -1832,7 +1832,7 @@ async fn deploy_error_recovery_touches_only_its_own_progress() {
     assert_eq!(status(&pool, reserved).await.as_deref(), Some("reserved"));
     let app = deployments_app(&pool, victim_org).await;
     let in_flight = building(&pool, victim_org, app).await;
-    let body = deploy(&state, user, victim_org, app, in_flight).await;
+    let (_, body) = deploy(&state, user, victim_org, app, in_flight).await;
     assert!(
         body.contains("User does not belong to this organization"),
         "{body}"
@@ -1842,9 +1842,10 @@ async fn deploy_error_recovery_touches_only_its_own_progress() {
     // A member replaying its own in-flight attempt loses the claim: the first
     // request keeps its deployment.
     let app = deployments_app(&pool, org).await;
-    git_repo(data_dir.path(), app);
+    git_repo(data_dir.path(), app, r#"enclave "main" {}"#);
     let in_flight = building(&pool, org, app).await;
-    let body = deploy(&state, user, org, app, in_flight).await;
+    let (http_status, body) = deploy(&state, user, org, app, in_flight).await;
+    assert_eq!(http_status, StatusCode::OK);
     assert!(body.contains("reservation expired"), "{body}");
     assert_eq!(status(&pool, in_flight).await.as_deref(), Some("building"));
 
@@ -1854,23 +1855,23 @@ async fn deploy_error_recovery_touches_only_its_own_progress() {
         .await
         .unwrap();
     let app = deployments_app(&pool, org).await;
-    git_repo(data_dir.path(), app);
-    let body = deploy(&state, user, org, app, foreign).await;
+    git_repo(data_dir.path(), app, r#"enclave "main" {}"#);
+    let (_, body) = deploy(&state, user, org, app, foreign).await;
     assert!(body.contains("reservation expired"), "{body}");
     assert_eq!(status(&pool, foreign).await.as_deref(), Some("reserved"));
 
     // Rejected before its claim (no repository): the app's own slot is freed.
     let app = deployments_app(&pool, org).await;
     let own = admission::reserve(&pool, org, app, user).await.unwrap();
-    let body = deploy(&state, user, org, app, own).await;
+    let (_, body) = deploy(&state, user, org, app, own).await;
     assert!(body.contains("Failed to get commit SHA"), "{body}");
     assert_eq!(status(&pool, own).await, None);
 
-    // Claimed, then failed (no caution.hcl or Procfile): the attempt is failed.
+    // Claimed, then failed (valid config, no Containerfile): the attempt is failed.
     let app = deployments_app(&pool, org).await;
-    git_repo(data_dir.path(), app);
+    git_repo(data_dir.path(), app, r#"enclave "main" {}"#);
     let claimed = admission::reserve(&pool, org, app, user).await.unwrap();
-    let body = deploy(&state, user, org, app, claimed).await;
+    let (_, body) = deploy(&state, user, org, app, claimed).await;
     assert!(body.contains("internal error"), "{body}");
     let (status, failure_kind, cleaned_up): (String, Option<String>, bool) = sqlx::query_as(
         "SELECT status, failure_kind, cleaned_up_at IS NOT NULL FROM app_deployments WHERE id = $1",
@@ -1883,6 +1884,68 @@ async fn deploy_error_recovery_touches_only_its_own_progress() {
         (status.as_str(), failure_kind.as_deref(), cleaned_up),
         ("failed", Some("provisioning"), true)
     );
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "run bash tests/e2e/test_app_deployments_db.sh (isolated PostgreSQL)"]
+async fn deploy_rejects_tls_without_domain_before_admission() {
+    let pool = test_pool().await;
+    let data_dir = tempfile::TempDir::new().unwrap();
+    let state = test_state(&pool, data_dir.path().to_str().unwrap());
+    let org = organization(&pool).await;
+    let user = member(&pool, org).await;
+
+    // No billing credits or usable component store: config must be checked first.
+    for lifecycle in ["legacy", "deployments"] {
+        let app = deployments_app(&pool, org).await;
+        sqlx::query("UPDATE compute_resources SET lifecycle = $2 WHERE id = $1")
+            .bind(app)
+            .bind(lifecycle)
+            .execute(&pool)
+            .await
+            .unwrap();
+        git_repo(
+            data_dir.path(),
+            app,
+            r#"enclave "main" {
+            network {
+                ingress {
+                    cidr_ipv4 = "0.0.0.0/0"
+                    port = 8080
+                }
+                http {
+                    port = 8080
+                    e2e_encryption { mode = "tls" }
+                }
+            }
+        }"#,
+        );
+        let reservation = if lifecycle == "deployments" {
+            admission::reserve(&pool, org, app, user).await.unwrap()
+        } else {
+            Uuid::nil()
+        };
+        let (http_status, body) = deploy(&state, user, org, app, reservation).await;
+        assert_eq!(http_status, StatusCode::BAD_REQUEST);
+        let response: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(response["status"], 400);
+        let message = response["error"].as_str().unwrap();
+        assert!(message.contains("Invalid caution.hcl"), "{message}");
+        assert!(
+            message.contains("a domain is required when e2e_encryption resolves to mode = \"tls\""),
+            "{message}"
+        );
+        assert_eq!(status(&pool, reservation).await, None);
+        let row: (String, Option<Uuid>) = sqlx::query_as(
+            "SELECT state::text, deploy_attempt_id FROM compute_resources WHERE id = $1",
+        )
+        .bind(app)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row, ("initialized".to_string(), None));
+    }
     pool.close().await;
 }
 
@@ -2676,8 +2739,8 @@ async fn status(pool: &PgPool, deployment: Uuid) -> Option<String> {
         .unwrap()
 }
 
-/// The app's bare repository with one empty commit on `main`.
-fn git_repo(data_dir: &std::path::Path, app: Uuid) {
+/// The app's bare repository with one configuration commit on `main`.
+fn git_repo(data_dir: &std::path::Path, app: Uuid, config: &str) {
     let work = data_dir.join(format!("work-{app}"));
     let bare = data_dir.join(format!("git-repos/{app}.git"));
     let git = |args: &[&std::ffi::OsStr]| {
@@ -2695,6 +2758,13 @@ fn git_repo(data_dir: &std::path::Path, app: Uuid) {
         "-b".as_ref(),
         "main".as_ref(),
         work.as_os_str(),
+    ]);
+    std::fs::write(work.join("caution.hcl"), config).unwrap();
+    git(&[
+        "-C".as_ref(),
+        work.as_os_str(),
+        "add".as_ref(),
+        "caution.hcl".as_ref(),
     ]);
     git(&[
         "-C".as_ref(),
@@ -2715,14 +2785,14 @@ fn git_repo(data_dir: &std::path::Path, app: Uuid) {
     ]);
 }
 
-/// Posts `/deploy` and returns the streamed body once the request settled.
+/// Posts `/deploy` and returns the HTTP status and body once the request settled.
 async fn deploy(
     state: &Arc<AppState>,
     user: Uuid,
     org: Uuid,
     app: Uuid,
     deployment_id: Uuid,
-) -> String {
+) -> (StatusCode, String) {
     let response = sentry_middleware::REQUEST_ID
         .scope(
             Uuid::new_v4(),
@@ -2740,8 +2810,9 @@ async fn deploy(
             ),
         )
         .await;
+    let status = response.status();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
-    String::from_utf8(body.to_vec()).unwrap()
+    (status, String::from_utf8(body.to_vec()).unwrap())
 }
