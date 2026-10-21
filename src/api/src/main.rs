@@ -1302,22 +1302,6 @@ async fn create_org_user_quorum_bundle(
     ))
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
-async fn list_org_quorum_participants(
-    State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
-) -> Result<Json<Vec<org_quorum::OrgQuorumMember>>, org_quorum::OrgQuorumError> {
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
-        .await
-        .with_context(org_quorum::OrgQuorumErrorCtx::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "unable to resolve organization",
-        ))?;
-    Ok(Json(
-        org_quorum::list_participants(&state.db, org_id).await?,
-    ))
-}
-
 /// Failure modes for [`get_quorum_bundle`] (leaf error: no underlying source).
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum GetQuorumBundleError {
@@ -6593,7 +6577,7 @@ async fn main() -> Result<(), MainError> {
         )
         .route(
             "/quorum-bundles/participants",
-            get(list_org_quorum_participants),
+            get(org_quorum::handlers::list_org_quorum_participants),
         )
         .route("/quorum-bundles/{id}", get(get_quorum_bundle))
         .route("/quorum-bundles/{id}", patch(update_quorum_bundle))

@@ -22,11 +22,13 @@ use std::{
 use uuid::Uuid;
 use webauthn_rs::prelude::SecurityKey;
 
-#[path = "org_quorum/certificates.rs"]
+#[path = "certificates.rs"]
 mod certificates;
 #[cfg(test)]
-#[path = "org_quorum/tests.rs"]
+#[path = "tests.rs"]
 mod tests;
+
+pub(crate) mod handlers;
 
 #[derive(Debug, thiserror::Error, CtxError)]
 #[error("{message} [{location}]")]
