@@ -4,6 +4,7 @@
 use super::*;
 use crate::cryptographic_bundles as storage;
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use serde_json::{Value, json};
 
 async fn organization(pool: &PgPool) -> Uuid {
@@ -430,33 +431,6 @@ async fn storage_roundtrip(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid
     );
 }
 
-/// Maps a generation error to the HTTP status the handler assigns it.
-fn generation_status(error: &GenerateOrgQuorumBundleError) -> StatusCode {
-    match error {
-        GenerateOrgQuorumBundleError::VerifyProof { .. } => StatusCode::BAD_GATEWAY,
-        GenerateOrgQuorumBundleError::Post { source, .. } => {
-            match source.downcast_ref::<PostError>() {
-                Some(PostError::Send { source, .. }) => match source.downcast_ref::<SendError>() {
-                    Some(SendError::Upstream {
-                        upstream_status: 429,
-                        ..
-                    }) => StatusCode::TOO_MANY_REQUESTS,
-                    Some(SendError::Upstream {
-                        upstream_status: 503,
-                        ..
-                    }) => StatusCode::SERVICE_UNAVAILABLE,
-                    Some(SendError::RequestTimeout { .. } | SendError::ResponseTimeout { .. }) => {
-                        StatusCode::GATEWAY_TIMEOUT
-                    }
-                    _ => StatusCode::BAD_GATEWAY,
-                },
-                None => StatusCode::BAD_GATEWAY,
-            }
-        }
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-    }
-}
-
 async fn hosted_pgp(pool: &PgPool, org: Uuid, user: Uuid) {
     assert!(std::env::var_os("PUBLIC_CERTIFICATE_SERVICE_URL").is_none());
     assert!(std::env::var_os("PUBLIC_CERTIFICATE_PCR_POLICY_PATH").is_none());
@@ -496,13 +470,25 @@ async fn hosted_pgp(pool: &PgPool, org: Uuid, user: Uuid) {
         let error = generate_org_quorum_bundle(pool, org, user, r)
             .await
             .unwrap_err();
-        assert_eq!(generation_status(&error), status, "{error}");
         if mode == "invalid-proof" {
             assert!(matches!(
-                error,
+                &error,
                 GenerateOrgQuorumBundleError::VerifyProof { .. }
             ));
         }
+        // Assert the real handler mapping, not a re-implementation of it.
+        let response = crate::org_quorum::handlers::CreateOrgUserQuorumBundleError::Generate {
+            org_id: org,
+            user_id: user,
+            location: std::panic::Location::caller(),
+            source: Box::new(error),
+        }
+        .into_response();
+        assert_eq!(
+            response.status(),
+            status,
+            "unexpected status for {selection}/{mode}"
+        );
         let log = request_log();
         assert_eq!(log.len(), before + 1, "generation was repeated");
         assert_eq!(log[before]["path"], "/generate_quorum");
