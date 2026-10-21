@@ -3,6 +3,7 @@
 //! Opt-in PostgreSQL and HTTP orchestration tests; not Nitro verification.
 use super::*;
 use crate::cryptographic_bundles as storage;
+use axum::http::StatusCode;
 use serde_json::{Value, json};
 
 async fn organization(pool: &PgPool) -> Uuid {
@@ -298,12 +299,10 @@ async fn credentials(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid) {
     let error = generate_org_quorum_bundle(pool, org, user, r.clone())
         .await
         .unwrap_err();
-    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(
-        error
-            .message
-            .contains("required key-service endpoint or trust policy is not configured")
-    );
+    assert!(matches!(
+        error,
+        GenerateOrgQuorumBundleError::KeymakerUrl { .. }
+    ));
     assert_eq!(
         request_log().len(),
         before,
@@ -423,12 +422,39 @@ async fn storage_roundtrip(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid
     let downloaded: Value = serde_json::from_slice(&std::fs::read(file.path()).unwrap()).unwrap();
     assert_eq!(downloaded, envelope);
     let error = verify_upload(&downloaded, false).unwrap_err();
-    assert_eq!(error.message, "uploaded quorum proof verification failed");
+    assert!(matches!(error, VerifyUploadError::Proof { .. }));
     assert!(
         storage::delete_quorum_bundle(pool, org, created.id)
             .await
             .unwrap()
     );
+}
+
+/// Maps a generation error to the HTTP status the handler assigns it.
+fn generation_status(error: &GenerateOrgQuorumBundleError) -> StatusCode {
+    match error {
+        GenerateOrgQuorumBundleError::VerifyProof { .. } => StatusCode::BAD_GATEWAY,
+        GenerateOrgQuorumBundleError::Post { source, .. } => {
+            match source.downcast_ref::<PostError>() {
+                Some(PostError::Send { source, .. }) => match source.downcast_ref::<SendError>() {
+                    Some(SendError::Upstream {
+                        upstream_status: 429,
+                        ..
+                    }) => StatusCode::TOO_MANY_REQUESTS,
+                    Some(SendError::Upstream {
+                        upstream_status: 503,
+                        ..
+                    }) => StatusCode::SERVICE_UNAVAILABLE,
+                    Some(SendError::RequestTimeout { .. } | SendError::ResponseTimeout { .. }) => {
+                        StatusCode::GATEWAY_TIMEOUT
+                    }
+                    _ => StatusCode::BAD_GATEWAY,
+                },
+                None => StatusCode::BAD_GATEWAY,
+            }
+        }
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
 
 async fn hosted_pgp(pool: &PgPool, org: Uuid, user: Uuid) {
@@ -470,9 +496,12 @@ async fn hosted_pgp(pool: &PgPool, org: Uuid, user: Uuid) {
         let error = generate_org_quorum_bundle(pool, org, user, r)
             .await
             .unwrap_err();
-        assert_eq!(error.status, status, "{error}");
+        assert_eq!(generation_status(&error), status, "{error}");
         if mode == "invalid-proof" {
-            assert_eq!(error.message, "Keymaker proof verification failed");
+            assert!(matches!(
+                error,
+                GenerateOrgQuorumBundleError::VerifyProof { .. }
+            ));
         }
         let log = request_log();
         assert_eq!(log.len(), before + 1, "generation was repeated");
