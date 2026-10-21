@@ -31,7 +31,7 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 
 # Prebuilt component storage (optional)
-aws-sdk-s3 = { version = "1.15", optional = true }
+aws-sdk-s3 = { version = "1.144", default-features = false, features = ["sigv4a", "http-1x", "default-https-client", "rt-tokio"], optional = true }
 
 # Logging
 tracing = { workspace = true }

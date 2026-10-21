@@ -37,11 +37,11 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 
 # HTTP client (EC2/AWS JSON APIs)
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.12", features = ["json"] }
 
 # AWS SDK for S3 uploads
 aws-config = { version = "1.1", features = ["behavior-version-latest"] }
-aws-sdk-s3 = "1.15"
+aws-sdk-s3 = { version = "1.144", default-features = false, features = ["sigv4a", "http-1x", "default-https-client", "rt-tokio"] }
 
 # Signing and encoding
 hmac = { workspace = true }
