@@ -11,6 +11,8 @@ NETWORK := caution-network
 DB_VOLUME := caution-postgres-data
 CAUTION_DATA_DIR ?= $(PWD)/caution-cache
 CONTAINER_DATA_DIR := /var/cache/caution
+CAUTION_ENV_FILE ?= $(HOME)/.config/caution/.env
+export CAUTION_ENV_FILE
 
 # Only the API consumes the prepared component selection.
 API_IMAGE ?= caution-api
@@ -61,11 +63,30 @@ endif
 
 DEV_BUILD_ARGS := --build-arg CARGO_BUILD_FLAGS="" --build-arg CARGO_PROFILE_DIR="debug" --build-arg EXTRA_RUSTFLAGS=""
 
+# Frontend settings are build-time public values, not the Docker runtime env-file.
+# Release targets derive scoped files from CAUTION_ENV_FILE; never shell-source it.
+VITE_SENTRY_RELEASE ?= $(shell git rev-parse HEAD)
+# Unset settings must not become empty overrides of generated frontend settings.
+export $(foreach key,VITE_SENTRY_DSN VITE_SENTRY_ENVIRONMENT VITE_PADDLE_SANDBOX,$(if $(filter undefined,$(origin $(key))),,$(key))) VITE_SENTRY_RELEASE
+FRONTEND_BUILD_ARGS := --build-arg VITE_SENTRY_DSN --build-arg VITE_SENTRY_ENVIRONMENT --build-arg VITE_SENTRY_RELEASE --build-arg VITE_PADDLE_SANDBOX
+FRONTEND_RELEASE_DIR ?=
+FRONTEND_CONTEXT_ARGS = $(if $(FRONTEND_RELEASE_DIR),--build-context "frontend-artifacts=$(FRONTEND_RELEASE_DIR)")
+FRONTEND_ARTIFACTS_DIR ?= $(OUT_DIR)/frontend-release
+FRONTEND_RELEASES_DIR ?= $(OUT_DIR)/frontend-releases
+export $(foreach key,FRONTEND_ENV_FILE FRONTEND_SENTRY_ENV_FILE,$(if $(filter undefined,$(origin $(key))),,$(key))) FRONTEND_RELEASES_DIR FRONTEND_RELEASE_DIR
+
+.PHONY: build-frontend-release build-gateway-release
+build-frontend-release:
+	@python3 scripts/prepare-frontend.py
+
+build-gateway-release:
+	@python3 scripts/prepare-frontend.py --gateway
+
 build-gateway:
 	@echo "Building Gateway binary..."
 	@mkdir -p $(OUT_DIR)
 	@docker rmi -f caution-gateway 2>/dev/null || true
-	@docker build -t caution-gateway -f ./containerfiles/Containerfile.gateway .
+	@docker build -t caution-gateway $(FRONTEND_BUILD_ARGS) $(FRONTEND_CONTEXT_ARGS) -f ./containerfiles/Containerfile.gateway .
 	@echo "Gateway image build complete"
 
 # NOTE: Tofu is currently broke in stagex.
@@ -94,7 +115,7 @@ build-gateway-dev:
 	@echo "Building Gateway binary (dev)..."
 	@mkdir -p $(OUT_DIR)
 	@docker rmi -f caution-gateway 2>/dev/null || true
-	@docker build -t caution-gateway $(DEV_BUILD_ARGS) -f ./containerfiles/Containerfile.gateway .
+	@docker build -t caution-gateway $(DEV_BUILD_ARGS) $(FRONTEND_BUILD_ARGS) $(FRONTEND_CONTEXT_ARGS) -f ./containerfiles/Containerfile.gateway .
 	@echo "Gateway dev image build complete"
 
 build-api-dev: fetch/opentofu-$(TOFU_VERSION).tar.gz
@@ -116,7 +137,7 @@ build-gateway-e2e:
 	@echo "Building Gateway binary (e2e test mode)..."
 	@mkdir -p $(OUT_DIR)
 	@docker rmi -f caution-gateway 2>/dev/null || true
-	@docker build -t caution-gateway $(DEV_BUILD_ARGS) --build-arg EXTRA_FEATURES="e2e-testing-unsafe" -f ./containerfiles/Containerfile.gateway .
+	@docker build -t caution-gateway $(DEV_BUILD_ARGS) $(FRONTEND_BUILD_ARGS) $(FRONTEND_CONTEXT_ARGS) --build-arg EXTRA_FEATURES="e2e-testing-unsafe" -f ./containerfiles/Containerfile.gateway .
 	@echo "Gateway e2e image build complete"
 
 build-metering:
@@ -145,10 +166,18 @@ build-frontend-dist:
 	@docker build \
 		-f ./containerfiles/Containerfile.frontend \
 		--target static \
-		$(if $(VITE_PADDLE_SANDBOX),--build-arg VITE_PADDLE_SANDBOX=$(VITE_PADDLE_SANDBOX)) \
+		$(FRONTEND_BUILD_ARGS) $(FRONTEND_CONTEXT_ARGS) \
 		--output type=local,dest=$(OUT_DIR)/frontend \
 		.
 	@echo "Frontend static assets built in $(OUT_DIR)/frontend"
+
+.PHONY: build-frontend-artifacts
+build-frontend-artifacts:
+	@test ! -e "$(FRONTEND_ARTIFACTS_DIR)" || { echo "Refusing to mix releases: choose a new FRONTEND_ARTIFACTS_DIR" >&2; exit 1; }
+	@docker build -f ./containerfiles/Containerfile.frontend \
+		--target frontend-artifacts $(FRONTEND_BUILD_ARGS) \
+		--output "type=local,dest=$(FRONTEND_ARTIFACTS_DIR)" .
+	@echo "Retain $(FRONTEND_ARTIFACTS_DIR): deploy dist only; upload its matching sentry-artifacts separately"
 
 # CLI release variables
 CLI_VERSION := $(shell grep '^version' src/cli/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
@@ -498,24 +527,23 @@ postgres: network volume
 
 migrate: postgres
 	@echo "Running migrations..."
-	docker run --rm \
+	python3 scripts/platform_env.py run --rm \
 		--network $(NETWORK) \
 		-v $(PWD)/src/api/migrations:/migrations:ro \
 		-v $(PWD)/utils/makefile-run-migrations.sh:/makefile-run-migrations.sh:ro \
-		--env-file $(HOME)/.config/caution/.env \
 		postgres:16-alpine \
 		sh /makefile-run-migrations.sh
 	@echo "Migrations complete"
 
 run-api: guard-direct-api network postgres
 	@$(call load_api_components,$(HOME)/.config/caution/components.env) \
-		docker run --rm --network $(NETWORK) --dns 8.8.8.8 --dns 8.8.4.4 \
-		--env-file $(HOME)/.config/caution/.env -e AWS_REGION=us-west-2 $(API_COMPONENT_ENV) \
+		python3 scripts/platform_env.py run --rm --network $(NETWORK) --dns 8.8.8.8 --dns 8.8.4.4 \
+		-e AWS_REGION=us-west-2 $(API_COMPONENT_ENV) \
 		"$$API_COMPONENT_IMAGE" --check-components && \
 		{ docker rm -f api 2>/dev/null || true; } && \
 		mkdir -p $(CAUTION_DATA_DIR)/git-repos $(CAUTION_DATA_DIR)/build $(CAUTION_DATA_DIR)/terraform && \
 		mkdir -p "$(KEYMAKER_POLICY_DIR)" && \
-		docker run -d \
+		python3 scripts/platform_env.py run -d \
 		--name api \
 		--network $(NETWORK) \
 		--dns 8.8.8.8 \
@@ -524,7 +552,6 @@ run-api: guard-direct-api network postgres
 		-e AWS_REGION=us-west-2 \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-e TF_PLUGIN_CACHE_DIR=$(CONTAINER_DATA_DIR)/terraform \
-		--env-file $(HOME)/.config/caution/.env \
 		-v "$(KEYMAKER_POLICY_DIR):/run/config:ro" \
 		-v "$(PRICES_FILE):/app/prices.json:ro" \
 		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
@@ -537,12 +564,11 @@ run-api: guard-direct-api network postgres
 run-gateway: guard-direct-gateway network
 	@docker rm -f gateway 2>/dev/null || true
 	@mkdir -p $(CAUTION_DATA_DIR)/git-repos "$(KEYMAKER_POLICY_DIR)"
-	@docker run -d \
+	@python3 scripts/platform_env.py run -d \
 		--name gateway \
 		--network $(NETWORK) \
 		-p 8000:8080 \
 		-p 2222:2222 \
-		--env-file $(HOME)/.config/caution/.env \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-v $(CAUTION_DATA_DIR):$(CONTAINER_DATA_DIR) \
 		-v "$(KEYMAKER_POLICY_DIR):/run/config:ro" \
@@ -551,10 +577,9 @@ run-gateway: guard-direct-gateway network
 
 run-email: guard-direct-email network
 	@docker rm -f email 2>/dev/null || true
-	@docker run -d \
+	@python3 scripts/platform_env.py run -d \
 		--name email \
 		--network $(NETWORK) \
-		--env-file $(HOME)/.config/caution/.env \
 		-e EMAIL_BIND_ADDR=0.0.0.0:8082 \
 		-p 127.0.0.1:8082:8082 \
 		caution-email
@@ -562,10 +587,9 @@ run-email: guard-direct-email network
 
 run-metering: guard-direct-metering network postgres
 	@docker rm -f metering 2>/dev/null || true
-	@docker run -d \
+	@python3 scripts/platform_env.py run -d \
 		--name metering \
 		--network $(NETWORK) \
-		--env-file $(HOME)/.config/caution/.env \
 		-v "$(PRICES_FILE):/app/prices.json:ro" \
 		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
 		-e METERING_INTERVAL_SECS=60 \
@@ -577,10 +601,9 @@ DRIFT_DETECTOR_MIN_SEVERITY ?= info
 
 run-drift-detector: network
 	@docker rm -f drift-detector 2>/dev/null || true
-	@docker run --rm \
+	@python3 scripts/platform_env.py run --rm \
 		--name drift-detector \
 		--network $(NETWORK) \
-		--env-file $(HOME)/.config/caution/.env \
 		caution-drift-detector \
 		$(if $(DRIFT_DETECTOR_ORG_ID),$(DRIFT_DETECTOR_ORG_ID) $(DRIFT_DETECTOR_MIN_SEVERITY))
 	@echo "Drift detection complete"
@@ -590,10 +613,13 @@ run-drift-detector: network
 # Main targets
 # =============================================================================
 
-.PHONY: setup test-setup
+.PHONY: setup test-setup install-service-config
 
 setup:
 	@bash scripts/setup-platform.sh
+
+install-service-config:
+	@bash scripts/install-service-config.sh
 
 # Keep service lifecycle in Make/systemd. Only component preparation is new.
 up:
@@ -602,13 +628,15 @@ up:
 
 .PHONY: up-components prepare-components test-prepare-components
 up-components:
+	@test "$${CAUTION_ENV_FILE}" = "$$HOME/.config/caution/.env" || { echo 'make up must use ~/.config/caution/.env, matching installed services' >&2; exit 1; }
 	@git diff --quiet HEAD -- || { echo "Commit tracked changes before make up"; exit 1; }
 	@$(MAKE) audit
 	@$(MAKE) build-api API_IMAGE=caution-api-components
-	@$(MAKE) build-gateway build-email build-metering
+	@$(MAKE) build-gateway-release
+	@$(MAKE) build-email build-metering
 	@$(MAKE) prepare-components API_IMAGE=caution-api-components
+	@$(MAKE) install-service-config
 	@$(MAKE) migrate
-	systemctl --user daemon-reload
 	systemctl restart --user caution-email caution-metering caution-api caution-gateway
 	@echo "  All services running"
 	@echo "  Gateway: http://localhost:8000"
@@ -711,9 +739,12 @@ admin: build-admin
 	if [ -z "$${AWS_ACCESS_KEY_ID:-}$${AWS_PROFILE:-}$${AWS_DEFAULT_PROFILE:-}$${AWS_SHARED_CREDENTIALS_FILE:-}$${AWS_CONFIG_FILE:-}$${AWS_ROLE_ARN:-}$${AWS_WEB_IDENTITY_TOKEN_FILE:-}$${AWS_CONTAINER_CREDENTIALS_RELATIVE_URI:-}$${AWS_CONTAINER_CREDENTIALS_FULL_URI:-}" ] \
 		&& [ "$${CAUTION_ADMIN_SKIP_AWS_ENV:-0}" != "1" ] \
 		&& [ -r "$$HOME/.config/caution/.env" ]; then \
-		set -a; . "$$HOME/.config/caution/.env"; set +a; \
-	fi; \
-	ENVIRONMENT="$$environment" DATABASE_URL="$$database_url" ./target/release/caution-admin $(ADMIN_ARGS)
+		ENVIRONMENT="$$environment" DATABASE_URL="$$database_url" CAUTION_ENV_FILE="$$HOME/.config/caution/.env" \
+			python3 scripts/platform_env.py aws-exec ./target/release/caution-admin $(ADMIN_ARGS); \
+	else \
+		unset SENTRY_URL SENTRY_ORG SENTRY_PROJECT SENTRY_AUTH_TOKEN SENTRY_RELEASE MAKEFLAGS MFLAGS MAKEOVERRIDES; \
+		ENVIRONMENT="$$environment" DATABASE_URL="$$database_url" ./target/release/caution-admin $(ADMIN_ARGS); \
+	fi
 
 # ── E2E test infrastructure ──────────────────────────────────────────
 # Uses a separate postgres instance and ephemeral volume so dev data is untouched.
@@ -788,20 +819,17 @@ run-api-test: network
 			component_flags='-e COMPONENT_BUILD_MODE=source -e COMPONENT_SET_SHA256= -e COMPONENTS_S3_BUCKET=';; \
 		*) echo "TEST_COMPONENT_BUILD_MODE must be prebuilt or source" >&2; exit 1;; \
 		esac; \
-		docker run --rm --network $(NETWORK) --dns 8.8.8.8 --dns 8.8.4.4 \
-		--env-file .env --env-file $(HOME)/.config/caution/.env \
+		python3 scripts/platform_env.py run --base-env-file .env --rm --network $(NETWORK) --dns 8.8.8.8 --dns 8.8.4.4 \
 		-e AWS_REGION=us-west-2 $$component_flags "$$API_COMPONENT_IMAGE" --check-components && \
 		{ docker rm -f api 2>/dev/null || true; } && \
 		mkdir -p $(CAUTION_DATA_DIR)/git-repos $(CAUTION_DATA_DIR)/build $(CAUTION_DATA_DIR)/terraform "$(KEYMAKER_POLICY_DIR)" && \
-		docker run -d \
+		python3 scripts/platform_env.py run --base-env-file .env -d \
 		--name api \
 		--network $(NETWORK) \
 		--dns 8.8.8.8 \
 		--dns 8.8.4.4 \
 		-p 127.0.0.1:8080:8080 \
 		--group-add $$(stat -c '%g' /var/run/docker.sock) \
-		--env-file .env \
-		--env-file $(HOME)/.config/caution/.env \
 		$$component_flags \
 		-e AWS_REGION=us-west-2 \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
@@ -825,12 +853,11 @@ run-api-test: network
 run-gateway-test: network
 	@docker rm -f gateway 2>/dev/null || true
 	@mkdir -p $(CAUTION_DATA_DIR)/git-repos "$(KEYMAKER_POLICY_DIR)"
-	@docker run -d \
+	@python3 scripts/platform_env.py run -d \
 		--name gateway \
 		--network $(NETWORK) \
 		-p 127.0.0.1:8000:8080 \
 		-p 127.0.0.1:2222:2222 \
-		--env-file $(HOME)/.config/caution/.env \
 		-e DATABASE_URL=$(TEST_DATABASE_URL) \
 		-e CAUTION_DATA_DIR=$(CONTAINER_DATA_DIR) \
 		-e RP_ID=localhost \
@@ -843,10 +870,9 @@ run-gateway-test: network
 
 run-email-test: network
 	@docker rm -f email 2>/dev/null || true
-	@docker run -d \
+	@python3 scripts/platform_env.py run -d \
 		--name email \
 		--network $(NETWORK) \
-		--env-file $(HOME)/.config/caution/.env \
 		-e EMAIL_TEST_MODE=true \
 		-e EMAIL_BIND_ADDR=0.0.0.0:8082 \
 		-p 127.0.0.1:8082:8082 \
@@ -855,11 +881,10 @@ run-email-test: network
 
 run-metering-test: network
 	@docker rm -f metering 2>/dev/null || true
-	@docker run -d \
+	@python3 scripts/platform_env.py run -d \
 		--name metering \
 		--network $(NETWORK) \
 		-p 127.0.0.1:8083:8083 \
-		--env-file $(HOME)/.config/caution/.env \
 		-v "$(PRICES_FILE):/app/prices.json:ro" \
 		-v $(HOME)/.config/caution/config.json:/app/config.json:ro \
 		-e DATABASE_URL=$(TEST_DATABASE_URL) \

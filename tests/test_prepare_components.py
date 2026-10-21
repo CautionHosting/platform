@@ -18,6 +18,7 @@ import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'scripts'))
 SPEC = importlib.util.spec_from_file_location('prepare_components', ROOT / 'scripts/prepare-components.py')
 assert SPEC is not None and SPEC.loader is not None
 PREP = importlib.util.module_from_spec(SPEC)
@@ -41,6 +42,7 @@ class PrepareComponentsTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.config = Path(self.directory.name)
         (self.config / '.env').write_text(OPERATOR)
+        (self.config / '.env').chmod(0o600)
         self.selection = self.config / 'components.env'
         self.selection.write_text(OLD)
         self.accepted = self.config / 'components/accepted'
@@ -122,7 +124,7 @@ class PrepareComponentsTests(unittest.TestCase):
         self.assertEqual(self.publisher['AWS_SECRET_ACCESS_KEY'], 'publisher-secret')
         self.assertEqual(self.publisher['STEVE_COMMIT'], PINS['steve'])
         self.assertEqual(self.reader, ('docker', 'run', '--rm', '--network', 'fixture-network',
-                         '--env-file', str(self.config / '.env'), '--env-file',
+                         '--env-file', options(self.reader, '--env-file')[0], '--env-file',
                          options(self.reader, '--env-file')[1], IMAGE, '--check-components'))
         self.assertEqual(self.reader_env, {**OPERATOR_VALUES, **expected})
         self.assertEqual((self.config / '.env').read_text(), OPERATOR)
@@ -220,7 +222,7 @@ class PrepareComponentsTests(unittest.TestCase):
         self.assertIn('EnvironmentFile=-%h/.config/caution/components.env', api)
         self.assertLess(api.index('--check-components'), api.index('docker rm -f api'))
         for line in api.splitlines():
-            if 'docker run' in line:
+            if 'platform_env.py run' in line:
                 self.assertIn('${API_COMPONENT_IMAGE}', line)
                 for key in ('PLATFORM_GIT_SHA', 'COMPONENT_BUILD_MODE', 'COMPONENT_SET_SHA256',
                             'COMPONENTS_S3_BUCKET', *(n.upper() + '_COMMIT' for n in PINS)):
@@ -258,8 +260,15 @@ class LaunchSelectionTests(unittest.TestCase):
     def launch(self, target, selection, **variables):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
+            checkout = home / 'checkout'
+            checkout.mkdir()
+            (checkout / 'scripts').symlink_to(ROOT / 'scripts', target_is_directory=True)
+            (checkout / '.env').write_text('')
+            (checkout / '.env').chmod(0o600)
             config = home / '.config/caution'
             config.mkdir(parents=True)
+            (config / '.env').write_text('DATABASE_URL=fixture-runtime\n')
+            (config / '.env').chmod(0o600)
             if selection is not None:
                 (config / 'components.env').write_text(selection)
             log = home / 'docker-calls'
@@ -268,16 +277,21 @@ class LaunchSelectionTests(unittest.TestCase):
                                    f'CAUTION_DATA_DIR={home}/cache', f'KEYMAKER_POLICY_DIR={home}/policies',
                                    *[f'{key}={value}' for key, value in variables.items()]],
                                   cwd=ROOT, text=True, capture_output=True, check=True)
-            functions = '''docker() {
-    printf '%s\\n' "$*" >> "$CALLS"
-    case "$*" in *--check-components*) return "${CHECK_STATUS:-0}";; esac
-}
-stat() { printf '0'; }
-'''
+            commands = home / 'bin'
+            commands.mkdir()
+            docker = commands / 'docker'
+            docker.write_text('''#!/bin/sh
+printf '%s\\n' "$*" >> "$CALLS"
+case "$*" in *--check-components*) exit "${CHECK_STATUS:-0}";; esac
+''')
+            docker.chmod(0o755)
+            functions = "stat() { printf '0'; }\n"
             result = None
             for command in plan.stdout.replace('\\\n', '').splitlines():
-                result = subprocess.run(['bash', '-c', functions + command], cwd=home,
-                                        env={**os.environ, 'CALLS': str(log),
+                result = subprocess.run(['bash', '-c', functions + command], cwd=checkout,
+                                        env={'PATH': f'{commands}:/usr/bin:/bin',
+                                             'HOME': str(home), 'CAUTION_ENV_FILE': str(config / '.env'),
+                                             'CALLS': str(log),
                                              'API_COMPONENT_IMAGE': 'must-not-use-inherited-image',
                                              'CHECK_STATUS': variables.get('CHECK_STATUS', '0')},
                                         text=True, capture_output=True)
@@ -293,7 +307,8 @@ stat() { printf '0'; }
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('--check-components', calls[0])
         self.assertEqual(calls[1], 'rm -f api')
-        self.assertIn('run -d', calls[2])
+        self.assertEqual(shlex.split(calls[2])[0], 'run')
+        self.assertIn('-d', shlex.split(calls[2]))
         for command in (calls[0], calls[2]):
             self.assertIn(IMAGE, command)
             for name in ('PLATFORM_GIT_SHA', 'COMPONENT_BUILD_MODE', 'COMPONENT_SET_SHA256',

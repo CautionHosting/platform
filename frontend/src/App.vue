@@ -24,7 +24,8 @@
 </template>
 
 <script>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { setDashboardReportingActive } from './observability/sentry.js'
 import Onboarding from './views/Onboarding.vue'
 import Register from './views/Login.vue'
 import AuthLogin from './views/AuthLogin.vue'
@@ -458,6 +459,8 @@ export default {
       return organizationSetupRequired.value ? 'CreateOrganization' : 'Dashboard'
     })
 
+    watch(currentView, (view) => setDashboardReportingActive(view === 'Dashboard'), { immediate: true, flush: 'sync' })
+
     const showPreviewBanner = computed(() => {
       if (!dashboardPreviewEnabled) return false
       return currentView.value === 'Dashboard'
@@ -478,6 +481,7 @@ export default {
     })
 
     onUnmounted(() => {
+      setDashboardReportingActive(false)
       window.removeEventListener('popstate', refreshCurrentLocation)
       window.removeEventListener('hashchange', refreshCurrentLocation)
       window.removeEventListener(locationChangedEvent, refreshCurrentLocation)

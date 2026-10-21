@@ -16,6 +16,8 @@ import subprocess
 import tempfile
 import uuid
 
+from platform_env import generated_files, read_env as read_operator_env
+
 PINS = ('enclaveos', 'bootproof', 'steve', 'locksmith')
 PUBLISHER_ENV = frozenset((
     'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN',
@@ -95,7 +97,8 @@ def prepare(image, network, work, selection_file=None):
         'docker', 'image', 'inspect', '--format', '{{json .Config.Env}}', image)))
     if image_env.get('PLATFORM_GIT_SHA') != head:
         raise ValueError('Build the API image from the selected platform commit first')
-    settings = {key: value for key, value in read_env(CONFIG / '.env').items()
+    operator_env = Path(os.environ.get('CAUTION_ENV_FILE', CONFIG / '.env'))
+    settings = {key: value for key, value in read_operator_env(operator_env).items()
                 if key in PUBLISHER_ENV}
     for key, value in os.environ.items():
         if key in PUBLISHER_ENV:
@@ -167,8 +170,9 @@ def prepare(image, network, work, selection_file=None):
         generated.update(COMPONENT_SET_SHA256=digest, COMPONENTS_S3_BUCKET=bucket)
     overlay = work / 'components.env'
     write_env(overlay, generated)
-    run('docker', 'run', '--rm', '--network', network, '--env-file', CONFIG / '.env',
-        '--env-file', overlay, image, '--check-components')
+    with generated_files(('runtime',), source=operator_env) as files:
+        run('docker', 'run', '--rm', '--network', network, '--env-file', files['runtime'],
+            '--env-file', overlay, image, '--check-components')
     overlay.replace(selection_file or CONFIG / 'components.env')
     print(f'Prepared API components ({mode}); no migrations or services changed.')
 

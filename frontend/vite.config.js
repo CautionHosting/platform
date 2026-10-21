@@ -4,9 +4,11 @@
 import { defineConfig, loadEnv } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { dashboardPreviewPlugin, isDashboardPreviewEnabled } from './dev/dashboardPreview.js'
+import { sentryArtifactsPlugin, sentryBuildConfig } from './build/sentry.js'
 
 export default defineConfig(({ command, mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
+  const sentry = sentryBuildConfig(env)
   const proxyTarget = env.VITE_PROXY_TARGET || 'http://localhost:8000'
   const dashboardPreviewEnabled = isDashboardPreviewEnabled({ command, env })
   const allowedHosts = env.VITE_ALLOWED_HOSTS
@@ -26,7 +28,7 @@ export default defineConfig(({ command, mode }) => {
   )
 
   return {
-    plugins: [vue(), dashboardPreviewPlugin(dashboardPreviewEnabled)],
+    plugins: [vue(), dashboardPreviewPlugin(dashboardPreviewEnabled), sentryArtifactsPlugin(sentry)],
     define: {
       __CAUTION_DASHBOARD_PREVIEW__: JSON.stringify(dashboardPreviewEnabled),
     },
@@ -41,7 +43,9 @@ export default defineConfig(({ command, mode }) => {
     },
     build: {
       outDir: 'dist',
-      assetsDir: 'assets'
+      assetsDir: 'assets',
+      emptyOutDir: true,
+      sourcemap: sentry.enabled ? 'hidden' : false,
     }
   }
 })

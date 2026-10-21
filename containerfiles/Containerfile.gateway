@@ -78,13 +78,39 @@ RUN npm ci
 FROM frontend-deps AS frontend-builder
 
 ARG VITE_PADDLE_SANDBOX
+ARG VITE_SENTRY_DSN
+ARG VITE_SENTRY_ENVIRONMENT
+ARG VITE_SENTRY_RELEASE
 
 ENV ENVIRONMENT=production
 ENV NODE_ENV=production
 
 COPY frontend/ ./
 
-RUN VITE_PADDLE_SANDBOX="${VITE_PADDLE_SANDBOX}" /usr/bin/npm run build
+RUN --network=none VITE_PADDLE_SANDBOX="${VITE_PADDLE_SANDBOX}" \
+    VITE_SENTRY_DSN="${VITE_SENTRY_DSN}" \
+    VITE_SENTRY_ENVIRONMENT="${VITE_SENTRY_ENVIRONMENT}" \
+    VITE_SENTRY_RELEASE="${VITE_SENTRY_RELEASE}" /usr/bin/npm run build
+
+FROM scratch AS frontend-artifacts
+
+COPY --from=frontend-builder /app/dist /dist
+COPY --from=frontend-builder /app/sentry-artifacts /sentry-artifacts
+
+FROM pallet-nodejs AS validated-frontend
+
+COPY --from=gcc /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
+COPY frontend/package.json /validator/package.json
+COPY frontend/build/sentry.js /validator/build/sentry.js
+COPY frontend/scripts/validate-sentry-artifacts.js /validator/scripts/validate-sentry-artifacts.js
+COPY --from=frontend-artifacts / /retained/
+
+ARG VITE_PADDLE_SANDBOX
+ARG VITE_SENTRY_DSN
+ARG VITE_SENTRY_ENVIRONMENT
+ARG VITE_SENTRY_RELEASE
+
+RUN --network=none ["/usr/bin/node", "/validator/scripts/validate-sentry-artifacts.js", "/retained/dist", "/retained/sentry-artifacts"]
 
 FROM scratch AS runtime
 COPY --from=user-runtime . /
@@ -98,7 +124,7 @@ COPY --from=builder /usr/local/bin/gateway /usr/local/bin/gateway
 COPY --from=docker-runtime . /
 COPY --from=docker-cli . /
 COPY --from=gitconfig-builder /root/.gitconfig /root/.gitconfig
-COPY --from=frontend-builder /app/dist/ /app/frontend/
+COPY --from=validated-frontend /retained/dist/ /app/frontend/
 
 WORKDIR /app
 

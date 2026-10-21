@@ -44,6 +44,5 @@ for file in .env prices.json config.json; do
     [[ "$file" != prices.json ]] || mode=0644
     install -m "$mode" "$REPO_ROOT/$example" "$CONFIG_DIR/$file"
 done
-install -m 0644 "$REPO_ROOT"/systemd/*.service "$UNIT_DIR/"
-systemctl --user daemon-reload
+bash "$REPO_ROOT/scripts/install-service-config.sh"
 printf 'Setup complete; no services started. Review %s/{.env,prices.json,config.json}, then run make up.\n' "$CONFIG_DIR"

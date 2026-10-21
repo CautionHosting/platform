@@ -5,6 +5,9 @@ import { createApp } from 'vue'
 import './styles/theme.css'
 import App from './App.vue'
 import { initializeTheme } from './utils/theme.js'
+import { configureSentry } from './observability/sentry.js'
 
 initializeTheme()
-createApp(App).mount('#app')
+const app = createApp(App)
+configureSentry(app)
+app.mount('#app')

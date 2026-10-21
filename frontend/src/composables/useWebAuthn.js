@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 import { ref } from "vue";
+import { reportServerResponse } from "../observability/sentry.js";
 import { resetDevelopmentBannerDismissal } from "../utils/developmentBanner.js";
 
 // Helper to convert base64url to Uint8Array
@@ -51,6 +52,8 @@ export async function authFetch(url, options = {}) {
     headers,
     credentials: 'include',
   });
+
+  reportServerResponse(response.status);
 
   // Handle username_required gate: if 403 with username_required error, redirect to dashboard
   if (response.status === 403 && !options.suppressGateRedirect) {
