@@ -1510,14 +1510,23 @@ async fn handle_git_push(
         };
 
         if !response.status().is_success() {
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
-            tracing::error!("Deployment failed: {}", error_text);
+            let status = response.status();
+            let mut message = "Deployment failed, please try again later.".to_string();
+            if status.is_client_error() {
+                tracing::warn!(%status, "Deployment rejected");
+                if let Ok(rejection) = response.json::<DeployErrorResponse>().await {
+                    if !rejection.error.is_empty()
+                        && rejection.error.len() <= 1024
+                        && !rejection.error.chars().any(char::is_control)
+                    {
+                        message = rejection.error;
+                    }
+                }
+            } else {
+                tracing::error!(%status, "Deployment failed");
+            }
             release_reservation().await;
-            let error_msg =
-                "remote: error: Deployment failed, please try again later.\n".to_string();
+            let error_msg = format!("remote: error: {message}\n");
             let _ = session_handle
                 .extended_data(channel, 1, Bytes::from(error_msg.into_bytes()))
                 .await;

@@ -3260,9 +3260,9 @@ fn activation_failure_message(source: &dterror::BoxError) -> &'static str {
 }
 
 impl DeployLogicError {
-    /// Frozen status code and fixed client body for each failure path.
-    fn client_response(&self) -> (StatusCode, &'static str) {
-        match self {
+    /// Client status and diagnostic for each failure path.
+    fn client_response(&self) -> (StatusCode, String) {
+        let (status, message) = match self {
             DeployLogicError::FrameworkCommit { .. } | DeployLogicError::Components { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
@@ -3366,15 +3366,38 @@ impl DeployLogicError {
             ),
             DeployLogicError::BuildConfigGit { source, .. } => {
                 match source.downcast_ref::<LoadBuildConfigForDeployError>() {
-                    Some(LoadBuildConfigForDeployError::HclParse { source, .. }) => {
-                        let message = match source.downcast_ref::<config::FromStrError>() {
-                            Some(config::FromStrError::NetworkPolicy { source, .. }) => source
-                                .downcast_ref::<config::NetworkPolicyError>()
-                                .map(config::NetworkPolicyError::client_message)
-                                .unwrap_or("Invalid caution.hcl network policy"),
-                            _ => "Invalid caution.hcl",
-                        };
-                        (StatusCode::BAD_REQUEST, message)
+                    Some(LoadBuildConfigForDeployError::HclParse { .. }) => {
+                        let mut message = self.to_string();
+                        let mut source = std::error::Error::source(self);
+                        while let Some(cause) = source {
+                            message.push_str(": ");
+                            // HCL's syntax Display includes a raw configuration line.
+                            // Keep its diagnostic and position without echoing values.
+                            if let Some(hcl::Error::Parse(parse)) =
+                                cause.downcast_ref::<hcl::Error>()
+                            {
+                                message.push_str(&format!(
+                                    "HCL parse error in line {}, column {}: {}",
+                                    parse.location().line(),
+                                    parse.location().column(),
+                                    parse.message(),
+                                ));
+                            } else {
+                                message.push_str(&cause.to_string());
+                            }
+                            source = cause.source();
+                        }
+                        let message = message
+                            .chars()
+                            .map(|c| {
+                                if c.is_control() {
+                                    c.escape_debug().to_string()
+                                } else {
+                                    c.to_string()
+                                }
+                            })
+                            .collect();
+                        return (StatusCode::BAD_REQUEST, message);
                     }
                     Some(LoadBuildConfigForDeployError::ProcfileParse { source, .. })
                         if matches!(
@@ -3522,7 +3545,8 @@ impl DeployLogicError {
             DeployLogicError::Panicked { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
-        }
+        };
+        (status, message.to_string())
     }
 }
 
@@ -3535,6 +3559,7 @@ async fn deploy_handler(
     use sentry_middleware::{REQUEST_ID, capture_error_with_breadcrumbs, drain_breadcrumbs};
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(32);
+    let (config_validated_tx, config_validated_rx) = tokio::sync::oneshot::channel();
     let deploy_attempt_id = Uuid::new_v4();
 
     // Capture the request ID and any breadcrumbs accumulated so far (pre-spawn
@@ -3550,7 +3575,7 @@ async fn deploy_handler(
     let deployment_id_for_recovery = req.deployment_id;
     let state_for_recovery = state.clone();
     let progress = Arc::new(app_deployments::lifecycle::DeployProgress::default());
-    tokio::spawn(async move {
+    let deploy_task = tokio::spawn(async move {
         let result = match tokio::spawn(REQUEST_ID.scope(
             request_id,
             deploy_logic(
@@ -3560,6 +3585,7 @@ async fn deploy_handler(
                 deploy_attempt_id,
                 progress.clone(),
                 tx.clone(),
+                config_validated_tx,
             ),
         ))
         .await
@@ -3580,6 +3606,7 @@ async fn deploy_handler(
 
                 let json = serde_json::to_string(&response).unwrap_or_else(|_| "{}".to_string());
                 let _ = tx.send(Ok(bytes::Bytes::from(format!("{}\n", json)))).await;
+                None
             }
             Err(error) => {
                 // Reset only the pending state owned by this deploy attempt.
@@ -3607,27 +3634,43 @@ async fn deploy_handler(
                         org_id_for_recovery,
                         app_id_for_recovery,
                         deployment_id,
-                        error.client_response().1,
+                        &error.client_response().1,
                     )
                     .await;
                 }
 
-                // Collect all breadcrumbs (pre-spawn + post-spawn) and report
-                // the failure to Sentry with an isolated hub.
+                let (status, msg) = error.client_response();
+                // Always drain breadcrumbs, but only report server failures.
                 let post_spawn = drain_breadcrumbs(&request_id);
                 let mut all_breadcrumbs = pre_spawn_breadcrumbs;
                 all_breadcrumbs.extend(post_spawn);
-                capture_error_with_breadcrumbs(&error, all_breadcrumbs);
+                if status.is_server_error() {
+                    capture_error_with_breadcrumbs(&error, all_breadcrumbs);
+                }
 
-                let (status, msg) = error.client_response();
-                let _ = tx.send(Ok(milestone_error(msg))).await;
+                let _ = tx.send(Ok(milestone_error(&msg))).await;
                 let error_json = serde_json::json!({"error": msg, "status": status.as_u16()});
                 let _ = tx
                     .send(Ok(bytes::Bytes::from(format!("{}\n", error_json))))
                     .await;
+                Some((status, Json(error_json)).into_response())
             }
         }
     });
+
+    // Keep HTTP headers uncommitted until the selected config is validated.
+    // On rejection, wait for reservation cleanup and return its actual status.
+    if config_validated_rx.await.is_err() {
+        drop(rx);
+        return match deploy_task.await {
+            Ok(Some(response)) => response,
+            _ => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "internal error"})),
+            )
+                .into_response(),
+        };
+    }
 
     let stream = ReceiverStream::new(rx);
     let body = Body::from_stream(stream);
@@ -4000,7 +4043,7 @@ mod activation_message_tests {
     use dterror::BoxError;
     use uuid::Uuid;
 
-    fn activation(source: impl Into<BoxError>) -> (StatusCode, &'static str) {
+    fn activation(source: impl Into<BoxError>) -> (StatusCode, String) {
         DeployLogicError::Activation {
             location: std::panic::Location::caller(),
             source: source.into(),
@@ -4109,6 +4152,48 @@ mod deploy_containerfile_tests {
     }
 
     #[tokio::test]
+    async fn deploy_path_requires_tls_domain_without_procfile_fallback() {
+        for domain in ["", r#"domain = "app.example.com""#] {
+            let hcl = format!(
+                r#"enclave "main" {{
+                network {{
+                    ingress {{
+                        cidr_ipv4 = "0.0.0.0/0"
+                        port = 8080
+                    }}
+                    http {{
+                        {domain}
+                        port = 8080
+                        e2e_encryption {{ mode = "tls" }}
+                    }}
+                }}
+            }}"#
+            );
+            let (repo_dir, commit_sha) =
+                commit_test_repo(&[("caution.hcl", &hcl), ("Procfile", "run: /app\n")]);
+            let git_dir = repo_dir.path().join(".git");
+            let result = load_build_config_for_deploy(git_dir.to_str().unwrap(), &commit_sha).await;
+            if domain.is_empty() {
+                let error = super::DeployLogicError::BuildConfigGit {
+                    source: Box::new(result.unwrap_err()),
+                    location: std::panic::Location::caller(),
+                };
+                let (status, message) = error.client_response();
+                assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+                assert!(message.contains("Invalid caution.hcl"), "{message}");
+                assert!(
+                    message.contains(
+                        "a domain is required when e2e_encryption resolves to mode = \"tls\""
+                    ),
+                    "{message}"
+                );
+            } else {
+                result.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn deploy_path_rejects_invalid_policy_without_procfile_fallback() {
         let (repo_dir, commit_sha) = commit_test_repo(&[
             (
@@ -4135,9 +4220,48 @@ mod deploy_containerfile_tests {
         };
         let (status, body) = error.client_response();
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
-        assert!(body.starts_with("Invalid caution.hcl") || body.starts_with("Invalid network"));
-        assert!(!body.contains("main.rs"));
+        assert!(body.contains("Invalid caution.hcl"), "{body}");
+        assert!(
+            body.contains("invalid network policy for enclave 'main'"),
+            "{body}"
+        );
+        assert!(body.contains("invalid egress CIDR in rule 0"), "{body}");
+        assert!(
+            body.contains("expected an IPv4 address and decimal prefix length 0-32"),
+            "{body}"
+        );
         assert!(!body.contains(repo_dir.path().to_str().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn deploy_hcl_syntax_error_preserves_diagnostic_without_source_values() {
+        let (repo_dir, commit_sha) = commit_test_repo(&[
+            (
+                "caution.hcl",
+                "enclave \"main\" { value = \"sensitive-placeholder\" @ }",
+            ),
+            ("Procfile", "run: /app\n"),
+        ]);
+        let git_dir = repo_dir.path().join(".git");
+        let source = load_build_config_for_deploy(git_dir.to_str().unwrap(), &commit_sha)
+            .await
+            .unwrap_err();
+        let error = super::DeployLogicError::BuildConfigGit {
+            source: Box::new(source),
+            location: std::panic::Location::caller(),
+        };
+        let (status, body) = error.client_response();
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            body.contains("failed to load build config from git"),
+            "{body}"
+        );
+        assert!(body.contains("Invalid caution.hcl"), "{body}");
+        assert!(body.contains("Failed to parse HCL"), "{body}");
+        assert!(body.contains("HCL parse error in line 1, column"), "{body}");
+        assert!(body.contains("expected"), "{body}");
+        assert!(!body.contains("sensitive-placeholder"), "{body}");
+        assert!(!body.chars().any(char::is_control), "{body}");
     }
 
     #[tokio::test]
@@ -4159,7 +4283,7 @@ mod deploy_containerfile_tests {
                 error.client_response(),
                 (
                     axum::http::StatusCode::BAD_REQUEST,
-                    "Invalid network policy."
+                    "Invalid network policy.".to_string()
                 )
             );
         }
@@ -4321,6 +4445,7 @@ async fn deploy_logic(
     deploy_attempt_id: Uuid,
     progress: Arc<app_deployments::lifecycle::DeployProgress>,
     tx: tokio::sync::mpsc::Sender<Result<bytes::Bytes, std::io::Error>>,
+    config_validated: tokio::sync::oneshot::Sender<()>,
 ) -> Result<DeployResponse, DeployLogicError> {
     use DeployLogicErrorCtx as Ctx;
 
@@ -4450,6 +4575,25 @@ async fn deploy_logic(
         };
 
     tracing::info!("Found resource: id={}, name={}", resource_id, app_name);
+
+    tracing::info!("Deploying branch: {}", req.branch);
+
+    let resolved_commit_sha = get_commit_sha(&app_id_str, &req.branch, &state.data_dir)
+        .await
+        .inspect(|sha| {
+            tracing::info!("Latest commit on branch '{}': {}", req.branch, sha);
+        })
+        .with_context(Ctx::commit_sha())?;
+
+    let commit_sha =
+        select_deploy_commit_sha(&req.branch, &resolved_commit_sha, req.commit_sha.as_deref())
+            .with_context(Ctx::commit_mismatch())?;
+
+    let git_dir = format!("{}/git-repos/{}.git", state.data_dir, app_id_str);
+    let (config_content, config_file) = load_build_config_for_deploy(&git_dir, &commit_sha)
+        .await
+        .with_context(Ctx::build_config_git())?;
+    let _ = config_validated.send(());
 
     let lifecycle = app_deployments::app_lifecycle(&state.db, req.app_id)
         .await
@@ -4677,20 +4821,6 @@ async fn deploy_logic(
         }
     }
 
-    tracing::info!("Deploying branch: {}", req.branch);
-
-    let resolved_commit_sha = get_commit_sha(&app_id_str, &req.branch, &state.data_dir)
-        .await
-        .inspect(|sha| {
-            tracing::info!("Latest commit on branch '{}': {}", req.branch, sha);
-        })
-        .with_context(Ctx::commit_sha())?;
-
-    let commit_sha =
-        select_deploy_commit_sha(&req.branch, &resolved_commit_sha, req.commit_sha.as_deref())
-            .with_context(Ctx::commit_mismatch())?;
-
-    let git_dir = format!("{}/git-repos/{}.git", state.data_dir, app_id_str);
     let deploy_target = if let Some(deployment_id) = candidate_deployment_id {
         let subject = app_deployments::admission::commit_subject(&git_dir, &commit_sha).await;
         let bundle_hash =
@@ -4718,10 +4848,6 @@ async fn deploy_logic(
             was_destroyed,
         }
     };
-
-    let (config_content, config_file) = load_build_config_for_deploy(&git_dir, &commit_sha)
-        .await
-        .with_context(Ctx::build_config_git())?;
 
     let containerfile = resolve_containerfile_for_deploy(&git_dir, &commit_sha, &config_file)
         .await
@@ -4838,7 +4964,7 @@ async fn deploy_logic(
             location: std::panic::Location::caller(),
         };
         deploy_target
-            .reject(&state, req.org_id, resource_id, error.client_response().1)
+            .reject(&state, req.org_id, resource_id, &error.client_response().1)
             .await;
         return Err(error);
     }
@@ -4848,7 +4974,7 @@ async fn deploy_logic(
             location: std::panic::Location::caller(),
         };
         deploy_target
-            .reject(&state, req.org_id, resource_id, error.client_response().1)
+            .reject(&state, req.org_id, resource_id, &error.client_response().1)
             .await;
         return Err(error);
     }
@@ -4858,7 +4984,7 @@ async fn deploy_logic(
             .with_context(Ctx::sizing_invalid());
     if let Err(error) = &deployment_requirements_result {
         deploy_target
-            .reject(&state, req.org_id, resource_id, error.client_response().1)
+            .reject(&state, req.org_id, resource_id, &error.client_response().1)
             .await;
     }
     let deployment_requirements = deployment_requirements_result?;
@@ -4900,7 +5026,7 @@ async fn deploy_logic(
                 location: std::panic::Location::caller(),
             };
             deploy_target
-                .reject(&state, req.org_id, resource_id, error.client_response().1)
+                .reject(&state, req.org_id, resource_id, &error.client_response().1)
                 .await;
             return Err(error);
         }
@@ -4921,7 +5047,7 @@ async fn deploy_logic(
             location: std::panic::Location::caller(),
         };
         deploy_target
-            .reject(&state, req.org_id, resource_id, error.client_response().1)
+            .reject(&state, req.org_id, resource_id, &error.client_response().1)
             .await;
         return Err(error);
     }
@@ -5279,7 +5405,7 @@ async fn deploy_logic(
             });
         if let Err(error) = &offered {
             deploy_target
-                .reject(&state, req.org_id, resource_id, error.client_response().1)
+                .reject(&state, req.org_id, resource_id, &error.client_response().1)
                 .await;
         }
         offered?;
@@ -5318,7 +5444,7 @@ async fn deploy_logic(
         };
         if let Err(error) = &reservation {
             deploy_target
-                .reject(&state, req.org_id, resource_id, error.client_response().1)
+                .reject(&state, req.org_id, resource_id, &error.client_response().1)
                 .await;
         }
         Some(reservation?)
@@ -5448,7 +5574,7 @@ async fn deploy_logic(
                     &app_name,
                     should_cleanup_on_failure,
                     &deployed_region,
-                    error.client_response().1,
+                    &error.client_response().1,
                 )
                 .await;
         }
@@ -5495,7 +5621,7 @@ async fn deploy_logic(
                 &app_name,
                 should_cleanup_on_failure,
                 &deployed_region,
-                error.client_response().1,
+                &error.client_response().1,
             )
             .await;
     }
@@ -5537,7 +5663,7 @@ async fn deploy_logic(
                     &app_name,
                     true,
                     &deployed_region,
-                    error.client_response().1,
+                    &error.client_response().1,
                 )
                 .await;
         }
@@ -5569,7 +5695,7 @@ async fn deploy_logic(
                     &app_name,
                     true,
                     &deployed_region,
-                    error.client_response().1,
+                    &error.client_response().1,
                 )
                 .await;
         }
@@ -5669,7 +5795,7 @@ async fn deploy_logic(
                 &app_name,
                 should_cleanup_on_failure,
                 &deployed_region,
-                error.client_response().1,
+                &error.client_response().1,
             )
             .await;
     }
@@ -5688,7 +5814,7 @@ async fn deploy_logic(
                 &app_name,
                 should_cleanup_on_failure,
                 &deployed_region,
-                error.client_response().1,
+                &error.client_response().1,
             )
             .await;
         return Err(error);
