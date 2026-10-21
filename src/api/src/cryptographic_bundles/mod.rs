@@ -16,6 +16,8 @@ use uuid::Uuid;
 
 mod holders;
 
+pub(crate) mod handlers;
+
 #[derive(Debug, Serialize, FromRow)]
 pub struct QuorumBundle {
     pub id: Uuid,
