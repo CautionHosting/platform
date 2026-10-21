@@ -55,6 +55,12 @@ impl OrgQuorumError {
     fn invalid(message: &'static str) -> Self {
         Self::new(StatusCode::BAD_REQUEST, message)
     }
+
+    /// Client status and text for this failure. Transitional: lets a handler
+    /// forward this error's status until it is replaced by a per-function type.
+    pub(crate) fn client_response(&self) -> (StatusCode, &'static str) {
+        (self.status, self.message)
+    }
 }
 
 impl IntoResponse for OrgQuorumError {
