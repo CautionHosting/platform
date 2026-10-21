@@ -4,8 +4,9 @@
 //! HTTP handlers for org quorum bundles, mounted under `/quorum-bundles`.
 
 use super::{
-    AssembleRequestError, GenerateOrgQuorumBundleError, GenerateOrgQuorumBundleRequest,
-    OrgQuorumMember, PostError, ResolveHoldersError, SendError, certificates::DeriveError,
+    AssembleRequestError, CredentialSnapshotError, GenerateOrgQuorumBundleError,
+    GenerateOrgQuorumBundleRequest, OrgQuorumMember, PostError, ResolveHoldersError, SendError,
+    certificates::{DeriveError, VerifyProofError},
     generate_org_quorum_bundle, list_participants,
 };
 use crate::{AppState, AuthContext, cryptographic_bundles::QuorumBundle, get_user_primary_org};
@@ -130,12 +131,18 @@ fn generate_client_response(
         Some(E::ResolveHolders { source, .. }) => {
             use ResolveHoldersError as R;
             match source.downcast_ref::<R>() {
-                Some(
-                    R::NotMember { .. }
-                    | R::PgpKeyMissing { .. }
-                    | R::Credentials { .. }
-                    | R::Keyring { .. },
-                ) => (StatusCode::BAD_REQUEST, "invalid quorum holder selection"),
+                Some(R::Credentials { source, .. }) => {
+                    use CredentialSnapshotError as C;
+                    match source.downcast_ref::<C>() {
+                        Some(C::Encode { .. }) => {
+                            (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+                        }
+                        _ => (StatusCode::BAD_REQUEST, "invalid quorum holder selection"),
+                    }
+                }
+                Some(R::NotMember { .. } | R::PgpKeyMissing { .. } | R::Keyring { .. }) => {
+                    (StatusCode::BAD_REQUEST, "invalid quorum holder selection")
+                }
                 Some(
                     R::MembershipQuery { .. } | R::PgpKeyQuery { .. } | R::CredentialsQuery { .. },
                 )
@@ -167,7 +174,20 @@ fn generate_client_response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "certificate-service configuration is unavailable",
                 ),
-                Some(D::VerifyProof { .. } | D::VerifyCertificates { .. }) | None => (
+                Some(D::VerifyProof { source, .. }) => {
+                    use VerifyProofError as V;
+                    match source.downcast_ref::<V>() {
+                        Some(V::Policy { .. }) => (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "certificate-service configuration is unavailable",
+                        ),
+                        _ => (
+                            StatusCode::BAD_GATEWAY,
+                            "certificate-service response could not be verified; generation was not retried",
+                        ),
+                    }
+                }
+                Some(D::VerifyCertificates { .. }) | None => (
                     StatusCode::BAD_GATEWAY,
                     "certificate-service response could not be verified; generation was not retried",
                 ),
