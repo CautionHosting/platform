@@ -1268,9 +1268,8 @@ pub async fn delete_payment_method(
 
         if !response.status().is_success() {
             let status = response.status();
-            let err_body = response.text().await.unwrap_or_default();
             tracing::warn!(
-                payment_method_id, org_id = %org_id, status = %status, body = %err_body,
+                payment_method_id, org_id = %org_id, status = %status,
                 "Failed to delete Paddle payment method"
             );
             return Err(DeletePaymentMethodError::PaddleAgreement {
@@ -2659,8 +2658,7 @@ pub async fn purchase_credits(
 
         if !response.status().is_success() {
             let status = response.status();
-            let err_body = response.text().await.unwrap_or_default();
-            tracing::error!(org_id = %org_id, status = %status, body = %err_body, "Paddle transaction failed");
+            tracing::error!(org_id = %org_id, status = %status, "Paddle transaction failed");
             return Err(PurchaseCreditsError::PaddleStatus {
                 location: std::panic::Location::caller(),
             });
@@ -3275,6 +3273,9 @@ pub async fn apply_credit(
 
     Ok(new_balance)
 }
+#[cfg(test)]
+mod diagnostic_tests;
+
 #[cfg(test)]
 mod tests {
     use super::{

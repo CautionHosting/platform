@@ -63,6 +63,8 @@ use sentry::{Breadcrumb, Hub, Scope};
 use tower::{Layer, Service};
 use tracing_subscriber::layer::{Context as SubContext, Layer as SubLayer};
 
+mod privacy;
+
 // ---------------------------------------------------------------------------
 // Task-local request ID
 // ---------------------------------------------------------------------------
@@ -312,17 +314,24 @@ pub fn init_from_env(service: &str) -> Option<sentry::ClientInitGuard> {
 
     let env_var = dsn_env_var(service);
     if let Ok(dsn) = std::env::var(&env_var) {
-        let mut options = sentry::ClientOptions::new().dsn(&dsn);
-        if let Some(environment) = environment_from_env() {
-            options = options.environment(environment);
-        }
-        let guard = sentry::init(options);
+        let guard = sentry::init(client_options(&dsn));
         tracing::info!(env_var = %env_var, "Sentry initialized");
         Some(guard)
     } else {
         tracing::warn!(env_var = %env_var, "Sentry DSN not set, Sentry reporting disabled");
         None
     }
+}
+
+fn client_options(dsn: &str) -> sentry::ClientOptions {
+    let mut options = sentry::ClientOptions::new()
+        .dsn(dsn)
+        .send_default_pii(false)
+        .before_send(privacy::scrub_event);
+    if let Some(environment) = environment_from_env() {
+        options = options.environment(environment);
+    }
+    options
 }
 
 /// The Sentry environment, taken from the `ENVIRONMENT` variable.
