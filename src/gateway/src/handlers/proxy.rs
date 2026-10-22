@@ -274,7 +274,7 @@ pub async fn proxy_handler(
         return Err(StatusCode::NOT_FOUND.into_response());
     }
 
-    tracing::debug!("Proxying request to: {}", target_url);
+    tracing::debug!(method = %method, path = %target_url.path(), "Proxying request");
 
     let mut proxy_req = state.http_client.request(method, target_url);
 
@@ -312,6 +312,7 @@ pub async fn proxy_handler(
     }
 
     let proxy_response = proxy_req.send().await.map_err(|e| {
+        let e = e.without_url();
         tracing::error!("Proxy request failed: {:?}", e);
         backend_unavailable_response(
             BackendUnreachable::Send {
@@ -326,6 +327,7 @@ pub async fn proxy_handler(
     let headers = proxy_response.headers().clone();
 
     let body_bytes = proxy_response.bytes().await.map_err(|e| {
+        let e = e.without_url();
         tracing::error!("Failed to read proxy response body: {:?}", e);
         backend_unavailable_response(
             BackendUnreachable::ReadResponse {
@@ -375,6 +377,287 @@ mod tests {
     use uuid::Uuid;
 
     const API_SERVICE_URL: &str = "http://api:8080";
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl CapturedLogs {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    fn proxy_test_state(api_service_url: String) -> crate::types::AppState {
+        let origin = reqwest::Url::parse("https://example.com").unwrap();
+        crate::types::AppState {
+            db: sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://localhost/nonexistent")
+                .unwrap(),
+            webauthn: webauthn_rs::WebauthnBuilder::new("example.com", &origin)
+                .unwrap()
+                .build()
+                .unwrap(),
+            relying_party_id: "example.com".into(),
+            api_service_url,
+            metering_service_url: String::new(),
+            http_client: reqwest::Client::builder()
+                .no_proxy()
+                .http1_only()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap(),
+            reg_states: Default::default(),
+            passkey_reg_states: Default::default(),
+            recovery_verifications: Default::default(),
+            auth_states: Default::default(),
+            sign_challenges: Default::default(),
+            session_timeout_hours: 24,
+            internal_service_secret: None,
+            csrf_secret: "synthetic-csrf-secret".into(),
+            login_allow_broadcast: true,
+            scoped_begin_limiter: crate::rate_limit::RateLimiter::new(1000, 60),
+            username_begin_limiter: crate::rate_limit::RateLimiter::new(1000, 60),
+        }
+    }
+
+    async fn loopback_backend(
+        response: &'static [u8],
+    ) -> (String, tokio::task::JoinHandle<Vec<u8>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let backend = tokio::spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 1024];
+                loop {
+                    let size = stream.read(&mut buffer).await.unwrap();
+                    assert_ne!(size, 0, "proxy closed before sending a complete request");
+                    request.extend_from_slice(&buffer[..size]);
+                    if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..end]);
+                        let content_length = headers
+                            .lines()
+                            .filter_map(|line| line.split_once(':'))
+                            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                            .map(|(_, value)| value.trim().parse::<usize>().unwrap())
+                            .unwrap_or(0);
+                        if request.len() >= end + 4 + content_length {
+                            break;
+                        }
+                    }
+                }
+                stream.write_all(response).await.unwrap();
+                stream.shutdown().await.unwrap();
+                request
+            })
+            .await
+            .expect("loopback backend timed out")
+        });
+        (format!("http://{address}"), backend)
+    }
+
+    async fn proxy_with_logs(
+        backend_url: String,
+        request: axum::extract::Request,
+    ) -> (
+        Result<axum::response::Response, axum::response::Response>,
+        String,
+    ) {
+        use tracing::instrument::WithSubscriber;
+
+        let logs = CapturedLogs::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter("off,gateway::handlers::proxy=debug")
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let response =
+            super::proxy_handler(axum::extract::State(proxy_test_state(backend_url)), request)
+                .with_subscriber(subscriber)
+                .await;
+        (response, logs.text())
+    }
+
+    #[tokio::test]
+    async fn send_failure_diagnostics_omit_query_and_userinfo() {
+        let (backend_url, backend) = loopback_backend(b"").await;
+        let backend_url =
+            backend_url.replacen("http://", "http://synthetic-user:synthetic-password@", 1);
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/user/status?token=synthetic-query-secret&next=%2Finternal")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let (response, logs) = proxy_with_logs(backend_url, request).await;
+        let response = response.expect_err("empty upstream response must fail during send");
+        backend.await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_GATEWAY);
+        let report = response
+            .extensions()
+            .get::<sentry_middleware::SentryReportable>()
+            .unwrap();
+        let error = report
+            .0
+            .downcast_ref::<super::BackendUnreachable>()
+            .unwrap();
+        let super::BackendUnreachable::Send { source, .. } = error else {
+            panic!("expected send failure, got {error:?}");
+        };
+        let source = source.downcast_ref::<reqwest::Error>().unwrap();
+        let diagnostics = format!("{logs}\n{error:?}\n{error}\n{source:?}\n{source}");
+        for secret in [
+            "synthetic-query-secret",
+            "synthetic-user",
+            "synthetic-password",
+            "?token=",
+        ] {
+            assert!(
+                !diagnostics.contains(secret),
+                "diagnostics leaked {secret}: {diagnostics}"
+            );
+        }
+        assert!(
+            source.url().is_none(),
+            "attached reqwest error retains its URL"
+        );
+        assert!(logs.contains("Proxy request failed"), "{logs}");
+        assert!(
+            logs.contains("/user/status") && logs.contains("POST"),
+            "{logs}"
+        );
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), super::MAX_BODY_SIZE)
+                .await
+                .unwrap(),
+            "Backend service unavailable"
+        );
+    }
+
+    #[tokio::test]
+    async fn body_failure_diagnostics_omit_query_and_userinfo() {
+        let (backend_url, backend) = loopback_backend(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\nshort",
+        )
+        .await;
+        let backend_url =
+            backend_url.replacen("http://", "http://synthetic-user:synthetic-password@", 1);
+        let request = axum::http::Request::builder()
+            .uri("/user/status?token=synthetic-query-secret")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let (response, logs) = proxy_with_logs(backend_url, request).await;
+        let response =
+            response.expect_err("truncated upstream response must fail during body read");
+        backend.await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_GATEWAY);
+        let report = response
+            .extensions()
+            .get::<sentry_middleware::SentryReportable>()
+            .unwrap();
+        let error = report
+            .0
+            .downcast_ref::<super::BackendUnreachable>()
+            .unwrap();
+        let super::BackendUnreachable::ReadResponse { source, .. } = error else {
+            panic!("expected body-read failure, got {error:?}");
+        };
+        let source = source.downcast_ref::<reqwest::Error>().unwrap();
+        let diagnostics = format!("{logs}\n{error:?}\n{error}\n{source:?}\n{source}");
+        for secret in [
+            "synthetic-query-secret",
+            "synthetic-user",
+            "synthetic-password",
+            "?token=",
+        ] {
+            assert!(
+                !diagnostics.contains(secret),
+                "diagnostics leaked {secret}: {diagnostics}"
+            );
+        }
+        assert!(
+            source.url().is_none(),
+            "attached reqwest error retains its URL"
+        );
+        assert!(
+            logs.contains("Failed to read proxy response body"),
+            "{logs}"
+        );
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), super::MAX_BODY_SIZE)
+                .await
+                .unwrap(),
+            "Failed to read backend response"
+        );
+    }
+
+    #[tokio::test]
+    async fn forwarding_preserves_query_body_and_upstream_response() {
+        let (backend_url, backend) = loopback_backend(
+            b"HTTP/1.1 422 Unprocessable Entity\r\nContent-Type: application/octet-stream\r\nContent-Length: 12\r\nConnection: close\r\n\r\nupstream\x00\xff\r\n",
+        ).await;
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/user/status?token=synthetic-query-secret&x=a%2Fb&x=two+words&empty=")
+            .header("Content-Type", "application/octet-stream")
+            .body(axum::body::Body::from(
+                b"synthetic-body-secret\x00\xff".to_vec(),
+            ))
+            .unwrap();
+        let (response, logs) = proxy_with_logs(backend_url, request).await;
+        let response = response.expect("complete upstream response must be forwarded");
+        let forwarded = backend.await.unwrap();
+        assert!(forwarded.starts_with(
+            b"POST /user/status?token=synthetic-query-secret&x=a%2Fb&x=two+words&empty= HTTP/1.1\r\n"
+        ));
+        let end = forwarded
+            .windows(4)
+            .position(|part| part == b"\r\n\r\n")
+            .unwrap();
+        assert_eq!(&forwarded[end + 4..], b"synthetic-body-secret\x00\xff");
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/octet-stream"
+        );
+        assert!(
+            response
+                .extensions()
+                .get::<sentry_middleware::SentryReportable>()
+                .is_none()
+        );
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), super::MAX_BODY_SIZE)
+                .await
+                .unwrap(),
+            b"upstream\x00\xff\r\n".as_slice()
+        );
+        assert!(!logs.contains("synthetic-query-secret"), "{logs}");
+        assert!(!logs.contains("synthetic-body-secret"), "{logs}");
+        assert!(
+            logs.contains("/user/status") && logs.contains("POST"),
+            "{logs}"
+        );
+    }
 
     fn target(path: &str) -> reqwest::Url {
         build_api_target_url(API_SERVICE_URL, path, None).expect("target URL should parse")

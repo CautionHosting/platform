@@ -663,10 +663,7 @@ pub async fn qr_login_status_handler(
             // consume returned None: another poll already took the session id
             // (one-shot), or it was cleared. The token is terminal-completed
             // with nothing left to hand back.
-            tracing::debug!(
-                "QR login status completed but session id already consumed (token: {})",
-                query.token
-            );
+            tracing::debug!("QR login status completed but session id already consumed");
         }
 
         return Ok(Json(crate::types::QrLoginStatusResponse {
@@ -1566,6 +1563,158 @@ mod tests {
         }
         let json = serde_json::to_value(details_for("POST", "/pgp-keys", None)).unwrap();
         assert_eq!(json, json!({"method": "POST", "path": "/pgp-keys"}));
+    }
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires DATABASE_URL pointing to disposable Postgres"]
+    async fn consumed_poll_race_does_not_log_polling_token(pool: sqlx::PgPool) {
+        use axum::{
+            extract::{Query, State},
+            response::IntoResponse,
+        };
+        use tracing::instrument::WithSubscriber;
+
+        const TOKEN: &str = "synthetic-polling-secret";
+        const SESSION: &str = "synthetic-session-secret";
+        sqlx::raw_sql(
+            "CREATE TABLE qr_login_tokens (
+                token TEXT PRIMARY KEY, requestee_token TEXT, status TEXT NOT NULL,
+                ip_address TEXT, browser_ip_address TEXT, auth_challenge_key TEXT,
+                session_id TEXT, expires_at TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(), username TEXT NOT NULL
+             );
+             CREATE TABLE auth_sessions (
+                session_id TEXT PRIMARY KEY, credential_id BYTEA NOT NULL, user_id UUID NOT NULL,
+                expires_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                last_used_at TIMESTAMPTZ NOT NULL DEFAULT now()
+             );",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO qr_login_tokens (token, status, session_id, expires_at, username)
+             VALUES ($1, 'completed', $2, now() + interval '1 hour', 'synthetic-user')",
+        )
+        .bind(TOKEN)
+        .bind(SESSION)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO auth_sessions (session_id, credential_id, user_id, expires_at)
+             VALUES ($1, '\\x01', $2, now() + interval '1 hour')",
+        )
+        .bind(SESSION)
+        .bind(Uuid::nil())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let origin = url::Url::parse("https://example.com").unwrap();
+        let state = crate::types::AppState {
+            db: pool.clone(),
+            webauthn: webauthn_rs::WebauthnBuilder::new("example.com", &origin)
+                .unwrap()
+                .build()
+                .unwrap(),
+            relying_party_id: "example.com".into(),
+            api_service_url: String::new(),
+            metering_service_url: String::new(),
+            http_client: reqwest::Client::builder().no_proxy().build().unwrap(),
+            reg_states: Default::default(),
+            passkey_reg_states: Default::default(),
+            recovery_verifications: Default::default(),
+            auth_states: Default::default(),
+            sign_challenges: Default::default(),
+            session_timeout_hours: 24,
+            internal_service_secret: None,
+            csrf_secret: "synthetic-csrf-secret".into(),
+            login_allow_broadcast: true,
+            scoped_begin_limiter: crate::rate_limit::RateLimiter::new(1000, 60),
+            username_begin_limiter: crate::rate_limit::RateLimiter::new(1000, 60),
+        };
+        let mut log_file = tempfile::tempfile().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter("off,gateway::handlers::qr_auth=debug")
+            .without_time()
+            .with_ansi(false)
+            .with_writer(log_file.try_clone().unwrap())
+            .finish();
+
+        // Pause the handler's session lookup after its token lookup. A competing
+        // consumer can then win deterministically, without timing-based races.
+        let mut lock = pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE auth_sessions IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *lock)
+            .await
+            .unwrap();
+        let poll = super::qr_login_status_handler(
+            State(state),
+            Query(super::QrLoginStatusQuery {
+                token: TOKEN.into(),
+            }),
+        )
+        .with_subscriber(subscriber);
+        let competitor = async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (
+                        SELECT 1 FROM pg_locks
+                        WHERE relation = 'auth_sessions'::regclass AND NOT granted
+                          AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                    )",
+                ).fetch_one(&pool).await.unwrap();
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            let session = crate::db::consume_qr_login_session_id(&pool, TOKEN)
+                .await
+                .unwrap();
+            lock.commit().await.unwrap();
+            session
+        };
+        let (response, consumed) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(poll, competitor)
+        })
+        .await
+        .expect("handler did not reach the coordinated consumed-poll race");
+        assert_eq!(consumed.as_deref(), Some(SESSION));
+        let response = response.unwrap().into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap(),
+            r#"{"status":"completed"}"#,
+        );
+        let session = crate::db::get_auth_session(&pool, SESSION)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            session.session_id, SESSION,
+            "polling must not alter the auth session"
+        );
+        assert!(
+            crate::db::consume_qr_login_session_id(&pool, TOKEN)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        use std::io::{Read, Seek};
+        log_file.rewind().unwrap();
+        let mut logs = String::new();
+        log_file.read_to_string(&mut logs).unwrap();
+        assert!(
+            logs.contains("session id already consumed"),
+            "race branch was not logged: {logs}"
+        );
+        assert!(!logs.contains(TOKEN), "polling token leaked: {logs}");
+        assert!(!logs.contains(SESSION), "session id leaked: {logs}");
     }
 
     #[test]

@@ -1306,10 +1306,11 @@ pub(crate) enum PollBuildStatusError {
         source: BoxError,
     },
 
-    #[error("Failed to parse status.json [{location}]")]
+    #[error("Failed to parse status.json at line {line}, column {column} [{location}]")]
     ParseStatus {
+        line: usize,
+        column: usize,
         location: Location,
-        source: BoxError,
     },
 
     #[error("could not advance build phase state [{location}]")]
@@ -1320,10 +1321,9 @@ pub(crate) enum PollBuildStatusError {
         source: BoxError,
     },
 
-    #[error("Build timed out after {elapsed}: {status:?} [{location}]")]
+    #[error("Build status stalled for {elapsed} [{location}]")]
     Stalled {
         elapsed: TimeDelta,
-        status: BuildStatus,
         location: Location,
     },
 
@@ -1368,16 +1368,15 @@ async fn poll_build_status(
                     .with_context(Ctx::read_body())?
                     .to_vec();
                 let status: BuildStatus = match serde_json::from_slice(&body) {
-                    Ok(o) => {
-                        tracing::info!("Received status: {o:?} ({:?})", String::from_utf8(body));
-                        o
-                    }
+                    Ok(status) => status,
                     Err(e) => {
-                        tracing::error!("Could not parse status.json: {e}");
-                        tracing::error!("Received body: {:?}", String::from_utf8(body));
+                        // Parser errors can quote arbitrary field values from the payload.
+                        tracing::error!(line = e.line(), column = e.column(), category = ?e.classify(),
+                            "Could not parse status.json");
                         return Err(PollBuildStatusError::ParseStatus {
+                            line: e.line(),
+                            column: e.column(),
                             location: std::panic::Location::caller(),
-                            source: e.into(),
                         });
                     }
                 };
@@ -1387,7 +1386,6 @@ async fn poll_build_status(
                 if elapsed > stalled_timeout {
                     return Err(PollBuildStatusError::Stalled {
                         elapsed,
-                        status,
                         location: std::panic::Location::caller(),
                     });
                 }
@@ -1396,6 +1394,8 @@ async fn poll_build_status(
                 let messages = phase_sm
                     .increment(&status)
                     .with_context(Ctx::phase_advance())?;
+                // The state machine has validated the phase; never log the raw status body.
+                tracing::info!(phase = %status.phase, timestamp = %status.timestamp, "Received build status");
                 for message in messages {
                     if let Some(msg) = message.milestone {
                         let _ = tx
@@ -1407,9 +1407,21 @@ async fn poll_build_status(
                 match status.phase.as_str() {
                     "completed" => return Ok(status),
                     "failed" => {
+                        // Older builders may put workload output in error. Only forward
+                        // exact, fixed summaries, never arbitrary diagnostic text.
                         let message = status
                             .error
-                            .unwrap_or_else(|| "Unknown build error".to_string());
+                            .as_deref()
+                            .filter(|message| {
+                                matches!(
+                                    *message,
+                                    "Application Docker build failed"
+                                        | "EIF build helper failed"
+                                        | "EIF file not found after build"
+                                )
+                            })
+                            .unwrap_or("Build failed; consult restricted builder logs for details")
+                            .to_string();
                         return Err(PollBuildStatusError::BuildFailed {
                             message,
                             location: std::panic::Location::caller(),
@@ -1679,8 +1691,7 @@ set_phase "building-application"
 if docker build -f "$CONTAINERFILE" -t app-image . 2>&1 | tee "$APP_BUILD_LOG"; then
     :
 else
-    fail "Application Docker build failed:
-$(tail -40 "$APP_BUILD_LOG" 2>/dev/null | tail -c 4096 | tr -d '\000-\010\013-\037\177' || echo "No build output available")"
+    fail "Application Docker build failed"
 fi
 
 # Write manifest for remote-build-helper
@@ -1728,8 +1739,7 @@ CAUTION_NO_CACHE="$NO_CACHE" \
 /usr/local/bin/remote-build-helper 2>&1 | tee "$HELPER_LOG"; then
     :
 else
-    fail "EIF build helper failed:
-$(tail -12 "$HELPER_LOG" 2>/dev/null | tail -c 4096 | tr -d '\000-\010\013-\037\177' || echo "No helper output available")"
+    fail "EIF build helper failed"
 fi
 
 EIF_PATH="/build/output/enclave.eif"
@@ -2207,6 +2217,118 @@ mod component_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn poll_diagnostic_fixture(
+        body: String,
+    ) -> (Result<BuildStatus, PollBuildStatusError>, String) {
+        use tracing::instrument::WithSubscriber;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let app = axum::Router::new().fallback(move || {
+            let body = body.clone();
+            async move { body }
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = aws_sdk_s3::Config::builder()
+            .behavior_version_latest()
+            .region(aws_sdk_s3::config::Region::new("us-west-2"))
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "fixture", "fixture", None, None, "test",
+            ))
+            .endpoint_url(endpoint)
+            .force_path_style(true)
+            .build();
+        let client = aws_sdk_s3::Client::from_conf(config);
+        let log = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(std::sync::Mutex::new(log.reopen().unwrap()))
+            .finish();
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            poll_build_status(&client, "fixture", "status.json", 15, &tx)
+                .with_subscriber(subscriber),
+        )
+        .await;
+        server.abort();
+        (
+            result.unwrap(),
+            std::fs::read_to_string(log.path()).unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn build_status_diagnostics_exclude_failure_payload() {
+        let marker = "synthetic-unlabelled-build-secret";
+        let (result, logs) = poll_diagnostic_fixture(
+            serde_json::json!({
+                "phase": "failed", "timestamp": Utc::now().timestamp(), "error": marker,
+                "pcrs": {"unexpected": marker}
+            })
+            .to_string(),
+        )
+        .await;
+        let error = result.unwrap_err();
+        assert!(matches!(error, PollBuildStatusError::BuildFailed { .. }));
+        assert!(!format!("{error:?}\n{error}\n{logs}").contains(marker));
+        assert!(logs.contains("Received build status"));
+    }
+
+    #[tokio::test]
+    async fn build_status_diagnostics_exclude_stalled_payload() {
+        let marker = "synthetic-stalled-build-secret";
+        let (result, logs) = poll_diagnostic_fixture(
+            serde_json::json!({
+                "phase": "building-application", "timestamp": 0, "error": marker,
+                "pcrs": {"unexpected": marker}
+            })
+            .to_string(),
+        )
+        .await;
+        let error = result.unwrap_err();
+        assert!(matches!(error, PollBuildStatusError::Stalled { .. }));
+        assert!(!format!("{error:?}\n{error}\n{logs}").contains(marker));
+    }
+
+    #[tokio::test]
+    async fn build_status_diagnostics_exclude_invalid_json_values() {
+        let marker = "synthetic-invalid-build-secret";
+        // serde_json's Display includes rejected field values, not just parse positions.
+        for body in [
+            format!(r#"{{"phase":"failed","timestamp":"{marker}"}}"#),
+            format!("{marker} not json"),
+            serde_json::json!({"phase": marker, "timestamp": Utc::now().timestamp()}).to_string(),
+        ] {
+            let (result, logs) = poll_diagnostic_fixture(body).await;
+            let error = result.unwrap_err();
+            assert!(!format!("{error:?}\n{error}\n{logs}").contains(marker));
+            if let Some(source) = std::error::Error::source(&error) {
+                assert!(!source.to_string().contains(marker));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn build_status_diagnostics_preserve_success_without_raw_payload() {
+        let marker = "synthetic-unknown-status-field-secret";
+        let (result, logs) = poll_diagnostic_fixture(
+            serde_json::json!({
+                "phase": "completed", "timestamp": Utc::now().timestamp(),
+                "eif_sha256": "a".repeat(64), "eif_size_bytes": 42,
+                "pcrs": {"PCR0": "b".repeat(96)}, "unknown": marker
+            })
+            .to_string(),
+        )
+        .await;
+        let status = result.unwrap();
+        assert_eq!(status.eif_sha256, "a".repeat(64));
+        assert_eq!(status.eif_size_bytes, 42);
+        assert_eq!(status.pcrs["PCR0"], "b".repeat(96));
+        assert!(!logs.contains(marker));
+    }
 
     #[tokio::test]
     #[ignore = "requires disposable COMPONENTS_TEST_DATABASE_URL"]
@@ -3282,9 +3404,8 @@ mod tests {
             "should retain the complete helper log"
         );
         assert!(
-            userdata.contains("-t app-image . 2>&1 | tee \"$APP_BUILD_LOG\"")
-                && userdata.contains("tail -40 \"$APP_BUILD_LOG\""),
-            "app build failures should report bounded Docker output"
+            userdata.contains("-t app-image . 2>&1 | tee \"$APP_BUILD_LOG\""),
+            "app build output should remain in its private log"
         );
         assert!(
             userdata.contains(
@@ -3298,12 +3419,25 @@ mod tests {
             ),
             "should upload the private helper log on failure"
         );
-        assert!(
-            userdata.contains("tail -12 \"$HELPER_LOG\"")
-                && userdata.contains("tail -c 4096")
-                && userdata.contains("tr -d"),
-            "public failure detail should be bounded"
-        );
+        // Execute both generated failure branches with secret-bearing private logs.
+        let private_log = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(private_log.path(), "synthetic-private-build-output").unwrap();
+        for reason in ["Application Docker build failed", "EIF build helper failed"] {
+            let start = userdata.find(&format!("    fail \"{reason}")).unwrap();
+            let end = start + userdata[start..].find("\nfi").unwrap();
+            let fragment = &userdata[start..end];
+            let output = std::process::Command::new("bash")
+                .arg("-c")
+                .arg(format!("fail() {{ printf '%s\\n' \"$1\"; }}\n{fragment}"))
+                .env("APP_BUILD_LOG", private_log.path())
+                .env("HELPER_LOG", private_log.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let summary = String::from_utf8(output.stdout).unwrap();
+            assert!(summary.contains(reason));
+            assert!(!summary.contains("synthetic-private-build-output"));
+        }
         assert!(
             !userdata.contains("/var/log/cloud-init-output.log") && !userdata.contains("tail -80"),
             "cloud-init output must not be returned to the Git client"
