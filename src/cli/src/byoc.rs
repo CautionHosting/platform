@@ -29,8 +29,8 @@ use crate::output::{Spinner, SpinnerStyle};
 use crate::prompt;
 use crate::resolve_local_build_command_from_dir;
 use crate::{
-    ApiClient, CreateAppResponse, deployment_target_summary, inspect_checkout_link,
-    linked_checkout_error, print_managed_dns_details,
+    ApiClient, CreateAppResponse, check_git_repo_at, deployment_target_summary,
+    inspect_checkout_link, linked_checkout_error, print_managed_dns_details, set_git_remote_at,
 };
 
 const BYOC_PROVISIONER_IMAGE: &str =
@@ -238,6 +238,93 @@ pub(crate) enum InitError {
 
         #[source]
         source: BoxError,
+    },
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum InitFromAppError {
+    #[error("failed to resolve the current directory [{location}]")]
+    CurrentDir {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to check git repository [{location}]")]
+    CheckGitRepo {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to verify app {app_id} [{location}]")]
+    FetchApp {
+        app_id: String,
+
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error(
+        "api returned app {api_app_id} while linking {expected_app_id}; refusing to change the checkout link [{location}]"
+    )]
+    IdMismatch {
+        api_app_id: String,
+
+        expected_app_id: String,
+
+        #[location]
+        location: Location,
+    },
+
+    #[error("app {app_id} has no Git URL; cannot create a remote [{location}]")]
+    MissingGitUrl {
+        app_id: String,
+
+        #[location]
+        location: Location,
+    },
+
+    #[error("failed to save deployment info [{location}]")]
+    SaveDeployment {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to set git remote [{location}]")]
+    SetGitRemote {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to run git push [{location}]")]
+    RunGitPush {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("git push to the caution remote failed: {stderr} [{location}]")]
+    PushFailed {
+        stderr: String,
+
+        #[location]
+        location: Location,
     },
 }
 
@@ -909,6 +996,89 @@ pub(crate) async fn init(
     output::status("  caution apps list");
     output::status("\nVerify attestation:");
     output::status("  caution verify");
+
+    Ok(())
+}
+
+/// Link the current checkout to an existing app and deploy it.
+///
+/// Unlike [`init`], this does not create an app. It verifies `app_id` through
+/// the API, records it as the checkout's deployment, points the `caution` Git
+/// remote at the app, and pushes the current commit to create a deployment.
+pub(crate) async fn init_from_app(
+    client: &ApiClient,
+    app_id: &str,
+) -> Result<(), InitFromAppError> {
+    use InitFromAppErrorCtx as Ctx;
+
+    let repo = std::env::current_dir().with_context(Ctx::current_dir())?;
+    init_from_app_in(client, app_id, &repo).await
+}
+
+async fn init_from_app_in(
+    client: &ApiClient,
+    app_id: &str,
+    repo: &Path,
+) -> Result<(), InitFromAppError> {
+    use InitFromAppErrorCtx as Ctx;
+
+    let app_id = app_id.trim();
+    output::status(format!("Linking checkout to existing app {}...", app_id));
+
+    output::verbose(client.verbose, "Checking git repository...");
+    check_git_repo_at(repo).with_context(Ctx::check_git_repo())?;
+
+    let app = client
+        .fetch_app(app_id)
+        .await
+        .with_context(Ctx::fetch_app(app_id))?;
+    if !app.id.eq_ignore_ascii_case(app_id) {
+        return Err(InitFromAppError::IdMismatch {
+            api_app_id: app.id,
+            expected_app_id: app_id.to_string(),
+            location: std::panic::Location::caller(),
+        });
+    }
+    if app.git_url.is_empty() {
+        return Err(InitFromAppError::MissingGitUrl {
+            app_id: app.id,
+            location: std::panic::Location::caller(),
+        });
+    }
+
+    output::success("App found");
+    output::status(format!("ID: {}", app.id));
+    output::status(format!(
+        "Name: {}",
+        app.resource_name.as_deref().unwrap_or("unnamed")
+    ));
+    output::status(format!("State: {}", app.state));
+    output::status(format!("Git URL: {}", app.git_url));
+
+    output::verbose(client.verbose, "Saving deployment info...");
+    client
+        .save_deployment(&app.id)
+        .with_context(Ctx::save_deployment())?;
+
+    output::verbose(client.verbose, "Setting git remote...");
+    set_git_remote_at(repo, &app.git_url).with_context(Ctx::set_git_remote())?;
+
+    output::status("Pushing the current commit to create a deployment...");
+    let push = Command::new("git")
+        .current_dir(repo)
+        .args(["push", "caution", "HEAD:main"])
+        .output()
+        .with_context(Ctx::run_git_push())?;
+    if !push.status.success() {
+        return Err(InitFromAppError::PushFailed {
+            stderr: String::from_utf8_lossy(&push.stderr).trim().to_string(),
+            location: std::panic::Location::caller(),
+        });
+    }
+
+    output::success("Deployment created");
+    output::status("\nCheck your app status:");
+    output::status("  caution apps list");
 
     Ok(())
 }
@@ -1757,10 +1927,11 @@ pub(crate) async fn teardown(
 
 #[cfg(test)]
 mod tests {
-    use super::{init_byoc, linked_encrypted_byoc_config};
+    use super::{init_byoc, init_from_app_in, linked_encrypted_byoc_config};
     use crate::ApiClient;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use tempfile::tempdir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn test_api_client() -> ApiClient {
         ApiClient {
@@ -1772,6 +1943,90 @@ mod tests {
             qr: false,
             workdir: None,
         }
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed in {}", dir.display());
+    }
+
+    fn git_stdout(dir: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    async fn serve(respond: impl Fn(&str) -> (u16, String) + Send + 'static) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut buffer = [0_u8; 4096];
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    request.extend_from_slice(&buffer[..read]);
+                    if read == 0 || request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&request).to_string();
+                let path = request.split(' ').nth(1).unwrap_or("").to_string();
+                let (status, body) = respond(&path);
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        url
+    }
+
+    fn linked_client(url: &str, repo: &Path) -> ApiClient {
+        let config_path = repo.join("session.json");
+        std::fs::write(
+            &config_path,
+            serde_json::json!({
+                "session_id": "test-session",
+                "expires_at": "2099-01-01T00:00:00Z",
+                "server_url": url,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        ApiClient {
+            base_url: url.to_string(),
+            client: reqwest::Client::new(),
+            config_path,
+            deployment_path: Some(repo.join("deployment.json")),
+            verbose: false,
+            qr: false,
+            workdir: None,
+        }
+    }
+
+    fn app_json(id: &str, git_url: &str) -> String {
+        serde_json::json!({
+            "id": id,
+            "resource_name": "key-service",
+            "state": "initialized",
+            "provider_resource_id": "i-1",
+            "public_ip": null,
+            "domain": null,
+            "configuration": null,
+            "git_url": git_url,
+        })
+        .to_string()
     }
 
     #[test]
@@ -1797,6 +2052,77 @@ mod tests {
         assert!(
             matches!(err, super::InitByocError::RequireAuthenticatedConfig { .. }),
             "BYOC init should check authentication before reading credential material: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn init_from_app_sets_the_remote_and_pushes_a_deployment() {
+        let repo = tempdir().unwrap();
+        git(repo.path(), &["init", "-q"]);
+        git(
+            repo.path(),
+            &[
+                "-c",
+                "user.email=test@example.com",
+                "-c",
+                "user.name=Test",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "init",
+            ],
+        );
+
+        let remote = tempdir().unwrap();
+        git(remote.path(), &["init", "-q", "--bare"]);
+
+        let app_id = "660e8400-e29b-41d4-a716-446655440000";
+        let git_url = remote.path().to_string_lossy().into_owned();
+        let response_url = git_url.clone();
+        let url = serve(move |_| (200, app_json(app_id, &response_url))).await;
+
+        let client = linked_client(&url, repo.path());
+        init_from_app_in(&client, app_id, repo.path())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            git_stdout(repo.path(), &["remote", "get-url", "caution"]).trim(),
+            git_url,
+            "the caution remote should point at the linked app"
+        );
+        let deployment = std::fs::read_to_string(repo.path().join("deployment.json")).unwrap();
+        assert!(deployment.contains(app_id), "{deployment}");
+        assert!(
+            !git_stdout(remote.path(), &["rev-parse", "refs/heads/main"])
+                .trim()
+                .is_empty(),
+            "the current commit should be pushed to the app as a deployment"
+        );
+    }
+
+    #[tokio::test]
+    async fn init_from_app_refuses_an_api_app_that_does_not_match_the_request() {
+        let repo = tempdir().unwrap();
+        git(repo.path(), &["init", "-q"]);
+
+        let app_id = "660e8400-e29b-41d4-a716-446655440000";
+        let other_id = "00000000-0000-4000-8000-000000000000";
+        let url = serve(move |_| (200, app_json(other_id, "git@example.com:other.git"))).await;
+
+        let client = linked_client(&url, repo.path());
+        let err = init_from_app_in(&client, app_id, repo.path())
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, super::InitFromAppError::IdMismatch { .. }),
+            "a mismatched API app must be rejected: {err:?}"
+        );
+        assert!(
+            git_stdout(repo.path(), &["remote"]).trim().is_empty(),
+            "no remote should be set when the app does not match"
         );
     }
 }

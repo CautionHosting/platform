@@ -138,6 +138,14 @@ This causes downtime and temporarily withdraws managed DNS, but retains the app
 ID, repository, managed hostname, and any BYOC linkage. Do not use `apps create`
 or plain `init`; BYOC apps must also not use `teardown --byoc` for that redeploy.
 
+### Linking an Existing App
+
+`caution init --from <app-id>` links the current checkout to an existing app
+instead of creating one. It verifies the app through the API, writes
+`.caution/deployment.json`, points the `caution` Git remote at the app, and
+pushes the current commit to start a deployment. It cannot combine with
+`--byoc`, `--name`, or `--config`.
+
 ### Account PGP Keys
 
 Export an armored OpenPGP public certificate and associate it with your Caution

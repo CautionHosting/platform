@@ -207,6 +207,11 @@ start the real stack with `make up`, generate an access code with
    `/bin -> usr/bin` and `/lib -> usr/lib`; other `/bin` or `/lib` symlink
    layouts are rejected during EIF assembly.
 
+   To link this checkout to an app that already exists instead of creating one,
+   run `caution init --from <app-id>`. It verifies the app, writes
+   `.caution/deployment.json`, sets the `caution` remote, and pushes the current
+   commit to start a deployment.
+
    The <a href="https://git.caution.co/public/demo-hello-world-enclave" target="_blank">hello-world-enclave</a> repo is a good test app to deploy.
 
 4. Build and deploy:
