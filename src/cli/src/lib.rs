@@ -30,6 +30,7 @@ use openpgp::{cert::CertParser, parse::Parse, serialize::Serialize as _};
 pub mod output;
 pub mod prompt;
 
+mod app_name;
 mod apps;
 mod attestation;
 mod auth;
@@ -602,7 +603,10 @@ enum AccountCommands {
 #[derive(Subcommand, Debug)]
 enum AppCommands {
     #[command(about = "Create a new Caution-managed application")]
-    Create,
+    Create {
+        #[arg(long, help = "App name (default: current directory name)")]
+        name: Option<String>,
+    },
     #[command(about = "List active applications (-a includes inactive ones)")]
     List {
         #[arg(
@@ -3861,8 +3865,8 @@ pub async fn run() -> Result<(), RunError> {
             }
         }
         Commands::Apps { command } => match command {
-            AppCommands::Create => {
-                apps::crud::create(&client)
+            AppCommands::Create { name } => {
+                apps::crud::create(&client, name)
                     .await
                     .with_context(Ctx::command_dispatch())?;
             }
@@ -4305,6 +4309,26 @@ mod tests {
                 .command,
             Commands::Apps {
                 command: AppCommands::List { all: false }
+            }
+        ));
+    }
+
+    #[test]
+    fn apps_create_accepts_name() {
+        assert!(matches!(
+            Cli::try_parse_from(["caution", "apps", "create", "--name", "my-app"])
+                .unwrap()
+                .command,
+            Commands::Apps {
+                command: AppCommands::Create { name: Some(ref n) }
+            } if n == "my-app"
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["caution", "apps", "create"])
+                .unwrap()
+                .command,
+            Commands::Apps {
+                command: AppCommands::Create { name: None }
             }
         ));
     }
