@@ -1,4 +1,5 @@
 use super::*;
+use axum::http::StatusCode;
 
 fn request() -> GenerateOrgQuorumBundleRequest {
     GenerateOrgQuorumBundleRequest {
@@ -294,7 +295,28 @@ async fn busy_and_timeout_do_not_retry_generation() {
         let error = post::<_, serde_json::Value>(&client, &url, &serde_json::json!({}))
             .await
             .unwrap_err();
-        assert_eq!(error.status, expected);
+        let PostError::Send { source, .. } = error;
+        let send = source.downcast_ref::<SendError>().expect("boxed SendError");
+        match expected {
+            StatusCode::TOO_MANY_REQUESTS => assert!(matches!(
+                send,
+                SendError::Upstream {
+                    upstream_status: 429,
+                    ..
+                }
+            )),
+            StatusCode::SERVICE_UNAVAILABLE => assert!(matches!(
+                send,
+                SendError::Upstream {
+                    upstream_status: 503,
+                    ..
+                }
+            )),
+            StatusCode::GATEWAY_TIMEOUT => {
+                assert!(matches!(send, SendError::RequestTimeout { .. }))
+            }
+            other => panic!("unexpected expectation {other}"),
+        }
         server.join().unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
@@ -336,7 +358,7 @@ fn rejects_shared_recipients_including_notations_and_expired_keys() {
                     .collect();
                 for at in [None, Some(SystemTime::now())] {
                     let error = validate_keyring(&keys, at).unwrap_err();
-                    assert!(error.message.contains("share an encryption key"));
+                    assert!(error.to_string().contains("share an encryption key"));
                 }
             }
         }
@@ -361,20 +383,14 @@ fn rejects_shared_recipients_including_notations_and_expired_keys() {
 fn policy_files_fail_closed_when_missing_or_invalid() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("keymaker-pcr-policy.json");
-    assert_eq!(
-        load_policy(&path).unwrap_err().status,
-        StatusCode::SERVICE_UNAVAILABLE
-    );
+    assert!(load_policy(&path).is_err());
     for json in [
         "not JSON",
         r#"{"sets":[]}"#,
         r#"{"sets":[{"pcrs":{"0":"ab"}}]}"#,
     ] {
         std::fs::write(&path, json).unwrap();
-        assert_eq!(
-            load_policy(&path).unwrap_err().status,
-            StatusCode::SERVICE_UNAVAILABLE
-        );
+        assert!(load_policy(&path).is_err());
     }
     for byte in ["00", "ab"] {
         std::fs::write(
@@ -398,10 +414,7 @@ fn client_policy_is_optional_and_rejects_malformed_or_debug_pins() {
         serde_json::json!({"sets":[{"pcrs":{"0":"ab"}}]}),
         serde_json::json!({"sets":[{"pcrs":{"0":"ab".repeat(48)}}], "extra":true}),
     ] {
-        assert_eq!(
-            client_policy(Some(&value)).unwrap_err().status,
-            StatusCode::BAD_REQUEST
-        );
+        assert!(client_policy(Some(&value)).is_err());
     }
     for byte in ["00", "ab"] {
         let value = serde_json::json!({"sets":[{"pcrs":{
@@ -435,10 +448,7 @@ fn client_policy_drops_expired_sets_and_bounds_the_rest() {
         vec![set(Some(future)); MAX_CLIENT_POLICY_SETS + 1],
         vec![set(Some(1))],
     ] {
-        assert_eq!(
-            client_policy(Some(&policy(sets))).unwrap_err().status,
-            StatusCode::BAD_REQUEST
-        );
+        assert!(client_policy(Some(&policy(sets))).is_err());
     }
 }
 
@@ -483,7 +493,7 @@ fn rejects_shared_ecdh_recipients_with_different_kdf_parameters() {
         assert!(
             validate_keyring(&keys, None)
                 .unwrap_err()
-                .message
+                .to_string()
                 .contains("share an encryption key")
         );
     }
@@ -533,7 +543,7 @@ fn accepts_repeated_ecdh_keys_within_one_holder_only() {
                 assert!(
                     validate_keyring(&pair, at)
                         .unwrap_err()
-                        .message
+                        .to_string()
                         .contains("share an encryption key")
                 );
             }

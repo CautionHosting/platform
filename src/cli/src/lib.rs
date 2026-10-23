@@ -30,6 +30,7 @@ use openpgp::{cert::CertParser, parse::Parse, serialize::Serialize as _};
 pub mod output;
 pub mod prompt;
 
+mod app_name;
 mod apps;
 mod attestation;
 mod auth;
@@ -439,6 +440,13 @@ enum Commands {
         )]
         bring_your_own_cloud: bool,
         #[arg(
+            long = "from",
+            value_name = "app-id",
+            conflicts_with_all = ["bring_your_own_cloud", "name", "config"],
+            help = "Link this checkout to an existing app, setting the Git remote and deploying the current commit"
+        )]
+        from: Option<String>,
+        #[arg(
             long,
             requires = "bring_your_own_cloud",
             help = "Cloud platform (default: aws)",
@@ -602,11 +610,14 @@ enum AccountCommands {
 #[derive(Subcommand, Debug)]
 enum AppCommands {
     #[command(about = "Create a new Caution-managed application")]
-    Create,
+    Create {
+        #[arg(long, help = "App name (default: current directory name)")]
+        name: Option<String>,
+    },
     #[command(about = "Sync an existing app's local .caution link and caution Git remote")]
     Sync {
-        #[arg(help = "App ID to link to this checkout", value_name = "APP_ID")]
-        id: uuid::Uuid,
+        #[arg(long, help = "App ID to link to this checkout", value_name = "APP_ID")]
+        app_id: uuid::Uuid,
     },
     #[command(about = "List active applications (-a includes inactive ones)")]
     List {
@@ -1746,6 +1757,56 @@ pub(crate) enum SetGitRemoteError {
         #[source]
         source: BoxError,
     },
+}
+
+/// Report whether `repo` is inside a Git work tree.
+pub(crate) fn check_git_repo_at(repo: &Path) -> Result<(), CheckGitRepoError> {
+    use CheckGitRepoErrorCtx as Ctx;
+
+    let output = Command::new("git")
+        .current_dir(repo)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .with_context(Ctx::run_git_command())?;
+
+    if !output.status.success() {
+        return Err(CheckGitRepoError::NotGitRepo {
+            location: std::panic::Location::caller(),
+        });
+    }
+
+    Ok(())
+}
+
+/// Add or update the `caution` Git remote in `repo`.
+pub(crate) fn set_git_remote_at(repo: &Path, git_url: &str) -> Result<(), SetGitRemoteError> {
+    use SetGitRemoteErrorCtx as Ctx;
+
+    let check_output = Command::new("git")
+        .current_dir(repo)
+        .args(["remote", "get-url", "caution"])
+        .output()
+        .with_context(Ctx::check())?;
+
+    if check_output.status.success() {
+        Command::new("git")
+            .current_dir(repo)
+            .args(["remote", "set-url", "caution", git_url])
+            .output()
+            .with_context(Ctx::update())?;
+
+        output::success(format!("Updated git remote 'caution' to: {}", git_url));
+    } else {
+        Command::new("git")
+            .current_dir(repo)
+            .args(["remote", "add", "caution", git_url])
+            .output()
+            .with_context(Ctx::add())?;
+
+        output::success(format!("Added git remote 'caution': {}", git_url));
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
@@ -2961,47 +3022,11 @@ impl ApiClient {
     }
 
     fn check_git_repo(&self) -> Result<(), CheckGitRepoError> {
-        use CheckGitRepoErrorCtx as Ctx;
-
-        let output = Command::new("git")
-            .args(["rev-parse", "--is-inside-work-tree"])
-            .output()
-            .with_context(Ctx::run_git_command())?;
-
-        if !output.status.success() {
-            return Err(CheckGitRepoError::NotGitRepo {
-                location: std::panic::Location::caller(),
-            });
-        }
-
-        Ok(())
+        check_git_repo_at(Path::new("."))
     }
 
     fn set_git_remote(&self, git_url: &str) -> Result<(), SetGitRemoteError> {
-        use SetGitRemoteErrorCtx as Ctx;
-
-        let check_output = Command::new("git")
-            .args(["remote", "get-url", "caution"])
-            .output()
-            .with_context(Ctx::check())?;
-
-        if check_output.status.success() {
-            Command::new("git")
-                .args(["remote", "set-url", "caution", git_url])
-                .output()
-                .with_context(Ctx::update())?;
-
-            output::success(format!("Updated git remote 'caution' to: {}", git_url));
-        } else {
-            Command::new("git")
-                .args(["remote", "add", "caution", git_url])
-                .output()
-                .with_context(Ctx::add())?;
-
-            output::success(format!("Added git remote 'caution': {}", git_url));
-        }
-
-        Ok(())
+        set_git_remote_at(Path::new("."), git_url)
     }
 
     fn generate_config_hcl(source_url: &str, byoc: bool) -> String {
@@ -3760,6 +3785,7 @@ pub async fn run() -> Result<(), RunError> {
         },
         Commands::Init {
             bring_your_own_cloud,
+            from,
             platform,
             name,
             region,
@@ -3767,23 +3793,29 @@ pub async fn run() -> Result<(), RunError> {
             config,
             yes,
         } => {
-            if bring_your_own_cloud && platform != "aws" {
-                return Err(RunError::ArgValidation {
-                    detail: "Only --platform aws is currently supported for bring-your-own-compute deployments",
-                    location: std::panic::Location::caller(),
-                });
+            if let Some(app_id) = from {
+                byoc::init_from_app(&client, &app_id)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
+            } else {
+                if bring_your_own_cloud && platform != "aws" {
+                    return Err(RunError::ArgValidation {
+                        detail: "Only --platform aws is currently supported for bring-your-own-compute deployments",
+                        location: std::panic::Location::caller(),
+                    });
+                }
+                byoc::init(
+                    &client,
+                    bring_your_own_cloud,
+                    name,
+                    region,
+                    local,
+                    config,
+                    yes,
+                )
+                .await
+                .with_context(Ctx::command_dispatch())?;
             }
-            byoc::init(
-                &client,
-                bring_your_own_cloud,
-                name,
-                region,
-                local,
-                config,
-                yes,
-            )
-            .await
-            .with_context(Ctx::command_dispatch())?;
         }
         Commands::Teardown {
             bring_your_own_cloud,
@@ -3866,13 +3898,13 @@ pub async fn run() -> Result<(), RunError> {
             }
         }
         Commands::Apps { command } => match command {
-            AppCommands::Create => {
-                apps::crud::create(&client)
+            AppCommands::Create { name } => {
+                apps::crud::create(&client, name)
                     .await
                     .with_context(Ctx::command_dispatch())?;
             }
-            AppCommands::Sync { id } => {
-                apps::sync::run(&client, id)
+            AppCommands::Sync { app_id } => {
+                apps::sync::run(&client, app_id)
                     .await
                     .with_context(Ctx::command_dispatch())?;
             }
@@ -4315,6 +4347,26 @@ mod tests {
                 .command,
             Commands::Apps {
                 command: AppCommands::List { all: false }
+            }
+        ));
+    }
+
+    #[test]
+    fn apps_create_accepts_name() {
+        assert!(matches!(
+            Cli::try_parse_from(["caution", "apps", "create", "--name", "my-app"])
+                .unwrap()
+                .command,
+            Commands::Apps {
+                command: AppCommands::Create { name: Some(ref n) }
+            } if n == "my-app"
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["caution", "apps", "create"])
+                .unwrap()
+                .command,
+            Commands::Apps {
+                command: AppCommands::Create { name: None }
             }
         ));
     }
@@ -5516,6 +5568,22 @@ enclave "default" {
         let error = crate::byoc::aws_credentials_error("production", "caution init --byoc");
         assert!(
             error.contains("aws configure export-credentials --profile production --format env")
+        );
+    }
+
+    #[test]
+    fn init_from_links_an_existing_app_and_rejects_byoc_flags() {
+        assert!(matches!(
+            Cli::try_parse_from(["caution", "init", "--from", "660e8400-e29b-41d4-a716-446655440000"])
+                .unwrap()
+                .command,
+            Commands::Init { from: Some(ref id), .. } if id == "660e8400-e29b-41d4-a716-446655440000"
+        ));
+        // `--from` replaces app creation, so it cannot combine with flags that
+        // only apply to creating a new app.
+        assert!(Cli::try_parse_from(["caution", "init", "--from", "app-id", "--byoc"]).is_err());
+        assert!(
+            Cli::try_parse_from(["caution", "init", "--from", "app-id", "--name", "x"]).is_err()
         );
     }
 

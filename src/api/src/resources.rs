@@ -27,7 +27,7 @@ use crate::{
     AppState, AuthContext, get_or_create_provider_account, get_or_create_resource_type,
     get_user_primary_org,
 };
-use crate::{cloud_credentials, deployment, types, validation};
+use crate::{cloud_credentials, deployment, types};
 
 #[derive(Debug, Serialize, FromRow)]
 pub struct ComputeResource {
@@ -77,6 +77,13 @@ pub enum CreateResourceError {
         source: BoxError,
     },
 
+    #[error("an app named '{resource_name}' already exists in this organization [{location}]")]
+    NameTaken {
+        resource_name: String,
+        #[location]
+        location: Location,
+    },
+
     #[error("failed to create compute resource '{provider_resource_id}' [{location}]")]
     Insert {
         provider_resource_id: String,
@@ -102,6 +109,7 @@ impl IntoResponse for CreateResourceError {
             CreateResourceError::CheckName { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
+            CreateResourceError::NameTaken { .. } => (StatusCode::CONFLICT, "name already taken"),
             CreateResourceError::Insert { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
@@ -154,40 +162,33 @@ pub async fn create_resource(
 
     let provider_resource_id = Uuid::new_v4().to_string();
 
-    // Use provided name (typically from directory name) or generate one
-    let resource_slug = if let Some(ref name) = payload.name {
-        // Validate the app name
-        if let Err(e) = validation::validate_app_name(name) {
-            tracing::warn!(
-                "Invalid app name '{}': {}, falling back to auto-generated",
-                name,
-                e
-            );
-            format!("app-{}", &provider_resource_id[..8])
-        } else {
-            // Check if name is already taken in this organization
+    // Use the provided name (typically from the CLI's `--name` or working
+    // directory) or generate one. A requested name is never silently rewritten:
+    // the `Validated` extractor rejects invalid names before this handler runs,
+    // and a collision is a distinct error so the caller learns the name was not
+    // applied instead of getting an unnamed `app-<id>`.
+    let resource_slug = match payload.name {
+        Some(name) => {
             let existing: Option<(Uuid,)> = sqlx::query_as(
                 "SELECT id FROM compute_resources
                  WHERE organization_id = $1 AND resource_name = $2 AND destroyed_at IS NULL",
             )
             .bind(org_id)
-            .bind(name)
+            .bind(&name)
             .fetch_optional(&state.db)
             .await
             .with_context(Ctx::check_name(name.as_str()))?;
 
             if existing.is_some() {
-                tracing::warn!(
-                    "App name '{}' already exists, falling back to auto-generated",
-                    name
-                );
-                format!("app-{}", &provider_resource_id[..8])
-            } else {
-                name.clone()
+                return Err(CreateResourceError::NameTaken {
+                    resource_name: name,
+                    location: std::panic::Location::caller(),
+                });
             }
+
+            name
         }
-    } else {
-        format!("app-{}", &provider_resource_id[..8])
+        None => format!("app-{}", &provider_resource_id[..8]),
     };
 
     // `cmd` is still accepted at the API boundary for backward compatibility, but

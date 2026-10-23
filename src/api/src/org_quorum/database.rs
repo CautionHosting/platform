@@ -3,6 +3,8 @@
 //! Opt-in PostgreSQL and HTTP orchestration tests; not Nitro verification.
 use super::*;
 use crate::cryptographic_bundles as storage;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use serde_json::{Value, json};
 
 async fn organization(pool: &PgPool) -> Uuid {
@@ -298,12 +300,10 @@ async fn credentials(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid) {
     let error = generate_org_quorum_bundle(pool, org, user, r.clone())
         .await
         .unwrap_err();
-    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(
-        error
-            .message
-            .contains("required key-service endpoint or trust policy is not configured")
-    );
+    assert!(matches!(
+        error,
+        GenerateOrgQuorumBundleError::KeymakerUrl { .. }
+    ));
     assert_eq!(
         request_log().len(),
         before,
@@ -423,7 +423,7 @@ async fn storage_roundtrip(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid
     let downloaded: Value = serde_json::from_slice(&std::fs::read(file.path()).unwrap()).unwrap();
     assert_eq!(downloaded, envelope);
     let error = verify_upload(&downloaded, false).unwrap_err();
-    assert_eq!(error.message, "uploaded quorum proof verification failed");
+    assert!(matches!(error, VerifyUploadError::Proof { .. }));
     assert!(
         storage::delete_quorum_bundle(pool, org, created.id)
             .await
@@ -470,10 +470,25 @@ async fn hosted_pgp(pool: &PgPool, org: Uuid, user: Uuid) {
         let error = generate_org_quorum_bundle(pool, org, user, r)
             .await
             .unwrap_err();
-        assert_eq!(error.status, status, "{error}");
         if mode == "invalid-proof" {
-            assert_eq!(error.message, "Keymaker proof verification failed");
+            assert!(matches!(
+                &error,
+                GenerateOrgQuorumBundleError::VerifyProof { .. }
+            ));
         }
+        // Assert the real handler mapping, not a re-implementation of it.
+        let response = crate::org_quorum::handlers::CreateOrgUserQuorumBundleError::Generate {
+            org_id: org,
+            user_id: user,
+            location: std::panic::Location::caller(),
+            source: Box::new(error),
+        }
+        .into_response();
+        assert_eq!(
+            response.status(),
+            status,
+            "unexpected status for {selection}/{mode}"
+        );
         let log = request_log();
         assert_eq!(log.len(), before + 1, "generation was repeated");
         assert_eq!(log[before]["path"], "/generate_quorum");

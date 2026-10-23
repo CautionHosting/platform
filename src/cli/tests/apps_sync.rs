@@ -139,7 +139,7 @@ async fn sync_creates_and_repairs_the_link_without_touching_other_local_data() {
                 ],
             );
         }
-        let output = run(dir.path(), &url, &[APP]).await;
+        let output = run(dir.path(), &url, &["--app-id", APP]).await;
         assert!(
             output.status.success(),
             "{}",
@@ -212,7 +212,7 @@ async fn sync_rejects_unverified_app_data_without_changing_the_existing_link() {
         );
         let config = fs::read(repo.join(".git/config")).unwrap();
         let (url, requests) = serve(dir.path(), status, body).await;
-        let output = run(dir.path(), &url, &[APP]).await;
+        let output = run(dir.path(), &url, &["--app-id", APP]).await;
         assert!(!output.status.success());
         assert_eq!(requests.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -236,7 +236,7 @@ async fn sync_reports_git_failure_without_replacing_local_metadata() {
     );
     fs::write(repo.join(".git/config.lock"), "existing lock").unwrap();
     let (url, _) = serve(dir.path(), StatusCode::OK, app()).await;
-    let output = run(dir.path(), &url, &[APP]).await;
+    let output = run(dir.path(), &url, &["--app-id", APP]).await;
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("git"));
     assert_eq!(
@@ -255,13 +255,22 @@ async fn sync_requires_an_explicit_app_uuid_and_a_git_worktree() {
     let repo = dir.path().join("repo");
     fs::create_dir(&repo).unwrap();
     let (url, requests) = serve(dir.path(), StatusCode::OK, app()).await;
-    for args in [vec![], vec!["not-an-app-id"], vec![APP]] {
+    for (args, expected_error) in [
+        (vec![], "--app-id <APP_ID>"),
+        (vec!["--app-id"], "a value is required"),
+        (vec!["--app-id", "not-an-app-id"], "invalid value"),
+        (vec![APP], "unexpected argument"),
+    ] {
         let output = run(dir.path(), &url, &args).await;
         assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(expected_error));
         assert!(!repo.join(".caution/deployment.json").exists());
     }
+    let output = run(dir.path(), &url, &["--app-id", APP]).await;
+    assert!(!output.status.success());
+    assert!(!repo.join(".caution/deployment.json").exists());
     git(&repo, &["init", "--bare", "-q"]);
-    let output = run(dir.path(), &url, &[APP]).await;
+    let output = run(dir.path(), &url, &["--app-id", APP]).await;
     assert!(!output.status.success());
     assert!(!repo.join(".caution/deployment.json").exists());
     assert_eq!(requests.load(Ordering::SeqCst), 0);

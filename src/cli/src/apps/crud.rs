@@ -127,6 +127,15 @@ fn print_destroy_redeploy_guidance(app: &App) {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum CreateError {
+    #[error("invalid app name [{location}]")]
+    InvalidAppName {
+        #[location]
+        location: Location,
+
+        #[source]
+        source: BoxError,
+    },
+
     #[error("failed to check git repository [{location}]")]
     CheckGitRepo {
         #[location]
@@ -263,8 +272,10 @@ pub(crate) enum CreateError {
     },
 }
 
-pub(crate) async fn create(client: &ApiClient) -> Result<(), CreateError> {
+pub(crate) async fn create(client: &ApiClient, name: Option<String>) -> Result<(), CreateError> {
     use CreateErrorCtx as Ctx;
+
+    let app_name = crate::app_name::resolve(name).with_context(Ctx::invalid_app_name())?;
 
     output::status("Creating new Caution-managed app...");
 
@@ -303,9 +314,12 @@ pub(crate) async fn create(client: &ApiClient) -> Result<(), CreateError> {
         .await
         .with_context(Ctx::ensure_authenticated())?;
 
+    output::status(format!("App name: {}", app_name));
+
     output::verbose(client.verbose, "Creating app on server...");
     let body = serde_json::json!({
-        "cmd": cmd
+        "cmd": cmd,
+        "name": app_name
     });
 
     let loader = Spinner::new("Setting up your app", SpinnerStyle::Processing);

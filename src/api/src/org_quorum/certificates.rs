@@ -14,8 +14,88 @@ use std::{num::NonZeroU8, time::SystemTime};
 const ORG_NOTATION: &str = "organization-id@caution.co";
 const BUNDLE_NOTATION: &str = "bundle-id@caution.co";
 
-fn rejected(message: &'static str) -> OrgQuorumError {
-    OrgQuorumError::new(StatusCode::BAD_GATEWAY, message)
+/// Failure modes for [`derive`]: one variant per fallible branch.
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum DeriveError {
+    #[error("certificate-service URL is not configured [{location}]")]
+    ServiceUrl {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("certificate-service trust policy path is not configured [{location}]")]
+    PolicyPath {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("unable to load the certificate-service PCR policy [{location}]")]
+    Policy {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("Caution CA certificate path is not configured [{location}]")]
+    CaPath {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("unable to read the Caution CA certificate [{location}]")]
+    CaRead {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("invalid Caution CA certificate [{location}]")]
+    CaParse {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("Caution CA configuration must contain only a public certificate [{location}]")]
+    CaPrivate { location: Location },
+    #[error("certificate-service token is not configured [{location}]")]
+    Token {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("unable to build the certificate issuance request [{location}]")]
+    IssuanceRequest {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("certificate-service request failed [{location}]")]
+    Send {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("certificate-service proof verification failed [{location}]")]
+    VerifyProof {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("invalid certificate-service response certificates [{location}]")]
+    VerifyCertificates {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
 #[tracing::instrument(skip_all)]
@@ -23,55 +103,96 @@ pub(super) async fn derive(
     client: &reqwest::Client,
     org_id: Uuid,
     count: NonZeroU8,
-) -> Result<([u8; 16], Vec<String>), OrgQuorumError> {
-    let url = configured("PUBLIC_CERTIFICATE_SERVICE_URL")?;
-    let policy = load_policy(Path::new(&configured(
-        "PUBLIC_CERTIFICATE_PCR_POLICY_PATH",
-    )?))?;
-    let ca_bytes = std::fs::read(configured("CAUTION_CA_CERT_PATH")?).with_context(Ctx::new(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "unable to read Caution CA certificate",
-    ))?;
-    let ca = Cert::from_bytes(&ca_bytes).with_context(Ctx::new(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "invalid Caution CA certificate",
-    ))?;
+) -> Result<([u8; 16], Vec<String>), DeriveError> {
+    use DeriveErrorCtx as Ctx;
+
+    let url = configured("PUBLIC_CERTIFICATE_SERVICE_URL").with_context(Ctx::service_url())?;
+    let policy_path =
+        configured("PUBLIC_CERTIFICATE_PCR_POLICY_PATH").with_context(Ctx::policy_path())?;
+    let policy = load_policy(Path::new(&policy_path)).with_context(Ctx::policy())?;
+    let ca_path = configured("CAUTION_CA_CERT_PATH").with_context(Ctx::ca_path())?;
+    let ca_bytes = std::fs::read(ca_path).with_context(Ctx::ca_read())?;
+    let ca = Cert::from_bytes(&ca_bytes).with_context(Ctx::ca_parse())?;
     if ca.is_tsk() {
-        return Err(OrgQuorumError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Caution CA configuration must contain only a public certificate",
-        ));
+        return Err(DeriveError::CaPrivate {
+            location: std::panic::Location::caller(),
+        });
     }
     let request =
         PublicCertificateRequest::V1(public_certificate_models::v1::PublicCertificateRequest {
             organization_id: *org_id.as_bytes(),
             certificate_count: count,
         });
-    let token = configured("PUBLIC_CERTIFICATE_SERVICE_TOKEN")?;
+    let token = configured("PUBLIC_CERTIFICATE_SERVICE_TOKEN").with_context(Ctx::token())?;
     let endpoint = [url.trim_end_matches('/'), "/v1/public-certificates"].concat();
     let local_test = cfg!(feature = "e2e-testing-unsafe")
         && std::env::var("CAUTION_UNSAFE_KEY_SERVICE_E2E").as_deref() == Ok("1");
-    let response: PublicCertificateResponse =
-        send(issuance_request(client, &endpoint, &token, local_test)?.json(&request)).await?;
-    let at = verify_proof(&response, &policy)?;
+    let request_builder = issuance_request(client, &endpoint, &token, local_test)
+        .with_context(Ctx::issuance_request())?;
+    let response: PublicCertificateResponse = send(request_builder.json(&request))
+        .await
+        .with_context(Ctx::send())?;
+    let at = verify_proof(&response, &policy).with_context(Ctx::verify_proof())?;
     verify_certificates(response.data, *org_id.as_bytes(), count, &ca, at)
+        .with_context(Ctx::verify_certificates())
+}
+
+/// Failure modes for [`bundle_hash`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum BundleHashError {
+    #[error("unable to hash the certificate-service response [{location}]")]
+    Encode {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
 // The service hashes the serialized struct, NOT Keymaker's canonical Value map.
-fn bundle_hash(data: &PublicCertificateBundle) -> Result<Vec<u8>, OrgQuorumError> {
-    let bytes = serde_cbor::to_vec(data).with_context(Ctx::new(
-        StatusCode::BAD_GATEWAY,
-        "unable to hash certificate-service response",
-    ))?;
+fn bundle_hash(data: &PublicCertificateBundle) -> Result<Vec<u8>, BundleHashError> {
+    use BundleHashErrorCtx as Ctx;
+
+    let bytes = serde_cbor::to_vec(data).with_context(Ctx::encode())?;
     Ok(Sha256::digest(bytes).to_vec())
+}
+
+/// Failure modes for [`verify_proof`]: one variant per fallible branch.
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum VerifyProofError {
+    #[error("unable to hash the certificate-service response [{location}]")]
+    Hash {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("invalid certificate-service PCR policy [{location}]")]
+    Policy {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("invalid certificate proof payload [{location}]")]
+    Payload {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("certificate-service proof verification failed [{location}]")]
+    Rejected { location: Location },
 }
 
 #[tracing::instrument(skip_all)]
 fn verify_proof(
     response: &PublicCertificateResponse,
     policy: &KeymakerPcrPolicy,
-) -> Result<SystemTime, OrgQuorumError> {
-    let hash = bundle_hash(&response.data)?;
+) -> Result<SystemTime, VerifyProofError> {
+    use VerifyProofErrorCtx as Ctx;
+
+    let hash = bundle_hash(&response.data).with_context(Ctx::hash())?;
     #[cfg(feature = "e2e-testing-unsafe")]
     if std::env::var("CAUTION_UNSAFE_KEY_SERVICE_E2E").as_deref() == Ok("1")
         && policy.sets.len() == 1
@@ -90,21 +211,20 @@ fn verify_proof(
     }
 
     for set in &policy.sets {
-        let nitro =
-            Nitro::new(response.necroproof.as_slice(), set.pcrs.clone()).with_context(Ctx::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "invalid certificate-service PCR policy",
-            ))?;
+        let nitro = Nitro::new(response.necroproof.as_slice(), set.pcrs.clone())
+            .with_context(Ctx::policy())?;
         // Only Bootproof parses/verifies the untrusted COSE evidence. No data is
         // consumed until AWS chain, signature, nonce absence, PCR and bundle-hash checks pass.
         if let Ok(document) = nitro.verify_at_attestation_time(&hash, None) {
-            let at = verify_payload(document, &hash)?;
+            let at = verify_payload(document, &hash).with_context(Ctx::payload())?;
             if valid_at(set, at) {
                 return Ok(at);
             }
         }
     }
-    Err(rejected("certificate-service proof verification failed"))
+    Err(VerifyProofError::Rejected {
+        location: std::panic::Location::caller(),
+    })
 }
 
 fn valid_at(set: &locksmith::bundle::KeymakerPcrSet, at: SystemTime) -> bool {
@@ -116,24 +236,91 @@ fn valid_at(set: &locksmith::bundle::KeymakerPcrSet, at: SystemTime) -> bool {
     }
 }
 
+/// Failure modes for [`verify_payload`]: one variant per rejected payload.
+/// Source-less (leaf error), so it derives plain `thiserror` without a `Ctx` twin.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum VerifyPayloadError {
+    #[error("invalid certificate proof payload [{location}]")]
+    Shape { location: Location },
+    #[error("certificate proof does not bind the returned bundle [{location}]")]
+    Binding { location: Location },
+    #[error("missing certificate proof timestamp [{location}]")]
+    MissingTimestamp { location: Location },
+    #[error("invalid certificate proof timestamp [{location}]")]
+    Timestamp { location: Location },
+}
+
 // Input must be the authenticated payload returned by Bootproof.
-fn verify_payload(document: Value, expected_hash: &[u8]) -> Result<SystemTime, OrgQuorumError> {
+fn verify_payload(document: Value, expected_hash: &[u8]) -> Result<SystemTime, VerifyPayloadError> {
     let Value::Map(map) = document else {
-        return Err(rejected("invalid certificate proof payload"));
+        return Err(VerifyPayloadError::Shape {
+            location: std::panic::Location::caller(),
+        });
     };
     if !matches!(map.get(&Value::Text("user_data".into())), Some(Value::Bytes(bytes)) if bytes == expected_hash)
     {
-        return Err(rejected(
-            "certificate proof does not bind the returned bundle",
-        ));
+        return Err(VerifyPayloadError::Binding {
+            location: std::panic::Location::caller(),
+        });
     }
     let Some(Value::Integer(timestamp)) = map.get(&Value::Text("timestamp".into())) else {
-        return Err(rejected("missing certificate proof timestamp"));
+        return Err(VerifyPayloadError::MissingTimestamp {
+            location: std::panic::Location::caller(),
+        });
     };
     u64::try_from(*timestamp)
         .ok()
         .and_then(|millis| SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(millis)))
-        .ok_or_else(|| rejected("invalid certificate proof timestamp"))
+        .ok_or_else(|| VerifyPayloadError::Timestamp {
+            location: std::panic::Location::caller(),
+        })
+}
+
+/// Failure modes for [`verify_certificates`]: one variant per rejected certificate.
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum VerifyCertificatesError {
+    #[error(
+        "certificate response does not match the requested organization and count [{location}]"
+    )]
+    Mismatch { location: Location },
+    #[error("invalid or revoked configured Caution CA anchor [{location}]")]
+    CaAnchor {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("ineligible derived holder certificate [{location}]")]
+    Ineligible {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("derived certificate was not valid at generation time [{location}]")]
+    NotValid {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("derived certificate index does not match its position [{location}]")]
+    Index { location: Location },
+    #[error("derived certificate lacks a valid Caution CA certification [{location}]")]
+    Uncertified { location: Location },
+    #[error("certificate context must be hashed [{location}]")]
+    UnhashedContext { location: Location },
+    #[error(
+        "Caution CA certification has missing, duplicate, noncritical or mismatched context [{location}]"
+    )]
+    Context { location: Location },
+    #[error("duplicate derived recipients [{location}]")]
+    Recipients {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
 fn verify_certificates(
@@ -142,7 +329,7 @@ fn verify_certificates(
     count: NonZeroU8,
     ca: &Cert,
     at: SystemTime,
-) -> Result<([u8; 16], Vec<String>), OrgQuorumError> {
+) -> Result<([u8; 16], Vec<String>), VerifyCertificatesError> {
     verify_certificates_with_eligibility_time(data, organization_id, count, ca, at, None)
 }
 
@@ -156,52 +343,51 @@ fn verify_certificates_with_eligibility_time(
     ca: &Cert,
     at: SystemTime,
     eligibility_at: Option<SystemTime>,
-) -> Result<([u8; 16], Vec<String>), OrgQuorumError> {
+) -> Result<([u8; 16], Vec<String>), VerifyCertificatesError> {
+    use VerifyCertificatesErrorCtx as Ctx;
+
     let bundle = data.to_latest();
     if bundle.organization_id != organization_id
         || bundle.certificates.len() != usize::from(count.get())
     {
-        return Err(rejected(
-            "certificate response does not match the requested organization and count",
-        ));
+        return Err(VerifyCertificatesError::Mismatch {
+            location: std::panic::Location::caller(),
+        });
     }
     let mut policy = StandardPolicy::new();
     policy.good_critical_notations(&[ORG_NOTATION, BUNDLE_NOTATION]);
-    locksmith::custody::validate_ca_anchor(ca, at).with_context(Ctx::new(
-        StatusCode::BAD_GATEWAY,
-        "invalid or revoked configured Caution CA anchor",
-    ))?;
+    locksmith::custody::validate_ca_anchor(ca, at).with_context(Ctx::ca_anchor())?;
     let org = hex::encode(organization_id);
     let id = hex::encode(bundle.bundle_id);
     for (index, armored) in bundle.certificates.iter().enumerate() {
-        let cert = eligible_certificate(armored, eligibility_at).with_context(Ctx::new(
-            StatusCode::BAD_GATEWAY,
-            "ineligible derived holder certificate",
-        ))?;
-        let valid = cert.with_policy(&policy, at).with_context(Ctx::new(
-            StatusCode::BAD_GATEWAY,
-            "derived certificate was not valid at generation time",
-        ))?;
+        let cert = eligible_certificate(armored, eligibility_at).with_context(Ctx::ineligible())?;
+        let valid = cert
+            .with_policy(&policy, at)
+            .with_context(Ctx::not_valid())?;
         let expected_uid = format!("Caution public certificate index={index}");
         let uid = valid
             .userids()
             .revoked(false)
             .find(|uid| uid.userid().value() == expected_uid.as_bytes())
-            .ok_or_else(|| rejected("derived certificate index does not match its position"))?;
+            .ok_or_else(|| VerifyCertificatesError::Index {
+                location: std::panic::Location::caller(),
+            })?;
         let certifications: Vec<_> = uid
             .valid_certifications_by_key(&policy, at, ca.primary_key().key())
             .collect();
         if certifications.is_empty() {
-            return Err(rejected(
-                "derived certificate lacks a valid Caution CA certification",
-            ));
+            return Err(VerifyCertificatesError::Uncertified {
+                location: std::panic::Location::caller(),
+            });
         }
         for signature in certifications {
             // Reject context in the unhashed area, even when the hashed value is
             // correct: there must be exactly one authenticated value per name.
             if signature.unhashed_area().iter().any(|packet| matches!(packet.value(),
                 SubpacketValue::NotationData(n) if [ORG_NOTATION, BUNDLE_NOTATION].contains(&n.name()))) {
-                return Err(rejected("certificate context must be hashed"));
+                return Err(VerifyCertificatesError::UnhashedContext {
+                    location: std::panic::Location::caller(),
+                });
             }
             for (name, expected) in [
                 (ORG_NOTATION, org.as_bytes()),
@@ -218,9 +404,9 @@ fn verify_certificates_with_eligibility_time(
                     })
                     .collect();
                 if values.as_slice() != [(true, expected)] {
-                    return Err(rejected(
-                        "Caution CA certification has missing, duplicate, noncritical or mismatched context",
-                    ));
+                    return Err(VerifyCertificatesError::Context {
+                        location: std::panic::Location::caller(),
+                    });
                 }
             }
         }
@@ -230,10 +416,7 @@ fn verify_certificates_with_eligibility_time(
         .iter()
         .map(|cert| Key::OpenPGP { cert: cert.clone() })
         .collect();
-    validate_keyring(&keys, eligibility_at).with_context(Ctx::new(
-        StatusCode::BAD_GATEWAY,
-        "duplicate derived recipients",
-    ))?;
+    validate_keyring(&keys, eligibility_at).with_context(Ctx::recipients())?;
     Ok((bundle.bundle_id, bundle.certificates))
 }
 
@@ -241,17 +424,39 @@ fn verify_certificates_with_eligibility_time(
 #[path = "certificate_tests.rs"]
 mod tests;
 
+/// Failure modes for [`issuance_request`]: one variant per rejected input.
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum IssuanceRequestError {
+    #[error("invalid certificate-service URL [{location}]")]
+    Url {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("certificate issuance requires HTTPS [{location}]")]
+    Transport { location: Location },
+    #[error("certificate-service token must be 32 random bytes encoded as hex [{location}]")]
+    Token { location: Location },
+    #[error("invalid certificate-service token [{location}]")]
+    Header {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
 // The shared HTTP client also calls Keymaker: never install this as a default header.
 fn issuance_request(
     client: &reqwest::Client,
     endpoint: &str,
     token: &str,
     local_test: bool,
-) -> Result<reqwest::RequestBuilder, OrgQuorumError> {
-    let url = reqwest::Url::parse(endpoint).with_context(Ctx::new(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "invalid certificate-service URL",
-    ))?;
+) -> Result<reqwest::RequestBuilder, IssuanceRequestError> {
+    use IssuanceRequestErrorCtx as Ctx;
+
+    let url = reqwest::Url::parse(endpoint).with_context(Ctx::url())?;
     let loopback = url.host_str().is_some_and(|host| {
         host == "localhost"
             || host
@@ -263,22 +468,17 @@ fn issuance_request(
         || !url.username().is_empty()
         || url.password().is_some()
     {
-        return Err(OrgQuorumError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "certificate issuance requires HTTPS",
-        ));
+        return Err(IssuanceRequestError::Transport {
+            location: std::panic::Location::caller(),
+        });
     }
     if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(OrgQuorumError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "certificate-service token must be 32 random bytes encoded as hex",
-        ));
+        return Err(IssuanceRequestError::Token {
+            location: std::panic::Location::caller(),
+        });
     }
     let mut header = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
-        .with_context(Ctx::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "invalid certificate-service token",
-        ))?;
+        .with_context(Ctx::header())?;
     header.set_sensitive(true);
     Ok(client
         .post(url)

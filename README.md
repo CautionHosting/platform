@@ -193,7 +193,9 @@ start the real stack with `make up`, generate an access code with
    ```
 
    This writes a `caution.hcl` template when one does not already exist and
-   configures the `caution` git remote. Successful app creation also records the
+   configures the `caution` git remote. App names default to the current
+   directory name; pass `--name` to `caution init` or `caution apps create` to
+   choose one. Successful app creation also records the
    current app ID in `.caution/deployment.json` and prints the managed DNS target
    when one is available, including for BYOC initialization. Caution remote
    builds run Docker from the repository root, using `build.containerfile` when
@@ -206,6 +208,16 @@ start the real stack with `make up`, generate an access code with
    Application images may use the conventional relative merged-/usr links
    `/bin -> usr/bin` and `/lib -> usr/lib`; other `/bin` or `/lib` symlink
    layouts are rejected during EIF assembly.
+
+   To link this checkout to an app that already exists instead of creating one,
+   run `caution init --from <app-id>`. It verifies the app, writes
+   `.caution/deployment.json`, sets the `caution` remote, and pushes the current
+   commit to start a deployment.
+
+   To restore only the local app link and Git remote, run
+   `caution apps sync --app-id <APP_ID>`. It verifies the app and updates
+   `.caution/deployment.json` and the `caution` fetch/push URLs without deploying.
+   Existing configuration, trust, and secret files are preserved.
 
    The <a href="https://git.caution.co/public/demo-hello-world-enclave" target="_blank">hello-world-enclave</a> repo is a good test app to deploy.
 
