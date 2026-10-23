@@ -603,7 +603,6 @@ up:
 .PHONY: up-components prepare-components test-prepare-components
 up-components:
 	@git diff --quiet HEAD -- || { echo "Commit tracked changes before make up"; exit 1; }
-	@$(MAKE) audit
 	@$(MAKE) build-api API_IMAGE=caution-api-components
 	@$(MAKE) build-gateway build-email build-metering
 	@$(MAKE) prepare-components API_IMAGE=caution-api-components

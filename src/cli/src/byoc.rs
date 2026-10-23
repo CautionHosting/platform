@@ -21,7 +21,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use caution_config::app_name::{self, AppNameError};
 use dterror::{BoxError, CtxError, Location, ResultExt};
 
 use crate::output;
@@ -721,22 +720,6 @@ pub(crate) enum TeardownError {
     },
 }
 
-/// Resolve the app name to create.
-///
-/// An explicit `--name` is validated and never rewritten; a name derived from the
-/// working directory is sanitized, since the user never typed it. Both go through
-/// the same rule the API enforces, so `init` cannot post a name the server rejects.
-fn resolve_app_name(name: Option<String>) -> Result<String, AppNameError> {
-    match name {
-        Some(explicit) => app_name::validate(&explicit).map(|()| explicit),
-        None => Ok(std::env::current_dir()
-            .ok()
-            .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
-            .and_then(|dir| app_name::sanitize(&dir))
-            .unwrap_or_else(|| "app".to_string())),
-    }
-}
-
 pub(crate) async fn init(
     client: &ApiClient,
     bring_your_own_cloud: bool,
@@ -748,7 +731,7 @@ pub(crate) async fn init(
 ) -> Result<(), InitError> {
     use InitErrorCtx as Ctx;
 
-    let app_name = resolve_app_name(name).with_context(Ctx::invalid_app_name())?;
+    let app_name = crate::app_name::resolve(name).with_context(Ctx::invalid_app_name())?;
 
     output::status("Initializing new deployment...");
 
