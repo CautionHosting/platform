@@ -4,3 +4,4 @@
 pub mod crud;
 pub mod download_eif;
 pub mod migrate_procfile;
+pub(crate) mod sync;

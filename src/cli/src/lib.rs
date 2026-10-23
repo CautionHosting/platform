@@ -607,6 +607,11 @@ enum AppCommands {
         #[arg(long, help = "App name (default: current directory name)")]
         name: Option<String>,
     },
+    #[command(about = "Sync an existing app's local .caution link and caution Git remote")]
+    Sync {
+        #[arg(help = "App ID to link to this checkout", value_name = "APP_ID")]
+        id: uuid::Uuid,
+    },
     #[command(about = "List active applications (-a includes inactive ones)")]
     List {
         #[arg(
@@ -3867,6 +3872,11 @@ pub async fn run() -> Result<(), RunError> {
         Commands::Apps { command } => match command {
             AppCommands::Create { name } => {
                 apps::crud::create(&client, name)
+                    .await
+                    .with_context(Ctx::command_dispatch())?;
+            }
+            AppCommands::Sync { id } => {
+                apps::sync::run(&client, id)
                     .await
                     .with_context(Ctx::command_dispatch())?;
             }
