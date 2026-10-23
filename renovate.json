@@ -1,0 +1,36 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "local>public/infrastructure//renovate/default.json"
+  ],
+  "ignorePaths": [
+    "**/node_modules/**",
+    "**/bower_components/**",
+    "**/vendor/**",
+    "**/target/**",
+    "**/.terraform/**",
+    "**/charts/**",
+    "**/out/**",
+    "**/fetch/**",
+    "**/dist/**",
+    "**/*.enc.yaml",
+    "**/terraform.tfstate*",
+    "src/api/src/testdata/**",
+    "src/enclave-builder/tests/fixtures/Containerfile.eif.inline-components"
+  ],
+  "packageRules": [
+    {
+      "description": "The Distrust registry needs a scoped, validated Git-index policy before automation.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["keyfork-shard", "keyforkd", "keyforkd-client", "keyfork-derive-openpgp", "keyfork-mnemonic"],
+      "enabled": false
+    },
+    {
+      "description": "Runtime and build image changes require explicit review.",
+      "matchManagers": [
+        "dockerfile"
+      ],
+      "dependencyDashboardApproval": true
+    }
+  ]
+}
