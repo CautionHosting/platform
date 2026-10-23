@@ -193,7 +193,9 @@ start the real stack with `make up`, generate an access code with
    ```
 
    This writes a `caution.hcl` template when one does not already exist and
-   configures the `caution` git remote. Successful app creation also records the
+   configures the `caution` git remote. App names default to the current
+   directory name; pass `--name` to `caution init` or `caution apps create` to
+   choose one. Successful app creation also records the
    current app ID in `.caution/deployment.json` and prints the managed DNS target
    when one is available, including for BYOC initialization. Caution remote
    builds run Docker from the repository root, using `build.containerfile` when
