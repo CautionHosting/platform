@@ -2569,7 +2569,7 @@ mod tests {
         VerifyTargetError, api_error_text, bare_target_allowed, canonical_id,
         deployment_detail_lines, deployment_rows, destroy_deployment,
         extract_resource_id_from_git_url, fetch_deployment, history_line, parse_selector,
-        prepare_deployment_verify, resolve_prefix, role_label, short_sha, switch,
+        prepare_deployment_verify, rename, resolve_prefix, role_label, short_sha, switch,
         switch_confirmation_lines, verify_target,
     };
     use super::{app_is_active, app_list_row, render_table, state_label};
@@ -3267,6 +3267,98 @@ mod tests {
         assert!(
             cause.contains("(status 404 Not Found): Deployment not found. ["),
             "{cause}"
+        );
+    }
+
+    #[tokio::test]
+    async fn renaming_an_app_patches_the_resource_name() {
+        let dir = tempdir().unwrap();
+        let (url, requests) = serve(|method, path| match method {
+            "GET" if path.ends_with(APP) => (
+                200,
+                serde_json::json!({
+                    "id": APP,
+                    "resource_name": "old-name",
+                    "state": "running",
+                    "provider_resource_id": "i-1",
+                })
+                .to_string(),
+            ),
+            "PATCH" if path.ends_with(APP) => (
+                200,
+                serde_json::json!({
+                    "id": APP,
+                    "resource_name": "new-name",
+                    "state": "running",
+                    "provider_resource_id": "i-1",
+                })
+                .to_string(),
+            ),
+            _ => (404, r#"{"error":"not found"}"#.to_string()),
+        })
+        .await;
+        let client = client(&url, dir.path(), None);
+
+        rename(&client, Some(APP.to_string()), "new-name".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            request_lines(&requests),
+            vec![
+                format!("GET /api/resources/{APP} HTTP/1.1"),
+                format!("PATCH /api/resources/{APP} HTTP/1.1"),
+            ]
+        );
+        let requests = requests.lock().unwrap();
+        assert!(
+            requests[1].contains(r#""name":"new-name""#),
+            "{}",
+            requests[1]
+        );
+    }
+
+    #[tokio::test]
+    async fn renaming_uses_the_linked_app_and_reports_a_name_conflict() {
+        let dir = tempdir().unwrap();
+        let (url, requests) = serve(|method, path| match method {
+            "GET" if path.ends_with(APP) => (
+                200,
+                serde_json::json!({
+                    "id": APP,
+                    "resource_name": "old-name",
+                    "state": "running",
+                    "provider_resource_id": "i-1",
+                })
+                .to_string(),
+            ),
+            "PATCH" => (
+                409,
+                r#"{"error":"an app with that name already exists in this organization"}"#
+                    .to_string(),
+            ),
+            _ => (404, r#"{"error":"not found"}"#.to_string()),
+        })
+        .await;
+        // Linked to APP: the id comes from the checkout's deployment file.
+        let client = client(&url, dir.path(), Some(APP));
+
+        let error = rename(&client, None, "taken-name".to_string())
+            .await
+            .err()
+            .unwrap();
+        let message = error.to_string();
+        assert!(
+            message.starts_with("failed to rename app (status 409 Conflict)"),
+            "{message}"
+        );
+        assert!(message.contains("already exists"), "{message}");
+        assert_eq!(
+            request_lines(&requests),
+            vec![
+                format!("GET /api/resources/{APP} HTTP/1.1"),
+                format!("PATCH /api/resources/{APP} HTTP/1.1"),
+            ]
         );
     }
 

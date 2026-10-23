@@ -45,6 +45,19 @@
                 <line x1="10" y1="14" x2="21" y2="3"/>
               </svg>
             </a>
+            <button
+              type="button"
+              class="app-rename-btn"
+              title="Rename app"
+              aria-label="Rename app"
+              @click="openRenameModal"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 20h9"/>
+                <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+              </svg>
+              Rename
+            </button>
           </div>
           <button
             v-if="selectedApp.state === 'running' && selectedApp.public_ip"
@@ -1373,6 +1386,37 @@ make build-cli
       </div>
     </div>
 
+    <!-- Rename App Modal -->
+    <div v-if="showRenameModal" class="modal-overlay" @click="cancelRename">
+      <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="rename-app-title" @click.stop>
+        <h3 id="rename-app-title" class="modal-title">Rename app</h3>
+        <p class="modal-message">
+          Choose a new name for "{{ renameOriginalName || 'this app' }}". Names must be unique within your organization.
+        </p>
+        <label class="modal-field" for="rename-app-input">
+          <span class="modal-field-label">New name</span>
+          <input
+            id="rename-app-input"
+            v-model="renameAppValue"
+            type="text"
+            class="modal-field-input"
+            :maxlength="appNameMaxLength"
+            autocomplete="off"
+            spellcheck="false"
+            @keyup.enter="confirmRename"
+            @keyup.escape="cancelRename"
+          />
+        </label>
+        <p v-if="renameAppError" class="modal-message modal-message--error" role="alert">{{ renameAppError }}</p>
+        <div class="modal-actions">
+          <button @click="cancelRename" class="btn-secondary">Cancel</button>
+          <button @click="confirmRename" class="btn-primary" :disabled="renamingApp">
+            {{ renamingApp ? 'Renaming...' : 'Rename' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- Account Tab -->
     <div v-if="activeTab === 'account'" class="content-card">
       <div class="content-header">
@@ -2048,6 +2092,7 @@ import {
   readAppListPreferences,
 } from "../utils/appList.js";
 import { formatLocalDate, formatLocalTime } from "../utils/dateTime.js";
+import { APP_NAME_MAX_LENGTH, normalizeAppName, validateAppName } from "../utils/appName.js";
 import { canRemoveOrganizationMember } from "../utils/organizations.js";
 import { getSubscriptionPlanAction } from "../utils/subscriptionPlan.js";
 import { getCurrentTheme } from "../utils/theme.js";
@@ -2167,6 +2212,12 @@ export default {
     const selectedApp = ref(null);
     const showDestroyModal = ref(false);
     const appToDestroy = ref(null);
+    const showRenameModal = ref(false);
+    const renamingApp = ref(false);
+    const renameAppValue = ref('');
+    const renameAppError = ref('');
+    const renameOriginalName = ref('');
+    const appNameMaxLength = APP_NAME_MAX_LENGTH;
     const copiedAppId = ref(null);
     const copiedField = ref(null);
     const appSearchQuery = ref('');
@@ -3517,6 +3568,73 @@ export default {
     const cancelDestroy = () => {
       showDestroyModal.value = false;
       appToDestroy.value = null;
+    };
+
+    const openRenameModal = () => {
+      if (!selectedApp.value) return;
+      renameOriginalName.value = selectedApp.value.resource_name || '';
+      renameAppValue.value = selectedApp.value.resource_name || '';
+      renameAppError.value = '';
+      showRenameModal.value = true;
+    };
+
+    const cancelRename = () => {
+      if (renamingApp.value) return;
+      showRenameModal.value = false;
+      renameAppError.value = '';
+      renameAppValue.value = '';
+      renameOriginalName.value = '';
+    };
+
+    const confirmRename = async () => {
+      if (!selectedApp.value || renamingApp.value) return;
+
+      const app = selectedApp.value;
+      const newName = normalizeAppName(renameAppValue.value);
+      const validationError = validateAppName(newName);
+      if (validationError) {
+        renameAppError.value = validationError;
+        return;
+      }
+
+      // Nothing to change: close without a round trip.
+      if (newName === (app.resource_name || '')) {
+        cancelRename();
+        return;
+      }
+
+      renamingApp.value = true;
+      renameAppError.value = '';
+
+      try {
+        const response = await authFetch(`/api/resources/${app.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: newName }),
+        });
+
+        if (response.ok) {
+          const updated = await response.json().catch(() => null);
+          showToast(`App renamed to "${updated?.resource_name || newName}"`, 'success');
+          showRenameModal.value = false;
+          renameAppValue.value = '';
+          renameOriginalName.value = '';
+          await loadApps();
+        } else if (response.status === 401) {
+          window.location.href = '/login';
+        } else if (response.status === 409) {
+          renameAppError.value = `An app named "${newName}" already exists in this organization.`;
+        } else if (response.status === 404) {
+          renameAppError.value = 'This app no longer exists. Refresh the list and try again.';
+        } else {
+          const data = await response.json().catch(() => ({}));
+          renameAppError.value = data.message || data.error || 'Failed to rename app. Try again.';
+        }
+      } catch (err) {
+        renameAppError.value = 'Failed to connect to server. Try again.';
+      } finally {
+        renamingApp.value = false;
+      }
     };
 
     const loadKeys = async () => {
@@ -5391,6 +5509,15 @@ export default {
       destroyApp,
       confirmDestroy,
       cancelDestroy,
+      showRenameModal,
+      renamingApp,
+      renameAppValue,
+      renameAppError,
+      renameOriginalName,
+      appNameMaxLength,
+      openRenameModal,
+      confirmRename,
+      cancelRename,
       sshKeys,
       loadingKeys,
       addingKey,
@@ -6517,6 +6644,69 @@ export default {
 
 .app-open-icon-btn svg {
   display: block;
+}
+
+.app-rename-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  padding: 0 16px;
+  background: transparent;
+  border: 1px solid var(--theme-border);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: var(--theme-text-faint);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+
+.app-rename-btn:hover {
+  background: var(--theme-control);
+  border-color: var(--theme-text-primary);
+  color: #fff;
+}
+
+.app-rename-btn svg {
+  display: block;
+}
+
+.modal-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+
+.modal-field-label {
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: var(--theme-text-secondary);
+}
+
+.modal-field-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  background: var(--theme-control);
+  border: 1px solid var(--theme-border);
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 1rem;
+  color: var(--theme-text-primary);
+}
+
+.modal-field-input:focus {
+  outline: none;
+  border-color: var(--theme-text-primary);
+}
+
+.modal-message--error {
+  color: #f87171;
+  margin-top: -12px;
 }
 
 /* Header Attestation Button (Primary CTA) - matches .btn-primary styling */
