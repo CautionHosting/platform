@@ -680,6 +680,11 @@ enum AppCommands {
     Build {
         #[arg(long, help = "Force rebuild, ignore cache")]
         no_cache: bool,
+        #[arg(
+            long,
+            help = "Parse and validate caution.hcl, then exit without building"
+        )]
+        lint: bool,
     },
     #[command(about = "Rename an application")]
     Rename {
@@ -2237,6 +2242,35 @@ pub(crate) fn config_dir() -> Result<PathBuf, ConfigDirError> {
     Ok(config_dir)
 }
 
+/// Parse the local build configuration in `dir`.
+///
+/// Reads `caution.hcl`, falling back to `Procfile`, so that `--lint` and the
+/// build path agree on which file describes the deployment. The parse includes
+/// the full `caution_config` validation (network policy, provider, env, and
+/// ingress rules). This performs no network access and writes nothing.
+#[tracing::instrument(skip_all, err)]
+fn read_local_config_in(dir: &Path) -> Result<caution_config::ConfigurationFile, ReadConfigError> {
+    use ReadConfigErrorCtx as Ctx;
+
+    let hcl_path = dir.join("caution.hcl");
+    if hcl_path.exists() {
+        let content = std::fs::read_to_string(&hcl_path).with_context(Ctx::read_hcl())?;
+        return caution_config::ConfigurationFile::from_str(&content)
+            .with_context(Ctx::parse_hcl());
+    }
+
+    let procfile_path = dir.join("Procfile");
+    if procfile_path.exists() {
+        let content = std::fs::read_to_string(&procfile_path).with_context(Ctx::read_procfile())?;
+        return caution_config::ConfigurationFile::from_procfile(&content)
+            .with_context(Ctx::parse_procfile());
+    }
+
+    Err(ReadConfigError::ConfigNotFound {
+        location: std::panic::Location::caller(),
+    })
+}
+
 impl ApiClient {
     fn new(
         base_url: &str,
@@ -2593,29 +2627,7 @@ impl ApiClient {
     }
 
     fn read_config(&self) -> Result<caution_config::ConfigurationFile, ReadConfigError> {
-        use ReadConfigErrorCtx as Ctx;
-        use std::path::Path;
-
-        let hcl_path = Path::new("caution.hcl");
-        if hcl_path.exists() {
-            let content = std::fs::read_to_string(hcl_path).with_context(Ctx::read_hcl())?;
-            let config = caution_config::ConfigurationFile::from_str(&content)
-                .with_context(Ctx::parse_hcl())?;
-            return Ok(config);
-        }
-
-        let procfile_path = Path::new("Procfile");
-        if procfile_path.exists() {
-            let content =
-                std::fs::read_to_string(procfile_path).with_context(Ctx::read_procfile())?;
-            let config = caution_config::ConfigurationFile::from_procfile(&content)
-                .with_context(Ctx::parse_procfile())?;
-            return Ok(config);
-        }
-
-        Err(ReadConfigError::ConfigNotFound {
-            location: std::panic::Location::caller(),
-        })
+        read_local_config_in(Path::new("."))
     }
 
     fn read_config_from_dir(
@@ -3704,6 +3716,19 @@ pub async fn run() -> Result<(), RunError> {
         return Ok(());
     }
 
+    // Local validation: parse caution.hcl and exit. Like `caution environment`
+    // this needs no API client, session, or Docker, and it writes nothing.
+    if matches!(
+        &cli.command,
+        Commands::Apps {
+            command: AppCommands::Build { lint: true, .. }
+        }
+    ) {
+        read_local_config_in(Path::new(".")).with_context(Ctx::command_dispatch())?;
+        output::success("✓ caution.hcl is valid");
+        return Ok(());
+    }
+
     env_notice::gate(cli.verbose);
 
     if !matches!(
@@ -3952,7 +3977,9 @@ pub async fn run() -> Result<(), RunError> {
                     .await
                     .with_context(Ctx::command_dispatch())?;
             }
-            AppCommands::Build { no_cache } => {
+            // `--lint` returns before the API client is created; only real
+            // builds reach this arm.
+            AppCommands::Build { no_cache, .. } => {
                 verify::build_local(&client, no_cache)
                     .await
                     .with_context(Ctx::command_dispatch())?;
@@ -5021,6 +5048,66 @@ enclave "main" {{
             Commands::Account {
                 command: AccountCommands::Id
             }
+        ));
+    }
+
+    #[test]
+    fn cli_parses_apps_build_lint() {
+        let cli = Cli::try_parse_from(["caution", "apps", "build", "--lint"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Commands::Apps {
+                command: AppCommands::Build { lint: true, .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn cli_parses_apps_build_without_lint() {
+        let cli = Cli::try_parse_from(["caution", "apps", "build", "--no-cache"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Commands::Apps {
+                command: AppCommands::Build {
+                    no_cache: true,
+                    lint: false,
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn read_local_config_in_parses_valid_caution_hcl() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("caution.hcl"),
+            "enclave \"main\" {\n  unit \"default\" {\n    command = \"/app/start\"\n  }\n}\n",
+        )
+        .unwrap();
+
+        assert!(super::read_local_config_in(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn read_local_config_in_rejects_invalid_caution_hcl() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("caution.hcl"), "this is not hcl {{").unwrap();
+
+        assert!(matches!(
+            super::read_local_config_in(dir.path()),
+            Err(super::ReadConfigError::ParseHcl { .. })
+        ));
+    }
+
+    #[test]
+    fn read_local_config_in_reports_missing_config() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert!(matches!(
+            super::read_local_config_in(dir.path()),
+            Err(super::ReadConfigError::ConfigNotFound { .. })
         ));
     }
 
