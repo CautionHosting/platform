@@ -32,6 +32,10 @@ async fn source_builds_pin_the_reviewed_release_on_both_host_paths() {
 }
 
 #[test]
+#[cfg_attr(
+    target_os = "macos",
+    ignore = "needs GNU coreutils (sha256sum -c strictness)"
+)]
 fn host_rejects_corrupt_or_unpinned_helpers_before_installation() {
     let source = include_str!("../../../terraform/modules/aws/nitro-enclave/user-data.sh");
     let fragment = source
