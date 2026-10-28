@@ -8,17 +8,33 @@ use dterror::{BoxError, CtxError, Location, ResultExt};
 use super::crud::extract_resource_id_from_git_url;
 use crate::{ApiClient, output};
 
+/// Which `git` invocation in [`run`] failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SyncGitErrorKind {
+    /// `git rev-parse --show-toplevel` (verify the checkout is a worktree).
+    VerifyWorktree,
+    /// `git remote` (list existing remotes).
+    ListRemotes,
+    /// `git remote add caution <url>` (create the canonical remote).
+    AddRemote,
+    /// `git config --local --replace-all remote.caution.<...> <url>` (repair
+    /// the fetch and push URLs).
+    ConfigureRemote,
+}
+
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum SyncError {
-    #[error("failed to run git [{location}]")]
+    #[error("failed to run git ({kind:?}) [{location}]")]
     RunGit {
+        kind: SyncGitErrorKind,
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("git command failed: {message} [{location}]")]
+    #[error("git command failed ({kind:?}): {message} [{location}]")]
     GitFailed {
+        kind: SyncGitErrorKind,
         message: String,
         #[location]
         location: Location,
@@ -64,7 +80,10 @@ pub(crate) enum SyncError {
 pub(crate) async fn run(client: &ApiClient, id: uuid::Uuid) -> Result<(), SyncError> {
     use SyncErrorCtx as Ctx;
 
-    git(&["rev-parse", "--show-toplevel"])?;
+    git(
+        SyncGitErrorKind::VerifyWorktree,
+        &["rev-parse", "--show-toplevel"],
+    )?;
     let id = id.to_string();
     let app = client
         .fetch_app(&id)
@@ -84,15 +103,21 @@ pub(crate) async fn run(client: &ApiClient, id: uuid::Uuid) -> Result<(), SyncEr
         });
     }
 
-    let remotes = git(&["remote"])?;
+    let remotes = git(SyncGitErrorKind::ListRemotes, &["remote"])?;
     if !String::from_utf8_lossy(&remotes.stdout)
         .lines()
         .any(|name| name == "caution")
     {
-        git(&["remote", "add", "caution", &app.git_url])?;
+        git(
+            SyncGitErrorKind::AddRemote,
+            &["remote", "add", "caution", &app.git_url],
+        )?;
     }
     for key in ["remote.caution.url", "remote.caution.pushurl"] {
-        git(&["config", "--local", "--replace-all", key, &app.git_url])?;
+        git(
+            SyncGitErrorKind::ConfigureRemote,
+            &["config", "--local", "--replace-all", key, &app.git_url],
+        )?;
     }
     client
         .save_deployment(&id)
@@ -103,15 +128,16 @@ pub(crate) async fn run(client: &ApiClient, id: uuid::Uuid) -> Result<(), SyncEr
 }
 
 #[tracing::instrument(skip_all, err)]
-fn git(args: &[&str]) -> Result<Output, SyncError> {
+fn git(kind: SyncGitErrorKind, args: &[&str]) -> Result<Output, SyncError> {
     use SyncErrorCtx as Ctx;
 
     let output = Command::new("git")
         .args(args)
         .output()
-        .with_context(Ctx::run_git())?;
+        .with_context(Ctx::run_git(kind))?;
     if !output.status.success() {
         return Err(SyncError::GitFailed {
+            kind,
             message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
             location: std::panic::Location::caller(),
         });
