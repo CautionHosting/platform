@@ -31,6 +31,7 @@ pub struct User {
     pub id: Uuid,
     pub username: String,
     pub email: Option<String>,
+    pub pending_email: Option<String>,
     pub email_verified: bool,
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
@@ -83,6 +84,7 @@ pub async fn get_current_user(
         "SELECT id,
                 username,
                 email,
+                pending_email,
                 email_verified_at IS NOT NULL AS email_verified,
                 is_active,
                 created_at,
@@ -210,6 +212,7 @@ pub async fn update_current_user(
                  RETURNING id,
                            username,
                            email,
+                           pending_email,
                            email_verified_at IS NOT NULL AS email_verified,
                            is_active,
                            created_at,
@@ -225,6 +228,7 @@ pub async fn update_current_user(
                 "UPDATE users
              SET username = COALESCE($1, username),
                  email = NULL,
+                 pending_email = NULL,
                  email_verified_at = NULL,
                  email_verification_token = NULL,
                  email_verification_token_expires_at = NULL
@@ -232,6 +236,7 @@ pub async fn update_current_user(
              RETURNING id,
                        username,
                        email,
+                       pending_email,
                        email_verified_at IS NOT NULL AS email_verified,
                        is_active,
                        created_at,
@@ -249,8 +254,7 @@ pub async fn update_current_user(
             let user = sqlx::query_as::<_, User>(
                 "UPDATE users
                  SET username = COALESCE($1, username),
-                     email = $2,
-                     email_verified_at = NULL,
+                     pending_email = $2,
                      email_verification_token = $3,
                      email_verification_token_expires_at = $4,
                      email_verification_sent_at = NOW()
@@ -258,6 +262,7 @@ pub async fn update_current_user(
                  RETURNING id,
                            username,
                            email,
+                           pending_email,
                            email_verified_at IS NOT NULL AS email_verified,
                            is_active,
                            created_at,

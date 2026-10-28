@@ -253,7 +253,7 @@ pub async fn send_verification_email(
 
     let update_result = sqlx::query(
         "UPDATE users
-         SET email = $1,
+         SET pending_email = $1,
              email_verification_token = $2,
              email_verification_token_expires_at = $3,
              email_verification_sent_at = NOW()
@@ -391,8 +391,7 @@ pub async fn verify_email(
     let result: Option<(uuid::Uuid, DateTime<Utc>)> = sqlx::query_as(
         "SELECT id, email_verification_token_expires_at
          FROM users
-         WHERE email_verification_token = $1
-           AND email_verified_at IS NULL",
+         WHERE email_verification_token = $1",
     )
     .bind(&params.token)
     .fetch_optional(&state.db)
@@ -417,20 +416,46 @@ pub async fn verify_email(
         return Ok((StatusCode::BAD_REQUEST, "Verification token has expired").into_response());
     }
 
-    sqlx::query(
+    // Match the token again so a change made after the lookup can't be
+    // verified by this (now superseded) link.
+    let update_result = sqlx::query(
         "UPDATE users
-         SET email_verified_at = NOW(),
+         SET email = COALESCE(pending_email, email),
+             pending_email = NULL,
+             email_verified_at = NOW(),
              email_verification_token = NULL,
              email_verification_token_expires_at = NULL
-         WHERE id = $1",
+         WHERE id = $1
+           AND email_verification_token = $2",
     )
     .bind(user_id)
+    .bind(&params.token)
     .execute(&state.db)
-    .await
-    .inspect_err(|e| {
-        tracing::error!("Failed to mark email as verified: {:?}", e);
-    })
-    .with_context(Ctx::mark_verified())?;
+    .await;
+
+    if let Err(sqlx::Error::Database(database_error)) = &update_result
+        && database_error.is_unique_violation()
+    {
+        return Ok((
+            StatusCode::CONFLICT,
+            "This email is already in use by another account",
+        )
+            .into_response());
+    }
+
+    let update_result = update_result
+        .inspect_err(|e| {
+            tracing::error!("Failed to mark email as verified: {:?}", e);
+        })
+        .with_context(Ctx::mark_verified())?;
+
+    if update_result.rows_affected() == 0 {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            "Invalid or expired verification token",
+        )
+            .into_response());
+    }
 
     tracing::info!("Email verified for user {}", user_id);
 

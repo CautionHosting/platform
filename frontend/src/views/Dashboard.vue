@@ -3255,6 +3255,7 @@ export default {
     const savingEmail = ref(false);
     const emailError = ref('');
     const emailVerificationDeliveryStatus = ref(null);
+    const pendingEmail = ref('');
 
     // Username claim (one-time, immutable once set)
     const username = ref('');
@@ -3305,6 +3306,9 @@ export default {
         emailInputMatchesSavedEmail.value
       ) {
         return 'Enter a different email to update your notification email.';
+      }
+      if (emailVerified.value && pendingEmail.value) {
+        return `Verification link sent to ${pendingEmail.value}. Your email changes once you confirm.`;
       }
       if (!userEmail.value || emailVerified.value) {
         return '';
@@ -3735,7 +3739,9 @@ export default {
         const response = await authFetch("/api/users/me");
         if (response.ok) {
           const data = await response.json();
-          userEmail.value = data.email || '';
+          // Until a verified address exists, show the one awaiting verification.
+          userEmail.value = (data.email_verified ? data.email : data.pending_email || data.email) || '';
+          pendingEmail.value = data.pending_email || '';
           emailInput.value = userEmail.value;
           emailVerified.value = Boolean(data.email_verified);
           emailVerificationDeliveryStatus.value = null;
@@ -3850,7 +3856,8 @@ export default {
         });
         if (response.ok) {
           const data = await response.json();
-          userEmail.value = data.email || '';
+          userEmail.value = (data.email_verified ? data.email : data.pending_email || data.email) || '';
+          pendingEmail.value = data.pending_email || '';
           emailInput.value = userEmail.value;
           emailVerified.value = Boolean(data.email_verified);
           editingEmail.value = false;
@@ -3862,11 +3869,11 @@ export default {
             showToast(
               isResendingVerificationLink
                 ? 'Verification link sent.'
-                : 'Email saved. Verification link sent.'
+                : 'Verification link sent. Your email changes once you confirm.'
             );
           } else if (data.verification_email_sent === false) {
             emailVerificationDeliveryStatus.value = 'failed';
-            showToast("Email saved, but we couldn't send the verification link. Check the address or try again in a moment.", 'error');
+            showToast("We couldn't send the verification link. Check the address or try again in a moment.", 'error');
           } else {
             emailVerificationDeliveryStatus.value = null;
             showToast('Email saved');
