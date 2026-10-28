@@ -603,3 +603,103 @@ fn credential_snapshots_require_uv_and_enforce_recovery_bounds_without_reorderin
     assert_eq!(credential_snapshot(rows).unwrap(), expected);
     assert!(credential_snapshot(vec![row(1, true), (b"{}".to_vec(), false)]).is_err());
 }
+
+#[test]
+fn verification_failures_carry_actionable_guidance() {
+    use caution_error::{Note, Warning};
+
+    static REGENERATE: &[Note] = &[Note::from_static(
+        "Re-generate the bundle with `caution quorum init`, then upload it again.",
+    )];
+    static REIMPORT: &[Note] = &[Note::from_static(
+        "Re-import the file with `caution quorum legacy`, then upload it again.",
+    )];
+    static UNVERIFIED: &[Warning] = &[Warning::from_static(
+        "The payload imports as unverified metadata only: no key-service generation proof backs it.",
+    )];
+    static KEY_SERVICE: &[Warning] = &[Warning::from_static(
+        "The key service policy is unavailable, so the bundle was not stored. Retry when the key service is healthy.",
+    )];
+
+    fn source() -> BoxError {
+        Box::new(std::io::Error::other("boom"))
+    }
+
+    fn at() -> Location {
+        std::panic::Location::caller()
+    }
+
+    let guidance: [(VerifyUploadError, &[Note], &[Warning]); 9] = [
+        (
+            VerifyUploadError::LegacyOptIn { location: at() },
+            &[],
+            UNVERIFIED,
+        ),
+        (
+            VerifyUploadError::LegacyParse {
+                location: at(),
+                source: source(),
+            },
+            REIMPORT,
+            &[],
+        ),
+        (
+            VerifyUploadError::Parse {
+                location: at(),
+                source: source(),
+            },
+            REGENERATE,
+            &[],
+        ),
+        (
+            VerifyUploadError::PolicyPath {
+                location: at(),
+                source: source(),
+            },
+            &[],
+            KEY_SERVICE,
+        ),
+        (
+            VerifyUploadError::Policy {
+                location: at(),
+                source: source(),
+            },
+            &[],
+            KEY_SERVICE,
+        ),
+        (
+            VerifyUploadError::Proof {
+                location: at(),
+                source: source(),
+            },
+            REGENERATE,
+            &[],
+        ),
+        (
+            VerifyUploadError::InvalidBundle { location: at() },
+            REGENERATE,
+            &[],
+        ),
+        (
+            VerifyUploadError::Keyring {
+                location: at(),
+                source: source(),
+            },
+            REGENERATE,
+            &[],
+        ),
+        (
+            VerifyUploadError::PublicKey {
+                location: at(),
+                source: source(),
+            },
+            REGENERATE,
+            &[],
+        ),
+    ];
+
+    for (error, notes, warnings) in &guidance {
+        assert_eq!(error.notes(), *notes, "notes for {error}");
+        assert_eq!(error.warnings(), *warnings, "warnings for {error}");
+    }
+}

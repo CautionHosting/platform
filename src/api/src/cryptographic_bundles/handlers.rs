@@ -69,73 +69,73 @@ pub(crate) async fn list_quorum_bundles(
 }
 
 /// Failure modes for [`create_quorum_bundle`].
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum CreateQuorumBundleError {
-    #[error("could not look up the primary organization [{location}]")]
+    #[error("could not look up the primary organization")]
     PrimaryOrgLookup {
+        #[provide]
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: crate::GetUserPrimaryOrgError,
     },
 
-    #[error("uploaded quorum bundle failed verification [{location}]")]
-    VerifyUpload {
+    #[error("invalid quorum bundle")]
+    UnverifiedBundle {
+        #[provide]
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: org_quorum::VerifyUploadError,
     },
 
-    #[error("failed to store quorum bundle [{location}]")]
+    #[error("key-service configuration is unavailable")]
+    KeyServiceUnavailable {
+        #[provide]
+        #[location]
+        location: Location,
+        #[source]
+        source: org_quorum::VerifyUploadError,
+    },
+
+    #[error("failed to store quorum bundle")]
     Store {
+        #[provide]
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: super::CreateQuorumBundleError,
     },
 }
 
 impl IntoResponse for CreateQuorumBundleError {
     fn into_response(self) -> Response {
-        let (status, body) = match &self {
-            CreateQuorumBundleError::PrimaryOrgLookup { .. } => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "unable to resolve organization",
-            ),
-            CreateQuorumBundleError::VerifyUpload { source, .. } => {
-                verify_upload_response(source.downcast_ref())
+        let status = match &self {
+            CreateQuorumBundleError::PrimaryOrgLookup { .. }
+            | CreateQuorumBundleError::Store { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            CreateQuorumBundleError::UnverifiedBundle { .. } => StatusCode::BAD_REQUEST,
+            CreateQuorumBundleError::KeyServiceUnavailable { .. } => {
+                StatusCode::SERVICE_UNAVAILABLE
             }
-            CreateQuorumBundleError::Store { .. } => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "unable to store quorum bundle",
-            ),
         };
-        sentry_middleware::error_response(status, body, self)
+        error_response(status, self)
     }
 }
 
-/// Client status and text for a failed upload verification.
-fn verify_upload_response(
-    error: Option<&org_quorum::VerifyUploadError>,
-) -> (StatusCode, &'static str) {
+/// Sends an error as a structured report and reports it to Sentry.
+fn error_response(status: StatusCode, error: impl caution_error::ProviderError) -> Response {
+    let report = caution_error::ErrorReport::from_error(&error);
+    sentry_middleware::error_response_provider(status, Json(report), error)
+}
+
+/// Whether an upload verification failure is the key service's fault, not the
+/// upload's.
+///
+/// A policy failure means the platform cannot check the proof at all, so the
+/// upload is neither accepted nor rejected on its own merits.
+fn is_key_service_unavailable(error: &org_quorum::VerifyUploadError) -> bool {
     use org_quorum::VerifyUploadError as V;
-    match error {
-        Some(V::PolicyPath { .. } | V::Policy { .. }) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "key-service configuration is unavailable",
-        ),
-        Some(
-            V::LegacyOptIn { .. }
-            | V::LegacyParse { .. }
-            | V::Parse { .. }
-            | V::Proof { .. }
-            | V::InvalidBundle { .. }
-            | V::Keyring { .. }
-            | V::PublicKey { .. },
-        )
-        | None => (StatusCode::BAD_REQUEST, "invalid quorum bundle"),
-    }
+    matches!(error, V::PolicyPath { .. } | V::Policy { .. })
 }
 
 #[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
@@ -150,7 +150,14 @@ pub(crate) async fn create_quorum_bundle(
         .await
         .with_context(Ctx::primary_org_lookup())?;
 
-    org_quorum::verify_upload(&req.data, req.allow_legacy).with_context(Ctx::verify_upload())?;
+    org_quorum::verify_upload(&req.data, req.allow_legacy).map_err(|source| {
+        let location = std::panic::Location::caller();
+        if is_key_service_unavailable(&source) {
+            CreateQuorumBundleError::KeyServiceUnavailable { location, source }
+        } else {
+            CreateQuorumBundleError::UnverifiedBundle { location, source }
+        }
+    })?;
     let bundle = super::create_quorum_bundle(&state.db, org_id, auth.user_id, req)
         .await
         .with_context(Ctx::store())?;
@@ -222,55 +229,65 @@ pub(crate) async fn get_quorum_bundle(
 }
 
 /// Failure modes for [`update_quorum_bundle`].
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum UpdateQuorumBundleError {
-    #[error("could not look up the primary organization [{location}]")]
+    #[error("could not look up the primary organization")]
     PrimaryOrgLookup {
+        #[provide]
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: crate::GetUserPrimaryOrgError,
     },
 
-    #[error("uploaded quorum bundle failed verification [{location}]")]
-    VerifyUpload {
+    #[error("invalid quorum bundle")]
+    UnverifiedBundle {
+        #[provide]
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: org_quorum::VerifyUploadError,
     },
 
-    #[error("failed to update quorum bundle [{location}]")]
+    #[error("key-service configuration is unavailable")]
+    KeyServiceUnavailable {
+        #[provide]
+        #[location]
+        location: Location,
+        #[source]
+        source: org_quorum::VerifyUploadError,
+    },
+
+    #[error("failed to update quorum bundle")]
     Update {
+        #[provide]
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: super::UpdateQuorumBundleError,
     },
 
-    #[error("quorum bundle {bundle_id} not found [{location}]")]
-    NotFound { bundle_id: Uuid, location: Location },
+    #[error("quorum bundle {bundle_id} not found")]
+    NotFound {
+        bundle_id: Uuid,
+        #[provide]
+        #[location]
+        location: Location,
+    },
 }
 
 impl IntoResponse for UpdateQuorumBundleError {
     fn into_response(self) -> Response {
-        let (status, body) = match &self {
-            UpdateQuorumBundleError::PrimaryOrgLookup { .. } => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "unable to resolve organization",
-            ),
-            UpdateQuorumBundleError::VerifyUpload { source, .. } => {
-                verify_upload_response(source.downcast_ref())
+        let status = match &self {
+            UpdateQuorumBundleError::PrimaryOrgLookup { .. }
+            | UpdateQuorumBundleError::Update { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            UpdateQuorumBundleError::UnverifiedBundle { .. } => StatusCode::BAD_REQUEST,
+            UpdateQuorumBundleError::KeyServiceUnavailable { .. } => {
+                StatusCode::SERVICE_UNAVAILABLE
             }
-            UpdateQuorumBundleError::Update { .. } => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "unable to update quorum bundle",
-            ),
-            UpdateQuorumBundleError::NotFound { .. } => {
-                (StatusCode::NOT_FOUND, "quorum bundle not found")
-            }
+            UpdateQuorumBundleError::NotFound { .. } => StatusCode::NOT_FOUND,
         };
-        sentry_middleware::error_response(status, body, self)
+        error_response(status, self)
     }
 }
 
@@ -288,7 +305,14 @@ pub(crate) async fn update_quorum_bundle(
         .with_context(Ctx::primary_org_lookup())?;
 
     if let Some(data) = &req.data {
-        org_quorum::verify_upload(data, req.allow_legacy).with_context(Ctx::verify_upload())?;
+        org_quorum::verify_upload(data, req.allow_legacy).map_err(|source| {
+            let location = std::panic::Location::caller();
+            if is_key_service_unavailable(&source) {
+                UpdateQuorumBundleError::KeyServiceUnavailable { location, source }
+            } else {
+                UpdateQuorumBundleError::UnverifiedBundle { location, source }
+            }
+        })?;
     }
     let bundle = super::update_quorum_bundle(&state.db, org_id, id, req)
         .await
@@ -666,5 +690,208 @@ pub(crate) async fn delete_secrets_bundle(
             bundle_id: id,
             location: std::panic::Location::caller(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CreateQuorumBundleError, UpdateQuorumBundleError, is_key_service_unavailable};
+    use crate::org_quorum::VerifyUploadError;
+    use axum::body::to_bytes;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use caution_error::{ErrorReport, Note, Warning};
+    use dterror::BoxError;
+
+    const REGENERATE: &str =
+        "Re-generate the bundle with `caution quorum init`, then upload it again.";
+    const KEY_SERVICE_UNAVAILABLE: &str = "The key service policy is unavailable, so the bundle was not stored. Retry when the key service is healthy.";
+
+    /// The error a callee produces when the upload is not a proofed bundle.
+    fn parse_failure() -> VerifyUploadError {
+        VerifyUploadError::Parse {
+            location: std::panic::Location::caller(),
+            source: source(),
+        }
+    }
+
+    /// The error a callee produces when the key service has no policy.
+    fn missing_policy() -> VerifyUploadError {
+        VerifyUploadError::PolicyPath {
+            location: std::panic::Location::caller(),
+            source: source(),
+        }
+    }
+
+    fn source() -> BoxError {
+        Box::new(std::io::Error::other("no policy at that path"))
+    }
+
+    async fn body_json(response: axum::response::Response) -> serde_json::Value {
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body is collected");
+        serde_json::from_slice(&bytes).expect("body is an error report")
+    }
+
+    fn unverified_create() -> CreateQuorumBundleError {
+        CreateQuorumBundleError::UnverifiedBundle {
+            location: std::panic::Location::caller(),
+            source: parse_failure(),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unverified_upload_reports_the_reason_and_the_fix() {
+        let error = unverified_create();
+
+        assert_eq!(error.to_string(), "invalid quorum bundle");
+
+        let report = ErrorReport::from_error(&error);
+        assert_eq!(report.error, "invalid quorum bundle");
+        assert_eq!(report.errors.len(), 3, "the callee, then its own source");
+        assert_eq!(report.errors[1].error, "expected proofed v1 quorum bundle");
+        assert_eq!(report.errors[1].notes, vec![Note::from(REGENERATE)]);
+        assert!(report.errors[1].warnings.is_empty());
+        assert!(
+            caution_error::location(&error).is_some(),
+            "location provided"
+        );
+
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            response
+                .extensions()
+                .get::<sentry_middleware::SentryReportable>()
+                .is_some(),
+            "the error is reported"
+        );
+        let body = body_json(response).await;
+        assert_eq!(body["error"], "invalid quorum bundle");
+        assert_eq!(
+            body["errors"][1]["error"],
+            "expected proofed v1 quorum bundle"
+        );
+        assert_eq!(body["errors"][1]["notes"][0], REGENERATE);
+    }
+
+    #[tokio::test]
+    async fn a_missing_key_service_policy_warns_that_nothing_was_stored() {
+        let error = CreateQuorumBundleError::KeyServiceUnavailable {
+            location: std::panic::Location::caller(),
+            source: missing_policy(),
+        };
+
+        assert_eq!(
+            error.to_string(),
+            "key-service configuration is unavailable"
+        );
+
+        let report = ErrorReport::from_error(&error);
+        assert_eq!(
+            report.errors[1].error,
+            "required key-service endpoint or trust policy is not configured"
+        );
+        assert_eq!(
+            report.errors[1].warnings,
+            vec![Warning::from(KEY_SERVICE_UNAVAILABLE)]
+        );
+        assert!(report.errors[1].notes.is_empty());
+
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_json(response).await;
+        assert_eq!(body["error"], "key-service configuration is unavailable");
+        assert_eq!(body["errors"][1]["warnings"][0], KEY_SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn an_update_failure_carries_the_same_split() {
+        let unverified = UpdateQuorumBundleError::UnverifiedBundle {
+            location: std::panic::Location::caller(),
+            source: parse_failure(),
+        };
+        let unverified = unverified.into_response();
+        assert_eq!(unverified.status(), StatusCode::BAD_REQUEST);
+        let body = body_json(unverified).await;
+        assert_eq!(body["error"], "invalid quorum bundle");
+        assert_eq!(body["errors"][1]["notes"][0], REGENERATE);
+
+        let missing_policy = UpdateQuorumBundleError::KeyServiceUnavailable {
+            location: std::panic::Location::caller(),
+            source: missing_policy(),
+        };
+        let missing_policy = missing_policy.into_response();
+        assert_eq!(missing_policy.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = body_json(missing_policy).await;
+        assert_eq!(body["errors"][1]["warnings"][0], KEY_SERVICE_UNAVAILABLE);
+
+        let not_found = UpdateQuorumBundleError::NotFound {
+            bundle_id: uuid::Uuid::nil(),
+            location: std::panic::Location::caller(),
+        };
+        let not_found = not_found.into_response();
+        assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
+        let body = body_json(not_found).await;
+        assert_eq!(
+            body["error"],
+            "quorum bundle 00000000-0000-0000-0000-000000000000 not found"
+        );
+        assert_eq!(
+            body["errors"].as_array().map(Vec::len),
+            Some(1),
+            "a leaf error has one link"
+        );
+    }
+
+    #[test]
+    fn only_a_policy_failure_blames_the_key_service() {
+        use VerifyUploadError as V;
+
+        for key_service in [
+            missing_policy(),
+            VerifyUploadError::Policy {
+                location: std::panic::Location::caller(),
+                source: source(),
+            },
+        ] {
+            assert!(
+                is_key_service_unavailable(&key_service),
+                "the platform cannot check the proof: {key_service}"
+            );
+        }
+
+        let upload_faults = [
+            parse_failure(),
+            V::LegacyOptIn {
+                location: std::panic::Location::caller(),
+            },
+            V::LegacyParse {
+                location: std::panic::Location::caller(),
+                source: source(),
+            },
+            V::Proof {
+                location: std::panic::Location::caller(),
+                source: source(),
+            },
+            V::InvalidBundle {
+                location: std::panic::Location::caller(),
+            },
+            V::Keyring {
+                location: std::panic::Location::caller(),
+                source: source(),
+            },
+            V::PublicKey {
+                location: std::panic::Location::caller(),
+                source: source(),
+            },
+        ];
+        for upload_fault in upload_faults {
+            assert!(
+                !is_key_service_unavailable(&upload_fault),
+                "the upload is at fault: {upload_fault}"
+            );
+        }
     }
 }
