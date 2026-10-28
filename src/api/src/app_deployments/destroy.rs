@@ -19,6 +19,7 @@ use axum::{
 use caution_error::Note;
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use sqlx::PgPool;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -52,12 +53,13 @@ impl std::fmt::Display for DestroyRejection {
 }
 
 /// Actionable guidance for a rejection; empty when the message already says it.
-fn rejection_notes(rejection: &DestroyRejection) -> Vec<Note> {
+fn rejection_notes(rejection: &DestroyRejection) -> &'static [Note] {
+    static LIVE: &[Note] = &[Note(Cow::Borrowed(
+        "Switch another deployment to live, then retry the destroy: `caution apps switch <deployment>`.",
+    ))];
     match rejection {
-        DestroyRejection::Live => vec![Note::from(
-            "Switch another deployment to live, then retry the destroy: `caution apps switch <deployment>`.",
-        )],
-        DestroyRejection::Busy | DestroyRejection::Terminating => Vec::new(),
+        DestroyRejection::Live => LIVE,
+        DestroyRejection::Busy | DestroyRejection::Terminating => &[],
     }
 }
 
@@ -544,7 +546,7 @@ pub(crate) enum DestroyError {
     Rejected {
         rejection: DestroyRejection,
         #[provide(ref = [caution_error::Note])]
-        notes: Vec<Note>,
+        notes: &'static [Note],
         #[provide]
         location: Location,
     },
