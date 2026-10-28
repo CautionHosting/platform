@@ -6,7 +6,9 @@
 //! These live outside the library so the generated `caution_error::...` paths
 //! resolve exactly as they do for a downstream crate.
 
-use caution_error::{ProviderError, request_ref, request_ref_in_chain, request_value};
+use caution_error::{
+    ErrorReport, Note, ProviderError, Warning, request_ref, request_ref_in_chain, request_value,
+};
 use std::fmt;
 
 #[derive(Debug, thiserror::Error, ProviderError)]
@@ -473,4 +475,62 @@ mod dterror_typed {
         let err: Mixed = io.with_context(MixedCtx::io()).unwrap_err();
         assert!(ProviderError::provider_source(&err).is_none());
     }
+}
+
+#[derive(Debug, thiserror::Error, ProviderError)]
+#[error("quota exceeded")]
+struct QuotaError {
+    #[provide(notes)]
+    notes: Vec<Note>,
+
+    #[provide(warnings)]
+    warnings: Vec<Warning>,
+
+    #[location]
+    location: &'static std::panic::Location<'static>,
+}
+
+#[test]
+fn notes_warnings_and_location_are_provided() {
+    let err = QuotaError {
+        notes: vec![Note("upgrade your plan".to_string())],
+        warnings: vec![Warning("this may take a while".to_string())],
+        location: std::panic::Location::caller(),
+    };
+
+    assert_eq!(
+        request_ref::<[Note]>(&err).expect("notes are provided")[0].0,
+        "upgrade your plan",
+    );
+    assert_eq!(
+        request_ref::<[Warning]>(&err).expect("warnings are provided")[0].0,
+        "this may take a while",
+    );
+    assert!(caution_error::location(&err).is_some());
+
+    let report = ErrorReport::from_error(&err);
+    assert_eq!(report.error, "quota exceeded");
+    assert_eq!(report.errors[0].notes[0].0, "upgrade your plan");
+    assert_eq!(report.errors[0].warnings[0].0, "this may take a while");
+}
+
+#[derive(Debug, thiserror::Error, ProviderError)]
+enum Guided {
+    #[error("denied")]
+    Denied {
+        #[provide(notes)]
+        notes: Vec<Note>,
+    },
+}
+
+#[test]
+fn enum_variant_notes_are_provided() {
+    let err = Guided::Denied {
+        notes: vec![Note("request access first".to_string())],
+    };
+
+    assert_eq!(
+        request_ref::<[Note]>(&err).expect("notes are provided")[0].0,
+        "request access first",
+    );
 }

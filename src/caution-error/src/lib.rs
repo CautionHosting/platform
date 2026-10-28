@@ -116,12 +116,14 @@
 //! ```
 
 mod error;
+mod report;
 mod request;
 
 #[doc(hidden)]
 pub mod __private;
 
 pub use error::ProviderError;
+pub use report::{ErrorReport, ErrorResponse, Location, Note, Warning, location, report};
 pub use request::{
     Request, request_ref, request_ref_in_chain, request_value, request_value_in_chain,
 };

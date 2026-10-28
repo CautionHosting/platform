@@ -9,7 +9,9 @@ description = "Stable generic member access for errors: a std::error::Error trai
 
 [dependencies]
 caution-error-derive = { path = "../caution-error-derive", version = "0.1.0" }
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 dterror.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
