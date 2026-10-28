@@ -38,7 +38,7 @@ serde_json = "1.0"
 
 # Error handling
 thiserror = "1"
-dterror = "0.4"
+dterror = "0.4.1"
 
 # Logging
 tracing = "0.1"

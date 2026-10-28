@@ -341,7 +341,7 @@ dependencies = [
  "caution-config",
  "caution-error",
  "chrono",
- "dterror 0.4.0",
+ "dterror 0.4.1",
  "enclave-builder",
  "futures",
  "hcl-rs",
@@ -1783,7 +1783,7 @@ dependencies = [
  "clap",
  "crossterm",
  "drift-detector",
- "dterror 0.4.0",
+ "dterror 0.4.1",
  "futures-util",
  "ratatui",
  "reqwest 0.12.28",
@@ -1799,7 +1799,7 @@ dependencies = [
 name = "caution-config"
 version = "0.1.0"
 dependencies = [
- "dterror 0.4.0",
+ "dterror 0.4.1",
  "hcl-rs",
  "serde",
  "serde_json",
@@ -1821,7 +1821,7 @@ name = "caution-error"
 version = "0.1.0"
 dependencies = [
  "caution-error-derive",
- "dterror 0.4.0",
+ "dterror 0.4.1",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -2029,7 +2029,7 @@ dependencies = [
  "coset 0.3.8",
  "crossterm",
  "dirs",
- "dterror 0.4.0",
+ "dterror 0.4.1",
  "enclave-builder",
  "flate2",
  "hcl-rs",
@@ -2881,7 +2881,7 @@ version = "0.1.0"
 dependencies = [
  "aws-config",
  "aws-sdk-ec2",
- "dterror 0.4.0",
+ "dterror 0.4.1",
  "serde_json",
  "sqlx",
  "thiserror 1.0.69",
@@ -2915,18 +2915,18 @@ checksum = "e05ee8f3f4ed77223f1ff7b12051ec44fc36d3e67ea217452dc8434559df9ded"
 
 [[package]]
 name = "dterror"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8162d0ddf8db2c9507692b611859c9beeeb7bc1aa4d28bef359a606275c496bb"
+checksum = "a0f20c5928a0f65dbbaf58c5d7d716d9bc65d1c63680dcca855787b69c94f81a"
 dependencies = [
  "dterror-derive",
 ]
 
 [[package]]
 name = "dterror-derive"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0951bab3e7e99c183b7c09b7ed6e241f3c036ec6aa5909cccf14f5238cbfd31c"
+checksum = "cada69be824bf137d47880f25e37442e38b038ab0e01dab795bff8e163d8ccc6"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -3113,7 +3113,7 @@ dependencies = [
  "axum",
  "chrono",
  "dotenvy",
- "dterror 0.4.0",
+ "dterror 0.4.1",
  "lettre",
  "serde",
  "serde_json",
@@ -3151,7 +3151,7 @@ dependencies = [
  "bootproof-sdk",
  "clap",
  "coset 0.3.8",
- "dterror 0.4.0",
+ "dterror 0.4.1",
  "flate2",
  "futures-util",
  "hex",
@@ -3502,7 +3502,7 @@ dependencies = [
  "bytes",
  "cookie",
  "dotenvy",
- "dterror 0.4.0",
+ "dterror 0.4.1",
  "futures",
  "hex",
  "hmac 0.12.1",
@@ -3752,7 +3752,7 @@ name = "hcl-patcher"
 version = "0.1.0"
 dependencies = [
  "clap",
- "dterror 0.4.0",
+ "dterror 0.4.1",
  "hcl-edit",
  "thiserror 2.0.20",
  "tracing",
@@ -5007,7 +5007,7 @@ dependencies = [
  "caution-config",
  "chrono",
  "dotenvy",
- "dterror 0.4.0",
+ "dterror 0.4.1",
  "futures",
  "hex",
  "hmac 0.12.1",
