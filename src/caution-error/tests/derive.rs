@@ -569,3 +569,22 @@ fn variant_without_provision_then_variant_with_provision() {
         "the variant does not provide a location"
     );
 }
+
+#[derive(Debug, thiserror::Error, ProviderError)]
+#[error("single note")]
+struct SingleNote {
+    #[provide(ref)]
+    note: Note,
+}
+
+#[test]
+fn provide_ref_targets_the_field_type() {
+    let err = SingleNote {
+        note: Note::from("only one"),
+    };
+
+    let provided = request_ref::<Note>(&err).expect("provided by reference");
+    assert_eq!(provided.0, "only one");
+    assert!(request_ref::<[Note]>(&err).is_none(), "not a slice");
+    assert_eq!(caution_error::notes(&err), vec![Note::from("only one")]);
+}

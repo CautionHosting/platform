@@ -184,7 +184,7 @@ pub(crate) enum SwitchError {
     },
     #[error("The deployment failed the platform health check.")]
     Unhealthy {
-        #[provide(ref = caution_error::Note)]
+        #[provide(ref)]
         note: Note,
         #[provide]
         #[location]

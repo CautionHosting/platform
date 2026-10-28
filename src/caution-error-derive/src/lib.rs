@@ -23,11 +23,11 @@ use syn::{
 ///
 /// - `#[provide]` provides the field's **value** (`provide_value`), keyed by the
 ///   field's declared type. The field must be `Copy` and `'static`.
-/// - `#[provide(ref = T)]` provides a **reference** to `T` (`provide_ref`). The
-///   field is deref-coerced to `&T`, so a `Vec<Note>` field with `ref = [Note]`
-///   provides `&[Note]`, and a reference field with `ref = X` provides `&X`. Use
-///   this form for a non-`Copy` field such as `String` or `Vec<_>`, or to name a
-///   target type that differs from the field's.
+/// - `#[provide(ref)]` provides a **reference** to the field's own declared type
+///   (`provide_ref::<FieldType>`). Use it for a non-`Copy` field such as `Note`.
+/// - `#[provide(ref = T)]` provides a reference to `T` instead, deref-coercing
+///   the field: a `Vec<Note>` field with `ref = [Note]` provides `&[Note]`, and
+///   a reference field with `ref = X` provides `&X`.
 ///
 /// A field marked `#[source]` (or `#[from]`) wires `provider_source`
 /// automatically. The source's type is not required to implement the trait: the
@@ -77,21 +77,27 @@ pub fn derive_provider_error(input: TokenStream) -> TokenStream {
 enum Provide {
     /// The field's value, by `provide_value`, keyed by the field's type.
     Value,
-    /// A reference to the named type, by `provide_ref`, deref-coercing the field.
-    Ref(Box<Type>),
+    /// A reference, by `provide_ref`, deref-coercing the field. `None` targets
+    /// the field's own declared type (`#[provide(ref)]`).
+    Ref(Option<Box<Type>>),
 }
 
-/// The parsed contents of `#[provide(ref = Type)]`.
+/// The parsed contents of `#[provide(ref)]` or `#[provide(ref = Type)]`.
 struct RefProvide {
-    target: Type,
+    target: Option<Type>,
 }
 
 impl Parse for RefProvide {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         input.parse::<Token![ref]>()?;
+        if input.is_empty() {
+            return Ok(Self { target: None });
+        }
         input.parse::<Token![=]>()?;
         let target: Type = input.parse()?;
-        Ok(Self { target })
+        Ok(Self {
+            target: Some(target),
+        })
     }
 }
 
@@ -142,7 +148,7 @@ fn struct_provide_body(fields: &Fields) -> syn::Result<TokenStream2> {
         };
         let reference = field_reference(field, position);
         let value = field_value(field, position);
-        body.extend(provide_statement(&provide, reference, value));
+        body.extend(provide_statement(&provide, &field.ty, reference, value));
     }
     Ok(body)
 }
@@ -166,7 +172,12 @@ fn enum_provide_body(data: &DataEnum) -> syn::Result<TokenStream2> {
                         continue;
                     };
                     let ident = named_field_ident(field);
-                    stmts.extend(provide_statement(&provide, quote!(#ident), quote!(*#ident)));
+                    stmts.extend(provide_statement(
+                        &provide,
+                        &field.ty,
+                        quote!(#ident),
+                        quote!(*#ident),
+                    ));
                     bindings.push(quote!(#ident));
                 }
                 quote! { Self::#variant_ident { #(#bindings,)* .. } => { #stmts } }
@@ -182,6 +193,7 @@ fn enum_provide_body(data: &DataEnum) -> syn::Result<TokenStream2> {
                     let binding = format_ident!("__provide_{}", position);
                     stmts.extend(provide_statement(
                         &provide,
+                        &field.ty,
                         quote!(#binding),
                         quote!(*#binding),
                     ));
@@ -261,12 +273,16 @@ fn enum_provider_source(data: &DataEnum) -> Option<TokenStream2> {
 /// field must be `Copy`).
 fn provide_statement(
     provide: &Provide,
+    field_type: &Type,
     reference: TokenStream2,
     value: TokenStream2,
 ) -> TokenStream2 {
     match provide {
         Provide::Value => quote! { request.provide_value(#value); },
-        Provide::Ref(target) => quote! { request.provide_ref::<#target>(#reference); },
+        Provide::Ref(target) => {
+            let target = target.as_deref().unwrap_or(field_type);
+            quote! { request.provide_ref::<#target>(#reference); }
+        }
     }
 }
 
@@ -366,14 +382,14 @@ fn provide_kind(field: &Field) -> syn::Result<Option<Provide>> {
             let parsed: RefProvide = list.parse_args().map_err(|_| {
                 syn::Error::new_spanned(
                     list,
-                    "unsupported #[provide(...)]; use `#[provide]` or `#[provide(ref = Type)]`",
+                    "unsupported #[provide(...)]; use `#[provide]`, `#[provide(ref)]`, or `#[provide(ref = Type)]`",
                 )
             })?;
-            Ok(Some(Provide::Ref(Box::new(parsed.target))))
+            Ok(Some(Provide::Ref(parsed.target.map(Box::new))))
         }
         Meta::NameValue(_) => Err(syn::Error::new_spanned(
             attribute,
-            "unsupported #[provide = ...]; use `#[provide]` or `#[provide(ref = Type)]`",
+            "unsupported #[provide = ...]; use `#[provide]`, `#[provide(ref)]`, or `#[provide(ref = Type)]`",
         )),
     }
 }
