@@ -476,6 +476,30 @@ fn public_key_line(public_key: &PublicKey) -> String {
     )
 }
 
+/// The guidance lines a deploy failure carries, ready to print to the push.
+///
+/// Each line becomes one `remote: ` line: trimmed, free of terminal controls,
+/// capped, and shown once, so a misconfigured or hostile response cannot flood
+/// the push.
+fn deploy_error_guidance(notes: &[String], warnings: &[String]) -> Vec<String> {
+    /// The cap the API applies to a client message, in bytes.
+    const MAX_LINE: usize = 1024;
+
+    let mut lines: Vec<String> = Vec::new();
+    for line in notes.iter().chain(warnings.iter()) {
+        let line = line.trim();
+        if line.is_empty()
+            || line.len() > MAX_LINE
+            || line.chars().any(char::is_control)
+            || lines.iter().any(|seen| seen == line)
+        {
+            continue;
+        }
+        lines.push(line.to_string());
+    }
+    lines
+}
+
 fn deploy_progress_started_message(milestone: &str) -> String {
     format!("remote: {milestone}")
 }
@@ -1512,6 +1536,7 @@ async fn handle_git_push(
         if !response.status().is_success() {
             let status = response.status();
             let mut message = "Deployment failed, please try again later.".to_string();
+            let mut guidance = Vec::new();
             if status.is_client_error() {
                 tracing::warn!(%status, "Deployment rejected");
                 if let Ok(rejection) = response.json::<DeployErrorResponse>().await {
@@ -1521,12 +1546,16 @@ async fn handle_git_push(
                     {
                         message = rejection.error;
                     }
+                    guidance = deploy_error_guidance(&rejection.notes, &rejection.warnings);
                 }
             } else {
                 tracing::error!(%status, "Deployment failed");
             }
             release_reservation().await;
-            let error_msg = format!("remote: error: {message}\n");
+            let mut error_msg = format!("remote: error: {message}\n");
+            for line in &guidance {
+                error_msg.push_str(&format!("remote: {line}\n"));
+            }
             let _ = session_handle
                 .extended_data(channel, 1, Bytes::from(error_msg.into_bytes()))
                 .await;
@@ -1563,6 +1592,11 @@ async fn handle_git_push(
             error: String,
             #[serde(default)]
             status: Option<u16>,
+            /// Guidance the API attaches to the failure: what to do about it.
+            #[serde(default)]
+            notes: Vec<String>,
+            #[serde(default)]
+            warnings: Vec<String>,
         }
 
         // Stream line-oriented deployment progress to the SSH client. Keep this
@@ -1690,10 +1724,18 @@ async fn handle_git_push(
                     // keep the app busy until it expires; after the claim this
                     // is a no-op (only `reserved` rows are released).
                     release_reservation().await;
+                    // The stream reported the message as a progress line; the
+                    // guidance is new, so print it either way.
+                    let mut output = String::new();
                     if !stream_reported_error {
-                        let error_msg = format!("remote: error: {}\n", api_error.error);
+                        output.push_str(&format!("remote: error: {}\n", api_error.error));
+                    }
+                    for line in deploy_error_guidance(&api_error.notes, &api_error.warnings) {
+                        output.push_str(&format!("remote: {line}\n"));
+                    }
+                    if !output.is_empty() {
                         let _ = session_handle
-                            .extended_data(channel, 1, Bytes::from(error_msg.into_bytes()))
+                            .extended_data(channel, 1, Bytes::from(output.into_bytes()))
                             .await;
                     }
                     let _ = session_handle.exit_status_request(channel, 1).await;
@@ -1852,10 +1894,10 @@ mod connection_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        contains_non_line_terminal_control, deploy_progress_completed_message,
-        deploy_progress_finished_message, deploy_progress_started_message, managed_dns_note,
-        parse_pushed_branch_ref, resource_state_allows_noop_redeploy, PushedBranchSelection,
-        ZERO_SHA1,
+        contains_non_line_terminal_control, deploy_error_guidance,
+        deploy_progress_completed_message, deploy_progress_finished_message,
+        deploy_progress_started_message, managed_dns_note, parse_pushed_branch_ref,
+        resource_state_allows_noop_redeploy, PushedBranchSelection, ZERO_SHA1,
     };
 
     const OLD_SHA: &str = "1111111111111111111111111111111111111111";
@@ -1874,6 +1916,28 @@ mod tests {
         assert!(note.contains("Create a CNAME for app.example.com pointing to"));
         assert!(!note.contains("DNS A record"));
         assert!(!note.contains("https://123e4567"));
+    }
+
+    #[test]
+    fn deploy_error_guidance_keeps_one_clean_line_per_guidance() {
+        let notes = vec![
+            "  Purchase credits in Settings.  ".to_string(),
+            // A repeated line is shown once.
+            "Purchase credits in Settings.".to_string(),
+            // A control character would break the line-oriented push output.
+            "line\nbreak".to_string(),
+            String::new(),
+            "x".repeat(1025),
+        ];
+        let warnings = vec!["Nothing was stored.".to_string()];
+
+        assert_eq!(
+            deploy_error_guidance(&notes, &warnings),
+            vec![
+                "Purchase credits in Settings.".to_string(),
+                "Nothing was stored.".to_string()
+            ]
+        );
     }
 
     #[test]

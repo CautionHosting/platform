@@ -617,8 +617,10 @@ fn verification_failures_carry_actionable_guidance() {
     static UNVERIFIED: &[Warning] = &[Warning::from_static(
         "The payload imports as unverified metadata only: no key-service generation proof backs it.",
     )];
+    static RETRY_KEY_SERVICE: &[Note] =
+        &[Note::from_static("Retry when the key service is healthy.")];
     static KEY_SERVICE: &[Warning] = &[Warning::from_static(
-        "The key service policy is unavailable, so the bundle was not stored. Retry when the key service is healthy.",
+        "The key service could not check the payload, so nothing was stored.",
     )];
 
     fn source() -> BoxError {
@@ -656,7 +658,7 @@ fn verification_failures_carry_actionable_guidance() {
                 location: at(),
                 source: source(),
             },
-            &[],
+            RETRY_KEY_SERVICE,
             KEY_SERVICE,
         ),
         (
@@ -664,7 +666,7 @@ fn verification_failures_carry_actionable_guidance() {
                 location: at(),
                 source: source(),
             },
-            &[],
+            RETRY_KEY_SERVICE,
             KEY_SERVICE,
         ),
         (

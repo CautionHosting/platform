@@ -2665,10 +2665,32 @@ pub(crate) enum DeployLogicError {
     Panicked { location: Location },
 }
 
-/// Client text for a failure in `complete_running`: the deployment is Running
-/// (and metered) unless it was destroyed or its app stopped meanwhile.
-fn activation_failure_message(source: &dterror::BoxError) -> &'static str {
+/// Guidance for a failure in `complete_running`: `(notes, warnings)`.
+///
+/// The deployment is Running and metered unless it was destroyed or its app
+/// stopped meanwhile, so the outcome is a caution and the next step is a note.
+fn activation_guidance(
+    source: &dterror::BoxError,
+) -> (
+    &'static [caution_error::Note],
+    &'static [caution_error::Warning],
+) {
     use app_deployments::lifecycle::CompleteRunningError;
+    use caution_error::{Note, Warning};
+
+    static WATCH: &[Note] = &[Note::from_static(
+        "`caution apps get -d <id>` shows the deployment's state.",
+    )];
+    static CHECK_THEN_PUSH: &[Note] = &[Note::from_static(
+        "If `caution apps get -d <id>` shows the deployment running, the platform makes it live within about a minute; if it shows it failed, push again.",
+    )];
+    static STILL_RUNNING: &[Warning] = &[Warning::from_static(
+        "The deployment is running and metered, and stays a candidate until an operator repairs the app's address.",
+    )];
+    static NOT_LIVE: &[Warning] = &[Warning::from_static(
+        "The deployment was destroyed, or its app is suspended or being destroyed, so it will not become live.",
+    )];
+
     match source.downcast_ref::<CompleteRunningError>() {
         Some(CompleteRunningError::AttachAddress { source, .. })
             if matches!(
@@ -2676,16 +2698,12 @@ fn activation_failure_message(source: &dterror::BoxError) -> &'static str {
                 Some(ec2::MoveAppAddressError::HolderMismatch { .. })
             ) =>
         {
-            "The deployment is running but could not be made live: the app's address is held by another instance. It stays a candidate until an operator repairs the address. See `caution apps get -d <id>`."
+            (WATCH, STILL_RUNNING)
         }
         Some(
             CompleteRunningError::OwnershipLost { .. } | CompleteRunningError::AppNotActive { .. },
-        ) => {
-            "The deployment was destroyed, or its app was suspended or is being destroyed, so it was not made live. See `caution apps get -d <id>`."
-        }
-        _ => {
-            "The deployment could not be made live. If `caution apps get -d <id>` shows it running, the platform makes it live within about a minute; if it shows it failed, push again."
-        }
+        ) => (WATCH, NOT_LIVE),
+        _ => (CHECK_THEN_PUSH, &[]),
     }
 }
 
@@ -2721,12 +2739,11 @@ impl DeployLogicError {
             }
             DeployLogicError::DeployInProgress { .. } => (
                 StatusCode::CONFLICT,
-                "A deployment is already in progress for this app. Please wait for it to complete.",
+                "A deployment is already in progress for this app.",
             ),
-            DeployLogicError::Terminating { .. } => (
-                StatusCode::CONFLICT,
-                "This app is being destroyed. Wait for teardown to complete before deploying it again.",
-            ),
+            DeployLogicError::Terminating { .. } => {
+                (StatusCode::CONFLICT, "This app is being destroyed.")
+            }
             DeployLogicError::AppNotFound { .. } => (StatusCode::NOT_FOUND, "App not found"),
             DeployLogicError::CredentialLookup { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
@@ -2737,7 +2754,7 @@ impl DeployLogicError {
             ),
             DeployLogicError::NoSubscription { .. } => (
                 StatusCode::PAYMENT_REQUIRED,
-                "Managed on-premises deployment requires an active subscription. Choose a plan in Settings at https://dashboard.caution.co",
+                "Managed on-premises deployment requires an active subscription.",
             ),
             DeployLogicError::SubscriptionInactive { .. } => (
                 StatusCode::PAYMENT_REQUIRED,
@@ -2751,10 +2768,9 @@ impl DeployLogicError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Unable to check deployment capacity",
             ),
-            DeployLogicError::AppLimitReached { .. } => (
-                StatusCode::PAYMENT_REQUIRED,
-                "App limit reached. Upgrade your plan in Settings at https://dashboard.caution.co",
-            ),
+            DeployLogicError::AppLimitReached { .. } => {
+                (StatusCode::PAYMENT_REQUIRED, "App limit reached.")
+            }
             DeployLogicError::EntitlementCommit { .. } => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Unable to finish deployment entitlement check",
@@ -2764,22 +2780,21 @@ impl DeployLogicError {
             }
             DeployLogicError::InsufficientCredits { .. } => (
                 StatusCode::PAYMENT_REQUIRED,
-                "Minimum $25.00 in credits required to deploy. Purchase credits in Settings.",
+                "Minimum $25.00 in credits required to deploy.",
             ),
             DeployLogicError::SuspensionQuery { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
             DeployLogicError::CreditSuspended { .. } => (
                 StatusCode::PAYMENT_REQUIRED,
-                "Your organization is suspended due to credit exhaustion. Add credits in Settings to resume.",
+                "Your organization is suspended due to credit exhaustion.",
             ),
             DeployLogicError::ActiveResourcesQuery { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
-            DeployLogicError::ResourceLimitReached { .. } => (
-                StatusCode::TOO_MANY_REQUESTS,
-                "Resource limit reached. Destroy unused resources or contact support.",
-            ),
+            DeployLogicError::ResourceLimitReached { .. } => {
+                (StatusCode::TOO_MANY_REQUESTS, "Resource limit reached.")
+            }
             DeployLogicError::ReactivateUpdate { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
@@ -2867,11 +2882,11 @@ impl DeployLogicError {
             }
             DeployLogicError::ByocRequired { .. } => (
                 StatusCode::BAD_REQUEST,
-                "caution.hcl declares AWS BYOC, but this app has no linked BYOC credentials. Refusing Caution-managed deployment. Reuse the original BYOC app and remote. To attach BYOC credentials to this linked app, run `caution init --byoc --config <decrypted-json>`. For a new BYOC app, use a fresh unlinked checkout and run `caution init --byoc`; `caution apps create` is managed capacity.",
+                "caution.hcl declares AWS BYOC, but this app has no linked BYOC credentials.",
             ),
             DeployLogicError::VcpuLimit { .. } => (
                 StatusCode::BAD_REQUEST,
-                "Fully managed deployments support up to 46 enclave vCPUs. Contact support for larger requests.",
+                "Fully managed deployments support up to 46 enclave vCPUs.",
             ),
             DeployLogicError::SizingInvalid { .. } => {
                 (StatusCode::BAD_REQUEST, "Invalid enclave resource request")
@@ -2881,7 +2896,7 @@ impl DeployLogicError {
             }
             DeployLogicError::EifTooLarge { .. } => (
                 StatusCode::BAD_REQUEST,
-                "EIF size exceeds allocated enclave memory. Increase memory_mb in configuration file.",
+                "EIF size exceeds allocated enclave memory.",
             ),
             DeployLogicError::BuilderTarget { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
@@ -2930,12 +2945,12 @@ impl DeployLogicError {
             }
             DeployLogicError::DeploymentNotReserved { .. } => (
                 StatusCode::CONFLICT,
-                "Push again: this app deploys through reserved deployments.",
+                "This app deploys through reserved deployments.",
             ),
             DeployLogicError::DeploymentClaim { source, .. } => match source {
                 app_deployments::admission::ClaimError::ReservationGone { .. } => (
                     StatusCode::CONFLICT,
-                    "This push's deployment reservation expired; push again.",
+                    "This push's deployment reservation expired.",
                 ),
                 app_deployments::admission::ClaimError::NotPushable { .. } => (
                     StatusCode::CONFLICT,
@@ -2948,11 +2963,11 @@ impl DeployLogicError {
             },
             DeployLogicError::LinkedNetworkChanged { .. } => (
                 StatusCode::CONFLICT,
-                "This push targets another AWS environment than the one this app's deployments live in (its linked account, VPC and region, or Caution's account). Keep that environment, or destroy the app before moving it.",
+                "This push targets another AWS environment than the one this app's deployments live in (its linked account, VPC and region, or Caution's account).",
             ),
             DeployLogicError::LinkedBuilderMissing { .. } => (
                 StatusCode::CONFLICT,
-                "This app's linked AWS environment predates the BYOC builder. Run `caution init --byoc` again to provision a current environment (destroy the app first if it has deployments).",
+                "This app's linked AWS environment predates the BYOC builder.",
             ),
             DeployLogicError::AppNetwork { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
@@ -2966,11 +2981,11 @@ impl DeployLogicError {
             ),
             DeployLogicError::RegionFull { .. } => (
                 StatusCode::SERVICE_UNAVAILABLE,
-                "No fully managed capacity is left in this app's region for a new candidate. Destroy a candidate or retry later.",
+                "No fully managed capacity is left in this app's region for a new candidate.",
             ),
-            DeployLogicError::Activation { source, .. } => (
+            DeployLogicError::Activation { .. } => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                activation_failure_message(source),
+                "The deployment could not be made live.",
             ),
             DeployLogicError::Panicked { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
@@ -2980,13 +2995,16 @@ impl DeployLogicError {
     }
 }
 
-/// Guidance for a deploy failure whose client text does not already say what to
-/// do next.
+/// Guidance for a deploy failure whose client text is the diagnosis alone.
 ///
-/// A variant whose client text carries its own remedy gets no note, so a note
-/// never repeats the message.
+/// The remedy for a failure, and the caution it owes the client, live here
+/// rather than in the message, so the message has one job: say what failed.
 impl DeployLogicError {
-    /// Notes for a deploy failure; empty when the message already says it.
+    /// Notes for a deploy failure: what the client can do about it.
+    ///
+    /// The message carries the diagnosis only, so a variant whose remedy used to
+    /// be glued to its message now carries that remedy here. A variant with no
+    /// remedy to offer gets none.
     fn notes(&self) -> &'static [caution_error::Note] {
         use caution_error::Note;
 
@@ -2996,42 +3014,133 @@ impl DeployLogicError {
         static AWS_ACCOUNT_ID: &[Note] = &[Note::from_static(
             "Set the AWS account ID on the linked provider account.",
         )];
+        static WAIT_FOR_DEPLOYMENT: &[Note] = &[Note::from_static(
+            "Wait for the deployment to finish; `caution apps get -d <id>` shows its state.",
+        )];
+        static WAIT_FOR_TEARDOWN: &[Note] = &[Note::from_static(
+            "Wait for teardown to complete before deploying it again.",
+        )];
+        static CHOOSE_PLAN: &[Note] = &[Note::from_static(
+            "Choose a plan in Settings at https://dashboard.caution.co.",
+        )];
         static REACTIVATE_SUBSCRIPTION: &[Note] = &[Note::from_static(
             "Reactivate the subscription in Settings at https://dashboard.caution.co.",
         )];
         static FREE_CAPACITY: &[Note] = &[Note::from_static(
             "Free deployment capacity on the plan, or upgrade in Settings at https://dashboard.caution.co.",
         )];
+        static UPGRADE_PLAN: &[Note] = &[Note::from_static(
+            "Upgrade the plan in Settings at https://dashboard.caution.co, or destroy an app you no longer need.",
+        )];
+        static BUY_CREDITS: &[Note] = &[Note::from_static(
+            "Purchase credits in Settings at https://dashboard.caution.co before redeploying.",
+        )];
+        static ADD_CREDITS: &[Note] = &[Note::from_static(
+            "Add credits in Settings at https://dashboard.caution.co to resume deployments.",
+        )];
+        static FREE_RESOURCES: &[Note] = &[Note::from_static(
+            "Destroy unused resources, or contact support for a higher limit.",
+        )];
+        static CONTACT_SUPPORT: &[Note] =
+            &[Note::from_static("Contact support for a larger request.")];
+        static INCREASE_MEMORY: &[Note] = &[Note::from_static(
+            "Increase `memory_mb` in the enclave configuration.",
+        )];
+        static BYOC_ROUTES: &[Note] = &[
+            Note::from_static(
+                "Reuse the original BYOC app and remote for this repository; its linked credentials already cover it.",
+            ),
+            Note::from_static(
+                "To attach BYOC credentials to this app, run `caution init --byoc --config <decrypted-json>`.",
+            ),
+            Note::from_static(
+                "For a new BYOC app, use a fresh unlinked checkout and run `caution init --byoc`; `caution apps create` provisions managed capacity instead.",
+            ),
+        ];
+        static DESTROY_CANDIDATE: &[Note] = &[Note::from_static(
+            "Destroy a candidate, or retry once other candidates are cleaned up.",
+        )];
+        static KEEP_ENVIRONMENT: &[Note] = &[Note::from_static(
+            "Keep that environment, or destroy the app before moving it.",
+        )];
+        static REINIT_BYOC: &[Note] = &[
+            Note::from_static(
+                "Run `caution init --byoc` again to provision a current environment.",
+            ),
+            Note::from_static("Destroy the app first if it has deployments."),
+        ];
         static RECOVERY_INGRESS: &[Note] = &[Note::from_static(
             "Add explicit `network.recovery_ingress` sources to `caution.hcl`.",
         )];
         static BRANCH_HEAD: &[Note] = &[Note::from_static(
             "Fetch the branch head, then push the commit you intend to deploy again.",
         )];
-        static BUILDER_CREDITS: &[Note] = &[Note::from_static(
-            "Purchase credits in Settings at https://dashboard.caution.co before redeploying.",
-        )];
-        static IN_PROGRESS: &[Note] = &[Note::from_static(
-            "`caution apps get -d <id>` shows the deployment that is in progress.",
-        )];
+        static PUSH_AGAIN: &[Note] = &[Note::from_static("Push again.")];
 
         match self {
             Self::NoProviderAccount { .. } => CLOUD_ACCOUNT,
             Self::NoAwsAccountId { .. } => AWS_ACCOUNT_ID,
+            Self::DeployInProgress { .. } => WAIT_FOR_DEPLOYMENT,
+            Self::Terminating { .. } => WAIT_FOR_TEARDOWN,
+            Self::NoSubscription { .. } => CHOOSE_PLAN,
             Self::SubscriptionInactive { .. } => REACTIVATE_SUBSCRIPTION,
             Self::SubscriptionNoCapacity { .. } => FREE_CAPACITY,
+            Self::AppLimitReached { .. } => UPGRADE_PLAN,
+            Self::InsufficientCredits { .. } | Self::BuilderCredits { .. } => BUY_CREDITS,
+            Self::CreditSuspended { .. } => ADD_CREDITS,
+            Self::ResourceLimitReached { .. } => FREE_RESOURCES,
+            Self::VcpuLimit { .. } => CONTACT_SUPPORT,
+            Self::EifTooLarge { .. } => INCREASE_MEMORY,
+            Self::ByocRequired { .. } => BYOC_ROUTES,
+            Self::RegionFull { .. } => DESTROY_CANDIDATE,
+            Self::LinkedNetworkChanged { .. } => KEEP_ENVIRONMENT,
+            Self::LinkedBuilderMissing { .. } => REINIT_BYOC,
             Self::RecoveryIngressRequired { .. } => RECOVERY_INGRESS,
             Self::CommitMismatch { .. } => BRANCH_HEAD,
-            Self::BuilderCredits { .. } => BUILDER_CREDITS,
-            Self::DeployInProgress { .. } => IN_PROGRESS,
+            Self::DeploymentNotReserved { .. } => PUSH_AGAIN,
+            Self::DeploymentClaim { source, .. } => match source {
+                app_deployments::admission::ClaimError::ReservationGone { .. } => PUSH_AGAIN,
+                app_deployments::admission::ClaimError::NotPushable { .. }
+                | app_deployments::admission::ClaimError::Lock { .. }
+                | app_deployments::admission::ClaimError::Database { .. } => &[],
+            },
+            Self::Activation { source, .. } => activation_guidance(source).0,
             _ => &[],
         }
     }
 
-    /// Warnings for a deploy failure; empty until a failure owes the client a
-    /// caution that its message does not carry.
+    /// Warnings for a deploy failure: the consequences the client cannot change
+    /// but should weigh.
     fn warnings(&self) -> &'static [caution_error::Warning] {
-        &[]
+        match self {
+            Self::Activation { source, .. } => activation_guidance(source).1,
+            _ => &[],
+        }
+    }
+
+    /// The message and its guidance as one line, for the callers that record it:
+    /// the rejection journal and the deployment stream.
+    ///
+    /// The response itself keeps the two separate.
+    fn client_message(&self) -> String {
+        let (_, message) = self.client_response();
+        let mut text = message;
+        let guidance = caution_error::notes(self)
+            .into_iter()
+            .map(|note| note.to_string())
+            .chain(
+                caution_error::warnings(self)
+                    .into_iter()
+                    .map(|warning| warning.to_string()),
+            );
+        for guidance in guidance {
+            if !matches!(text.chars().last(), Some('.' | '!' | '?')) {
+                text.push('.');
+            }
+            text.push(' ');
+            text.push_str(&guidance);
+        }
+        text
     }
 
     /// The call site that failed the push.
@@ -3220,7 +3329,7 @@ async fn deploy_handler(
                         org_id_for_recovery,
                         app_id_for_recovery,
                         deployment_id,
-                        &error.client_response().1,
+                        &error.client_message(),
                     )
                     .await;
                 }
@@ -3629,12 +3738,25 @@ mod activation_message_tests {
     use dterror::BoxError;
     use uuid::Uuid;
 
-    fn activation(source: impl Into<BoxError>) -> (StatusCode, String) {
+    fn activation(source: impl Into<BoxError>) -> DeployLogicError {
         DeployLogicError::Activation {
             location: std::panic::Location::caller(),
             source: source.into(),
         }
-        .client_response()
+    }
+
+    fn notes(error: &DeployLogicError) -> Vec<String> {
+        caution_error::notes(error)
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    fn warnings(error: &DeployLogicError) -> Vec<String> {
+        caution_error::warnings(error)
+            .iter()
+            .map(ToString::to_string)
+            .collect()
     }
 
     fn attach(source: impl Into<BoxError>) -> CompleteRunningError {
@@ -3646,38 +3768,69 @@ mod activation_message_tests {
 
     #[test]
     fn activation_failure_says_whether_the_deployment_goes_live() {
-        // A held address needs repair: the deployment stays a candidate.
-        let (status, held) = activation(attach(MoveAppAddressError::HolderMismatch {
+        // A held address needs repair: the deployment keeps running and metered,
+        // and stays a candidate until an operator repairs the address.
+        let held = activation(attach(MoveAppAddressError::HolderMismatch {
             expected: None,
             actual: Some("i-other".to_string()),
             location: std::panic::Location::caller(),
         }));
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(held.contains("running"), "{held}");
-        assert!(held.contains("stays a candidate"), "{held}");
-        assert!(held.contains("caution apps get -d <id>"), "{held}");
+        assert_eq!(
+            held.client_response(),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "The deployment could not be made live.".to_string()
+            )
+        );
+        let held_warnings = warnings(&held);
+        assert!(
+            held_warnings
+                .iter()
+                .any(|w| w.contains("running and metered")),
+            "{held_warnings:?}"
+        );
+        assert!(
+            held_warnings
+                .iter()
+                .any(|w| w.contains("stays a candidate")),
+            "{held_warnings:?}"
+        );
+        assert!(
+            notes(&held)
+                .iter()
+                .any(|n| n.contains("caution apps get -d <id>")),
+            "{held:?}"
+        );
 
         // A transient failure is retried by reconciliation.
-        let (_, transient) = activation(attach(std::io::Error::other("throttled")));
-        assert!(transient.contains("within about a minute"), "{transient}");
+        let transient = activation(attach(std::io::Error::other("throttled")));
+        let transient_notes = notes(&transient);
         assert!(
-            transient.contains("caution apps get -d <id>"),
-            "{transient}"
+            transient_notes
+                .iter()
+                .any(|n| n.contains("within about a minute")),
+            "{transient_notes:?}"
         );
-        let (_, database) = activation(CompleteRunningError::Database {
+        assert!(warnings(&transient).is_empty());
+        let database = activation(CompleteRunningError::Database {
             location: std::panic::Location::caller(),
             source: "connection reset".into(),
         });
-        assert_eq!(database, transient);
+        assert_eq!(notes(&database), transient_notes);
 
         // Destroyed or suspended meanwhile: it is not made live.
-        let (_, gone) = activation(CompleteRunningError::OwnershipLost {
+        let gone = activation(CompleteRunningError::OwnershipLost {
             deployment_id: Uuid::nil(),
             location: std::panic::Location::caller(),
         });
-        assert!(gone.contains("destroyed"), "{gone}");
-        assert_ne!(gone, transient);
-        assert_ne!(held, transient);
+        assert!(
+            warnings(&gone)
+                .iter()
+                .any(|w| w.contains("will not become live")),
+            "{gone:?}"
+        );
+        assert_ne!(warnings(&gone), warnings(&transient));
+        assert_ne!(warnings(&gone), held_warnings);
     }
 }
 
@@ -4550,7 +4703,7 @@ async fn deploy_logic(
             location: std::panic::Location::caller(),
         };
         deploy_target
-            .reject(&state, req.org_id, resource_id, &error.client_response().1)
+            .reject(&state, req.org_id, resource_id, &error.client_message())
             .await;
         return Err(error);
     }
@@ -4560,7 +4713,7 @@ async fn deploy_logic(
             location: std::panic::Location::caller(),
         };
         deploy_target
-            .reject(&state, req.org_id, resource_id, &error.client_response().1)
+            .reject(&state, req.org_id, resource_id, &error.client_message())
             .await;
         return Err(error);
     }
@@ -4570,7 +4723,7 @@ async fn deploy_logic(
             .with_context(Ctx::sizing_invalid());
     if let Err(error) = &deployment_requirements_result {
         deploy_target
-            .reject(&state, req.org_id, resource_id, &error.client_response().1)
+            .reject(&state, req.org_id, resource_id, &error.client_message())
             .await;
     }
     let deployment_requirements = deployment_requirements_result?;
@@ -4612,7 +4765,7 @@ async fn deploy_logic(
                 location: std::panic::Location::caller(),
             };
             deploy_target
-                .reject(&state, req.org_id, resource_id, &error.client_response().1)
+                .reject(&state, req.org_id, resource_id, &error.client_message())
                 .await;
             return Err(error);
         }
@@ -4633,7 +4786,7 @@ async fn deploy_logic(
             location: std::panic::Location::caller(),
         };
         deploy_target
-            .reject(&state, req.org_id, resource_id, &error.client_response().1)
+            .reject(&state, req.org_id, resource_id, &error.client_message())
             .await;
         return Err(error);
     }
@@ -4991,7 +5144,7 @@ async fn deploy_logic(
             });
         if let Err(error) = &offered {
             deploy_target
-                .reject(&state, req.org_id, resource_id, &error.client_response().1)
+                .reject(&state, req.org_id, resource_id, &error.client_message())
                 .await;
         }
         offered?;
@@ -5030,7 +5183,7 @@ async fn deploy_logic(
         };
         if let Err(error) = &reservation {
             deploy_target
-                .reject(&state, req.org_id, resource_id, &error.client_response().1)
+                .reject(&state, req.org_id, resource_id, &error.client_message())
                 .await;
         }
         Some(reservation?)
@@ -5160,7 +5313,7 @@ async fn deploy_logic(
                     &app_name,
                     should_cleanup_on_failure,
                     &deployed_region,
-                    &error.client_response().1,
+                    &error.client_message(),
                 )
                 .await;
         }
@@ -5207,7 +5360,7 @@ async fn deploy_logic(
                 &app_name,
                 should_cleanup_on_failure,
                 &deployed_region,
-                &error.client_response().1,
+                &error.client_message(),
             )
             .await;
     }
@@ -5249,7 +5402,7 @@ async fn deploy_logic(
                     &app_name,
                     true,
                     &deployed_region,
-                    &error.client_response().1,
+                    &error.client_message(),
                 )
                 .await;
         }
@@ -5281,7 +5434,7 @@ async fn deploy_logic(
                     &app_name,
                     true,
                     &deployed_region,
-                    &error.client_response().1,
+                    &error.client_message(),
                 )
                 .await;
         }
@@ -5381,7 +5534,7 @@ async fn deploy_logic(
                 &app_name,
                 should_cleanup_on_failure,
                 &deployed_region,
-                &error.client_response().1,
+                &error.client_message(),
             )
             .await;
     }
@@ -5400,7 +5553,7 @@ async fn deploy_logic(
                 &app_name,
                 should_cleanup_on_failure,
                 &deployed_region,
-                &error.client_response().1,
+                &error.client_message(),
             )
             .await;
         return Err(error);
@@ -6496,66 +6649,139 @@ mod deploy_guidance_tests {
     }
 
     #[test]
-    fn a_message_that_states_the_remedy_gets_no_note() {
-        let self_contained = [
-            DeployLogicError::InsufficientCredits { location: at() },
-            DeployLogicError::CreditSuspended { location: at() },
-            DeployLogicError::AppLimitReached { location: at() },
-            DeployLogicError::ResourceLimitReached { location: at() },
-            DeployLogicError::NoSubscription { location: at() },
-            DeployLogicError::EifTooLarge { location: at() },
+    fn a_failure_with_no_remedy_to_offer_gets_no_note() {
+        let unactionable = [
+            DeployLogicError::NotOrgMember { location: at() },
+            DeployLogicError::NoRegion { location: at() },
+            DeployLogicError::PublishConflict { location: at() },
+            DeployLogicError::InstanceTypeUnavailableInZone { location: at() },
+            DeployLogicError::Panicked { location: at() },
         ];
 
-        for error in &self_contained {
+        for error in &unactionable {
             assert!(
                 notes(error).is_empty(),
-                "the message carries the remedy, so a note would repeat it: {error}"
+                "the client cannot change this, so a note would be filler: {error}"
             );
         }
     }
 
     #[test]
-    fn guidance_the_message_omits_becomes_a_note() {
-        let guided = [
+    fn a_remedy_the_message_does_not_carry_becomes_a_note() {
+        let guided: [(DeployLogicError, &[&str]); 21] = [
             (
                 DeployLogicError::NoProviderAccount { location: at() },
-                "Link a cloud provider account in Settings at https://dashboard.caution.co.",
+                &["Link a cloud provider account in Settings at https://dashboard.caution.co."],
             ),
             (
                 DeployLogicError::NoAwsAccountId { location: at() },
-                "Set the AWS account ID on the linked provider account.",
+                &["Set the AWS account ID on the linked provider account."],
+            ),
+            (
+                DeployLogicError::DeployInProgress { location: at() },
+                &["Wait for the deployment to finish; `caution apps get -d <id>` shows its state."],
+            ),
+            (
+                DeployLogicError::Terminating { location: at() },
+                &["Wait for teardown to complete before deploying it again."],
+            ),
+            (
+                DeployLogicError::NoSubscription { location: at() },
+                &["Choose a plan in Settings at https://dashboard.caution.co."],
             ),
             (
                 DeployLogicError::SubscriptionInactive { location: at() },
-                "Reactivate the subscription in Settings at https://dashboard.caution.co.",
+                &["Reactivate the subscription in Settings at https://dashboard.caution.co."],
             ),
             (
                 DeployLogicError::SubscriptionNoCapacity { location: at() },
-                "Free deployment capacity on the plan, or upgrade in Settings at https://dashboard.caution.co.",
+                &[
+                    "Free deployment capacity on the plan, or upgrade in Settings at https://dashboard.caution.co.",
+                ],
+            ),
+            (
+                DeployLogicError::AppLimitReached { location: at() },
+                &[
+                    "Upgrade the plan in Settings at https://dashboard.caution.co, or destroy an app you no longer need.",
+                ],
+            ),
+            (
+                DeployLogicError::InsufficientCredits { location: at() },
+                &[
+                    "Purchase credits in Settings at https://dashboard.caution.co before redeploying.",
+                ],
+            ),
+            (
+                DeployLogicError::BuilderCredits { location: at() },
+                &[
+                    "Purchase credits in Settings at https://dashboard.caution.co before redeploying.",
+                ],
+            ),
+            (
+                DeployLogicError::CreditSuspended { location: at() },
+                &["Add credits in Settings at https://dashboard.caution.co to resume deployments."],
+            ),
+            (
+                DeployLogicError::ResourceLimitReached { location: at() },
+                &["Destroy unused resources, or contact support for a higher limit."],
+            ),
+            (
+                DeployLogicError::VcpuLimit { location: at() },
+                &["Contact support for a larger request."],
+            ),
+            (
+                DeployLogicError::EifTooLarge { location: at() },
+                &["Increase `memory_mb` in the enclave configuration."],
+            ),
+            (
+                DeployLogicError::RegionFull {
+                    region: "us-east-1".to_string(),
+                    location: at(),
+                },
+                &["Destroy a candidate, or retry once other candidates are cleaned up."],
+            ),
+            (
+                DeployLogicError::LinkedNetworkChanged { location: at() },
+                &["Keep that environment, or destroy the app before moving it."],
+            ),
+            (
+                DeployLogicError::LinkedBuilderMissing { location: at() },
+                &[
+                    "Run `caution init --byoc` again to provision a current environment.",
+                    "Destroy the app first if it has deployments.",
+                ],
+            ),
+            (
+                DeployLogicError::ByocRequired { location: at() },
+                &[
+                    "Reuse the original BYOC app and remote for this repository; its linked credentials already cover it.",
+                    "To attach BYOC credentials to this app, run `caution init --byoc --config <decrypted-json>`.",
+                    "For a new BYOC app, use a fresh unlinked checkout and run `caution init --byoc`; `caution apps create` provisions managed capacity instead.",
+                ],
             ),
             (
                 DeployLogicError::RecoveryIngressRequired { location: at() },
-                "Add explicit `network.recovery_ingress` sources to `caution.hcl`.",
+                &["Add explicit `network.recovery_ingress` sources to `caution.hcl`."],
             ),
             (
                 DeployLogicError::CommitMismatch {
                     location: at(),
                     source: Box::new(std::io::Error::other("branch head moved")),
                 },
-                "Fetch the branch head, then push the commit you intend to deploy again.",
+                &["Fetch the branch head, then push the commit you intend to deploy again."],
             ),
             (
-                DeployLogicError::BuilderCredits { location: at() },
-                "Purchase credits in Settings at https://dashboard.caution.co before redeploying.",
-            ),
-            (
-                DeployLogicError::DeployInProgress { location: at() },
-                "`caution apps get -d <id>` shows the deployment that is in progress.",
+                DeployLogicError::DeploymentNotReserved { location: at() },
+                &["Push again."],
             ),
         ];
 
-        for (error, note) in &guided {
-            assert_eq!(notes(error), vec![note.to_string()], "guidance for {error}");
+        for (error, expected) in &guided {
+            let expected = expected
+                .iter()
+                .map(|note| note.to_string())
+                .collect::<Vec<_>>();
+            assert_eq!(notes(error), expected, "guidance for {error}");
         }
     }
 
@@ -6577,5 +6803,11 @@ mod deploy_guidance_tests {
             "Purchase credits in Settings at https://dashboard.caution.co before redeploying."
         );
         assert_eq!(frame["warnings"].as_array().map(Vec::len), Some(0));
+        // The journal and the stream record the message and its guidance as one
+        // line, so nothing that reads only that text loses the remedy.
+        assert_eq!(
+            error.client_message(),
+            "Insufficient credits for builder. Purchase credits in Settings at https://dashboard.caution.co before redeploying."
+        );
     }
 }

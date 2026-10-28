@@ -247,8 +247,7 @@ pub struct BuildRequest {
     pub tls_await_app_address: bool,
 }
 
-pub const ACTIVE_BUILD_CONFLICT_MSG: &str =
-    "A build is already in progress for this app. Please wait for it to complete.";
+pub const ACTIVE_BUILD_CONFLICT_MSG: &str = "A build is already in progress for this app.";
 
 /// Failure modes for [`validate_remote_containerfile_path`].
 #[derive(Debug, thiserror::Error)]

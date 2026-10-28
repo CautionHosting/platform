@@ -172,7 +172,7 @@ pub(crate) enum CapacityError {
     },
 
     #[error(
-        "No fully managed capacity is available in this app's region ({region}) for a new candidate. Destroy a candidate or retry later. [{location}]"
+        "No fully managed capacity is available in this app's region ({region}) for a new candidate. [{location}]"
     )]
     RegionFull {
         region: String,

@@ -705,7 +705,9 @@ mod tests {
 
     const REGENERATE: &str =
         "Re-generate the bundle with `caution quorum init`, then upload it again.";
-    const KEY_SERVICE_UNAVAILABLE: &str = "The key service policy is unavailable, so the bundle was not stored. Retry when the key service is healthy.";
+    const KEY_SERVICE_UNAVAILABLE: &str =
+        "The key service could not check the payload, so nothing was stored.";
+    const RETRY_KEY_SERVICE: &str = "Retry when the key service is healthy.";
 
     /// The error a callee produces when the upload is not a proofed bundle.
     fn parse_failure() -> VerifyUploadError {
@@ -797,7 +799,11 @@ mod tests {
             report.errors[1].warnings,
             vec![Warning::from(KEY_SERVICE_UNAVAILABLE)]
         );
-        assert!(report.errors[1].notes.is_empty());
+        assert_eq!(
+            report.errors[1].notes,
+            vec![Note::from(RETRY_KEY_SERVICE)],
+            "the retry condition is the instruction"
+        );
 
         let response = error.into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);

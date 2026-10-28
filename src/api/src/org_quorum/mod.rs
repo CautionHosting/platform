@@ -1169,6 +1169,8 @@ impl VerifyUploadError {
         static REIMPORT: &[Note] = &[Note::from_static(
             "Re-import the file with `caution quorum legacy`, then upload it again.",
         )];
+        static RETRY_KEY_SERVICE: &[Note] =
+            &[Note::from_static("Retry when the key service is healthy.")];
 
         match self {
             Self::LegacyParse { .. } => REIMPORT,
@@ -1177,7 +1179,8 @@ impl VerifyUploadError {
             | Self::InvalidBundle { .. }
             | Self::Keyring { .. }
             | Self::PublicKey { .. } => REGENERATE,
-            Self::LegacyOptIn { .. } | Self::PolicyPath { .. } | Self::Policy { .. } => &[],
+            Self::PolicyPath { .. } | Self::Policy { .. } => RETRY_KEY_SERVICE,
+            Self::LegacyOptIn { .. } => &[],
         }
     }
 
@@ -1188,7 +1191,7 @@ impl VerifyUploadError {
             "The payload imports as unverified metadata only: no key-service generation proof backs it.",
         )];
         static KEY_SERVICE: &[Warning] = &[Warning::from_static(
-            "The key service policy is unavailable, so the bundle was not stored. Retry when the key service is healthy.",
+            "The key service could not check the payload, so nothing was stored.",
         )];
 
         match self {
