@@ -181,7 +181,7 @@ fn enum_provide_body(data: &DataEnum) -> syn::Result<TokenStream2> {
                 quote! { Self::#variant_ident(#(#patterns),*) => { #stmts } }
             }
         };
-        arms.extend(arm);
+        arms.extend(quote! { #arm, });
     }
 
     Ok(quote! { match self { #arms } })
@@ -238,7 +238,7 @@ fn enum_provider_source(data: &DataEnum) -> Option<TokenStream2> {
                 }
             }
         };
-        arms.extend(arm);
+        arms.extend(quote! { #arm, });
     }
 
     Some(quote! { match self { #arms } })

@@ -534,3 +534,38 @@ fn enum_variant_notes_are_provided() {
         "request access first",
     );
 }
+
+#[derive(Debug, thiserror::Error, ProviderError)]
+enum MixedProvision {
+    #[error("a")]
+    A {
+        app_id: u32,
+        location: &'static std::panic::Location<'static>,
+    },
+    #[error("b")]
+    B {
+        #[location]
+        location: &'static std::panic::Location<'static>,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[test]
+fn variant_without_provision_then_variant_with_provision() {
+    let err = MixedProvision::B {
+        location: std::panic::Location::caller(),
+        source: std::io::Error::other("boom"),
+    };
+    assert!(caution_error::location(&err).is_some());
+    assert!(ProviderError::provider_source(&err).is_none());
+
+    let err = MixedProvision::A {
+        app_id: 1,
+        location: std::panic::Location::caller(),
+    };
+    assert!(
+        caution_error::location(&err).is_none(),
+        "no #[location] attribute"
+    );
+}
