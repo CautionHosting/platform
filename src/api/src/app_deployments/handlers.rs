@@ -699,4 +699,38 @@ mod tests {
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["errors"][0]["notes"].as_array().unwrap().len(), 0);
     }
+
+    #[test]
+    fn pilot_errors_carry_a_sentry_reportable() {
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use sentry_middleware::SentryReportable;
+
+        let list = ListDeploymentsError {
+            app_id: Uuid::new_v4(),
+            location: std::panic::Location::caller(),
+            source: Box::new(std::io::Error::other("boom")),
+        };
+        let response = list.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(response.extensions().get::<SentryReportable>().is_some());
+
+        let load = GetDeploymentError::Load {
+            deployment_id: Uuid::new_v4(),
+            location: std::panic::Location::caller(),
+            source: Box::new(std::io::Error::other("boom")),
+        };
+        let response = load.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(response.extensions().get::<SentryReportable>().is_some());
+
+        let not_found = GetDeploymentInAppError::NotFound {
+            app_id: Uuid::new_v4(),
+            deployment_id: Uuid::new_v4(),
+            location: std::panic::Location::caller(),
+        };
+        let response = not_found.into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(response.extensions().get::<SentryReportable>().is_some());
+    }
 }
