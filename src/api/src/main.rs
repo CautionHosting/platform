@@ -2980,6 +2980,162 @@ impl DeployLogicError {
     }
 }
 
+/// Guidance for a deploy failure whose client text does not already say what to
+/// do next.
+///
+/// A variant whose client text carries its own remedy gets no note, so a note
+/// never repeats the message.
+impl DeployLogicError {
+    /// Notes for a deploy failure; empty when the message already says it.
+    fn notes(&self) -> &'static [caution_error::Note] {
+        use caution_error::Note;
+
+        static CLOUD_ACCOUNT: &[Note] = &[Note::from_static(
+            "Link a cloud provider account in Settings at https://dashboard.caution.co.",
+        )];
+        static AWS_ACCOUNT_ID: &[Note] = &[Note::from_static(
+            "Set the AWS account ID on the linked provider account.",
+        )];
+        static REACTIVATE_SUBSCRIPTION: &[Note] = &[Note::from_static(
+            "Reactivate the subscription in Settings at https://dashboard.caution.co.",
+        )];
+        static FREE_CAPACITY: &[Note] = &[Note::from_static(
+            "Free deployment capacity on the plan, or upgrade in Settings at https://dashboard.caution.co.",
+        )];
+        static RECOVERY_INGRESS: &[Note] = &[Note::from_static(
+            "Add explicit `network.recovery_ingress` sources to `caution.hcl`.",
+        )];
+        static BRANCH_HEAD: &[Note] = &[Note::from_static(
+            "Fetch the branch head, then push the commit you intend to deploy again.",
+        )];
+        static BUILDER_CREDITS: &[Note] = &[Note::from_static(
+            "Purchase credits in Settings at https://dashboard.caution.co before redeploying.",
+        )];
+        static IN_PROGRESS: &[Note] = &[Note::from_static(
+            "`caution apps get -d <id>` shows the deployment that is in progress.",
+        )];
+
+        match self {
+            Self::NoProviderAccount { .. } => CLOUD_ACCOUNT,
+            Self::NoAwsAccountId { .. } => AWS_ACCOUNT_ID,
+            Self::SubscriptionInactive { .. } => REACTIVATE_SUBSCRIPTION,
+            Self::SubscriptionNoCapacity { .. } => FREE_CAPACITY,
+            Self::RecoveryIngressRequired { .. } => RECOVERY_INGRESS,
+            Self::CommitMismatch { .. } => BRANCH_HEAD,
+            Self::BuilderCredits { .. } => BUILDER_CREDITS,
+            Self::DeployInProgress { .. } => IN_PROGRESS,
+            _ => &[],
+        }
+    }
+
+    /// Warnings for a deploy failure; empty until a failure owes the client a
+    /// caution that its message does not carry.
+    fn warnings(&self) -> &'static [caution_error::Warning] {
+        &[]
+    }
+
+    /// The call site that failed the push.
+    fn location(&self) -> Location {
+        use DeployLogicError::*;
+
+        match self {
+            Components { location, .. }
+            | FrameworkCommit { location, .. }
+            | OrgMembership { location, .. }
+            | NotOrgMember { location, .. }
+            | ProviderAccountQuery { location, .. }
+            | NoProviderAccount { location, .. }
+            | NoAwsAccountId { location, .. }
+            | ResourceTypeQuery { location, .. }
+            | ResourceLookup { location, .. }
+            | DeployInProgress { location, .. }
+            | Terminating { location, .. }
+            | AppNotFound { location, .. }
+            | CredentialLookup { location, .. }
+            | EntitlementQuery { location, .. }
+            | NoSubscription { location, .. }
+            | SubscriptionInactive { location, .. }
+            | SubscriptionNoCapacity { location, .. }
+            | AppCountQuery { location, .. }
+            | AppLimitReached { location, .. }
+            | EntitlementCommit { location, .. }
+            | BalanceQuery { location, .. }
+            | InsufficientCredits { location, .. }
+            | SuspensionQuery { location, .. }
+            | CreditSuspended { location, .. }
+            | ActiveResourcesQuery { location, .. }
+            | ResourceLimitReached { location, .. }
+            | ReactivateUpdate { location, .. }
+            | PendingUpdate { location, .. }
+            | CommitSha { location, .. }
+            | CommitMismatch { location, .. }
+            | BuildConfigGit { location, .. }
+            | NetworkPolicy { location, .. }
+            | RecoveryIngressRequired { location, .. }
+            | RepoInspect { location, .. }
+            | UnitConfig { location, .. }
+            | EncryptorMissing { location, .. }
+            | OnpremSecrets { location, .. }
+            | ByocRequired { location, .. }
+            | VcpuLimit { location, .. }
+            | SizingInvalid { location, .. }
+            | EifMetadata { location, .. }
+            | EifTooLarge { location, .. }
+            | BuilderTarget { location, .. }
+            | CacheLookup { location, .. }
+            | BuilderCredits { location, .. }
+            | UploadSource { location, .. }
+            | BuilderFailed { location, .. }
+            | CapacityDatabase { location, .. }
+            | NoRegion { location, .. }
+            | NitroDeploy { location, .. }
+            | EnclaveUnhealthy { location, .. }
+            | ResourceUpdate { location, .. }
+            | PublishConflict { location, .. }
+            | Metering { location, .. }
+            | Lifecycle { location, .. }
+            | DeploymentNotReserved { location, .. }
+            | DeploymentClaim { location, .. }
+            | LinkedNetworkChanged { location, .. }
+            | LinkedBuilderMissing { location, .. }
+            | AppNetwork { location, .. }
+            | ZoneOffering { location, .. }
+            | InstanceTypeUnavailableInZone { location, .. }
+            | RegionFull { location, .. }
+            | Activation { location, .. }
+            | Panicked { location, .. } => location,
+        }
+    }
+}
+
+/// [`ProviderError`](caution_error::ProviderError) is hand-written rather than
+/// derived: the derive provides guidance held in fields, and this error derives
+/// its guidance from the variant, which keeps the mapping in one place instead
+/// of in 65 variant declarations and their construction sites.
+impl caution_error::ProviderError for DeployLogicError {
+    fn provide<'a>(&'a self, request: &mut caution_error::Request<'a>) {
+        request.provide_ref::<[caution_error::Note]>(self.notes());
+        request.provide_ref::<[caution_error::Warning]>(self.warnings());
+        request.provide_value(self.location());
+    }
+}
+
+/// The one-line JSON frame a failed push streams, and the body an
+/// already-rejected push returns: the client text, the status, and the guidance
+/// the text does not already state.
+fn deploy_error_frame(
+    error: &DeployLogicError,
+    status: StatusCode,
+    message: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "error": message,
+        "status": status.as_u16(),
+        "notes": caution_error::notes(error),
+        "warnings": caution_error::warnings(error),
+    })
+}
+
 #[tracing::instrument(skip_all, fields(org_id = %req.org_id, app_id = %req.app_id))]
 async fn deploy_handler(
     State(state): State<Arc<AppState>>,
@@ -3079,7 +3235,7 @@ async fn deploy_handler(
                 }
 
                 let _ = tx.send(Ok(milestone_error(&msg))).await;
-                let error_json = serde_json::json!({"error": msg, "status": status.as_u16()});
+                let error_json = deploy_error_frame(&error, status, &msg);
                 let _ = tx
                     .send(Ok(bytes::Bytes::from(format!("{}\n", error_json))))
                     .await;
@@ -6321,5 +6477,105 @@ mod component_rejection_tests {
             "stale rejection must not change a restored resource"
         );
         db.close().await;
+    }
+}
+
+#[cfg(test)]
+mod deploy_guidance_tests {
+    use super::{DeployLogicError, deploy_error_frame};
+
+    fn at() -> dterror::Location {
+        std::panic::Location::caller()
+    }
+
+    fn notes(error: &DeployLogicError) -> Vec<String> {
+        caution_error::notes(error)
+            .iter()
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn a_message_that_states_the_remedy_gets_no_note() {
+        let self_contained = [
+            DeployLogicError::InsufficientCredits { location: at() },
+            DeployLogicError::CreditSuspended { location: at() },
+            DeployLogicError::AppLimitReached { location: at() },
+            DeployLogicError::ResourceLimitReached { location: at() },
+            DeployLogicError::NoSubscription { location: at() },
+            DeployLogicError::EifTooLarge { location: at() },
+        ];
+
+        for error in &self_contained {
+            assert!(
+                notes(error).is_empty(),
+                "the message carries the remedy, so a note would repeat it: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn guidance_the_message_omits_becomes_a_note() {
+        let guided = [
+            (
+                DeployLogicError::NoProviderAccount { location: at() },
+                "Link a cloud provider account in Settings at https://dashboard.caution.co.",
+            ),
+            (
+                DeployLogicError::NoAwsAccountId { location: at() },
+                "Set the AWS account ID on the linked provider account.",
+            ),
+            (
+                DeployLogicError::SubscriptionInactive { location: at() },
+                "Reactivate the subscription in Settings at https://dashboard.caution.co.",
+            ),
+            (
+                DeployLogicError::SubscriptionNoCapacity { location: at() },
+                "Free deployment capacity on the plan, or upgrade in Settings at https://dashboard.caution.co.",
+            ),
+            (
+                DeployLogicError::RecoveryIngressRequired { location: at() },
+                "Add explicit `network.recovery_ingress` sources to `caution.hcl`.",
+            ),
+            (
+                DeployLogicError::CommitMismatch {
+                    location: at(),
+                    source: Box::new(std::io::Error::other("branch head moved")),
+                },
+                "Fetch the branch head, then push the commit you intend to deploy again.",
+            ),
+            (
+                DeployLogicError::BuilderCredits { location: at() },
+                "Purchase credits in Settings at https://dashboard.caution.co before redeploying.",
+            ),
+            (
+                DeployLogicError::DeployInProgress { location: at() },
+                "`caution apps get -d <id>` shows the deployment that is in progress.",
+            ),
+        ];
+
+        for (error, note) in &guided {
+            assert_eq!(notes(error), vec![note.to_string()], "guidance for {error}");
+        }
+    }
+
+    #[test]
+    fn a_failed_push_frame_carries_the_status_text_and_guidance() {
+        let error = DeployLogicError::BuilderCredits { location: at() };
+        assert!(
+            caution_error::location(&error).is_some(),
+            "the call site is provided"
+        );
+
+        let (status, message) = error.client_response();
+        let frame = deploy_error_frame(&error, status, &message);
+
+        assert_eq!(frame["status"], 402);
+        assert_eq!(frame["error"], "Insufficient credits for builder");
+        assert_eq!(
+            frame["notes"][0],
+            "Purchase credits in Settings at https://dashboard.caution.co before redeploying."
+        );
+        assert_eq!(frame["warnings"].as_array().map(Vec::len), Some(0));
     }
 }
