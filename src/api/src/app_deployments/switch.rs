@@ -120,10 +120,11 @@ fn rejection_warnings(rejection: &SwitchRejection) -> Vec<Warning> {
 }
 
 /// Guidance when the target fails its health check: how to see why it failed.
-fn unhealthy_notes() -> Vec<Note> {
-    vec![Note::from(
+fn unhealthy_notes() -> &'static [Note] {
+    static NOTES: &[Note] = &[Note(std::borrow::Cow::Borrowed(
         "Enable debug mode on the target (`debug { enabled = true }`) to capture its launch logs, then retry the switch once it passes its health check.",
-    )]
+    ))];
+    NOTES
 }
 
 pub(crate) fn switch_precondition(view: &SwitchView) -> Result<SwitchPlan, SwitchRejection> {
@@ -186,7 +187,7 @@ pub(crate) enum SwitchError {
     #[error("The deployment failed the platform health check.")]
     Unhealthy {
         #[provide(ref = [caution_error::Note])]
-        notes: Vec<Note>,
+        notes: &'static [Note],
         #[provide]
         #[location]
         location: Location,
