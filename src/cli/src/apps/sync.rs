@@ -11,20 +11,31 @@ use crate::{ApiClient, output};
 /// Which `git` invocation in [`run`] failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SyncGitErrorKind {
-    /// `git rev-parse --show-toplevel` (verify the checkout is a worktree).
+    /// Verify the checkout is a worktree.
     VerifyWorktree,
-    /// `git remote` (list existing remotes).
+    /// List existing remotes.
     ListRemotes,
-    /// `git remote add caution <url>` (create the canonical remote).
+    /// Create the canonical remote.
     AddRemote,
-    /// `git config --local --replace-all remote.caution.<...> <url>` (repair
-    /// the fetch and push URLs).
+    /// Repair the fetch and push URLs.
     ConfigureRemote,
+}
+
+impl std::fmt::Display for SyncGitErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let command = match self {
+            Self::VerifyWorktree => "git rev-parse --show-toplevel",
+            Self::ListRemotes => "git remote",
+            Self::AddRemote => "git remote add caution <url>",
+            Self::ConfigureRemote => "git config --local --replace-all <key> <url>",
+        };
+        f.write_str(command)
+    }
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum SyncError {
-    #[error("failed to run git ({kind:?}) [{location}]")]
+    #[error("failed to run `{kind}` [{location}]")]
     RunGit {
         kind: SyncGitErrorKind,
         #[location]
@@ -32,7 +43,7 @@ pub(crate) enum SyncError {
         #[source]
         source: BoxError,
     },
-    #[error("git command failed ({kind:?}): {message} [{location}]")]
+    #[error("`{kind}` failed: {message} [{location}]")]
     GitFailed {
         kind: SyncGitErrorKind,
         message: String,
