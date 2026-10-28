@@ -607,6 +607,7 @@ up-components:
 	@$(MAKE) build-gateway build-email build-metering
 	@$(MAKE) prepare-components API_IMAGE=caution-api-components
 	@$(MAKE) migrate
+	install -m 0644 systemd/*.service "$${XDG_CONFIG_HOME:-$(HOME)/.config}/systemd/user/"
 	systemctl --user daemon-reload
 	systemctl restart --user caution-email caution-metering caution-api caution-gateway
 	@echo "  All services running"
