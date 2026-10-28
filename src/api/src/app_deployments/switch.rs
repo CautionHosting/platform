@@ -119,6 +119,13 @@ fn rejection_warnings(rejection: &SwitchRejection) -> Vec<Warning> {
     }
 }
 
+/// Guidance when the target fails its health check: how to see why it failed.
+fn unhealthy_notes() -> Vec<Note> {
+    vec![Note::from(
+        "Enable debug mode on the target (`debug { enabled = true }`) to capture its launch logs, then retry the switch once it passes its health check.",
+    )]
+}
+
 pub(crate) fn switch_precondition(view: &SwitchView) -> Result<SwitchPlan, SwitchRejection> {
     if !view.acknowledged_verification {
         return Err(SwitchRejection::NotAcknowledged);
@@ -178,6 +185,8 @@ pub(crate) enum SwitchError {
     },
     #[error("The deployment failed the platform health check.")]
     Unhealthy {
+        #[provide(ref = [caution_error::Note])]
+        notes: Vec<Note>,
         #[provide]
         #[location]
         location: Location,
@@ -508,7 +517,7 @@ async fn execute(
         };
         crate::wait_for_deployment_health(&public_ip, 15)
             .await
-            .with_context(Ctx::unhealthy())?;
+            .with_context(Ctx::unhealthy(unhealthy_notes()))?;
     }
 
     // 2. The AWS calls under the lock take seconds, not the health wait.
@@ -769,6 +778,7 @@ mod tests {
             rejected(SwitchRejection::NotRunning),
             rejected(SwitchRejection::TlsNotAcknowledged),
             SwitchError::Unhealthy {
+                notes: unhealthy_notes(),
                 location,
                 source: source(),
             },
@@ -902,6 +912,31 @@ mod tests {
     }
 
     #[test]
+    fn unhealthy_reports_the_debug_hint() {
+        use axum::response::IntoResponse;
+
+        let error = SwitchError::Unhealthy {
+            notes: unhealthy_notes(),
+            location: std::panic::Location::caller(),
+            source: "boom".into(),
+        };
+
+        let report = caution_error::ErrorReport::from_error(&error);
+        assert_eq!(
+            report.error,
+            "The deployment failed the platform health check."
+        );
+        assert_eq!(report.errors[0].notes.len(), 1);
+        assert!(report.errors[0].notes[0].0.contains("debug mode"));
+        assert!(
+            caution_error::location(&error).is_some(),
+            "location provided"
+        );
+
+        assert_eq!(error.into_response().status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
     fn display_matches_the_client_message() {
         let location = std::panic::Location::caller();
         let source = || -> BoxError { "boom".into() };
@@ -923,6 +958,7 @@ mod tests {
             rejected(SwitchRejection::TlsNotAcknowledged),
             rejected(SwitchRejection::Stale),
             SwitchError::Unhealthy {
+                notes: unhealthy_notes(),
                 location,
                 source: source(),
             },
