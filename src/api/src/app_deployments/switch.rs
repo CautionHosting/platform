@@ -19,6 +19,7 @@ use axum::{
 use caution_error::{Note, Warning};
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use sqlx::PgPool;
+use std::borrow::Cow;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -94,28 +95,30 @@ impl std::fmt::Display for SwitchRejection {
 }
 
 /// Actionable guidance for a rejection; empty when the message already says it.
-fn rejection_notes(rejection: &SwitchRejection) -> Vec<Note> {
+fn rejection_notes(rejection: &SwitchRejection) -> &'static [Note] {
+    static NOT_ACKNOWLEDGED: &[Note] = &[Note(Cow::Borrowed(
+        "Re-send the switch with `acknowledged_verification: true` after verifying and testing the target deployment.",
+    ))];
     match rejection {
-        SwitchRejection::NotAcknowledged => vec![Note::from(
-            "Re-send the switch with `acknowledged_verification: true` after verifying and testing the target deployment.",
-        )],
+        SwitchRejection::NotAcknowledged => NOT_ACKNOWLEDGED,
         SwitchRejection::AppUnavailable
         | SwitchRejection::NotRunning
         | SwitchRejection::TlsNotAcknowledged
-        | SwitchRejection::Stale => Vec::new(),
+        | SwitchRejection::Stale => &[],
     }
 }
 
 /// Cautions for a rejection; empty when there is nothing beyond the message.
-fn rejection_warnings(rejection: &SwitchRejection) -> Vec<Warning> {
+fn rejection_warnings(rejection: &SwitchRejection) -> &'static [Warning] {
+    static TLS_NOT_ACKNOWLEDGED: &[Warning] = &[Warning(Cow::Borrowed(
+        "Existing connections may close and HTTPS can be unavailable until the certificate is issued.",
+    ))];
     match rejection {
-        SwitchRejection::TlsNotAcknowledged => vec![Warning::from(
-            "Existing connections may close and HTTPS can be unavailable until the certificate is issued.",
-        )],
+        SwitchRejection::TlsNotAcknowledged => TLS_NOT_ACKNOWLEDGED,
         SwitchRejection::NotAcknowledged
         | SwitchRejection::AppUnavailable
         | SwitchRejection::NotRunning
-        | SwitchRejection::Stale => Vec::new(),
+        | SwitchRejection::Stale => &[],
     }
 }
 
@@ -176,9 +179,9 @@ pub(crate) enum SwitchError {
     Rejected {
         rejection: SwitchRejection,
         #[provide(ref = [caution_error::Note])]
-        notes: Vec<Note>,
+        notes: &'static [Note],
         #[provide(ref = [caution_error::Warning])]
-        warnings: Vec<Warning>,
+        warnings: &'static [Warning],
         #[provide]
         location: Location,
     },
