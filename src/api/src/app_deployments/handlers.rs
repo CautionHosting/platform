@@ -341,8 +341,9 @@ async fn load_views(
         .collect())
 }
 
-fn error_response(status: StatusCode, error: &dyn caution_error::ProviderError) -> Response {
-    (status, Json(caution_error::ErrorReport::from_error(error))).into_response()
+fn error_response(status: StatusCode, error: impl caution_error::ProviderError) -> Response {
+    let report = caution_error::ErrorReport::from_error(&error);
+    sentry_middleware::error_response_provider(status, Json(report), error)
 }
 
 /// Failure modes for [`list_handler`].
@@ -360,7 +361,7 @@ pub(crate) struct ListDeploymentsError {
 impl IntoResponse for ListDeploymentsError {
     fn into_response(self) -> Response {
         tracing::error!(error = ?self, "failed to list deployments");
-        error_response(StatusCode::INTERNAL_SERVER_ERROR, &self)
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, self)
     }
 }
 
@@ -418,7 +419,7 @@ impl IntoResponse for GetDeploymentInAppError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         };
-        error_response(status, &self)
+        error_response(status, self)
     }
 }
 
@@ -476,7 +477,7 @@ impl IntoResponse for GetDeploymentError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         };
-        error_response(status, &self)
+        error_response(status, self)
     }
 }
 

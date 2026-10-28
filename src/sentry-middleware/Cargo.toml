@@ -8,6 +8,7 @@ edition = "2024"
 
 [dependencies]
 axum = { workspace = true }
+caution-error = { path = "../caution-error" }
 tower = { workspace = true }
 sentry = { workspace = true }
 tracing = { workspace = true }

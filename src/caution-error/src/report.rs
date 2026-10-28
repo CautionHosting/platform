@@ -106,7 +106,7 @@ impl ErrorReport {
     pub fn from_error(error: &dyn ProviderError) -> Self {
         Self {
             error: error.to_string(),
-            errors: chain(error),
+            errors: responses(error),
         }
     }
 }
@@ -129,36 +129,92 @@ pub fn location(error: &dyn ProviderError) -> Option<&'static std::panic::Locati
 /// Bounds a pathological source chain. Real chains are a few links deep.
 const MAX_CHAIN_LINKS: usize = 64;
 
-/// Walks the error chain and builds one [`ErrorResponse`] per link.
-fn chain(root: &dyn ProviderError) -> Vec<ErrorResponse> {
-    let mut responses = Vec::new();
-    let mut provider: Option<&dyn ProviderError> = Some(root);
-    let mut error: &(dyn std::error::Error + 'static) = root;
+/// Iterates an error chain: the root, then [`provider_source`] links (typed
+/// sources), then [`std::error::Error::source`] links (a source that is not a
+/// [`ProviderError`], such as a boxed error).
+///
+/// [`provider_source`]: ProviderError::provider_source
+#[must_use]
+pub fn chain(root: &dyn ProviderError) -> Chain<'_> {
+    let error: &(dyn std::error::Error + 'static) = root;
+    Chain {
+        provider: Some(root),
+        error: Some(error),
+        remaining: MAX_CHAIN_LINKS,
+    }
+}
 
-    for _ in 0..MAX_CHAIN_LINKS {
-        responses.push(ErrorResponse {
-            error: error.to_string(),
-            notes: slice_copy(provider.and_then(|p| request_ref::<[Note]>(p))),
-            warnings: slice_copy(provider.and_then(|p| request_ref::<[Warning]>(p))),
-        });
+/// One link in an error [`chain`].
+#[derive(Clone, Copy)]
+pub struct ErrorNode<'a> {
+    error: &'a (dyn std::error::Error + 'static),
+    provider: Option<&'a dyn ProviderError>,
+}
 
-        if let Some(next) = provider.and_then(|p| p.provider_source()) {
-            let upcast: &(dyn std::error::Error + 'static) = next;
-            error = upcast;
-            provider = Some(next);
-            continue;
-        }
-
-        match std::error::Error::source(error) {
-            Some(source) => {
-                error = source;
-                provider = None;
-            }
-            None => break,
-        }
+impl<'a> ErrorNode<'a> {
+    /// The error, for `Display` and `source`.
+    #[must_use]
+    pub fn error(&self) -> &'a (dyn std::error::Error + 'static) {
+        self.error
     }
 
-    responses
+    /// The error as a [`ProviderError`], when it is one.
+    #[must_use]
+    pub fn provider(&self) -> Option<&'a dyn ProviderError> {
+        self.provider
+    }
+
+    /// The call site this link provides, when it provides one. See [`location`].
+    #[must_use]
+    pub fn location(&self) -> Option<&'static std::panic::Location<'static>> {
+        self.provider.and_then(location)
+    }
+}
+
+/// Iterator over an error chain, produced by [`chain`].
+pub struct Chain<'a> {
+    provider: Option<&'a dyn ProviderError>,
+    error: Option<&'a (dyn std::error::Error + 'static)>,
+    remaining: usize,
+}
+
+impl<'a> Iterator for Chain<'a> {
+    type Item = ErrorNode<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let error = self.error?;
+        if self.remaining == 0 {
+            self.error = None;
+            return None;
+        }
+        self.remaining -= 1;
+
+        let provider = self.provider;
+        match provider.and_then(|p| p.provider_source()) {
+            Some(next) => {
+                let upcast: &(dyn std::error::Error + 'static) = next;
+                self.error = Some(upcast);
+                self.provider = Some(next);
+            }
+            None => {
+                self.error = std::error::Error::source(error);
+                self.provider = None;
+            }
+        }
+
+        Some(ErrorNode { error, provider })
+    }
+}
+
+/// Builds one [`ErrorResponse`] per link of the chain.
+fn responses(root: &dyn ProviderError) -> Vec<ErrorResponse> {
+    chain(root)
+        .map(|node| ErrorResponse {
+            error: node.error().to_string(),
+            notes: slice_copy(node.provider().and_then(|p| request_ref::<[Note]>(p))),
+            warnings: slice_copy(node.provider().and_then(|p| request_ref::<[Warning]>(p))),
+        })
+        .collect()
 }
 
 /// Copies a provided slice into an owned vector.

@@ -7291,6 +7291,7 @@ name = "sentry-middleware"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "caution-error",
  "sentry",
  "tokio",
  "tower 0.4.13",

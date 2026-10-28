@@ -260,13 +260,61 @@ impl tracing::field::Visit for BreadcrumbVisitor {
 // SentryReportable (response extension)
 // ---------------------------------------------------------------------------
 
-/// A boxed error attached to an HTTP response for centralized Sentry reporting.
+/// An error attached to an HTTP response for centralized Sentry reporting.
 ///
-/// Because `Arc<dyn Error + Send + Sync>` is not `Sized`, it cannot be used
-/// directly as an [`axum::Extension`] type key. This newtype wrapper makes it
-/// sized while preserving the trait object inside.
+/// A trait object is not `Sized`, so it cannot be used directly as an
+/// [`axum::Extension`] type key; this wrapper makes it sized.
+///
+/// An error attached with [`error_response_provider`] or [`attach_provider`] is
+/// held as a [`caution_error::ProviderError`], so the layer reads the call-site
+/// Location through the provider API ([`caution_error::chain`]) and can walk the
+/// whole provider chain. An error attached with [`error_response`] or [`attach`]
+/// is held opaquely, and the layer falls back to parsing `Display`.
 #[derive(Debug, Clone)]
-pub struct SentryReportable(pub Arc<dyn std::error::Error + Send + Sync>);
+pub struct SentryReportable {
+    error: ReportableError,
+}
+
+#[derive(Debug, Clone)]
+enum ReportableError {
+    Plain(Arc<dyn std::error::Error + Send + Sync>),
+    Provider(Arc<dyn caution_error::ProviderError>),
+}
+
+impl SentryReportable {
+    /// Wraps a plain error; the layer falls back to parsing `Display`.
+    fn plain(error: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self {
+            error: ReportableError::Plain(Arc::new(error)),
+        }
+    }
+
+    /// Wraps a provider error so the layer can read provided Locations.
+    fn provider(error: impl caution_error::ProviderError) -> Self {
+        Self {
+            error: ReportableError::Provider(Arc::new(error)),
+        }
+    }
+
+    /// The error itself, for `Display` and `source`.
+    fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+        match &self.error {
+            ReportableError::Plain(error) => error.as_ref(),
+            ReportableError::Provider(error) => {
+                let error: &(dyn std::error::Error + Send + Sync + 'static) = error.as_ref();
+                error
+            }
+        }
+    }
+
+    /// The `(index, location)` pairs to tag on the Sentry event.
+    fn locations(&self) -> Vec<(usize, String)> {
+        match &self.error {
+            ReportableError::Plain(error) => error_locations(error.as_ref()),
+            ReportableError::Provider(error) => provider_locations(error.as_ref()),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Init helper
@@ -381,7 +429,24 @@ pub fn error_response<B: IntoResponse>(
     let mut response = (status, body).into_response();
     response
         .extensions_mut()
-        .insert(SentryReportable(Arc::new(error)));
+        .insert(SentryReportable::plain(error));
+    response
+}
+
+/// Like [`error_response`], for an error that is a [`caution_error::ProviderError`].
+///
+/// The layer reads the call-site Location from the provider API and walks the
+/// whole provider chain, so `Display` need not carry a `[location]` suffix.
+#[tracing::instrument(skip_all)]
+pub fn error_response_provider<B: IntoResponse>(
+    status: StatusCode,
+    body: B,
+    error: impl caution_error::ProviderError,
+) -> Response {
+    let mut response = (status, body).into_response();
+    response
+        .extensions_mut()
+        .insert(SentryReportable::provider(error));
     response
 }
 
@@ -405,7 +470,19 @@ pub fn attach(
 ) -> Response {
     response
         .extensions_mut()
-        .insert(SentryReportable(Arc::new(error)));
+        .insert(SentryReportable::plain(error));
+    response
+}
+
+/// Like [`attach`], for an error that is a [`caution_error::ProviderError`].
+#[tracing::instrument(skip_all)]
+pub fn attach_provider(
+    mut response: Response,
+    error: impl caution_error::ProviderError,
+) -> Response {
+    response
+        .extensions_mut()
+        .insert(SentryReportable::provider(error));
     response
 }
 
@@ -448,6 +525,25 @@ pub fn capture_error_with_breadcrumbs(
         hub.add_breadcrumb(crumb);
     }
     hub.capture_error(error);
+}
+
+/// Collect the code location of every link in a provider chain.
+///
+/// Uses the Location each link provides through the provider API
+/// ([`caution_error::ErrorNode::location`]); falls back to parsing the link's
+/// `Display` for a link that has no provider view or provides no Location, such
+/// as a boxed error. Indices match [`error_locations`].
+fn provider_locations(provider: &dyn caution_error::ProviderError) -> Vec<(usize, String)> {
+    caution_error::chain(provider)
+        .enumerate()
+        .filter_map(|(index, node)| {
+            let location = node
+                .location()
+                .map(ToString::to_string)
+                .or_else(|| error_location(&node.error().to_string()).map(str::to_string))?;
+            Some((index, location))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -589,9 +685,8 @@ where
 
             let mut response = response;
 
-            if let Some(SentryReportable(error)) =
-                response.extensions_mut().remove::<SentryReportable>()
-            {
+            if let Some(reportable) = response.extensions_mut().remove::<SentryReportable>() {
+                let error = reportable.as_error();
                 if response.status().is_server_error() {
                     // Drain breadcrumbs accumulated for this request.
                     let breadcrumbs = {
@@ -613,14 +708,14 @@ where
                     // no state leaks across requests or users.
                     let client = Hub::main().client();
                     let mut scope = request_scope(&method, &path, response.status(), request_id);
-                    for (index, location) in error_locations(error.as_ref()) {
+                    for (index, location) in reportable.locations() {
                         scope.set_tag(format!("error.location.{index}").as_str(), location);
                     }
                     let hub = Arc::new(Hub::new(client, Arc::new(scope)));
                     for crumb in breadcrumbs {
                         hub.add_breadcrumb(crumb);
                     }
-                    hub.capture_error(error.as_ref());
+                    hub.capture_error(error);
                 } else {
                     // Clean up breadcrumbs even for non-error responses to
                     // avoid leaking memory.
@@ -839,5 +934,96 @@ mod tests {
             super::error_locations(&error),
             vec![(0, "src/wrapper.rs:5:6".to_string())]
         );
+    }
+
+    #[test]
+    fn provider_locations_use_the_provided_location() {
+        use caution_error::{ProviderError, Request};
+
+        #[derive(Debug)]
+        struct Located {
+            site: &'static std::panic::Location<'static>,
+        }
+
+        impl std::fmt::Display for Located {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                // No `[location]` suffix: the location comes from the provider.
+                f.write_str("located failed")
+            }
+        }
+
+        impl std::error::Error for Located {}
+
+        impl ProviderError for Located {
+            fn provide<'a>(&'a self, request: &mut Request<'a>) {
+                request.provide_value(self.site);
+            }
+        }
+
+        #[track_caller]
+        fn site() -> &'static std::panic::Location<'static> {
+            std::panic::Location::caller()
+        }
+
+        let locations = super::provider_locations(&Located { site: site() });
+
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].0, 0);
+        assert!(locations[0].1.contains(".rs:"), "{}", locations[0].1);
+    }
+
+    #[test]
+    fn provider_locations_fall_back_to_display_for_a_plain_source() {
+        use caution_error::{ProviderError, Request};
+
+        #[derive(Debug)]
+        struct Wrapper {
+            site: &'static std::panic::Location<'static>,
+            source: Inner,
+        }
+
+        #[derive(Debug)]
+        struct Inner;
+
+        impl std::fmt::Display for Wrapper {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("wrapper failed")
+            }
+        }
+
+        impl std::fmt::Display for Inner {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("inner failed [src/inner.rs:2:3]")
+            }
+        }
+
+        impl std::error::Error for Wrapper {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.source)
+            }
+        }
+
+        impl std::error::Error for Inner {}
+
+        impl ProviderError for Wrapper {
+            fn provide<'a>(&'a self, request: &mut Request<'a>) {
+                request.provide_value(self.site);
+            }
+        }
+
+        #[track_caller]
+        fn site() -> &'static std::panic::Location<'static> {
+            std::panic::Location::caller()
+        }
+
+        let locations = super::provider_locations(&Wrapper {
+            site: site(),
+            source: Inner,
+        });
+
+        assert_eq!(locations.len(), 2);
+        assert_eq!(locations[0].0, 0);
+        assert!(locations[0].1.contains(".rs:"), "{}", locations[0].1);
+        assert_eq!(locations[1], (1, "src/inner.rs:2:3".to_string()));
     }
 }
