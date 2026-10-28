@@ -63,6 +63,15 @@ impl Note {
     pub fn new(message: impl Into<Cow<'static, str>>) -> Self {
         Self(message.into())
     }
+
+    /// Builds a note from a `'static` literal.
+    ///
+    /// This is `const` (unlike [`From::from`]), so it can build a `static`
+    /// slice of notes: `static NOTES: &[Note] = &[Note::from_static("…")];`.
+    #[must_use]
+    pub const fn from_static(message: &'static str) -> Self {
+        Self(Cow::Borrowed(message))
+    }
 }
 
 impl fmt::Display for Note {
@@ -101,6 +110,12 @@ impl Warning {
     #[must_use]
     pub fn new(message: impl Into<Cow<'static, str>>) -> Self {
         Self(message.into())
+    }
+
+    /// Builds a warning from a `'static` literal. See [`Note::from_static`].
+    #[must_use]
+    pub const fn from_static(message: &'static str) -> Self {
+        Self(Cow::Borrowed(message))
     }
 }
 
@@ -470,6 +485,15 @@ mod tests {
             Warning(Cow::Borrowed("static"))
         ));
         assert_eq!(Note::new("built").0, "built");
+    }
+
+    #[test]
+    fn from_static_is_const_constructible() {
+        static NOTES: &[Note] = &[Note::from_static("static note")];
+        static WARNINGS: &[Warning] = &[Warning::from_static("static warning")];
+
+        assert_eq!(NOTES[0].0, "static note");
+        assert_eq!(WARNINGS[0].0, "static warning");
     }
 
     #[test]

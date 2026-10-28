@@ -19,7 +19,6 @@ use axum::{
 use caution_error::{Note, Warning};
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use sqlx::PgPool;
-use std::borrow::Cow;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -96,9 +95,9 @@ impl std::fmt::Display for SwitchRejection {
 
 /// Actionable guidance for a rejection; empty when the message already says it.
 fn rejection_notes(rejection: &SwitchRejection) -> &'static [Note] {
-    static NOT_ACKNOWLEDGED: &[Note] = &[Note(Cow::Borrowed(
+    static NOT_ACKNOWLEDGED: &[Note] = &[Note::from_static(
         "Re-send the switch with `acknowledged_verification: true` after verifying and testing the target deployment.",
-    ))];
+    )];
     match rejection {
         SwitchRejection::NotAcknowledged => NOT_ACKNOWLEDGED,
         SwitchRejection::AppUnavailable
@@ -110,9 +109,9 @@ fn rejection_notes(rejection: &SwitchRejection) -> &'static [Note] {
 
 /// Cautions for a rejection; empty when there is nothing beyond the message.
 fn rejection_warnings(rejection: &SwitchRejection) -> &'static [Warning] {
-    static TLS_NOT_ACKNOWLEDGED: &[Warning] = &[Warning(Cow::Borrowed(
+    static TLS_NOT_ACKNOWLEDGED: &[Warning] = &[Warning::from_static(
         "Existing connections may close and HTTPS can be unavailable until the certificate is issued.",
-    ))];
+    )];
     match rejection {
         SwitchRejection::TlsNotAcknowledged => TLS_NOT_ACKNOWLEDGED,
         SwitchRejection::NotAcknowledged

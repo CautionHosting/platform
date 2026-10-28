@@ -19,7 +19,6 @@ use axum::{
 use caution_error::Note;
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use sqlx::PgPool;
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -54,9 +53,9 @@ impl std::fmt::Display for DestroyRejection {
 
 /// Actionable guidance for a rejection; empty when the message already says it.
 fn rejection_notes(rejection: &DestroyRejection) -> &'static [Note] {
-    static LIVE: &[Note] = &[Note(Cow::Borrowed(
+    static LIVE: &[Note] = &[Note::from_static(
         "Switch another deployment to live, then retry the destroy: `caution apps switch <deployment>`.",
-    ))];
+    )];
     match rejection {
         DestroyRejection::Live => LIVE,
         DestroyRejection::Busy | DestroyRejection::Terminating => &[],
