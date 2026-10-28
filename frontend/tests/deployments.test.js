@@ -79,6 +79,30 @@ test('switch outcome never reports success without confirmation', async () => {
   assert.equal(timedOut.outcome, 'unknown')
 })
 
+test('a rejected switch and destroy add the guidance the report carries', async () => {
+  const sign = async () => ({ 'X-Fido2-Challenge-Id': 'c' })
+  const report = {
+    error: 'The deployment failed the platform health check.',
+    errors: [
+      { error: 'The deployment failed the platform health check.', notes: [], warnings: [] },
+      { error: 'unhealthy', notes: ['Enable debug mode on the target, then retry the switch once it passes its health check.'], warnings: [] },
+    ],
+  }
+  const switched = await switchDeployment({ sign, fetch: async () => ({ ok: false, status: 400, json: async () => report }), appId: 'app-1', deploymentId: 'b', body: '{}' })
+  assert.equal(switched.outcome, 'rejected')
+  assert.equal(
+    switched.message,
+    'The deployment failed the platform health check.\nEnable debug mode on the target, then retry the switch once it passes its health check.'
+  )
+
+  const destroyed = await destroyDeployment({ fetch: async () => ({ ok: false, status: 409, json: async () => report }), appId: 'app-1', deploymentId: 'b' })
+  assert.equal(destroyed.outcome, 'rejected')
+  assert.equal(
+    destroyed.message,
+    'The deployment failed the platform health check.\nEnable debug mode on the target, then retry the switch once it passes its health check.'
+  )
+})
+
 test('deployment destroy reports cleanup failures', async () => {
   const run = (status, body) => destroyDeployment({ fetch: async () => ({ ok: status < 300, status, json: async () => body }), appId: 'app-1', deploymentId: 'b' })
   assert.equal((await run(204)).outcome, 'destroyed')

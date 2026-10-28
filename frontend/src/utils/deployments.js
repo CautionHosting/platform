@@ -5,6 +5,7 @@
 // metadata stays unknown.
 
 import { formatStatusLabel } from './appDetails.js'
+import { apiError } from './apiError.js'
 
 const STATUS_LABELS = { reserved: 'Building', building: 'Building', provisioning: 'Starting', running: 'Running', failed: 'Failed', destroying: 'Cleanup pending', destroyed: 'Destroyed' }
 
@@ -112,7 +113,7 @@ export async function switchDeployment({ sign, fetch, appId, deploymentId, body,
   if (response.status === 409 && data?.error === STALE_LIVE) {
     return { outcome: 'stale', message: 'The live deployment changed. Review the refreshed deployments and confirm again.' }
   }
-  return { outcome: 'rejected', message: data?.error || `Switch failed (HTTP ${response.status}).` }
+  return { outcome: 'rejected', message: apiError(data, `Switch failed (HTTP ${response.status}).`) }
 }
 
 const DESTROY_UNKNOWN = 'The destroy outcome is unknown; refresh to check.'
@@ -128,7 +129,7 @@ export async function destroyDeployment({ fetch, appId, deploymentId }) {
   // A 5xx (or a proxy 504) can leave the spawned destroy running: never call it failed.
   if (response.status >= 500) return { outcome: 'unknown', message: DESTROY_UNKNOWN }
   const data = await response.json().catch(() => null)
-  return { outcome: 'rejected', message: data?.error || `Destroy failed (HTTP ${response.status}).` }
+  return { outcome: 'rejected', message: apiError(data, `Destroy failed (HTTP ${response.status}).`) }
 }
 
 // One row per retained instance, including cleanup pending; unknown estimates stay null.

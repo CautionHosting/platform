@@ -2026,6 +2026,7 @@ import RetainedInstances from "../components/RetainedInstances.vue";
 import CopyIconButton from "../components/CopyIconButton.vue";
 import QuorumBundleCreate from "../components/QuorumBundleCreate.vue";
 import { createBundleSubmitter } from "../utils/quorumCreation.js";
+import { apiError, apiErrorFromText } from "../utils/apiError.js";
 import { verifyPasskeyRecovery } from "../composables/passkeyRecovery.js";
 import { authFetch } from "../composables/useWebAuthn.js";
 import {
@@ -2606,13 +2607,7 @@ export default {
 
     const readResponseError = async (response, fallback) => {
       const text = await response.text().catch(() => "");
-      if (!text) return fallback;
-      try {
-        const parsed = JSON.parse(text);
-        return parsed.error || parsed.message || text;
-      } catch {
-        return text;
-      }
+      return apiErrorFromText(text, fallback);
     };
 
     const saveOrganizationName = async () => {
@@ -3144,7 +3139,7 @@ export default {
 
         if (!challengeRes.ok) {
           const data = await challengeRes.json().catch(() => ({}));
-          throw new Error(data.error || "Failed to authenticate request");
+          throw new Error(apiError(data, "Failed to authenticate request"));
         }
 
         const { publicKey, challenge_id } = await challengeRes.json();
@@ -3202,7 +3197,7 @@ export default {
           showToast(newValue ? "PIN requirement enabled" : "PIN requirement disabled");
         } else {
           const data = await response.json().catch(() => ({}));
-          orgSettingsError.value = data.error || "Failed to update settings";
+          orgSettingsError.value = apiError(data, "Failed to update settings");
           showToast(orgSettingsError.value, 'error');
         }
       } catch (err) {
@@ -3470,7 +3465,7 @@ export default {
           window.location.href = "/login";
         } else {
           const data = await response.json().catch(() => ({}));
-          showToast(data.error || "Failed to load apps", 'error');
+          showToast(apiError(data, "Failed to load apps"), 'error');
         }
       } catch (err) {
         showToast("Failed to connect to server", 'error');
@@ -3504,7 +3499,7 @@ export default {
           await loadApps();
         } else {
           const data = await response.json().catch(() => ({}));
-          showToast(data.error || "Failed to destroy app", 'error');
+          showToast(apiError(data, "Failed to destroy app"), 'error');
         }
       } catch (err) {
         showToast("Failed to connect to server", 'error');
@@ -3538,7 +3533,7 @@ export default {
         } else {
           sshKeys.value = [];
           const data = await response.json().catch(() => ({}));
-          showToast(data.error || "Failed to load SSH keys", 'error');
+          showToast(apiError(data, "Failed to load SSH keys"), 'error');
           return false;
         }
       } catch (err) {
@@ -4339,10 +4334,7 @@ export default {
 
         if (!challengeRes.ok) {
           const data = await challengeRes.json().catch(() => ({}));
-          throw new Error(
-            data.error ||
-            "Failed to authenticate request. Please try again."
-          );
+          throw new Error(apiError(data, "Failed to authenticate request. Please try again."));
         }
 
         const { publicKey, challenge_id } = await challengeRes.json();
@@ -4402,7 +4394,7 @@ export default {
           showToast(`${keyName} added`);
         } else {
           const data = await response.json().catch(() => ({}));
-          error.value = data.error || "Failed to add SSH key";
+          error.value = apiError(data, "Failed to add SSH key");
         }
       } catch (err) {
         if (err.name === "NotAllowedError") {
@@ -4445,7 +4437,7 @@ export default {
 
         if (!challengeRes.ok) {
           const data = await challengeRes.json().catch(() => ({}));
-          throw new Error(data.error || "Failed to authenticate request");
+          throw new Error(apiError(data, "Failed to authenticate request"));
         }
 
         const { publicKey, challenge_id } = await challengeRes.json();
@@ -4501,7 +4493,7 @@ export default {
           await loadKeys();
         } else {
           const data = await response.json().catch(() => ({}));
-          showToast(data.error || "Failed to delete SSH key", 'error');
+          showToast(apiError(data, "Failed to delete SSH key"), 'error');
         }
       } catch (err) {
         if (err.name === "NotAllowedError") {
@@ -4535,7 +4527,7 @@ export default {
           window.location.href = "/login";
         } else {
           const data = await response.json().catch(() => ({}));
-          showToast(data.error || "Failed to load credentials", 'error');
+          showToast(apiError(data, "Failed to load credentials"), 'error');
         }
       } catch (err) {
         showToast("Failed to connect to server", 'error');
@@ -4560,7 +4552,7 @@ export default {
           window.location.href = "/login";
         } else {
           const data = await response.json().catch(() => ({}));
-          showToast(data.error || "Failed to load quorum bundles", 'error');
+          showToast(apiError(data, "Failed to load quorum bundles"), 'error');
         }
       } catch (err) {
         showToast("Failed to connect to server", 'error');
@@ -4587,7 +4579,7 @@ export default {
           await loadBundles();
         } else {
           const data = await response.json().catch(() => ({}));
-          showToast(data.error || "Failed to delete quorum bundle", 'error');
+          showToast(apiError(data, "Failed to delete quorum bundle"), 'error');
         }
       } catch (err) {
         showToast(err.message || "Failed to delete quorum bundle", 'error');
@@ -4634,7 +4626,7 @@ export default {
           await loadBundles();
         } else {
           const data = await response.json().catch(() => ({}));
-          showToast(data.error || "Failed to rename bundle", 'error');
+          showToast(apiError(data, "Failed to rename bundle"), 'error');
         }
       } catch (err) {
         showToast(err.message || "Failed to rename bundle", 'error');
@@ -4680,7 +4672,7 @@ export default {
           await loadBundles();
         } else {
           const data = await response.json().catch(() => ({}));
-          showToast(data.error || "Failed to add label", 'error');
+          showToast(apiError(data, "Failed to add label"), 'error');
         }
       } catch (err) {
         showToast(err.message || "Failed to add label", 'error');
@@ -4708,7 +4700,7 @@ export default {
           await loadBundles();
         } else {
           const data = await response.json().catch(() => ({}));
-          showToast(data.error || "Failed to remove label", 'error');
+          showToast(apiError(data, "Failed to remove label"), 'error');
         }
       } catch (err) {
         showToast(err.message || "Failed to remove label", 'error');
@@ -4776,7 +4768,7 @@ export default {
           await loadCredentials();
         } else {
           const data = await response.json().catch(() => ({}));
-          showToast(data.error || "Failed to add credential", 'error');
+          showToast(apiError(data, "Failed to add credential"), 'error');
         }
       } catch (err) {
         showToast("Failed to connect to server", 'error');
@@ -4800,7 +4792,7 @@ export default {
           await loadCredentials();
         } else {
           const data = await response.json().catch(() => ({}));
-          showToast(data.error || "Failed to delete credential", 'error');
+          showToast(apiError(data, "Failed to delete credential"), 'error');
         }
       } catch (err) {
         showToast("Failed to connect to server", 'error');
@@ -4822,7 +4814,7 @@ export default {
           await loadCredentials();
         } else {
           const data = await response.json().catch(() => ({}));
-          showToast(data.error || "Failed to set default credential", 'error');
+          showToast(apiError(data, "Failed to set default credential"), 'error');
         }
       } catch (err) {
         showToast("Failed to connect to server", 'error');
@@ -6350,6 +6342,8 @@ export default {
 
 .toast-message {
   flex: 1;
+  /* Guidance renders on its own line, so keep the newline. */
+  white-space: pre-line;
 }
 
 .toast-dismiss {

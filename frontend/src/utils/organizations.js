@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+import { withGuidance } from './apiError.js'
+
 /**
  * Organization naming and setup-gate helpers.
  *
@@ -81,7 +83,7 @@ export function organizationCreationOutcome(status, body = null) {
  */
 export function organizationCreationErrorMessage(body, text, fallback) {
   if (body) {
-    return body.message || body.error || fallback
+    return withGuidance(body.message || body.error || fallback, body)
   }
   const raw = normalize(text)
   return raw || fallback

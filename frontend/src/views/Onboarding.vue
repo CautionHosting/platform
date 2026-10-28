@@ -48,6 +48,7 @@
 import { ref, onMounted } from 'vue'
 import CompactPageHeader from '../components/CompactPageHeader.vue'
 import { authFetch } from '../composables/useWebAuthn.js'
+import { apiError } from '../utils/apiError.js'
 
 export default {
   name: 'Onboarding',
@@ -91,7 +92,7 @@ export default {
           emailSent.value = true
           pollEmailVerification()
         } else {
-          error.value = data.error || data.message || 'Failed to send verification email'
+          error.value = apiError(data, 'Failed to send verification email')
         }
       } catch {
         error.value = 'Failed to connect to server'

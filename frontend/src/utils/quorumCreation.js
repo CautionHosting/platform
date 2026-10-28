@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Caution SEZC
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
+import { apiErrorFromText } from './apiError.js'
+
 export const MAX_DASHBOARD_HOLDERS = 10
 export const MAX_KEYRING_BYTES = 512 * 1024
 export const MAX_CREATION_BYTES = 1024 * 1024
@@ -112,7 +114,7 @@ export async function parsePublicKeyring(text) {
 
 export async function responseError(response, fallback) {
   const text = await response.text().catch(() => '')
-  try { const json = JSON.parse(text); return json.error || json.message || fallback } catch { return text || fallback }
+  return apiErrorFromText(text, fallback)
 }
 
 export function createBundleSubmitter({ sign, fetch, timeoutMs = 180000 }) {
