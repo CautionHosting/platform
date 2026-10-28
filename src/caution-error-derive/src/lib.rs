@@ -27,8 +27,11 @@ use syn::{
 ///
 /// - `#[provide(notes)]` on a `Vec<caution_error::Note>` field exposes it as
 ///   `&[Note]`; `#[provide(warnings)]` does the same for `Vec<Warning>`.
-/// - `#[location]` exposes the field as `caution_error::Location`, so a report
-///   or Sentry can read the call site with [`caution_error::location`].
+/// - `#[provide(location)]` on a `&'static std::panic::Location<'static>` field
+///   (for example `dterror::Location`) exposes it as `caution_error::Location`,
+///   so a report or Sentry can read the call site with
+///   [`caution_error::location`]. `#[location]` alone provides nothing; it is
+///   `dterror`'s annotation and is independent of this derive.
 ///
 /// A field marked `#[source]` (or `#[from]`) wires `provider_source`
 /// automatically. The source's type is not required to implement the trait: the
@@ -55,6 +58,7 @@ use syn::{
 ///     notes: Vec<caution_error::Note>,
 ///     #[provide(warnings)]
 ///     warnings: Vec<caution_error::Warning>,
+///     #[provide(location)]
 ///     #[location]
 ///     location: dterror::Location,
 ///     #[source]
@@ -344,10 +348,6 @@ fn named_field_ident(field: &Field) -> &syn::Ident {
 
 /// Classifies how a field is provided, when it is.
 fn provide_role(field: &Field) -> syn::Result<Option<Provide>> {
-    if has_attribute(field, "location") {
-        return Ok(Some(Provide::Location));
-    }
-
     let Some(attribute) = field
         .attrs
         .iter()
@@ -363,21 +363,22 @@ fn provide_role(field: &Field) -> syn::Result<Option<Provide>> {
             let argument: Ident = list.parse_args().map_err(|_| {
                 syn::Error::new_spanned(
                     list,
-                    "unsupported #[provide(...)] argument; expected `notes` or `warnings`",
+                    "unsupported #[provide(...)] argument; expected `notes`, `warnings`, or `location`",
                 )
             })?;
             match argument.to_string().as_str() {
                 "notes" => Ok(Some(Provide::Notes)),
                 "warnings" => Ok(Some(Provide::Warnings)),
+                "location" => Ok(Some(Provide::Location)),
                 _ => Err(syn::Error::new_spanned(
                     argument,
-                    "unsupported #[provide(...)] argument; expected `notes` or `warnings`",
+                    "unsupported #[provide(...)] argument; expected `notes`, `warnings`, or `location`",
                 )),
             }
         }
         Meta::NameValue(_) => Err(syn::Error::new_spanned(
             attribute,
-            "unsupported #[provide = ...]; use `#[provide]`, `#[provide(notes)]`, or `#[provide(warnings)]`",
+            "unsupported #[provide = ...]; use `#[provide]`, `#[provide(notes)]`, `#[provide(warnings)]`, or `#[provide(location)]`",
         )),
     }
 }
@@ -387,7 +388,7 @@ fn variant_contributes(variant: &syn::Variant) -> bool {
     variant
         .fields
         .iter()
-        .any(|field| has_attribute(field, "provide") || has_attribute(field, "location"))
+        .any(|field| has_attribute(field, "provide"))
 }
 
 /// Returns true when a variant holds at least one source field.

@@ -486,6 +486,7 @@ struct QuotaError {
     #[provide(warnings)]
     warnings: Vec<Warning>,
 
+    #[provide(location)]
     #[location]
     location: &'static std::panic::Location<'static>,
 }
@@ -544,6 +545,7 @@ enum MixedProvision {
     },
     #[error("b")]
     B {
+        #[provide(location)]
         #[location]
         location: &'static std::panic::Location<'static>,
         #[source]
@@ -566,6 +568,6 @@ fn variant_without_provision_then_variant_with_provision() {
     };
     assert!(
         caution_error::location(&err).is_none(),
-        "no #[location] attribute"
+        "no #[provide(location)] attribute"
     );
 }
