@@ -16,6 +16,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use caution_error::Note;
 use chrono::{DateTime, Duration, Utc};
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use rand::{RngCore, rngs::OsRng};
@@ -769,26 +770,48 @@ pub async fn list_members(
     Ok(Json(members))
 }
 
+/// Guidance when an invitation already exists.
+const ALREADY_INVITED_NOTE: &str = "To resend the invitation, cancel the existing invitation.";
+
 /// Failure modes for [`invite_member`].
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub enum InviteMemberError {
-    #[error("you do not have permission to manage this organization [{location}]")]
-    Forbidden { location: Location },
+    #[error("you do not have permission to manage this organization")]
+    Forbidden {
+        #[provide]
+        location: Location,
+    },
 
-    #[error("a user with this email is already a member of this organization [{location}]")]
-    AlreadyMember { location: Location },
+    #[error("a user with this email is already a member of this organization")]
+    AlreadyMember {
+        #[provide]
+        location: Location,
+    },
 
-    #[error("an active invitation already exists for this email [{location}]")]
-    AlreadyInvited { location: Location },
+    #[error("an active invitation already exists for this email")]
+    AlreadyInvited {
+        #[provide(ref)]
+        note: Note,
+        #[provide]
+        location: Location,
+    },
 
-    #[error("a platform user with this email already exists [{location}]")]
-    UserAlreadyExists { location: Location },
+    #[error("a platform user with this email already exists")]
+    UserAlreadyExists {
+        #[provide]
+        location: Location,
+    },
 
-    #[error("organization invitation not found [{location}]")]
-    NotFound { org_id: Uuid, location: Location },
+    #[error("organization invitation not found")]
+    NotFound {
+        org_id: Uuid,
+        #[provide]
+        location: Location,
+    },
 
-    #[error("failed to create invitation [{location}]")]
+    #[error("failed to create invitation")]
     Database {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -798,17 +821,16 @@ pub enum InviteMemberError {
 
 impl IntoResponse for InviteMemberError {
     fn into_response(self) -> Response {
-        let (status, body) = match &self {
-            InviteMemberError::Forbidden { .. } => (StatusCode::FORBIDDEN, "forbidden"),
-            InviteMemberError::AlreadyMember { .. } => (StatusCode::CONFLICT, "conflict"),
-            InviteMemberError::AlreadyInvited { .. } => (StatusCode::CONFLICT, "conflict"),
-            InviteMemberError::UserAlreadyExists { .. } => (StatusCode::CONFLICT, "conflict"),
-            InviteMemberError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found"),
-            InviteMemberError::Database { .. } => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
-            }
+        let status = match &self {
+            Self::Forbidden { .. } => StatusCode::FORBIDDEN,
+            Self::AlreadyMember { .. }
+            | Self::AlreadyInvited { .. }
+            | Self::UserAlreadyExists { .. } => StatusCode::CONFLICT,
+            Self::NotFound { .. } => StatusCode::NOT_FOUND,
+            Self::Database { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        sentry_middleware::error_response(status, body, self)
+        let report = caution_error::ErrorReport::from_error(&self);
+        sentry_middleware::error_response_provider(status, Json(report), self)
     }
 }
 
@@ -872,6 +894,7 @@ pub async fn invite_member(
 
     if already_invited {
         return Err(InviteMemberError::AlreadyInvited {
+            note: Note::from(ALREADY_INVITED_NOTE),
             location: std::panic::Location::caller(),
         });
     }
@@ -953,6 +976,7 @@ pub async fn invite_member(
             .unwrap_or(false)
         {
             return InviteMemberError::AlreadyInvited {
+                note: Note::from(ALREADY_INVITED_NOTE),
                 location: std::panic::Location::caller(),
             };
         }
@@ -1429,6 +1453,44 @@ pub async fn remove_member(
     .with_context(Ctx::delete())?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ALREADY_INVITED_NOTE, InviteMemberError};
+
+    #[test]
+    fn already_invited_reports_the_cancel_route() {
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use caution_error::Note;
+
+        let error = InviteMemberError::AlreadyInvited {
+            note: Note::from(ALREADY_INVITED_NOTE),
+            location: std::panic::Location::caller(),
+        };
+
+        let report = caution_error::ErrorReport::from_error(&error);
+        assert_eq!(
+            report.error,
+            "an active invitation already exists for this email"
+        );
+        assert_eq!(report.errors[0].notes.len(), 1);
+        assert_eq!(report.errors[0].notes[0].0, ALREADY_INVITED_NOTE);
+        assert!(
+            caution_error::location(&error).is_some(),
+            "location provided"
+        );
+
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(
+            response
+                .extensions()
+                .get::<sentry_middleware::SentryReportable>()
+                .is_some()
+        );
+    }
 }
 
 #[cfg(test)]
