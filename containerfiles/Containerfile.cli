@@ -7,16 +7,44 @@ FROM stagex/core-libunwind@sha256:08cd9e229ef1b4f547c25436d06a2f893f252fc1c1d8b8
 FROM stagex/core-ca-certificates@sha256:8390dff73a4502614411e2b2ecb4e4e33b6cc10dc26cf2c6a46e5df71f4c4b03 AS ca-certificates
 FROM stagex/core-openssl@sha256:04a0d15071ca64b6f4855bb7790a306caa33b6259b522c44898a41975a67562e AS openssl
 FROM stagex/user-eudev@sha256:ee3ff9ab6054ece93e4981bcf6c5fb50aa9be48dc74f54237b1656c51aae1d8f AS eudev
-FROM stagex/user-pcsc-lite@sha256:58e5846a6c0aa394d55f00a8bf743aab41e024449c31d199af868f012accc326 AS pcsc-lite
 FROM stagex/user-nettle@sha256:110504b49f494b06121d1816eaa18aae2b772761e6748229d5bff1260a0f9860 AS nettle
 FROM stagex/core-gmp@sha256:f90653ed07062074363542a77e26a2d16a142f9be5ebf6900b53f4ab8a82d39d AS gmp
 FROM stagex/core-user-runtime@sha256:1694accf42714684f8ebefed165dd202efb474d53cafbd47b63f93b47c999cad AS user-runtime
+
+## Hack until we have a pcsc-lite-static subpackage uptream in stagex
+FROM stagex/pallet-clang-meson-busybox@sha256:4ccdb2c068b97ed635a6a209cb8bdf37e395f80a0c5cfe1c879de82013f6d3a6 AS pallet-clang-meson-busybox
+FROM stagex/core-flex@sha256:cb59795fb1909fe9ec376451ef2b06149f4c504b1bda91a163f0b7704874fb44 AS core-flex
+FROM stagex/core-m4@sha256:8e0f459a44a59b038fe2e08aaf2f1d4aa466757e104ef5e6387d5bfbb20cf9d1 AS core-m4
+FROM pallet-clang-meson-busybox as build-pcsc-lite-static
+COPY --from=core-flex . /
+COPY --from=core-m4 . /
+ADD --checksum=sha256:bfcfe38a20afc49849c6bf55325e38f449fc4b26d3923fdc32b969ae41a8741b https://pcsclite.apdu.fr/files/pcsc-lite-2.5.1.tar.xz .
+RUN <<-EOF
+  tar -xf pcsc-lite-2.5.1.tar.xz
+  cd pcsc-lite-2.5.1
+	meson setup \
+		--prefix=/usr \
+    --buildtype=release \
+    -Ddefault_library=static \
+    -Dlibudev=false \
+    -Dlibusb=false \
+    -Dlibsystemd=false \
+    -Dpolkit=false \
+    -Dusb=false \
+    -Dserial=false \
+    -Dembedded=true \
+		. output
+	meson compile -C output
+	DESTDIR=/rootfs meson install --no-rebuild -C output
+EOF
+FROM scratch as pcsc-lite-static
+COPY --from=build-pcsc-lite-static /rootfs/ /
 
 FROM pallet-rust AS builder
 
 COPY --from=openssl . /
 COPY --from=eudev . /
-COPY --from=pcsc-lite . /
+COPY --from=pcsc-lite-static . /
 COPY --from=nettle . /
 COPY --from=gmp . /
 
@@ -34,7 +62,9 @@ ENV RUSTFLAGS="${RUSTFLAGS} -C target-feature=+crt-static"
 ENV RUSTFLAGS="${RUSTFLAGS} -C link-arg=-Wl,--build-id=none"
 ENV TARGET_ARCH="x86_64-unknown-linux-musl"
 ENV NETTLE_STATIC=1
-ENV LIBPCSCLITE_STATIC=1
+ENV PCSCLITE_STATIC=1
+ENV PCSCLITE_LIB_DIR=/usr/lib
+ENV PKG_CONFIG_ALL_STATIC=1
 
 # Keep fetched Git dependencies in the layer: the offline build must not rely
 # on a mutable BuildKit cache retaining their checkouts between RUN steps.
