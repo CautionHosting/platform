@@ -108,7 +108,8 @@ network access on every invocation, and do not modify dependencies.
 
 After the audits pass, `make up` builds the API, gateway (including frontend
 assets), email, and metering images, prepares enclave components, starts
-PostgreSQL, runs migrations, and restarts the services. No separate
+PostgreSQL, runs migrations, refreshes the systemd user units from `systemd/`,
+and restarts the services. No separate
 `make build-all` is needed; the first run requires network access for image pulls
 and build dependencies.
 
