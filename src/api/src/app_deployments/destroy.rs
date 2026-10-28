@@ -16,6 +16,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use caution_error::Note;
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -34,6 +35,30 @@ pub(crate) enum DestroyRejection {
     Busy,
     /// App destroy is running: a second `tofu destroy` would share its state.
     Terminating,
+}
+
+impl std::fmt::Display for DestroyRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Live => {
+                "The live deployment cannot be destroyed; switch to another deployment first."
+            }
+            Self::Busy => {
+                "This deployment is being built, provisioned or destroyed; retry shortly."
+            }
+            Self::Terminating => "The app is being destroyed.",
+        })
+    }
+}
+
+/// Actionable guidance for a rejection; empty when the message already says it.
+fn rejection_notes(rejection: &DestroyRejection) -> Vec<Note> {
+    match rejection {
+        DestroyRejection::Live => vec![Note::from(
+            "Switch another deployment to live, then retry the destroy: `caution apps switch <deployment>`.",
+        )],
+        DestroyRejection::Busy | DestroyRejection::Terminating => Vec::new(),
+    }
 }
 
 pub(crate) fn destroy_precondition(
@@ -508,33 +533,47 @@ pub(super) async fn complete_destroy_with(
     Ok(())
 }
 
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum DestroyError {
-    #[error("deployment not found [{location}]")]
-    NotFound { location: Location },
-    #[error("destroy rejected: {rejection:?} [{location}]")]
+    #[error("Deployment not found.")]
+    NotFound {
+        #[provide]
+        location: Location,
+    },
+    #[error("{rejection}")]
     Rejected {
         rejection: DestroyRejection,
+        #[provide(ref = [caution_error::Note])]
+        notes: Vec<Note>,
+        #[provide]
         location: Location,
     },
-    #[error("deployment holds the app Elastic IP [{location}]")]
-    HoldsAddress { location: Location },
-    #[error("AWS error while reading the app Elastic IP [{location}]")]
+    #[error(
+        "This deployment currently holds the app address; wait for reconciliation or switch first."
+    )]
+    HoldsAddress {
+        #[provide]
+        location: Location,
+    },
+    #[error("Deployment destroy failed; retry.")]
     Aws {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("database error while destroying a deployment [{location}]")]
+    #[error("Deployment destroy failed; retry.")]
     Database {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("deployment destroy failed [{location}]")]
+    #[error("Deployment destroy failed; retry.")]
     DestroyFailed {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -542,39 +581,24 @@ pub(crate) enum DestroyError {
     },
 }
 
+impl DestroyError {
+    fn status(&self) -> StatusCode {
+        match self {
+            Self::NotFound { .. } => StatusCode::NOT_FOUND,
+            Self::Rejected { .. } | Self::HoldsAddress { .. } => StatusCode::CONFLICT,
+            Self::Aws { .. } | Self::Database { .. } | Self::DestroyFailed { .. } => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        }
+    }
+}
+
 impl IntoResponse for DestroyError {
     fn into_response(self) -> Response {
-        let (status, message) = match &self {
-            Self::NotFound { .. } => (StatusCode::NOT_FOUND, "Deployment not found."),
-            Self::Rejected {
-                rejection: DestroyRejection::Live,
-                ..
-            } => (
-                StatusCode::CONFLICT,
-                "The live deployment cannot be destroyed; switch to another deployment first.",
-            ),
-            Self::Rejected {
-                rejection: DestroyRejection::Busy,
-                ..
-            } => (
-                StatusCode::CONFLICT,
-                "This deployment is being built, provisioned or destroyed; retry shortly.",
-            ),
-            Self::Rejected {
-                rejection: DestroyRejection::Terminating,
-                ..
-            } => (StatusCode::CONFLICT, "The app is being destroyed."),
-            Self::HoldsAddress { .. } => (
-                StatusCode::CONFLICT,
-                "This deployment currently holds the app address; wait for reconciliation or switch first.",
-            ),
-            Self::Aws { .. } | Self::Database { .. } | Self::DestroyFailed { .. } => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Deployment destroy failed; retry.",
-            ),
-        };
-        tracing::warn!(error = %self, "deployment destroy failed");
-        (status, Json(serde_json::json!({ "error": message }))).into_response()
+        let status = self.status();
+        tracing::warn!(error = ?self, "deployment destroy failed");
+        let report = caution_error::ErrorReport::from_error(&self);
+        sentry_middleware::error_response_provider(status, Json(report), self)
     }
 }
 
@@ -702,6 +726,7 @@ pub(super) async fn begin_destroy(
         Ok(DestroyPlan::Destroy) if row.app_state == "terminating" => {
             return Err(DestroyError::Rejected {
                 rejection: DestroyRejection::Terminating,
+                notes: rejection_notes(&DestroyRejection::Terminating),
                 location: std::panic::Location::caller(),
             });
         }
@@ -709,6 +734,7 @@ pub(super) async fn begin_destroy(
         Ok(DestroyPlan::AlreadyDestroyed) => return Ok(None),
         Err(rejection) => {
             return Err(DestroyError::Rejected {
+                notes: rejection_notes(&rejection),
                 rejection,
                 location: std::panic::Location::caller(),
             });
@@ -937,6 +963,49 @@ mod tests {
             destroy_precondition(Some(live), live, "failed"),
             Err(DestroyRejection::Live)
         ));
+    }
+
+    #[test]
+    fn live_rejection_carries_an_actionable_note() {
+        use axum::response::IntoResponse;
+        use sentry_middleware::SentryReportable;
+
+        let error = DestroyError::Rejected {
+            rejection: DestroyRejection::Live,
+            notes: rejection_notes(&DestroyRejection::Live),
+            location: std::panic::Location::caller(),
+        };
+
+        let report = caution_error::ErrorReport::from_error(&error);
+        assert_eq!(
+            report.error,
+            "The live deployment cannot be destroyed; switch to another deployment first."
+        );
+        assert_eq!(report.errors[0].notes.len(), 1);
+        assert!(report.errors[0].notes[0].0.contains("caution apps switch"));
+        assert!(
+            !report.errors[0].error.contains(".rs:"),
+            "no call site leaks"
+        );
+        assert!(
+            caution_error::location(&error).is_some(),
+            "location provided"
+        );
+
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(response.extensions().get::<SentryReportable>().is_some());
+
+        let busy = DestroyError::Rejected {
+            rejection: DestroyRejection::Busy,
+            notes: rejection_notes(&DestroyRejection::Busy),
+            location: std::panic::Location::caller(),
+        };
+        assert!(
+            caution_error::ErrorReport::from_error(&busy).errors[0]
+                .notes
+                .is_empty()
+        );
     }
 
     #[test]
