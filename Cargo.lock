@@ -339,6 +339,7 @@ dependencies = [
  "bootproof-sdk",
  "bytes",
  "caution-config",
+ "caution-error",
  "chrono",
  "dterror 0.4.0",
  "enclave-builder",

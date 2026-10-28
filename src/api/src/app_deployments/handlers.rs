@@ -341,13 +341,13 @@ async fn load_views(
         .collect())
 }
 
-fn error_response(status: StatusCode, message: &str) -> Response {
-    (status, Json(serde_json::json!({ "error": message }))).into_response()
+fn error_response(status: StatusCode, error: &dyn caution_error::ProviderError) -> Response {
+    (status, Json(caution_error::ErrorReport::from_error(error))).into_response()
 }
 
 /// Failure modes for [`list_handler`].
-#[derive(Debug, thiserror::Error, CtxError)]
-#[error("failed to list the deployments of app {app_id} [{location}]")]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
+#[error("failed to list the deployments of app {app_id}")]
 pub(crate) struct ListDeploymentsError {
     app_id: Uuid,
     #[location]
@@ -359,10 +359,7 @@ pub(crate) struct ListDeploymentsError {
 impl IntoResponse for ListDeploymentsError {
     fn into_response(self) -> Response {
         tracing::error!(error = ?self, "failed to list deployments");
-        error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Failed to list deployments.",
-        )
+        error_response(StatusCode::INTERNAL_SERVER_ERROR, &self)
     }
 }
 
@@ -391,15 +388,15 @@ pub(crate) async fn list_handler(
 }
 
 /// Failure modes for [`get_in_app_handler`].
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum GetDeploymentInAppError {
-    #[error("deployment {deployment_id} not found in app {app_id} [{location}]")]
+    #[error("deployment {deployment_id} not found in app {app_id}")]
     NotFound {
         app_id: Uuid,
         deployment_id: Uuid,
         location: Location,
     },
-    #[error("failed to read deployment {deployment_id} of app {app_id} [{location}]")]
+    #[error("failed to read deployment {deployment_id} of app {app_id}")]
     Load {
         app_id: Uuid,
         deployment_id: Uuid,
@@ -412,16 +409,14 @@ pub(crate) enum GetDeploymentInAppError {
 
 impl IntoResponse for GetDeploymentInAppError {
     fn into_response(self) -> Response {
-        match self {
-            Self::NotFound { .. } => error_response(StatusCode::NOT_FOUND, "Deployment not found."),
+        let status = match &self {
+            Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::Load { .. } => {
                 tracing::error!(error = ?self, "failed to read a deployment");
-                error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to read the deployment.",
-                )
+                StatusCode::INTERNAL_SERVER_ERROR
             }
-        }
+        };
+        error_response(status, &self)
     }
 }
 
@@ -452,14 +447,14 @@ pub(crate) async fn get_in_app_handler(
 }
 
 /// Failure modes for [`get_handler`].
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum GetDeploymentError {
-    #[error("deployment {deployment_id} not found [{location}]")]
+    #[error("deployment {deployment_id} not found")]
     NotFound {
         deployment_id: Uuid,
         location: Location,
     },
-    #[error("failed to read deployment {deployment_id} [{location}]")]
+    #[error("failed to read deployment {deployment_id}")]
     Load {
         deployment_id: Uuid,
         #[location]
@@ -471,16 +466,14 @@ pub(crate) enum GetDeploymentError {
 
 impl IntoResponse for GetDeploymentError {
     fn into_response(self) -> Response {
-        match self {
-            Self::NotFound { .. } => error_response(StatusCode::NOT_FOUND, "Deployment not found."),
+        let status = match &self {
+            Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::Load { .. } => {
                 tracing::error!(error = ?self, "failed to read a deployment");
-                error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to read the deployment.",
-                )
+                StatusCode::INTERNAL_SERVER_ERROR
             }
-        }
+        };
+        error_response(status, &self)
     }
 }
 
@@ -679,5 +672,27 @@ mod tests {
         // Not recorded yet (the deployment has not gone Running).
         let view = serde_json::to_value(row(id, "pending", None).into_view(None)).unwrap();
         assert!(view["debug_mode"].is_null());
+    }
+
+    #[test]
+    fn not_found_report_is_structured_and_location_free() {
+        let deployment_id = Uuid::new_v4();
+        let err = GetDeploymentError::NotFound {
+            deployment_id,
+            location: std::panic::Location::caller(),
+        };
+
+        let report = caution_error::ErrorReport::from_error(&err);
+        let expected = format!("deployment {deployment_id} not found");
+
+        assert_eq!(report.error, expected);
+        assert_eq!(report.errors[0].error, expected);
+        assert!(
+            !report.errors[0].error.contains(".rs:"),
+            "no call site leaks"
+        );
+
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["errors"][0]["notes"].as_array().unwrap().len(), 0);
     }
 }
