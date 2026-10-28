@@ -11,27 +11,25 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
+use syn::parse::{Parse, ParseStream};
 use syn::{
-    Data, DataEnum, DeriveInput, Field, Fields, GenericArgument, Ident, Index, Meta, PathArguments,
+    Data, DataEnum, DeriveInput, Field, Fields, GenericArgument, Index, Meta, PathArguments, Token,
     Type, parse_macro_input,
 };
 
 /// Derives [`caution_error::ProviderError`] for a struct or enum.
 ///
-/// A field is provided only when it carries `#[provide]`. Plain `#[provide]`
-/// exposes the field's own type with `provide_ref::<FieldType>`, so context is
-/// shared by reference and never cloned; a consumer asks with
-/// `request_ref::<FieldType>(error)`.
+/// A field is provided only when it carries `#[provide]`, and always by
+/// reference with `provide_ref`, so nothing is cloned.
 ///
-/// Two field attributes refine this:
-///
-/// - `#[provide(notes)]` on a `Vec<caution_error::Note>` field exposes it as
-///   `&[Note]`; `#[provide(warnings)]` does the same for `Vec<Warning>`.
-/// - `#[provide(location)]` on a `&'static std::panic::Location<'static>` field
-///   (for example `dterror::Location`) exposes it as `caution_error::Location`,
-///   so a report or Sentry can read the call site with
-///   [`caution_error::location`]. `#[location]` alone provides nothing; it is
-///   `dterror`'s annotation and is independent of this derive.
+/// - `#[provide]` exposes the field's own declared type:
+///   `provide_ref::<FieldType>(&self.field)`.
+/// - `#[provide(ref = T)]` exposes a reference to `T` instead:
+///   `provide_ref::<T>(&self.field)`. The field is deref-coerced to `&T`, so a
+///   `Vec<Note>` field with `ref = [Note]` provides `&[Note]`, and a
+///   `&'static std::panic::Location<'static>` field with
+///   `ref = caution_error::Location` provides `&Location`. This names the type
+///   explicitly, so it also works when the field is spelled with an alias.
 ///
 /// A field marked `#[source]` (or `#[from]`) wires `provider_source`
 /// automatically. The source's type is not required to implement the trait: the
@@ -54,11 +52,11 @@ use syn::{
 /// struct UpstreamError {
 ///     #[provide]
 ///     request_id: String,
-///     #[provide(notes)]
+///     #[provide(ref = [caution_error::Note])]
 ///     notes: Vec<caution_error::Note>,
-///     #[provide(warnings)]
+///     #[provide(ref = [caution_error::Warning])]
 ///     warnings: Vec<caution_error::Warning>,
-///     #[provide(location)]
+///     #[provide(ref = caution_error::Location)]
 ///     #[location]
 ///     location: dterror::Location,
 ///     #[source]
@@ -66,7 +64,7 @@ use syn::{
 ///     status: u16,
 /// }
 /// ```
-#[proc_macro_derive(ProviderError, attributes(provide, source, from, location))]
+#[proc_macro_derive(ProviderError, attributes(provide, source, from))]
 pub fn derive_provider_error(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     expand(&input)
@@ -74,16 +72,26 @@ pub fn derive_provider_error(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// How a field participates in the generated `provide`.
-enum Provide {
-    /// The field's own type, by reference.
-    Value,
-    /// A `Vec<Note>` field, as `&[Note]`.
-    Notes,
-    /// A `Vec<Warning>` field, as `&[Warning]`.
-    Warnings,
-    /// A `#[location]` field, as `caution_error::Location`.
-    Location,
+/// The type a `#[provide]` field is exposed as.
+enum ProvideTarget {
+    /// The field's own declared type.
+    FieldType,
+    /// The type named by `#[provide(ref = T)]`.
+    Explicit(Box<Type>),
+}
+
+/// The parsed contents of `#[provide(ref = Type)]`.
+struct RefProvide {
+    target: Type,
+}
+
+impl Parse for RefProvide {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        input.parse::<Token![ref]>()?;
+        input.parse::<Token![=]>()?;
+        let target: Type = input.parse()?;
+        Ok(Self { target })
+    }
 }
 
 /// Expands the derive for one item.
@@ -128,13 +136,11 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
 fn struct_provide_body(fields: &Fields) -> syn::Result<TokenStream2> {
     let mut body = TokenStream2::new();
     for (position, field) in fields.iter().enumerate() {
-        let Some(role) = provide_role(field)? else {
+        let Some(target) = provide_target(field)? else {
             continue;
         };
-        let ty = &field.ty;
         let reference = field_reference(field, position);
-        let value = field_value(field, position);
-        body.extend(provide_statement(role, ty, reference, value));
+        body.extend(provide_statement(&target, &field.ty, reference));
     }
     Ok(body)
 }
@@ -154,12 +160,11 @@ fn enum_provide_body(data: &DataEnum) -> syn::Result<TokenStream2> {
                 let mut bindings = Vec::new();
                 let mut stmts = TokenStream2::new();
                 for field in &named.named {
-                    let Some(role) = provide_role(field)? else {
+                    let Some(target) = provide_target(field)? else {
                         continue;
                     };
                     let ident = named_field_ident(field);
-                    let ty = &field.ty;
-                    stmts.extend(provide_statement(role, ty, quote!(#ident), quote!(*#ident)));
+                    stmts.extend(provide_statement(&target, &field.ty, quote!(#ident)));
                     bindings.push(quote!(#ident));
                 }
                 quote! { Self::#variant_ident { #(#bindings,)* .. } => { #stmts } }
@@ -168,18 +173,12 @@ fn enum_provide_body(data: &DataEnum) -> syn::Result<TokenStream2> {
                 let mut patterns = Vec::new();
                 let mut stmts = TokenStream2::new();
                 for (position, field) in unnamed.unnamed.iter().enumerate() {
-                    let Some(role) = provide_role(field)? else {
+                    let Some(target) = provide_target(field)? else {
                         patterns.push(quote!(_));
                         continue;
                     };
                     let binding = format_ident!("__provide_{}", position);
-                    let ty = &field.ty;
-                    stmts.extend(provide_statement(
-                        role,
-                        ty,
-                        quote!(#binding),
-                        quote!(*#binding),
-                    ));
+                    stmts.extend(provide_statement(&target, &field.ty, quote!(#binding)));
                     patterns.push(quote!(#binding));
                 }
                 quote! { Self::#variant_ident(#(#patterns),*) => { #stmts } }
@@ -249,22 +248,20 @@ fn enum_provider_source(data: &DataEnum) -> Option<TokenStream2> {
 }
 
 /// Builds one `provide_ref` statement for a field.
+///
+/// `reference` is a reference to the field. Its type may differ from the target
+/// (`&Vec<Note>` for `[Note]`, `&&Location` for `Location`); the compiler
+/// deref-coerces it at this call site.
 fn provide_statement(
-    role: Provide,
-    ty: &Type,
+    target: &ProvideTarget,
+    field_type: &Type,
     reference: TokenStream2,
-    value: TokenStream2,
 ) -> TokenStream2 {
-    match role {
-        Provide::Value => quote! { request.provide_ref::<#ty>(#reference); },
-        Provide::Notes => quote! { request.provide_ref::<[caution_error::Note]>(#reference); },
-        Provide::Warnings => {
-            quote! { request.provide_ref::<[caution_error::Warning]>(#reference); }
-        }
-        Provide::Location => {
-            quote! { request.provide_ref::<caution_error::Location>(#value); }
-        }
-    }
+    let target: &Type = match target {
+        ProvideTarget::FieldType => field_type,
+        ProvideTarget::Explicit(target) => target,
+    };
+    quote! { request.provide_ref::<#target>(#reference); }
 }
 
 /// Builds the `provider_source` expression for a source field.
@@ -327,17 +324,6 @@ fn field_reference(field: &Field, position: usize) -> TokenStream2 {
     }
 }
 
-/// Returns the `self.<field>` value for a struct field.
-fn field_value(field: &Field, position: usize) -> TokenStream2 {
-    match &field.ident {
-        Some(ident) => quote!(self.#ident),
-        None => {
-            let index = Index::from(position);
-            quote!(self.#index)
-        }
-    }
-}
-
 /// Returns the identifier of a named field.
 fn named_field_ident(field: &Field) -> &syn::Ident {
     field
@@ -346,8 +332,8 @@ fn named_field_ident(field: &Field) -> &syn::Ident {
         .expect("named field always has an identifier")
 }
 
-/// Classifies how a field is provided, when it is.
-fn provide_role(field: &Field) -> syn::Result<Option<Provide>> {
+/// Returns how a field is provided, when it is.
+fn provide_target(field: &Field) -> syn::Result<Option<ProvideTarget>> {
     let Some(attribute) = field
         .attrs
         .iter()
@@ -357,28 +343,20 @@ fn provide_role(field: &Field) -> syn::Result<Option<Provide>> {
     };
 
     match &attribute.meta {
-        Meta::Path(_) => Ok(Some(Provide::Value)),
-        Meta::List(list) if list.tokens.is_empty() => Ok(Some(Provide::Value)),
+        Meta::Path(_) => Ok(Some(ProvideTarget::FieldType)),
+        Meta::List(list) if list.tokens.is_empty() => Ok(Some(ProvideTarget::FieldType)),
         Meta::List(list) => {
-            let argument: Ident = list.parse_args().map_err(|_| {
+            let parsed: RefProvide = list.parse_args().map_err(|_| {
                 syn::Error::new_spanned(
                     list,
-                    "unsupported #[provide(...)] argument; expected `notes`, `warnings`, or `location`",
+                    "unsupported #[provide(...)]; use `#[provide]` or `#[provide(ref = Type)]`",
                 )
             })?;
-            match argument.to_string().as_str() {
-                "notes" => Ok(Some(Provide::Notes)),
-                "warnings" => Ok(Some(Provide::Warnings)),
-                "location" => Ok(Some(Provide::Location)),
-                _ => Err(syn::Error::new_spanned(
-                    argument,
-                    "unsupported #[provide(...)] argument; expected `notes`, `warnings`, or `location`",
-                )),
-            }
+            Ok(Some(ProvideTarget::Explicit(Box::new(parsed.target))))
         }
         Meta::NameValue(_) => Err(syn::Error::new_spanned(
             attribute,
-            "unsupported #[provide = ...]; use `#[provide]`, `#[provide(notes)]`, `#[provide(warnings)]`, or `#[provide(location)]`",
+            "unsupported #[provide = ...]; use `#[provide]` or `#[provide(ref = Type)]`",
         )),
     }
 }

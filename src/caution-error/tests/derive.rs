@@ -480,14 +480,13 @@ mod dterror_typed {
 #[derive(Debug, thiserror::Error, ProviderError)]
 #[error("quota exceeded")]
 struct QuotaError {
-    #[provide(notes)]
+    #[provide(ref = [Note])]
     notes: Vec<Note>,
 
-    #[provide(warnings)]
+    #[provide(ref = [Warning])]
     warnings: Vec<Warning>,
 
-    #[provide(location)]
-    #[location]
+    #[provide(ref = caution_error::Location)]
     location: &'static std::panic::Location<'static>,
 }
 
@@ -519,7 +518,7 @@ fn notes_warnings_and_location_are_provided() {
 enum Guided {
     #[error("denied")]
     Denied {
-        #[provide(notes)]
+        #[provide(ref = [Note])]
         notes: Vec<Note>,
     },
 }
@@ -545,8 +544,7 @@ enum MixedProvision {
     },
     #[error("b")]
     B {
-        #[provide(location)]
-        #[location]
+        #[provide(ref = caution_error::Location)]
         location: &'static std::panic::Location<'static>,
         #[source]
         source: std::io::Error,
@@ -568,6 +566,6 @@ fn variant_without_provision_then_variant_with_provision() {
     };
     assert!(
         caution_error::location(&err).is_none(),
-        "no #[provide(location)] attribute"
+        "the variant does not provide a location"
     );
 }

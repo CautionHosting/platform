@@ -350,7 +350,7 @@ fn error_response(status: StatusCode, error: &dyn caution_error::ProviderError) 
 #[error("failed to list the deployments of app {app_id}")]
 pub(crate) struct ListDeploymentsError {
     app_id: Uuid,
-    #[provide(location)]
+    #[provide(ref = caution_error::Location)]
     #[location]
     location: Location,
     #[source]
@@ -401,7 +401,7 @@ pub(crate) enum GetDeploymentInAppError {
     Load {
         app_id: Uuid,
         deployment_id: Uuid,
-        #[provide(location)]
+        #[provide(ref = caution_error::Location)]
         #[location]
         location: Location,
         #[source]
@@ -459,7 +459,7 @@ pub(crate) enum GetDeploymentError {
     #[error("failed to read deployment {deployment_id}")]
     Load {
         deployment_id: Uuid,
-        #[provide(location)]
+        #[provide(ref = caution_error::Location)]
         #[location]
         location: Location,
         #[source]

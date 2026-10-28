@@ -125,7 +125,8 @@ pub fn report(error: &dyn ProviderError) -> ErrorReport {
 
 /// Returns the client-facing location an error provides, when it provides one.
 ///
-/// A `#[provide(location)]` field is exposed by `#[derive(ProviderError)]`.
+/// A field marked `#[provide(ref = Location)]` is exposed by
+/// `#[derive(ProviderError)]`.
 #[must_use]
 pub fn location(error: &dyn ProviderError) -> Option<&Location> {
     request_ref::<Location>(error)
