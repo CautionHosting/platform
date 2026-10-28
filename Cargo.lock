@@ -1818,6 +1818,20 @@ dependencies = [
 [[package]]
 name = "caution-error"
 version = "0.1.0"
+dependencies = [
+ "caution-error-derive",
+ "dterror 0.3.0",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "caution-error-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "cbc"

@@ -13,6 +13,7 @@ members = [
     "src/environment-heuristics",
     "src/caution-config", 
     "src/caution-error",
+    "src/caution-error-derive",
     "src/caution-admin",
     "src/hcl-patcher",
     "src/drift-detector",

@@ -29,6 +29,29 @@
 //! field to `&dyn ProviderError`; [`request_ref_in_chain`] and
 //! [`request_value_in_chain`] then walk the whole source chain.
 //!
+//! # Derive
+//!
+//! `#[derive(ProviderError)]` writes the `provide` impl. Only fields marked
+//! `#[provide]` are exposed, each with `provide_ref`, so nothing is cloned. The
+//! derive does not touch `std::error::Error`, so it composes with `thiserror`
+//! and therefore with `dterror`:
+//!
+//! ```rust
+//! use caution_error::{ProviderError, request_ref};
+//!
+//! #[derive(Debug, thiserror::Error, ProviderError)]
+//! #[error("upstream returned {status}")]
+//! struct UpstreamError {
+//!     #[provide]
+//!     request_id: String,
+//!     status: u16,
+//! }
+//!
+//! let err = UpstreamError { request_id: "req-7".into(), status: 503 };
+//! assert_eq!(request_ref::<String>(&err).map(String::as_str), Some("req-7"));
+//! assert!(request_ref::<u16>(&err).is_none(), "only #[provide] fields are exposed");
+//! ```
+//!
 //! # Example
 //!
 //! ```rust
@@ -72,3 +95,11 @@ pub use error::ProviderError;
 pub use request::{
     Request, request_ref, request_ref_in_chain, request_value, request_value_in_chain,
 };
+
+/// Derives [`ProviderError`] for a struct or enum.
+///
+/// Emits only the `ProviderError` implementation. Fields marked `#[provide]`
+/// are exposed with `provide_ref`; nothing else is provided and no value is
+/// cloned. The derive never implements `std::error::Error`, so it composes with
+/// `thiserror` and `dterror`.
+pub use caution_error_derive::ProviderError;

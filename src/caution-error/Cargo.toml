@@ -8,3 +8,8 @@ edition = "2024"
 description = "Stable generic member access for errors: a std::error::Error trait with a provider API that does not require nightly."
 
 [dependencies]
+caution-error-derive = { path = "../caution-error-derive", version = "0.1.0" }
+
+[dev-dependencies]
+dterror.workspace = true
+thiserror.workspace = true
