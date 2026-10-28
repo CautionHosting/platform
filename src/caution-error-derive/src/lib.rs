@@ -19,17 +19,15 @@ use syn::{
 
 /// Derives [`caution_error::ProviderError`] for a struct or enum.
 ///
-/// A field is provided only when it carries `#[provide]`, and always by
-/// reference with `provide_ref`, so nothing is cloned.
+/// A field is provided only when it carries `#[provide]`:
 ///
-/// - `#[provide]` exposes the field's own declared type:
-///   `provide_ref::<FieldType>(&self.field)`.
-/// - `#[provide(ref = T)]` exposes a reference to `T` instead:
-///   `provide_ref::<T>(&self.field)`. The field is deref-coerced to `&T`, so a
-///   `Vec<Note>` field with `ref = [Note]` provides `&[Note]`, and a
-///   `&'static std::panic::Location<'static>` field with
-///   `ref = caution_error::Location` provides `&Location`. This names the type
-///   explicitly, so it also works when the field is spelled with an alias.
+/// - `#[provide]` provides the field's **value** (`provide_value`), keyed by the
+///   field's declared type. The field must be `Copy` and `'static`.
+/// - `#[provide(ref = T)]` provides a **reference** to `T` (`provide_ref`). The
+///   field is deref-coerced to `&T`, so a `Vec<Note>` field with `ref = [Note]`
+///   provides `&[Note]`, and a reference field with `ref = X` provides `&X`. Use
+///   this form for a non-`Copy` field such as `String` or `Vec<_>`, or to name a
+///   target type that differs from the field's.
 ///
 /// A field marked `#[source]` (or `#[from]`) wires `provider_source`
 /// automatically. The source's type is not required to implement the trait: the
@@ -50,17 +48,20 @@ use syn::{
 /// #[derive(Debug, thiserror::Error, dterror::CtxError, caution_error::ProviderError)]
 /// #[error("upstream returned {status}")]
 /// struct UpstreamError {
-///     #[provide]
+///     #[provide(ref = String)]
 ///     request_id: String,
 ///     #[provide(ref = [caution_error::Note])]
 ///     notes: Vec<caution_error::Note>,
 ///     #[provide(ref = [caution_error::Warning])]
 ///     warnings: Vec<caution_error::Warning>,
-///     #[provide(ref = caution_error::Location)]
+///     // `Location` is `Copy`, so its value (the reference) is provided directly.
+///     #[provide]
 ///     #[location]
 ///     location: dterror::Location,
 ///     #[source]
 ///     cause: SomeTypedError,
+///     // `u16` is `Copy`.
+///     #[provide]
 ///     status: u16,
 /// }
 /// ```
@@ -72,12 +73,12 @@ pub fn derive_provider_error(input: TokenStream) -> TokenStream {
         .into()
 }
 
-/// The type a `#[provide]` field is exposed as.
-enum ProvideTarget {
-    /// The field's own declared type.
-    FieldType,
-    /// The type named by `#[provide(ref = T)]`.
-    Explicit(Box<Type>),
+/// How a `#[provide]` field is exposed.
+enum Provide {
+    /// The field's value, by `provide_value`, keyed by the field's type.
+    Value,
+    /// A reference to the named type, by `provide_ref`, deref-coercing the field.
+    Ref(Box<Type>),
 }
 
 /// The parsed contents of `#[provide(ref = Type)]`.
@@ -136,11 +137,12 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
 fn struct_provide_body(fields: &Fields) -> syn::Result<TokenStream2> {
     let mut body = TokenStream2::new();
     for (position, field) in fields.iter().enumerate() {
-        let Some(target) = provide_target(field)? else {
+        let Some(provide) = provide_kind(field)? else {
             continue;
         };
         let reference = field_reference(field, position);
-        body.extend(provide_statement(&target, &field.ty, reference));
+        let value = field_value(field, position);
+        body.extend(provide_statement(&provide, reference, value));
     }
     Ok(body)
 }
@@ -160,11 +162,11 @@ fn enum_provide_body(data: &DataEnum) -> syn::Result<TokenStream2> {
                 let mut bindings = Vec::new();
                 let mut stmts = TokenStream2::new();
                 for field in &named.named {
-                    let Some(target) = provide_target(field)? else {
+                    let Some(provide) = provide_kind(field)? else {
                         continue;
                     };
                     let ident = named_field_ident(field);
-                    stmts.extend(provide_statement(&target, &field.ty, quote!(#ident)));
+                    stmts.extend(provide_statement(&provide, quote!(#ident), quote!(*#ident)));
                     bindings.push(quote!(#ident));
                 }
                 quote! { Self::#variant_ident { #(#bindings,)* .. } => { #stmts } }
@@ -173,12 +175,16 @@ fn enum_provide_body(data: &DataEnum) -> syn::Result<TokenStream2> {
                 let mut patterns = Vec::new();
                 let mut stmts = TokenStream2::new();
                 for (position, field) in unnamed.unnamed.iter().enumerate() {
-                    let Some(target) = provide_target(field)? else {
+                    let Some(provide) = provide_kind(field)? else {
                         patterns.push(quote!(_));
                         continue;
                     };
                     let binding = format_ident!("__provide_{}", position);
-                    stmts.extend(provide_statement(&target, &field.ty, quote!(#binding)));
+                    stmts.extend(provide_statement(
+                        &provide,
+                        quote!(#binding),
+                        quote!(*#binding),
+                    ));
                     patterns.push(quote!(#binding));
                 }
                 quote! { Self::#variant_ident(#(#patterns),*) => { #stmts } }
@@ -247,21 +253,21 @@ fn enum_provider_source(data: &DataEnum) -> Option<TokenStream2> {
     Some(quote! { match self { #arms } })
 }
 
-/// Builds one `provide_ref` statement for a field.
+/// Builds one statement for a provided field.
 ///
-/// `reference` is a reference to the field. Its type may differ from the target
-/// (`&Vec<Note>` for `[Note]`, `&&Location` for `Location`); the compiler
-/// deref-coerces it at this call site.
+/// `reference` is `&field` (struct) or the match binding (enum); `value` is the
+/// field itself. A `ref = T` statement passes `reference`, which the compiler
+/// deref-coerces to `&T`. A value statement moves out of `reference` (so the
+/// field must be `Copy`).
 fn provide_statement(
-    target: &ProvideTarget,
-    field_type: &Type,
+    provide: &Provide,
     reference: TokenStream2,
+    value: TokenStream2,
 ) -> TokenStream2 {
-    let target: &Type = match target {
-        ProvideTarget::FieldType => field_type,
-        ProvideTarget::Explicit(target) => target,
-    };
-    quote! { request.provide_ref::<#target>(#reference); }
+    match provide {
+        Provide::Value => quote! { request.provide_value(#value); },
+        Provide::Ref(target) => quote! { request.provide_ref::<#target>(#reference); },
+    }
 }
 
 /// Builds the `provider_source` expression for a source field.
@@ -324,6 +330,17 @@ fn field_reference(field: &Field, position: usize) -> TokenStream2 {
     }
 }
 
+/// Returns the `self.<field>` value for a struct field.
+fn field_value(field: &Field, position: usize) -> TokenStream2 {
+    match &field.ident {
+        Some(ident) => quote!(self.#ident),
+        None => {
+            let index = Index::from(position);
+            quote!(self.#index)
+        }
+    }
+}
+
 /// Returns the identifier of a named field.
 fn named_field_ident(field: &Field) -> &syn::Ident {
     field
@@ -333,7 +350,7 @@ fn named_field_ident(field: &Field) -> &syn::Ident {
 }
 
 /// Returns how a field is provided, when it is.
-fn provide_target(field: &Field) -> syn::Result<Option<ProvideTarget>> {
+fn provide_kind(field: &Field) -> syn::Result<Option<Provide>> {
     let Some(attribute) = field
         .attrs
         .iter()
@@ -343,8 +360,8 @@ fn provide_target(field: &Field) -> syn::Result<Option<ProvideTarget>> {
     };
 
     match &attribute.meta {
-        Meta::Path(_) => Ok(Some(ProvideTarget::FieldType)),
-        Meta::List(list) if list.tokens.is_empty() => Ok(Some(ProvideTarget::FieldType)),
+        Meta::Path(_) => Ok(Some(Provide::Value)),
+        Meta::List(list) if list.tokens.is_empty() => Ok(Some(Provide::Value)),
         Meta::List(list) => {
             let parsed: RefProvide = list.parse_args().map_err(|_| {
                 syn::Error::new_spanned(
@@ -352,7 +369,7 @@ fn provide_target(field: &Field) -> syn::Result<Option<ProvideTarget>> {
                     "unsupported #[provide(...)]; use `#[provide]` or `#[provide(ref = Type)]`",
                 )
             })?;
-            Ok(Some(ProvideTarget::Explicit(Box::new(parsed.target))))
+            Ok(Some(Provide::Ref(Box::new(parsed.target))))
         }
         Meta::NameValue(_) => Err(syn::Error::new_spanned(
             attribute,

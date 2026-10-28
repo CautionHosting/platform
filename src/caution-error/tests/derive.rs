@@ -14,7 +14,7 @@ use std::fmt;
 #[derive(Debug, thiserror::Error, ProviderError)]
 #[error("upstream returned {status}")]
 struct Upstream {
-    #[provide]
+    #[provide(ref = String)]
     request_id: String,
     status: u16,
 }
@@ -48,7 +48,7 @@ fn skips_unmarked_fields() {
 enum Failure {
     #[error("missing {name}")]
     Missing {
-        #[provide]
+        #[provide(ref = String)]
         name: String,
         #[provide]
         key: u32,
@@ -57,7 +57,7 @@ enum Failure {
     #[error("timeout after {0} ms")]
     Timeout(u64),
     #[error("tuple")]
-    Tuple(#[provide] String, u16),
+    Tuple(#[provide(ref = String)] String, u16),
 }
 
 #[test]
@@ -72,7 +72,7 @@ fn enum_named_variant_provides_marked_fields() {
         request_ref::<String>(&err).map(String::as_str),
         Some("region")
     );
-    assert_eq!(request_ref::<u32>(&err), Some(&3));
+    assert_eq!(request_value::<u32>(&err), Some(3));
     assert!(
         request_ref::<Option<String>>(&err).is_none(),
         "cause is not marked"
@@ -104,7 +104,7 @@ fn enum_tuple_variant_provides_marked_position() {
 #[derive(Debug, thiserror::Error, dterror::CtxError, ProviderError)]
 #[error("could not read config '{path}' [{location}]")]
 struct ConfigError {
-    #[provide]
+    #[provide(ref = String)]
     path: String,
 
     #[location]
@@ -136,7 +136,7 @@ fn composes_with_dterror_and_thiserror() {
 #[derive(Debug, thiserror::Error, ProviderError)]
 #[error("no such device")]
 struct Inner {
-    #[provide]
+    #[provide(ref = String)]
     device: String,
 }
 
@@ -395,7 +395,7 @@ mod dterror_typed {
     #[derive(Debug, thiserror::Error, dterror::CtxError, ProviderError)]
     #[error("no such device '{device}'")]
     struct TypedInner {
-        #[provide]
+        #[provide(ref = String)]
         device: String,
     }
 
@@ -486,7 +486,7 @@ struct QuotaError {
     #[provide(ref = [Warning])]
     warnings: Vec<Warning>,
 
-    #[provide(ref = caution_error::Location)]
+    #[provide]
     location: &'static std::panic::Location<'static>,
 }
 
@@ -544,7 +544,7 @@ enum MixedProvision {
     },
     #[error("b")]
     B {
-        #[provide(ref = caution_error::Location)]
+        #[provide]
         location: &'static std::panic::Location<'static>,
         #[source]
         source: std::io::Error,

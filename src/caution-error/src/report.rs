@@ -44,13 +44,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ProviderError, request_ref};
-
-/// The client-facing location type carried by an error.
-///
-/// This matches `dterror::Location` (`&'static std::panic::Location<'static>`).
-/// Errors expose it through the provider API; use [`location`] to read it.
-pub type Location = std::panic::Location<'static>;
+use crate::{ProviderError, request_ref, request_value};
 
 /// A piece of guidance that helps a client resolve an error.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,13 +117,13 @@ pub fn report(error: &dyn ProviderError) -> ErrorReport {
     ErrorReport::from_error(error)
 }
 
-/// Returns the client-facing location an error provides, when it provides one.
+/// Returns the call site an error provides, when it provides one.
 ///
-/// A field marked `#[provide(ref = Location)]` is exposed by
-/// `#[derive(ProviderError)]`.
+/// A field marked `#[provide]` (`dterror::Location` is `Copy`) is stored by
+/// value, so this returns the `'static` reference itself.
 #[must_use]
-pub fn location(error: &dyn ProviderError) -> Option<&Location> {
-    request_ref::<Location>(error)
+pub fn location(error: &dyn ProviderError) -> Option<&'static std::panic::Location<'static>> {
+    request_value::<&'static std::panic::Location<'static>>(error)
 }
 
 /// Bounds a pathological source chain. Real chains are a few links deep.
@@ -175,7 +169,7 @@ fn slice_copy<T: Clone>(slice: Option<&[T]>) -> Vec<T> {
 #[cfg(test)]
 mod tests {
     use super::{ErrorReport, Note, Warning};
-    use crate::{ProviderError, Request, request_ref};
+    use crate::{ProviderError, Request};
 
     #[derive(Debug)]
     struct Root {
@@ -305,12 +299,11 @@ mod tests {
 
         impl ProviderError for Located {
             fn provide<'a>(&'a self, request: &mut Request<'a>) {
-                request.provide_ref::<super::Location>(site());
+                request.provide_value(site());
             }
         }
 
         let located = super::location(&Located).expect("location provided");
         assert!(located.file().ends_with("report.rs"));
-        assert!(request_ref::<super::Location>(&Located).is_some());
     }
 }

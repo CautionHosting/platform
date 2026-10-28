@@ -32,8 +32,9 @@
 //! # Derive
 //!
 //! `#[derive(ProviderError)]` writes the `provide` impl. Only fields marked
-//! `#[provide]` are exposed, each with `provide_ref`, so nothing is cloned. The
-//! derive does not touch `std::error::Error`, so it composes with `thiserror`
+//! `#[provide]` are exposed: plain `#[provide]` provides the field's value (the
+//! field must be `Copy`), and `#[provide(ref = T)]` provides a reference to `T`.
+//! The derive does not touch `std::error::Error`, so it composes with `thiserror`
 //! and therefore with `dterror`:
 //!
 //! ```rust
@@ -42,7 +43,7 @@
 //! #[derive(Debug, thiserror::Error, ProviderError)]
 //! #[error("upstream returned {status}")]
 //! struct UpstreamError {
-//!     #[provide]
+//!     #[provide(ref = String)]
 //!     request_id: String,
 //!     status: u16,
 //! }
@@ -71,7 +72,7 @@
 //! #[derive(Debug, thiserror::Error, ProviderError)]
 //! #[error("no such device")]
 //! struct Inner {
-//!     #[provide]
+//!     #[provide(ref = String)]
 //!     device: String,
 //! }
 //!
@@ -123,15 +124,15 @@ mod request;
 pub mod __private;
 
 pub use error::ProviderError;
-pub use report::{ErrorReport, ErrorResponse, Location, Note, Warning, location, report};
+pub use report::{ErrorReport, ErrorResponse, Note, Warning, location, report};
 pub use request::{
     Request, request_ref, request_ref_in_chain, request_value, request_value_in_chain,
 };
 
 /// Derives [`ProviderError`] for a struct or enum.
 ///
-/// Emits only the `ProviderError` implementation. Fields marked `#[provide]`
-/// are exposed with `provide_ref`; nothing else is provided and no value is
-/// cloned. The derive never implements `std::error::Error`, so it composes with
-/// `thiserror` and `dterror`.
+/// Emits only the `ProviderError` implementation. Fields marked `#[provide]` are
+/// exposed (by value, or as a reference with `#[provide(ref = T)]`); nothing else
+/// is provided. The derive never implements `std::error::Error`, so it composes
+/// with `thiserror` and `dterror`.
 pub use caution_error_derive::ProviderError;
