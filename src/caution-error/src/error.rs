@@ -60,7 +60,9 @@ use crate::Request;
 ///
 /// Do not forward [`provide`](ProviderError::provide) to a wrapped source error.
 /// The source chain already surfaces it, and forwarding duplicates its context
-/// under two errors in the report. Expose only the context owned by this error.
+/// under two errors in the report. To make a typed source's context reachable,
+/// wire [`provider_source`](ProviderError::provider_source) instead; the
+/// `request_*_in_chain` helpers then walk the chain explicitly.
 pub trait ProviderError: std::error::Error + Send + Sync + 'static {
     /// Attempts to satisfy `request` with context owned by this error.
     ///
@@ -70,6 +72,72 @@ pub trait ProviderError: std::error::Error + Send + Sync + 'static {
     /// first error in a chain to answer wins.
     #[allow(unused_variables, reason = "the default deliberately offers nothing")]
     fn provide<'a>(&'a self, request: &mut Request<'a>) {}
+
+    /// Returns this error's source as a [`ProviderError`], when the source is
+    /// itself one.
+    ///
+    /// [`std::error::Error::source`] erases the source to
+    /// `&dyn std::error::Error`, and a `dyn` standard error has no provider API
+    /// on stable. An error whose source is a typed [`ProviderError`] widens the
+    /// field here, so the chain helpers
+    /// ([`request_ref_in_chain`](crate::request_ref_in_chain) and
+    /// [`request_value_in_chain`](crate::request_value_in_chain)) can reach the
+    /// source's context without the consumer naming the source's type.
+    ///
+    /// The default is `None`. The returned trait object is bounded by
+    /// `'static`, which always holds because [`ProviderError`] requires it.
+    ///
+    /// ```rust
+    /// use caution_error::{ProviderError, Request, request_value_in_chain};
+    /// use std::fmt;
+    ///
+    /// #[derive(Debug)]
+    /// struct Source {
+    ///     depth: u8,
+    /// }
+    ///
+    /// #[derive(Debug)]
+    /// struct Outer {
+    ///     source: Source,
+    /// }
+    ///
+    /// impl fmt::Display for Source {
+    ///     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    ///         f.write_str("source failed")
+    ///     }
+    /// }
+    ///
+    /// impl fmt::Display for Outer {
+    ///     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    ///         f.write_str("outer failed")
+    ///     }
+    /// }
+    ///
+    /// impl std::error::Error for Source {}
+    /// impl std::error::Error for Outer {
+    ///     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+    ///         Some(&self.source)
+    ///     }
+    /// }
+    ///
+    /// impl ProviderError for Source {
+    ///     fn provide<'a>(&'a self, request: &mut Request<'a>) {
+    ///         request.provide_value::<u8>(self.depth);
+    ///     }
+    /// }
+    ///
+    /// impl ProviderError for Outer {
+    ///     fn provider_source(&self) -> Option<&(dyn ProviderError + 'static)> {
+    ///         Some(&self.source)
+    ///     }
+    /// }
+    ///
+    /// let outer = Outer { source: Source { depth: 3 } };
+    /// assert_eq!(request_value_in_chain::<u8>(&outer), Some(3));
+    /// ```
+    fn provider_source(&self) -> Option<&(dyn ProviderError + 'static)> {
+        None
+    }
 }
 
 #[cfg(test)]

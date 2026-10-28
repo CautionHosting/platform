@@ -208,6 +208,93 @@ where
     request_by_type_tag::<'a, tags::Ref<tags::MaybeSizedValue<T>>>(err)
 }
 
+/// Requests a value of type `T` from `err` and every error reachable through
+/// [`ProviderError::provider_source`].
+///
+/// The first error in the chain that holds `T` wins. Unlike [`request_value`],
+/// which asks only its argument, this crosses into typed sources, so context
+/// owned by a wrapped error is reachable without the consumer naming the
+/// wrapper.
+///
+/// ```rust
+/// use caution_error::{
+///     ProviderError, Request, request_value, request_value_in_chain,
+/// };
+///
+/// #[derive(Debug)]
+/// struct Source {
+///     depth: u8,
+/// }
+///
+/// #[derive(Debug)]
+/// struct Outer {
+///     source: Source,
+/// }
+///
+/// impl std::fmt::Display for Source {
+///     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+///         f.write_str("source failed")
+///     }
+/// }
+///
+/// impl std::fmt::Display for Outer {
+///     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+///         f.write_str("outer failed")
+///     }
+/// }
+///
+/// impl std::error::Error for Source {}
+/// impl std::error::Error for Outer {}
+///
+/// impl ProviderError for Source {
+///     fn provide<'a>(&'a self, request: &mut Request<'a>) {
+///         request.provide_value::<u8>(self.depth);
+///     }
+/// }
+///
+/// impl ProviderError for Outer {
+///     fn provider_source(&self) -> Option<&(dyn ProviderError + 'static)> {
+///         Some(&self.source)
+///     }
+/// }
+///
+/// let outer = Outer { source: Source { depth: 2 } };
+/// assert_eq!(request_value::<u8>(&outer), None, "the root does not hold a u8");
+/// assert_eq!(request_value_in_chain::<u8>(&outer), Some(2));
+/// ```
+pub fn request_value_in_chain<T>(err: &dyn ProviderError) -> Option<T>
+where
+    T: 'static,
+{
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(value) = request_value::<T>(error) {
+            return Some(value);
+        }
+        current = error.provider_source();
+    }
+    None
+}
+
+/// Requests a reference of type `T` from `err` and every error reachable through
+/// [`ProviderError::provider_source`].
+///
+/// The first error in the chain that holds a `T` wins. Unlike [`request_ref`],
+/// which asks only its argument, this crosses into typed sources.
+pub fn request_ref_in_chain<T>(err: &dyn ProviderError) -> Option<&T>
+where
+    T: 'static + ?Sized,
+{
+    let mut current = Some(err);
+    while let Some(error) = current {
+        if let Some(value) = request_ref::<T>(error) {
+            return Some(value);
+        }
+        current = error.provider_source();
+    }
+    None
+}
+
 /// Requests a value by type tag from the error.
 fn request_by_type_tag<'a, I>(err: &'a (impl ProviderError + ?Sized)) -> Option<I::Reified>
 where
@@ -344,7 +431,9 @@ impl<'a> Tagged<dyn Erased<'a> + 'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Request, request_ref, request_value};
+    use super::{
+        Request, request_ref, request_ref_in_chain, request_value, request_value_in_chain,
+    };
     use crate::ProviderError;
     use std::fmt;
 
@@ -392,6 +481,10 @@ mod tests {
             request.provide_ref::<Backtrace>(&self.backtrace);
             request.provide_ref::<str>(&self.name);
             request.provide_value::<u16>(self.code);
+        }
+
+        fn provider_source(&self) -> Option<&(dyn ProviderError + 'static)> {
+            Some(&self.source)
         }
     }
 
@@ -442,6 +535,14 @@ mod tests {
         let source = std::error::Error::source(&err).expect("source present");
         assert_eq!(source.to_string(), "source error");
         assert_eq!(request_value::<u8>(&err), None, "source is not forwarded");
+    }
+
+    #[test]
+    fn chain_reaches_typed_source() {
+        let err = error();
+        assert_eq!(request_value::<u8>(&err), None, "the root holds no u8");
+        assert_eq!(request_value_in_chain::<u8>(&err), Some(2));
+        assert_eq!(request_ref_in_chain::<str>(&err), Some("edge"));
     }
 
     #[test]

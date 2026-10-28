@@ -24,6 +24,11 @@
 //! [`ProviderError::provide`] hook with an empty default, so a type only implements
 //! it when it has context to offer.
 //!
+//! [`request_ref`] and [`request_value`] ask one error. When context lives in a
+//! typed source field, wire [`ProviderError::provider_source`] to widen that
+//! field to `&dyn ProviderError`; [`request_ref_in_chain`] and
+//! [`request_value_in_chain`] then walk the whole source chain.
+//!
 //! # Example
 //!
 //! ```rust
@@ -64,4 +69,6 @@ mod error;
 mod request;
 
 pub use error::ProviderError;
-pub use request::{Request, request_ref, request_value};
+pub use request::{
+    Request, request_ref, request_ref_in_chain, request_value, request_value_in_chain,
+};
