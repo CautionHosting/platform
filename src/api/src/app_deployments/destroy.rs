@@ -534,6 +534,16 @@ pub(super) async fn complete_destroy_with(
     Ok(())
 }
 
+/// Guidance when the target still holds the app address: how to release it.
+static HOLDS_ADDRESS_NOTES: &[Note] = &[
+    Note::from_static(
+        "Switch another deployment to live to move the address off this one (`caution apps switch <deployment>`), then retry the destroy.",
+    ),
+    Note::from_static(
+        "If the app is being repaired, reconciliation rebinds the address on its next pass; retrying in a minute also works.",
+    ),
+];
+
 #[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum DestroyError {
     #[error("Deployment not found.")]
@@ -553,6 +563,8 @@ pub(crate) enum DestroyError {
         "This deployment currently holds the app address; wait for reconciliation or switch first."
     )]
     HoldsAddress {
+        #[provide(ref = [caution_error::Note])]
+        notes: &'static [Note],
         #[provide]
         location: Location,
     },
@@ -760,6 +772,7 @@ pub(super) async fn begin_destroy(
             .with_context(Ctx::aws())?;
         if holder.as_deref() == Some(instance_id) {
             return Err(DestroyError::HoldsAddress {
+                notes: HOLDS_ADDRESS_NOTES,
                 location: std::panic::Location::caller(),
             });
         }
@@ -1007,6 +1020,27 @@ mod tests {
                 .notes
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn holds_address_offers_both_routes() {
+        use axum::response::IntoResponse;
+
+        let error = DestroyError::HoldsAddress {
+            notes: HOLDS_ADDRESS_NOTES,
+            location: std::panic::Location::caller(),
+        };
+
+        let report = caution_error::ErrorReport::from_error(&error);
+        assert_eq!(report.errors[0].notes.len(), 2);
+        assert!(report.errors[0].notes[0].0.contains("caution apps switch"));
+        assert!(report.errors[0].notes[1].0.contains("reconciliation"));
+        assert!(
+            caution_error::location(&error).is_some(),
+            "location provided"
+        );
+
+        assert_eq!(error.into_response().status(), StatusCode::CONFLICT);
     }
 
     #[test]
