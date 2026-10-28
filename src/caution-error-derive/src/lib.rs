@@ -11,7 +11,10 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{Data, DataEnum, DeriveInput, Field, Fields, Index, parse_macro_input};
+use syn::{
+    Data, DataEnum, DeriveInput, Field, Fields, GenericArgument, Index, PathArguments, Type,
+    parse_macro_input,
+};
 
 /// Derives [`caution_error::ProviderError`] for a struct or enum.
 ///
@@ -25,6 +28,11 @@ use syn::{Data, DataEnum, DeriveInput, Field, Fields, Index, parse_macro_input};
 /// implement the trait: the generated code probes it at compile time, returning
 /// `Some` for a [`caution_error::ProviderError`] and `None` otherwise, so a
 /// typed source and a `Box<dyn Error + Send + Sync>` source both build.
+///
+/// `Option<T>` sources are unwrapped first: `None` yields `None`, and `Some` is
+/// probed like any other source. `Box<T>`, `Box<dyn ProviderError>`, and
+/// `&'static dyn ProviderError` sources are reachable, because those types are
+/// themselves [`caution_error::ProviderError`].
 ///
 /// The derive does not implement `std::error::Error`; the type must get that
 /// from `thiserror` (or an equivalent), which is how `dterror` errors are
@@ -108,7 +116,7 @@ fn struct_provider_source(fields: &Fields) -> Option<TokenStream2> {
         .enumerate()
         .find(|(_, field)| is_source(field))?;
     let access = field_access(field, position);
-    Some(probe(access))
+    Some(source_probe(access, &field.ty))
 }
 
 /// Builds the `provide` body for an enum.
@@ -173,7 +181,7 @@ fn enum_provider_source(data: &DataEnum) -> Option<TokenStream2> {
             Fields::Named(named) => match named.named.iter().find(|f| is_source(f)) {
                 Some(field) => {
                     let ident = named_field_ident(field);
-                    let body = probe(quote!(#ident));
+                    let body = source_probe(quote!(#ident), &field.ty);
                     quote! { Self::#variant_ident { #ident, .. } => #body }
                 }
                 None => quote! { Self::#variant_ident { .. } => None },
@@ -185,14 +193,14 @@ fn enum_provider_source(data: &DataEnum) -> Option<TokenStream2> {
                     if is_source(field) && binding.is_none() {
                         let ident = format_ident!("__source_{}", position);
                         patterns.push(quote!(#ident));
-                        binding = Some(ident);
+                        binding = Some((ident, &field.ty));
                     } else {
                         patterns.push(quote!(_));
                     }
                 }
                 match binding {
-                    Some(ident) => {
-                        let body = probe(quote!(#ident));
+                    Some((ident, ty)) => {
+                        let body = source_probe(quote!(#ident), ty);
                         quote! { Self::#variant_ident(#(#patterns),*) => #body }
                     }
                     None => quote! { Self::#variant_ident(#(#patterns),*) => None },
@@ -203,6 +211,43 @@ fn enum_provider_source(data: &DataEnum) -> Option<TokenStream2> {
     }
 
     Some(quote! { match self { #arms } })
+}
+
+/// Builds the `provider_source` expression for a source field.
+///
+/// An `Option<T>` source is unwrapped first, so `None` yields `None` and `Some`
+/// is probed like any other source. Every other type is probed directly.
+fn source_probe(access: TokenStream2, ty: &Type) -> TokenStream2 {
+    match option_inner(ty) {
+        Some(_) => {
+            let inner = probe(quote!(__provider_source));
+            quote! {
+                (#access).as_ref().and_then(|__provider_source| #inner)
+            }
+        }
+        None => probe(access),
+    }
+}
+
+/// Returns the `T` of an `Option<T>` type, spelled with any `Option` path or
+/// fully qualified.
+fn option_inner(ty: &Type) -> Option<&Type> {
+    let Type::Path(path) = ty else {
+        return None;
+    };
+    let segment = path.path.segments.last()?;
+    if segment.ident != "Option" {
+        return None;
+    }
+    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    let mut types = arguments.args.iter().filter_map(|argument| match argument {
+        GenericArgument::Type(ty) => Some(ty),
+        _ => None,
+    });
+    let inner = types.next()?;
+    types.next().is_none().then_some(inner)
 }
 
 /// Builds an expression that resolves a reference to an already-borrowed field

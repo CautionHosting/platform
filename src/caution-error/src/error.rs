@@ -140,6 +140,55 @@ pub trait ProviderError: std::error::Error + Send + Sync + 'static {
     }
 }
 
+/// Forwards through an owning [`Box`], so a boxed error is itself a
+/// [`ProviderError`] and can be a `#[source]` field.
+impl<T: ProviderError> ProviderError for Box<T> {
+    fn provide<'a>(&'a self, request: &mut Request<'a>) {
+        ProviderError::provide(&**self, request);
+    }
+
+    fn provider_source(&self) -> Option<&(dyn ProviderError + 'static)> {
+        ProviderError::provider_source(&**self)
+    }
+}
+
+/// Forwards through a shared reference. Only `'static` references qualify,
+/// because [`ProviderError`] requires `'static`; this covers a
+/// `&'static dyn ProviderError` source field.
+impl<T: ProviderError + ?Sized> ProviderError for &'static T {
+    fn provide<'a>(&'a self, request: &mut Request<'a>) {
+        ProviderError::provide(&**self, request);
+    }
+
+    fn provider_source(&self) -> Option<&(dyn ProviderError + 'static)> {
+        ProviderError::provider_source(&**self)
+    }
+}
+
+/// Implements [`std::error::Error`] for a boxed trait object.
+///
+/// The standard library implements `Error` for `Box<E>` only when `E` is
+/// `Sized`, so `Box<dyn ProviderError>` would otherwise not be an error and
+/// could not be a `#[source]` field. `Box` is `#[fundamental]`, so this impl is
+/// permitted even though `Error` and `Box` are foreign.
+impl std::error::Error for Box<dyn ProviderError> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        std::error::Error::source(&**self)
+    }
+}
+
+/// Forwards through a boxed trait object, complementing the `Sized` `Box<T>`
+/// impl above.
+impl ProviderError for Box<dyn ProviderError> {
+    fn provide<'a>(&'a self, request: &mut Request<'a>) {
+        ProviderError::provide(&**self, request);
+    }
+
+    fn provider_source(&self) -> Option<&(dyn ProviderError + 'static)> {
+        ProviderError::provider_source(&**self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ProviderError;
