@@ -384,3 +384,93 @@ fn unannotated_source_field_is_not_wired() {
     );
     assert!(request_ref_in_chain::<String>(&err).is_none());
 }
+
+/// dterror 0.4 typed sources, driven through `with_context`.
+mod dterror_typed {
+    use caution_error::{ProviderError, request_ref_in_chain};
+    use dterror::ResultExt;
+
+    #[derive(Debug, thiserror::Error, dterror::CtxError, ProviderError)]
+    #[error("no such device '{device}'")]
+    struct TypedInner {
+        #[provide]
+        device: String,
+    }
+
+    #[derive(Debug, thiserror::Error, dterror::CtxError, ProviderError)]
+    #[error("mount failed")]
+    struct TypedOuter {
+        #[source]
+        source: TypedInner,
+    }
+
+    #[test]
+    fn typed_source_is_chained() {
+        let inner: Result<(), TypedInner> = Err(TypedInner {
+            device: "nvme0".to_string(),
+        });
+        let err: TypedOuter = inner.with_context(TypedOuterCtx::new()).unwrap_err();
+
+        assert!(ProviderError::provider_source(&err).is_some());
+        assert_eq!(
+            request_ref_in_chain::<String>(&err).map(String::as_str),
+            Some("nvme0"),
+        );
+        assert!(std::error::Error::source(&err).is_some());
+    }
+
+    #[derive(Debug, thiserror::Error, dterror::CtxError, ProviderError)]
+    #[error("optional mount failed")]
+    struct OptionalOuter {
+        #[source]
+        source: Option<TypedInner>,
+    }
+
+    #[test]
+    fn optional_typed_source_is_chained() {
+        let err = OptionalOuter {
+            source: Some(TypedInner {
+                device: "sda1".to_string(),
+            }),
+        };
+
+        assert_eq!(
+            request_ref_in_chain::<String>(&err).map(String::as_str),
+            Some("sda1"),
+        );
+
+        let err = OptionalOuter { source: None };
+        assert!(ProviderError::provider_source(&err).is_none());
+    }
+
+    #[derive(Debug, thiserror::Error, dterror::CtxError, ProviderError)]
+    enum Mixed {
+        #[error("inner failed")]
+        Inner {
+            #[source]
+            source: TypedInner,
+        },
+        #[error("io failed")]
+        Io {
+            #[source]
+            source: std::io::Error,
+        },
+    }
+
+    #[test]
+    fn sum_typed_sources_chain_only_when_provider() {
+        let inner: Result<(), TypedInner> = Err(TypedInner {
+            device: "loop0".to_string(),
+        });
+        let err: Mixed = inner.with_context(MixedCtx::inner()).unwrap_err();
+
+        assert_eq!(
+            request_ref_in_chain::<String>(&err).map(String::as_str),
+            Some("loop0"),
+        );
+
+        let io: Result<(), std::io::Error> = Err(std::io::Error::other("boom"));
+        let err: Mixed = io.with_context(MixedCtx::io()).unwrap_err();
+        assert!(ProviderError::provider_source(&err).is_none());
+    }
+}
