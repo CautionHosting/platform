@@ -16,6 +16,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use caution_error::{Note, Warning};
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -69,6 +70,55 @@ pub(crate) enum SwitchRejection {
     Stale,
 }
 
+impl SwitchRejection {
+    /// The client-facing message; also the `Display` text.
+    fn message(&self) -> &'static str {
+        match self {
+            Self::NotAcknowledged => "Acknowledge that the deployment was verified and tested.",
+            Self::AppUnavailable => {
+                "The app cannot switch while it is suspended or being destroyed."
+            }
+            Self::NotRunning => "Only a Running deployment can become live.",
+            Self::TlsNotAcknowledged => {
+                "This deployment obtains its TLS certificate only after switching; acknowledge that TLS verification is pending."
+            }
+            Self::Stale => "The live deployment changed; review and confirm again.",
+        }
+    }
+}
+
+impl std::fmt::Display for SwitchRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+/// Actionable guidance for a rejection; empty when the message already says it.
+fn rejection_notes(rejection: &SwitchRejection) -> Vec<Note> {
+    match rejection {
+        SwitchRejection::NotAcknowledged => vec![Note::from(
+            "Re-send the switch with `acknowledged_verification: true` after verifying and testing the target deployment.",
+        )],
+        SwitchRejection::AppUnavailable
+        | SwitchRejection::NotRunning
+        | SwitchRejection::TlsNotAcknowledged
+        | SwitchRejection::Stale => Vec::new(),
+    }
+}
+
+/// Cautions for a rejection; empty when there is nothing beyond the message.
+fn rejection_warnings(rejection: &SwitchRejection) -> Vec<Warning> {
+    match rejection {
+        SwitchRejection::TlsNotAcknowledged => vec![Warning::from(
+            "Existing connections may close and HTTPS can be unavailable until the certificate is issued.",
+        )],
+        SwitchRejection::NotAcknowledged
+        | SwitchRejection::AppUnavailable
+        | SwitchRejection::NotRunning
+        | SwitchRejection::Stale => Vec::new(),
+    }
+}
+
 pub(crate) fn switch_precondition(view: &SwitchView) -> Result<SwitchPlan, SwitchRejection> {
     if !view.acknowledged_verification {
         return Err(SwitchRejection::NotAcknowledged);
@@ -109,53 +159,77 @@ pub(crate) fn expected_holder(
     live_instance_id
 }
 
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum SwitchError {
-    #[error("deployment not found [{location}]")]
-    NotFound { location: Location },
-    #[error("switch rejected: {rejection:?} [{location}]")]
+    #[error("Deployment not found.")]
+    NotFound {
+        #[provide]
+        location: Location,
+    },
+    #[error("{rejection}")]
     Rejected {
         rejection: SwitchRejection,
+        #[provide(ref = [caution_error::Note])]
+        notes: Vec<Note>,
+        #[provide(ref = [caution_error::Warning])]
+        warnings: Vec<Warning>,
+        #[provide]
         location: Location,
     },
-    #[error("target failed the platform health check [{location}]")]
+    #[error("The deployment failed the platform health check.")]
     Unhealthy {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("Elastic IP is unassigned or held by an unexpected instance [{location}]")]
-    AssociationMismatch { location: Location },
-    #[error("AWS error while switching [{location}]")]
-    Aws {
-        #[location]
-        location: Location,
-        #[source]
-        source: BoxError,
-    },
-    #[error("AWS error inspecting the target before the move [{location}]")]
-    Inspect {
-        #[location]
-        location: Location,
-        #[source]
-        source: BoxError,
-    },
-    #[error("database error while switching [{location}]")]
-    Database {
-        #[location]
-        location: Location,
-        #[source]
-        source: BoxError,
-    },
-    #[error("switch request carries no valid passkey signature [{location}]")]
-    Unsigned { location: Location },
     #[error(
-        "Elastic IP is unassigned or held by an unexpected instance before the move [{location}]"
+        "The app address is unassigned or held by an unexpected instance; switching is blocked until it is repaired."
     )]
-    HolderMismatch { location: Location },
-    #[error("the switch task failed [{location}]")]
+    AssociationMismatch {
+        #[provide]
+        location: Location,
+    },
+    #[error("Switch failed.")]
+    Aws {
+        #[provide]
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("Switch failed.")]
+    Inspect {
+        #[provide]
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("Switch failed.")]
+    Database {
+        #[provide]
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("This operation requires signature verification")]
+    Unsigned {
+        #[provide]
+        location: Location,
+    },
+    #[error(
+        "The app address is unassigned or held by an unexpected instance; switching is blocked until it is repaired."
+    )]
+    HolderMismatch {
+        #[provide]
+        location: Location,
+    },
+    #[error("Switch failed.")]
     Task {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -164,65 +238,37 @@ pub(crate) enum SwitchError {
 }
 
 impl SwitchError {
-    fn response_parts(&self) -> (StatusCode, &'static str) {
+    fn status(&self) -> StatusCode {
         match self {
-            Self::NotFound { .. } => (StatusCode::NOT_FOUND, "Deployment not found."),
+            Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::Rejected {
-                rejection: SwitchRejection::NotAcknowledged,
+                rejection: SwitchRejection::NotAcknowledged | SwitchRejection::TlsNotAcknowledged,
                 ..
-            } => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "Acknowledge that the deployment was verified and tested.",
-            ),
-            Self::Rejected {
-                rejection: SwitchRejection::AppUnavailable,
-                ..
-            } => (
-                StatusCode::CONFLICT,
-                "The app cannot switch while it is suspended or being destroyed.",
-            ),
-            Self::Rejected {
-                rejection: SwitchRejection::NotRunning,
-                ..
-            } => (
-                StatusCode::CONFLICT,
-                "Only a Running deployment can become live.",
-            ),
-            Self::Rejected {
-                rejection: SwitchRejection::TlsNotAcknowledged,
-                ..
-            } => (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "This deployment obtains its TLS certificate only after switching; acknowledge that TLS verification is pending.",
-            ),
-            Self::Rejected {
-                rejection: SwitchRejection::Stale,
-                ..
-            } => (
-                StatusCode::CONFLICT,
-                "The live deployment changed; review and confirm again.",
-            ),
-            Self::Unhealthy { .. } => (
-                StatusCode::CONFLICT,
-                "The deployment failed the platform health check.",
-            ),
-            Self::AssociationMismatch { .. } | Self::HolderMismatch { .. } => (
-                StatusCode::CONFLICT,
-                "The app address is unassigned or held by an unexpected instance; switching is blocked until it is repaired.",
-            ),
-            Self::Aws { .. } | Self::Inspect { .. } | Self::Database { .. } => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "Switch failed.")
+            } => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::Rejected { .. }
+            | Self::Unhealthy { .. }
+            | Self::AssociationMismatch { .. }
+            | Self::HolderMismatch { .. } => StatusCode::CONFLICT,
+            Self::Unsigned { .. } => StatusCode::FORBIDDEN,
+            Self::Aws { .. } | Self::Inspect { .. } | Self::Database { .. } | Self::Task { .. } => {
+                StatusCode::INTERNAL_SERVER_ERROR
             }
-            Self::Unsigned { .. } => (
-                StatusCode::FORBIDDEN,
-                "This operation requires signature verification",
-            ),
-            Self::Task { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "Switch failed."),
         }
     }
 
     pub(crate) fn client_message(&self) -> &'static str {
-        self.response_parts().1
+        match self {
+            Self::Rejected { rejection, .. } => rejection.message(),
+            Self::NotFound { .. } => "Deployment not found.",
+            Self::Unhealthy { .. } => "The deployment failed the platform health check.",
+            Self::AssociationMismatch { .. } | Self::HolderMismatch { .. } => {
+                "The app address is unassigned or held by an unexpected instance; switching is blocked until it is repaired."
+            }
+            Self::Aws { .. } | Self::Inspect { .. } | Self::Database { .. } | Self::Task { .. } => {
+                "Switch failed."
+            }
+            Self::Unsigned { .. } => "This operation requires signature verification",
+        }
     }
 
     /// Refused before the address could move. `AssociationMismatch` is not:
@@ -246,9 +292,10 @@ impl SwitchError {
 
 impl IntoResponse for SwitchError {
     fn into_response(self) -> Response {
-        let (status, message) = self.response_parts();
-        tracing::warn!(error = %self, "deployment switch failed");
-        (status, Json(serde_json::json!({ "error": message }))).into_response()
+        let status = self.status();
+        tracing::warn!(error = ?self, "deployment switch failed");
+        let report = caution_error::ErrorReport::from_error(&self);
+        sentry_middleware::error_response_provider(status, Json(report), self)
     }
 }
 
@@ -302,9 +349,15 @@ fn check(
         target_tls_after_switch: row.target_tls_after_switch,
         acknowledged_tls_pending: request.acknowledged_tls_pending,
     })
-    .map_err(|rejection| SwitchError::Rejected {
-        rejection,
-        location: std::panic::Location::caller(),
+    .map_err(|rejection| {
+        let notes = rejection_notes(&rejection);
+        let warnings = rejection_warnings(&rejection);
+        SwitchError::Rejected {
+            rejection,
+            notes,
+            warnings,
+            location: std::panic::Location::caller(),
+        }
     })?;
     let (Some(region), Some(instance_id)) = (row.region.clone(), row.target_instance_id.clone())
     else {
@@ -448,6 +501,8 @@ async fn execute(
         else {
             return Err(SwitchError::Rejected {
                 rejection: SwitchRejection::NotRunning,
+                notes: rejection_notes(&SwitchRejection::NotRunning),
+                warnings: rejection_warnings(&SwitchRejection::NotRunning),
                 location: std::panic::Location::caller(),
             });
         };
@@ -698,9 +753,15 @@ mod tests {
     fn moved_nothing_is_true_only_before_the_address_moves() {
         let location = std::panic::Location::caller();
         let source = || -> BoxError { "boom".into() };
-        let rejected = |rejection| SwitchError::Rejected {
-            rejection,
-            location,
+        let rejected = |rejection| {
+            let notes = rejection_notes(&rejection);
+            let warnings = rejection_warnings(&rejection);
+            SwitchError::Rejected {
+                rejection,
+                notes,
+                warnings,
+                location,
+            }
         };
         for error in [
             SwitchError::NotFound { location },
@@ -760,6 +821,8 @@ mod tests {
     fn the_stale_confirmation_message_is_pinned() {
         let stale = SwitchError::Rejected {
             rejection: SwitchRejection::Stale,
+            notes: rejection_notes(&SwitchRejection::Stale),
+            warnings: rejection_warnings(&SwitchRejection::Stale),
             location: std::panic::Location::caller(),
         };
         // `frontend/src/utils/deployments.js` matches this exact text to detect
@@ -768,6 +831,123 @@ mod tests {
             stale.client_message(),
             "The live deployment changed; review and confirm again."
         );
+        assert_eq!(
+            caution_error::ErrorReport::from_error(&stale).error,
+            "The live deployment changed; review and confirm again."
+        );
+    }
+
+    #[test]
+    fn rejection_guidance_is_reported() {
+        use axum::response::IntoResponse;
+        use sentry_middleware::SentryReportable;
+
+        let location = std::panic::Location::caller();
+        let rejected = |rejection| {
+            let notes = rejection_notes(&rejection);
+            let warnings = rejection_warnings(&rejection);
+            SwitchError::Rejected {
+                rejection,
+                notes,
+                warnings,
+                location,
+            }
+        };
+
+        let not_ack = rejected(SwitchRejection::NotAcknowledged);
+        let report = caution_error::ErrorReport::from_error(&not_ack);
+        assert_eq!(
+            report.error,
+            "Acknowledge that the deployment was verified and tested."
+        );
+        assert_eq!(report.errors[0].notes.len(), 1);
+        assert!(
+            report.errors[0].notes[0]
+                .0
+                .contains("acknowledged_verification")
+        );
+        assert!(report.errors[0].warnings.is_empty());
+        assert!(
+            caution_error::location(&not_ack).is_some(),
+            "location provided"
+        );
+        assert!(
+            !report.errors[0].error.contains(".rs:"),
+            "no call site leaks"
+        );
+
+        let response = not_ack.into_response();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(response.extensions().get::<SentryReportable>().is_some());
+
+        let tls = rejected(SwitchRejection::TlsNotAcknowledged);
+        let report = caution_error::ErrorReport::from_error(&tls);
+        assert!(report.errors[0].notes.is_empty());
+        assert_eq!(report.errors[0].warnings.len(), 1);
+        assert!(
+            report.errors[0].warnings[0]
+                .0
+                .contains("HTTPS can be unavailable")
+        );
+        assert_eq!(
+            tls.into_response().status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+
+        let stale = rejected(SwitchRejection::Stale);
+        let report = caution_error::ErrorReport::from_error(&stale);
+        assert!(report.errors[0].notes.is_empty());
+        assert!(report.errors[0].warnings.is_empty());
+        assert_eq!(stale.into_response().status(), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn display_matches_the_client_message() {
+        let location = std::panic::Location::caller();
+        let source = || -> BoxError { "boom".into() };
+        let rejected = |rejection| {
+            let notes = rejection_notes(&rejection);
+            let warnings = rejection_warnings(&rejection);
+            SwitchError::Rejected {
+                rejection,
+                notes,
+                warnings,
+                location,
+            }
+        };
+        for error in [
+            SwitchError::NotFound { location },
+            rejected(SwitchRejection::NotAcknowledged),
+            rejected(SwitchRejection::AppUnavailable),
+            rejected(SwitchRejection::NotRunning),
+            rejected(SwitchRejection::TlsNotAcknowledged),
+            rejected(SwitchRejection::Stale),
+            SwitchError::Unhealthy {
+                location,
+                source: source(),
+            },
+            SwitchError::AssociationMismatch { location },
+            SwitchError::Aws {
+                location,
+                source: source(),
+            },
+            SwitchError::Inspect {
+                location,
+                source: source(),
+            },
+            SwitchError::Database {
+                location,
+                source: source(),
+            },
+            SwitchError::Unsigned { location },
+            SwitchError::HolderMismatch { location },
+            SwitchError::Task {
+                location,
+                source: source(),
+            },
+        ] {
+            assert_eq!(error.to_string(), error.client_message(), "{error:?}");
+        }
     }
 
     /// Serves each scripted holder in turn, then repeats the last.
