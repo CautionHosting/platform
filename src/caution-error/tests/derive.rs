@@ -6,7 +6,7 @@
 //! These live outside the library so the generated `caution_error::...` paths
 //! resolve exactly as they do for a downstream crate.
 
-use caution_error::{ProviderError, request_ref, request_value};
+use caution_error::{ProviderError, request_ref, request_ref_in_chain, request_value};
 
 #[derive(Debug, thiserror::Error, ProviderError)]
 #[error("upstream returned {status}")]
@@ -128,4 +128,82 @@ fn composes_with_dterror_and_thiserror() {
         Some("permission denied".to_string()),
         "thiserror still owns the std source",
     );
+}
+
+#[derive(Debug, thiserror::Error, ProviderError)]
+#[error("no such device")]
+struct Inner {
+    #[provide]
+    device: String,
+}
+
+#[derive(Debug, thiserror::Error, ProviderError)]
+#[error("read failed")]
+struct ReadFailed {
+    #[source]
+    cause: Inner,
+}
+
+#[test]
+fn typed_source_is_wired_automatically() {
+    let err = ReadFailed {
+        cause: Inner {
+            device: "nvme0".to_string(),
+        },
+    };
+
+    assert!(
+        request_ref::<String>(&err).is_none(),
+        "root holds no device"
+    );
+    assert_eq!(
+        request_ref_in_chain::<String>(&err).map(String::as_str),
+        Some("nvme0"),
+    );
+    assert!(ProviderError::provider_source(&err).is_some());
+}
+
+/// A source of a type that is not a `ProviderError` must still compile; the
+/// probe returns `None` for it.
+#[derive(Debug, thiserror::Error, ProviderError)]
+#[error("io failed")]
+struct IoFailed {
+    #[source]
+    cause: std::io::Error,
+}
+
+#[test]
+fn non_provider_source_builds_and_wires_nothing() {
+    let err = IoFailed {
+        cause: std::io::Error::other("boom"),
+    };
+
+    assert!(ProviderError::provider_source(&err).is_none());
+    assert!(request_ref_in_chain::<String>(&err).is_none());
+}
+
+#[derive(Debug, thiserror::Error, ProviderError)]
+enum Wrapped {
+    #[error("wrapped")]
+    Inner {
+        #[source]
+        cause: Inner,
+    },
+    #[error("bare")]
+    Bare,
+}
+
+#[test]
+fn enum_variant_source_is_wired() {
+    let err = Wrapped::Inner {
+        cause: Inner {
+            device: "disk1".to_string(),
+        },
+    };
+
+    assert_eq!(
+        request_ref_in_chain::<String>(&err).map(String::as_str),
+        Some("disk1"),
+    );
+    assert!(ProviderError::provider_source(&Wrapped::Bare).is_none());
 }

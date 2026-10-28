@@ -52,6 +52,33 @@
 //! assert!(request_ref::<u16>(&err).is_none(), "only #[provide] fields are exposed");
 //! ```
 //!
+//! A `#[source]` (or `#[from]`, or a field named `source`) wires
+//! [`ProviderError::provider_source`] automatically. The source type does not
+//! have to implement the trait: the derive probes it at compile time, so a typed
+//! source is chained and anything else (for example a `Box<dyn Error + Send +
+//! Sync>`) safely yields `None`:
+//!
+//! ```rust
+//! use caution_error::{ProviderError, Request, request_ref_in_chain};
+//!
+//! #[derive(Debug, thiserror::Error, ProviderError)]
+//! #[error("read failed")]
+//! struct ReadError {
+//!     #[source]
+//!     cause: Inner,
+//! }
+//!
+//! #[derive(Debug, thiserror::Error, ProviderError)]
+//! #[error("no such device")]
+//! struct Inner {
+//!     #[provide]
+//!     device: String,
+//! }
+//!
+//! let err = ReadError { cause: Inner { device: "nvme0".into() } };
+//! assert_eq!(request_ref_in_chain::<String>(&err).map(String::as_str), Some("nvme0"));
+//! ```
+//!
 //! # Example
 //!
 //! ```rust
@@ -90,6 +117,9 @@
 
 mod error;
 mod request;
+
+#[doc(hidden)]
+pub mod __private;
 
 pub use error::ProviderError;
 pub use request::{

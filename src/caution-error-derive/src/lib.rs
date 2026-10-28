@@ -20,10 +20,15 @@ use syn::{Data, DataEnum, DeriveInput, Field, Fields, Index, parse_macro_input};
 /// and never cloned; a consumer asks for it with
 /// `request_ref::<FieldType>(error)`.
 ///
+/// A `#[source]` (or `#[from]`, or a field named `source`) wires
+/// `provider_source` automatically. The source's type is not required to
+/// implement the trait: the generated code probes it at compile time, returning
+/// `Some` for a [`caution_error::ProviderError`] and `None` otherwise, so a
+/// typed source and a `Box<dyn Error + Send + Sync>` source both build.
+///
 /// The derive does not implement `std::error::Error`; the type must get that
 /// from `thiserror` (or an equivalent), which is how `dterror` errors are
-/// built. It also does not implement `provider_source`; wire that by hand when
-/// a typed source's context should be reachable through the chain helpers.
+/// built.
 ///
 /// ```ignore
 /// #[derive(Debug, thiserror::Error, caution_error::ProviderError)]
@@ -31,10 +36,12 @@ use syn::{Data, DataEnum, DeriveInput, Field, Fields, Index, parse_macro_input};
 /// struct UpstreamError {
 ///     #[provide]
 ///     request_id: String,
+///     #[source]
+///     cause: SomeTypedError,
 ///     status: u16,
 /// }
 /// ```
-#[proc_macro_derive(ProviderError, attributes(provide))]
+#[proc_macro_derive(ProviderError, attributes(provide, source, from))]
 pub fn derive_provider_error(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     expand(&input)
@@ -47,9 +54,12 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
-    let body = match &input.data {
-        Data::Struct(data) => struct_body(&data.fields),
-        Data::Enum(data) => enum_body(data)?,
+    let (provide_body, provider_source) = match &input.data {
+        Data::Struct(data) => (
+            struct_provide_body(&data.fields),
+            struct_provider_source(&data.fields),
+        ),
+        Data::Enum(data) => (enum_provide_body(data), enum_provider_source(data)),
         Data::Union(_) => {
             return Err(syn::Error::new_spanned(
                 name,
@@ -58,39 +68,53 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
     };
 
+    let provider_source_method = provider_source.map(|body| {
+        quote! {
+            fn provider_source(&self) -> Option<&(dyn caution_error::ProviderError + 'static)> {
+                #body
+            }
+        }
+    });
+
     Ok(quote! {
         impl #impl_generics caution_error::ProviderError for #name #ty_generics #where_clause {
             fn provide<'a>(&'a self, request: &mut caution_error::Request<'a>) {
-                #body
+                #provide_body
             }
+
+            #provider_source_method
         }
     })
 }
 
 /// Builds the `provide` body for a struct.
-fn struct_body(fields: &Fields) -> TokenStream2 {
+fn struct_provide_body(fields: &Fields) -> TokenStream2 {
     let mut body = TokenStream2::new();
     for (position, field) in fields.iter().enumerate() {
         if !is_provided(field) {
             continue;
         }
         let ty = &field.ty;
-        let access = match &field.ident {
-            Some(ident) => quote!(&self.#ident),
-            None => {
-                let index = Index::from(position);
-                quote!(&self.#index)
-            }
-        };
+        let access = field_access(field, position);
         body.extend(quote! { request.provide_ref::<#ty>(#access); });
     }
     body
 }
 
+/// Builds the `provider_source` body for a struct, when it has a source field.
+fn struct_provider_source(fields: &Fields) -> Option<TokenStream2> {
+    let (position, field) = fields
+        .iter()
+        .enumerate()
+        .find(|(_, field)| is_source(field))?;
+    let access = field_access(field, position);
+    Some(probe(access))
+}
+
 /// Builds the `provide` body for an enum.
-fn enum_body(data: &DataEnum) -> syn::Result<TokenStream2> {
+fn enum_provide_body(data: &DataEnum) -> TokenStream2 {
     if !data.variants.iter().any(variant_provides) {
-        return Ok(TokenStream2::new());
+        return TokenStream2::new();
     }
 
     let mut arms = TokenStream2::new();
@@ -105,10 +129,7 @@ fn enum_body(data: &DataEnum) -> syn::Result<TokenStream2> {
                     if !is_provided(field) {
                         continue;
                     }
-                    let ident = field
-                        .ident
-                        .as_ref()
-                        .expect("named field always has an identifier");
+                    let ident = named_field_ident(field);
                     let ty = &field.ty;
                     stmts.extend(quote! { request.provide_ref::<#ty>(#ident); });
                     bindings.push(quote!(#ident));
@@ -134,7 +155,85 @@ fn enum_body(data: &DataEnum) -> syn::Result<TokenStream2> {
         arms.extend(arm);
     }
 
-    Ok(quote! { match self { #arms } })
+    quote! { match self { #arms } }
+}
+
+/// Builds the `provider_source` body for an enum, when any variant has a source
+/// field.
+fn enum_provider_source(data: &DataEnum) -> Option<TokenStream2> {
+    if !data.variants.iter().any(variant_has_source) {
+        return None;
+    }
+
+    let mut arms = TokenStream2::new();
+    for variant in &data.variants {
+        let variant_ident = &variant.ident;
+        let arm = match &variant.fields {
+            Fields::Unit => quote! { Self::#variant_ident => None },
+            Fields::Named(named) => match named.named.iter().find(|f| is_source(f)) {
+                Some(field) => {
+                    let ident = named_field_ident(field);
+                    let body = probe(quote!(#ident));
+                    quote! { Self::#variant_ident { #ident, .. } => #body }
+                }
+                None => quote! { Self::#variant_ident { .. } => None },
+            },
+            Fields::Unnamed(unnamed) => {
+                let mut patterns = Vec::new();
+                let mut binding = None;
+                for (position, field) in unnamed.unnamed.iter().enumerate() {
+                    if is_source(field) && binding.is_none() {
+                        let ident = format_ident!("__source_{}", position);
+                        patterns.push(quote!(#ident));
+                        binding = Some(ident);
+                    } else {
+                        patterns.push(quote!(_));
+                    }
+                }
+                match binding {
+                    Some(ident) => {
+                        let body = probe(quote!(#ident));
+                        quote! { Self::#variant_ident(#(#patterns),*) => #body }
+                    }
+                    None => quote! { Self::#variant_ident(#(#patterns),*) => None },
+                }
+            }
+        };
+        arms.extend(arm);
+    }
+
+    Some(quote! { match self { #arms } })
+}
+
+/// Builds an expression that resolves a reference to an already-borrowed field
+/// to `Option<&dyn ProviderError>` through the compile-time probe.
+fn probe(reference: TokenStream2) -> TokenStream2 {
+    quote! {
+        {
+            #[allow(unused_imports, reason = "only used by the fallback path")]
+            use caution_error::__private::ProviderSourceFallback as _;
+            caution_error::__private::ProviderSource(#reference).as_provider_source()
+        }
+    }
+}
+
+/// Returns the `&self.<field>` accessor for a struct field.
+fn field_access(field: &Field, position: usize) -> TokenStream2 {
+    match &field.ident {
+        Some(ident) => quote!(&self.#ident),
+        None => {
+            let index = Index::from(position);
+            quote!(&self.#index)
+        }
+    }
+}
+
+/// Returns the identifier of a named field.
+fn named_field_ident(field: &Field) -> &syn::Ident {
+    field
+        .ident
+        .as_ref()
+        .expect("named field always has an identifier")
 }
 
 /// Returns true when a variant holds at least one `#[provide]` field.
@@ -142,10 +241,28 @@ fn variant_provides(variant: &syn::Variant) -> bool {
     variant.fields.iter().any(is_provided)
 }
 
+/// Returns true when a variant holds at least one source field.
+fn variant_has_source(variant: &syn::Variant) -> bool {
+    variant.fields.iter().any(is_source)
+}
+
 /// Returns true when a field carries `#[provide]`.
 fn is_provided(field: &Field) -> bool {
+    has_attribute(field, "provide")
+}
+
+/// Returns true when a field is the error source: `#[source]`, `#[from]`, or a
+/// field that `thiserror` treats as the source because it is named `source`.
+fn is_source(field: &Field) -> bool {
+    has_attribute(field, "source")
+        || has_attribute(field, "from")
+        || field.ident.as_ref().is_some_and(|ident| ident == "source")
+}
+
+/// Returns true when a field carries the named attribute.
+fn has_attribute(field: &Field, name: &str) -> bool {
     field
         .attrs
         .iter()
-        .any(|attribute| attribute.path().is_ident("provide"))
+        .any(|attribute| attribute.path().is_ident(name))
 }
