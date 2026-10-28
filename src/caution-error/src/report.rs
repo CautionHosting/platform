@@ -30,7 +30,7 @@
 //!     }
 //! }
 //!
-//! let error = Busy { notes: vec![Note("retry in a few seconds".to_string())] };
+//! let error = Busy { notes: vec![Note::from("retry in a few seconds")] };
 //! let report = ErrorReport::from_error(&error);
 //! assert_eq!(report.error, "the device is busy");
 //! assert_eq!(report.errors[0].notes[0].0, "retry in a few seconds");
@@ -40,6 +40,7 @@
 //! repeats the first chain entry so older clients that read a flat `error`
 //! string keep working while others read `errors`.
 
+use std::borrow::Cow;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -47,9 +48,22 @@ use serde::{Deserialize, Serialize};
 use crate::{ProviderError, request_ref, request_value};
 
 /// A piece of guidance that helps a client resolve an error.
+///
+/// Holds a [`Cow`] so a fixed message can borrow a `'static` literal and a
+/// computed message can own its string. [`From<&'static str>`](From) and
+/// `From<String>` let a `dterror` context field be built from a literal:
+/// `Ctx::new("retry shortly")`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct Note(pub String);
+pub struct Note(pub Cow<'static, str>);
+
+impl Note {
+    /// Builds a note from anything that becomes a `Cow<'static, str>`.
+    #[must_use]
+    pub fn new(message: impl Into<Cow<'static, str>>) -> Self {
+        Self(message.into())
+    }
+}
 
 impl fmt::Display for Note {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -57,14 +71,60 @@ impl fmt::Display for Note {
     }
 }
 
+impl From<&'static str> for Note {
+    fn from(message: &'static str) -> Self {
+        Self(Cow::Borrowed(message))
+    }
+}
+
+impl From<String> for Note {
+    fn from(message: String) -> Self {
+        Self(Cow::Owned(message))
+    }
+}
+
+impl From<Cow<'static, str>> for Note {
+    fn from(message: Cow<'static, str>) -> Self {
+        Self(message)
+    }
+}
+
 /// A caution that a client may want to take into account.
+///
+/// Holds a [`Cow`] for the same reason as [`Note`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct Warning(pub String);
+pub struct Warning(pub Cow<'static, str>);
+
+impl Warning {
+    /// Builds a warning from anything that becomes a `Cow<'static, str>`.
+    #[must_use]
+    pub fn new(message: impl Into<Cow<'static, str>>) -> Self {
+        Self(message.into())
+    }
+}
 
 impl fmt::Display for Warning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+impl From<&'static str> for Warning {
+    fn from(message: &'static str) -> Self {
+        Self(Cow::Borrowed(message))
+    }
+}
+
+impl From<String> for Warning {
+    fn from(message: String) -> Self {
+        Self(Cow::Owned(message))
+    }
+}
+
+impl From<Cow<'static, str>> for Warning {
+    fn from(message: Cow<'static, str>) -> Self {
+        Self(message)
     }
 }
 
@@ -124,6 +184,41 @@ pub fn report(error: &dyn ProviderError) -> ErrorReport {
 #[must_use]
 pub fn location(error: &dyn ProviderError) -> Option<&'static std::panic::Location<'static>> {
     request_value::<&'static std::panic::Location<'static>>(error)
+}
+
+/// Collects the [`Note`]s an error provides.
+///
+/// An error may provide a slice (`provide_ref::<[Note]>`, as the derive does for
+/// a `Vec<Note>` field), a single value (`provide_value(Note)`), or a single
+/// reference (`provide_ref::<Note>`, as the derive does for `#[provide(ref = Note)]`).
+/// A slice wins, then a value, then a reference.
+#[must_use]
+pub fn notes(error: &dyn ProviderError) -> Vec<Note> {
+    if let Some(slice) = request_ref::<[Note]>(error) {
+        return slice.to_vec();
+    }
+    if let Some(note) = request_value::<Note>(error) {
+        return vec![note];
+    }
+    if let Some(note) = request_ref::<Note>(error) {
+        return vec![note.clone()];
+    }
+    Vec::new()
+}
+
+/// Collects the [`Warning`]s an error provides. See [`notes`] for the shapes.
+#[must_use]
+pub fn warnings(error: &dyn ProviderError) -> Vec<Warning> {
+    if let Some(slice) = request_ref::<[Warning]>(error) {
+        return slice.to_vec();
+    }
+    if let Some(warning) = request_value::<Warning>(error) {
+        return vec![warning];
+    }
+    if let Some(warning) = request_ref::<Warning>(error) {
+        return vec![warning.clone()];
+    }
+    Vec::new()
 }
 
 /// Bounds a pathological source chain. Real chains are a few links deep.
@@ -211,15 +306,10 @@ fn responses(root: &dyn ProviderError) -> Vec<ErrorResponse> {
     chain(root)
         .map(|node| ErrorResponse {
             error: node.error().to_string(),
-            notes: slice_copy(node.provider().and_then(|p| request_ref::<[Note]>(p))),
-            warnings: slice_copy(node.provider().and_then(|p| request_ref::<[Warning]>(p))),
+            notes: node.provider().map(notes).unwrap_or_default(),
+            warnings: node.provider().map(warnings).unwrap_or_default(),
         })
         .collect()
-}
-
-/// Copies a provided slice into an owned vector.
-fn slice_copy<T: Clone>(slice: Option<&[T]>) -> Vec<T> {
-    slice.map(<[T]>::to_vec).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -294,10 +384,10 @@ mod tests {
     #[test]
     fn report_covers_provider_and_boxed_links() {
         let error = Root {
-            notes: vec![Note("root note".to_string())],
-            warnings: vec![Warning("root warning".to_string())],
+            notes: vec![Note::from("root note")],
+            warnings: vec![Warning::from("root warning")],
             source: Inner {
-                notes: vec![Note("inner note".to_string())],
+                notes: vec![Note::from("inner note")],
             },
         };
 
@@ -324,8 +414,8 @@ mod tests {
             error: "boom".to_string(),
             errors: vec![super::ErrorResponse {
                 error: "boom".to_string(),
-                notes: vec![Note("do x".to_string())],
-                warnings: vec![Warning("careful".to_string())],
+                notes: vec![Note::from("do x")],
+                warnings: vec![Warning::from("careful")],
             }],
         };
 
@@ -361,5 +451,124 @@ mod tests {
 
         let located = super::location(&Located).expect("location provided");
         assert!(located.file().ends_with("report.rs"));
+    }
+
+    #[test]
+    fn note_and_warning_borrow_literals_and_own_strings() {
+        use std::borrow::Cow;
+
+        assert!(matches!(
+            Note::from("static"),
+            Note(Cow::Borrowed("static"))
+        ));
+        assert!(matches!(
+            Note::from(String::from("owned")),
+            Note(Cow::Owned(_))
+        ));
+        assert!(matches!(
+            Warning::from("static"),
+            Warning(Cow::Borrowed("static"))
+        ));
+        assert_eq!(Note::new("built").0, "built");
+    }
+
+    #[test]
+    fn notes_and_warnings_read_a_slice_or_a_single_value() {
+        use crate::{ProviderError, Request};
+
+        #[derive(Debug)]
+        struct WithSlice {
+            notes: Vec<Note>,
+            warnings: Vec<Warning>,
+        }
+
+        impl std::fmt::Display for WithSlice {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("with slice")
+            }
+        }
+
+        impl std::error::Error for WithSlice {}
+
+        impl ProviderError for WithSlice {
+            fn provide<'a>(&'a self, request: &mut Request<'a>) {
+                request.provide_ref::<[Note]>(&self.notes);
+                request.provide_ref::<[Warning]>(&self.warnings);
+            }
+        }
+
+        #[derive(Debug)]
+        struct WithSingle;
+
+        impl std::fmt::Display for WithSingle {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("with single")
+            }
+        }
+
+        impl std::error::Error for WithSingle {}
+
+        impl ProviderError for WithSingle {
+            fn provide<'a>(&'a self, request: &mut Request<'a>) {
+                request.provide_value(Note::from("single note"));
+                request.provide_value(Warning::from("single warning"));
+            }
+        }
+
+        let slice = WithSlice {
+            notes: vec![Note::from("one"), Note::from("two")],
+            warnings: vec![Warning::from("careful")],
+        };
+        assert_eq!(
+            super::notes(&slice),
+            vec![Note::from("one"), Note::from("two")]
+        );
+        assert_eq!(super::warnings(&slice), vec![Warning::from("careful")]);
+
+        assert_eq!(super::notes(&WithSingle), vec![Note::from("single note")]);
+        assert_eq!(
+            super::warnings(&WithSingle),
+            vec![Warning::from("single warning")]
+        );
+
+        #[derive(Debug)]
+        struct WithRef {
+            note: Note,
+        }
+
+        impl std::fmt::Display for WithRef {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("with ref")
+            }
+        }
+
+        impl std::error::Error for WithRef {}
+
+        impl ProviderError for WithRef {
+            fn provide<'a>(&'a self, request: &mut Request<'a>) {
+                request.provide_ref::<Note>(&self.note);
+            }
+        }
+
+        let reference = WithRef {
+            note: Note::from("ref note"),
+        };
+        assert_eq!(super::notes(&reference), vec![Note::from("ref note")]);
+    }
+
+    #[test]
+    fn report_round_trips_through_json() {
+        let report = ErrorReport {
+            error: "boom".to_string(),
+            errors: vec![super::ErrorResponse {
+                error: "boom".to_string(),
+                notes: vec![Note::from("do x")],
+                warnings: vec![Warning::from("careful")],
+            }],
+        };
+
+        let json = serde_json::to_string(&report).expect("serializes");
+        let back: ErrorReport = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(back, report);
     }
 }

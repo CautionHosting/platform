@@ -493,8 +493,8 @@ struct QuotaError {
 #[test]
 fn notes_warnings_and_location_are_provided() {
     let err = QuotaError {
-        notes: vec![Note("upgrade your plan".to_string())],
-        warnings: vec![Warning("this may take a while".to_string())],
+        notes: vec![Note::from("upgrade your plan")],
+        warnings: vec![Warning::from("this may take a while")],
         location: std::panic::Location::caller(),
     };
 
@@ -526,7 +526,7 @@ enum Guided {
 #[test]
 fn enum_variant_notes_are_provided() {
     let err = Guided::Denied {
-        notes: vec![Note("request access first".to_string())],
+        notes: vec![Note::from("request access first")],
     };
 
     assert_eq!(
