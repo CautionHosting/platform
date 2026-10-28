@@ -17,6 +17,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use caution_error::Note;
 use chrono::{DateTime, Utc};
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use sqlx::PgPool;
@@ -449,12 +450,18 @@ pub(crate) async fn get_in_app_handler(
     })
 }
 
+/// Guidance for an unknown deployment id: where to find the live ones.
+const DEPLOYMENT_IDS_NOTE: &str = "Run `caution apps get <app>` to list all of the app's deployment ids, then retry with a current one.";
+
 /// Failure modes for [`get_handler`].
 #[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum GetDeploymentError {
     #[error("deployment {deployment_id} not found")]
     NotFound {
         deployment_id: Uuid,
+        #[provide(ref)]
+        note: Note,
+        #[provide]
         location: Location,
     },
     #[error("failed to read deployment {deployment_id}")]
@@ -496,6 +503,7 @@ pub(crate) async fn get_handler(
         .map(Json)
         .ok_or_else(|| GetDeploymentError::NotFound {
             deployment_id,
+            note: Note::from(DEPLOYMENT_IDS_NOTE),
             location: std::panic::Location::caller(),
         })
 }
@@ -683,6 +691,7 @@ mod tests {
         let deployment_id = Uuid::new_v4();
         let err = GetDeploymentError::NotFound {
             deployment_id,
+            note: Note::from(DEPLOYMENT_IDS_NOTE),
             location: std::panic::Location::caller(),
         };
 
@@ -695,9 +704,13 @@ mod tests {
             !report.errors[0].error.contains(".rs:"),
             "no call site leaks"
         );
+        assert!(caution_error::location(&err).is_some(), "location provided");
+
+        assert_eq!(report.errors[0].notes.len(), 1);
+        assert!(report.errors[0].notes[0].0.contains("deployment ids"));
 
         let json = serde_json::to_value(&report).unwrap();
-        assert_eq!(json["errors"][0]["notes"].as_array().unwrap().len(), 0);
+        assert_eq!(json["errors"][0]["notes"][0], DEPLOYMENT_IDS_NOTE);
     }
 
     #[test]
