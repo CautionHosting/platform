@@ -8,6 +8,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use caution_error::Note;
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use serde::Serialize;
 use sqlx::PgPool;
@@ -302,14 +303,23 @@ pub async fn ensure_user_has_org(db: &PgPool, user_id: Uuid) -> Result<(), Ensur
     Ok(())
 }
 
-/// Failure modes for [`onboarding_middleware`].
-#[derive(Debug, thiserror::Error, CtxError)]
-pub enum OnboardingMiddlewareError {
-    #[error("onboarding required [{location}]")]
-    NotOnboarded { location: Location },
+/// Guidance for an un-onboarded user: what onboarding actually requires.
+const NOT_ONBOARDED_NOTE: &str = "Finish onboarding: verify your email and add a payment method (or redeem a beta code), then retry.";
 
-    #[error("internal error [{location}]")]
+/// Failure modes for [`onboarding_middleware`].
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
+pub enum OnboardingMiddlewareError {
+    #[error("payment required")]
+    NotOnboarded {
+        #[provide(ref)]
+        note: Note,
+        #[provide]
+        location: Location,
+    },
+
+    #[error("internal error")]
     Internal {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -319,15 +329,12 @@ pub enum OnboardingMiddlewareError {
 
 impl IntoResponse for OnboardingMiddlewareError {
     fn into_response(self) -> Response {
-        let (status, body) = match &self {
-            OnboardingMiddlewareError::NotOnboarded { .. } => {
-                (StatusCode::PAYMENT_REQUIRED, "payment required")
-            }
-            OnboardingMiddlewareError::Internal { .. } => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
-            }
+        let status = match &self {
+            Self::NotOnboarded { .. } => StatusCode::PAYMENT_REQUIRED,
+            Self::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        sentry_middleware::error_response(status, body, self)
+        let report = caution_error::ErrorReport::from_error(&self);
+        sentry_middleware::error_response_provider(status, Json(report), self)
     }
 }
 
@@ -345,6 +352,7 @@ pub async fn onboarding_middleware(
         && matches!(error, EnsureUserHasOrgError::NotOnboarded { .. })
     {
         return Err(OnboardingMiddlewareError::NotOnboarded {
+            note: Note::from(NOT_ONBOARDED_NOTE),
             location: std::panic::Location::caller(),
         });
     }
@@ -516,7 +524,7 @@ pub async fn internal_auth_middleware(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_auth_method;
+    use super::{NOT_ONBOARDED_NOTE, OnboardingMiddlewareError, parse_auth_method};
 
     #[test]
     fn only_known_auth_methods_are_accepted() {
@@ -525,6 +533,36 @@ mod tests {
         assert_eq!(parse_auth_method("ssh_signed"), Some("ssh_signed"));
         assert_eq!(parse_auth_method("admin"), None);
         assert_eq!(parse_auth_method(""), None);
+    }
+
+    #[test]
+    fn not_onboarded_reports_the_onboarding_steps() {
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use caution_error::Note;
+
+        let error = OnboardingMiddlewareError::NotOnboarded {
+            note: Note::from(NOT_ONBOARDED_NOTE),
+            location: std::panic::Location::caller(),
+        };
+
+        let report = caution_error::ErrorReport::from_error(&error);
+        assert_eq!(report.error, "payment required");
+        assert_eq!(report.errors[0].notes.len(), 1);
+        assert_eq!(report.errors[0].notes[0].0, NOT_ONBOARDED_NOTE);
+        assert!(
+            caution_error::location(&error).is_some(),
+            "location provided"
+        );
+
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        assert!(
+            response
+                .extensions()
+                .get::<sentry_middleware::SentryReportable>()
+                .is_some()
+        );
     }
 }
 
