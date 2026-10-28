@@ -6,19 +6,19 @@ use crate::Request;
 /// An error that also exposes context through the stable generic member access
 /// API.
 ///
-/// `StdError` is a plain [`std::error::Error`] with the platform's usual
+/// `ProviderError` is a plain [`std::error::Error`] with the platform's usual
 /// additional bounds, [`Send`], [`Sync`], and `'static`, plus a single
-/// [`provide`](StdError::provide) hook. Because the standard error trait is a
+/// [`provide`](ProviderError::provide) hook. Because the standard error trait is a
 /// supertrait, every method it already defines (`source`, `cause`,
 /// [`Display`](std::fmt::Display), [`Debug`](std::fmt::Debug)) stays available
-/// on `T: StdError` and on `dyn StdError`; this trait does not redeclare them.
+/// on `T: ProviderError` and on `dyn ProviderError`; this trait does not redeclare them.
 ///
-/// The default [`provide`](StdError::provide) implementation does not satisfy
+/// The default [`provide`](ProviderError::provide) implementation does not satisfy
 /// any request, so implementors only override it when they have context worth
 /// reporting:
 ///
 /// ```rust
-/// use caution_error::{request_ref, Request, StdError};
+/// use caution_error::{request_ref, Request, ProviderError};
 ///
 /// #[derive(Debug)]
 /// struct RetryAfter(std::time::Duration);
@@ -34,7 +34,7 @@ use crate::Request;
 ///
 /// impl std::error::Error for RateLimited {}
 ///
-/// impl StdError for RateLimited {
+/// impl ProviderError for RateLimited {
 ///     fn provide<'a>(&'a self, request: &mut Request<'a>) {
 ///         request.provide_value::<RetryAfter>(RetryAfter(
 ///             std::time::Duration::from_secs(30),
@@ -50,18 +50,18 @@ use crate::Request;
 /// # Why not a blanket implementation?
 ///
 /// A blanket
-/// `impl<T: std::error::Error + Send + Sync + 'static> StdError for T` would
-/// make the trait automatic, but it would also fix [`provide`](StdError::provide)
+/// `impl<T: std::error::Error + Send + Sync + 'static> ProviderError for T` would
+/// make the trait automatic, but it would also fix [`provide`](ProviderError::provide)
 /// for every error type and leave no way to override it. The provider API only
 /// has value when an implementor replaces the default, so types opt in with an
-/// explicit `impl StdError for MyError {}`.
+/// explicit `impl ProviderError for MyError {}`.
 ///
 /// # Delegation
 ///
-/// Do not forward [`provide`](StdError::provide) to a wrapped source error.
+/// Do not forward [`provide`](ProviderError::provide) to a wrapped source error.
 /// The source chain already surfaces it, and forwarding duplicates its context
 /// under two errors in the report. Expose only the context owned by this error.
-pub trait StdError: std::error::Error + Send + Sync + 'static {
+pub trait ProviderError: std::error::Error + Send + Sync + 'static {
     /// Attempts to satisfy `request` with context owned by this error.
     ///
     /// The default implementation satisfies nothing. Implementors call the
@@ -74,7 +74,7 @@ pub trait StdError: std::error::Error + Send + Sync + 'static {
 
 #[cfg(test)]
 mod tests {
-    use super::StdError;
+    use super::ProviderError;
     use crate::{Request, request_ref, request_value};
     use std::fmt;
 
@@ -107,13 +107,13 @@ mod tests {
 
     impl std::error::Error for Child {}
 
-    impl StdError for Parent {
+    impl ProviderError for Parent {
         fn provide<'a>(&'a self, request: &mut Request<'a>) {
             request.provide_value::<u32>(self.value);
         }
     }
 
-    impl StdError for Child {
+    impl ProviderError for Child {
         fn provide<'a>(&'a self, request: &mut Request<'a>) {
             request.provide_ref::<Parent>(&self.parent);
         }
@@ -129,7 +129,7 @@ mod tests {
             }
         }
         impl std::error::Error for Plain {}
-        impl StdError for Plain {}
+        impl ProviderError for Plain {}
 
         assert!(request_value::<u32>(&Plain).is_none());
         assert!(request_ref::<Marker>(&Plain).is_none());

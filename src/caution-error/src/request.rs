@@ -7,16 +7,16 @@
 //! The types and functions here mirror `core::error::{Request, request_ref,
 //! request_value}` and `core::any::*`. They are a byte-for-byte port of the
 //! standard-library implementation, with the single change that `provide` is
-//! reached through [`crate::StdError`] instead of the unstable
+//! reached through [`crate::ProviderError`] instead of the unstable
 //! `std::error::Error::provide`. See the crate root for the rationale.
 
 use std::any::TypeId;
 use std::fmt::{self, Debug, Formatter};
 
-use crate::StdError;
+use crate::ProviderError;
 
 /// A request for context of a specific type, passed to
-/// [`StdError::provide`](crate::StdError::provide).
+/// [`ProviderError::provide`](crate::ProviderError::provide).
 ///
 /// The consumer of an error creates a `Request` for a concrete type and asks
 /// the error to satisfy it with [`provide_value`](Request::provide_value) or
@@ -25,7 +25,7 @@ use crate::StdError;
 /// directly; they call [`request_value`] or [`request_ref`].
 ///
 /// `Request` is unsized. It is always used behind a reference, as the argument
-/// to [`StdError::provide`](crate::StdError::provide).
+/// to [`ProviderError::provide`](crate::ProviderError::provide).
 #[repr(transparent)]
 pub struct Request<'a>(Tagged<dyn Erased<'a> + 'a>);
 
@@ -137,7 +137,7 @@ impl<'a> Debug for Request<'a> {
 /// `'static`.
 ///
 /// ```rust
-/// use caution_error::{request_value, Request, StdError};
+/// use caution_error::{request_value, Request, ProviderError};
 ///
 /// struct ExitCode(u8);
 ///
@@ -152,7 +152,7 @@ impl<'a> Debug for Request<'a> {
 ///
 /// impl std::error::Error for Failed {}
 ///
-/// impl StdError for Failed {
+/// impl ProviderError for Failed {
 ///     fn provide<'a>(&'a self, request: &mut Request<'a>) {
 ///         request.provide_value::<ExitCode>(ExitCode(2));
 ///     }
@@ -160,7 +160,7 @@ impl<'a> Debug for Request<'a> {
 ///
 /// assert_eq!(request_value::<ExitCode>(&Failed).map(|c| c.0), Some(2));
 /// ```
-pub fn request_value<'a, T>(err: &'a (impl StdError + ?Sized)) -> Option<T>
+pub fn request_value<'a, T>(err: &'a (impl ProviderError + ?Sized)) -> Option<T>
 where
     T: 'static,
 {
@@ -174,7 +174,7 @@ where
 /// `'static` but may be unsized, for example `str`.
 ///
 /// ```rust
-/// use caution_error::{request_ref, Request, StdError};
+/// use caution_error::{request_ref, Request, ProviderError};
 ///
 /// #[derive(Debug)]
 /// struct RequestId(String);
@@ -192,7 +192,7 @@ where
 ///
 /// impl std::error::Error for Failed {}
 ///
-/// impl StdError for Failed {
+/// impl ProviderError for Failed {
 ///     fn provide<'a>(&'a self, request: &mut Request<'a>) {
 ///         request.provide_ref::<str>(&self.request_id.0);
 ///     }
@@ -201,7 +201,7 @@ where
 /// let err = Failed { request_id: RequestId("req-7".into()) };
 /// assert_eq!(request_ref::<str>(&err), Some("req-7"));
 /// ```
-pub fn request_ref<'a, T>(err: &'a (impl StdError + ?Sized)) -> Option<&'a T>
+pub fn request_ref<'a, T>(err: &'a (impl ProviderError + ?Sized)) -> Option<&'a T>
 where
     T: 'static + ?Sized,
 {
@@ -209,7 +209,7 @@ where
 }
 
 /// Requests a value by type tag from the error.
-fn request_by_type_tag<'a, I>(err: &'a (impl StdError + ?Sized)) -> Option<I::Reified>
+fn request_by_type_tag<'a, I>(err: &'a (impl ProviderError + ?Sized)) -> Option<I::Reified>
 where
     I: tags::Type<'a>,
 {
@@ -217,7 +217,7 @@ where
         tag_id: TypeId::of::<I>(),
         value: TaggedOption::<'a, I>(None),
     };
-    StdError::provide(err, tagged.as_request());
+    ProviderError::provide(err, tagged.as_request());
     tagged.value.0
 }
 
@@ -345,7 +345,7 @@ impl<'a> Tagged<dyn Erased<'a> + 'a> {
 #[cfg(test)]
 mod tests {
     use super::{Request, request_ref, request_value};
-    use crate::StdError;
+    use crate::ProviderError;
     use std::fmt;
 
     #[derive(Debug)]
@@ -387,7 +387,7 @@ mod tests {
 
     impl std::error::Error for Source {}
 
-    impl StdError for Error {
+    impl ProviderError for Error {
         fn provide<'a>(&'a self, request: &mut Request<'a>) {
             request.provide_ref::<Backtrace>(&self.backtrace);
             request.provide_ref::<str>(&self.name);
@@ -395,7 +395,7 @@ mod tests {
         }
     }
 
-    impl StdError for Source {
+    impl ProviderError for Source {
         fn provide<'a>(&'a self, request: &mut Request<'a>) {
             request.provide_value::<u8>(self.depth);
         }
@@ -462,7 +462,7 @@ mod tests {
 
         impl std::error::Error for Lazy {}
 
-        impl StdError for Lazy {
+        impl ProviderError for Lazy {
             fn provide<'a>(&'a self, request: &mut Request<'a>) {
                 request.provide_value_with::<u32>(|| {
                     self.calls.fetch_add(1, Ordering::SeqCst);
@@ -512,17 +512,17 @@ mod tests {
         impl std::error::Error for Outer {}
         impl std::error::Error for Inner {}
 
-        impl StdError for Inner {
+        impl ProviderError for Inner {
             fn provide<'a>(&'a self, request: &mut Request<'a>) {
                 request.provide_value::<u8>(2);
                 assert!(!request.would_be_satisfied_by_value_of::<u8>());
             }
         }
 
-        impl StdError for Outer {
+        impl ProviderError for Outer {
             fn provide<'a>(&'a self, request: &mut Request<'a>) {
                 request.provide_value::<u8>(1);
-                StdError::provide(&self.inner, request);
+                ProviderError::provide(&self.inner, request);
             }
         }
 
