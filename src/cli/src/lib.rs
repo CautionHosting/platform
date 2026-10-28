@@ -2340,6 +2340,10 @@ impl ApiClient {
             return message;
         }
 
+        if let Some(message) = structured_error_message(body) {
+            return message;
+        }
+
         if body.trim().is_empty() {
             format!("HTTP {}", status)
         } else {
@@ -3529,6 +3533,49 @@ enclave "default" {{
             .join(".cache/caution");
         Ok(cache_dir)
     }
+}
+
+/// Renders a structured error report as text.
+///
+/// The API answers some endpoints with
+/// `{"error": …, "errors": [{"error": …, "notes": […], "warnings": […]}]}`, where
+/// any link may carry guidance. The CLI shows the client text, then every note
+/// and warning once, in chain order. A body without an `errors` array is not a
+/// report, so the caller falls back to showing the body as it arrived.
+fn structured_error_message(body: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Report {
+        error: String,
+        errors: Vec<Link>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Link {
+        #[serde(default)]
+        notes: Vec<String>,
+        #[serde(default)]
+        warnings: Vec<String>,
+    }
+
+    let report: Report = serde_json::from_str(body).ok()?;
+    if report.error.trim().is_empty() {
+        return None;
+    }
+
+    let mut message = report.error.trim().to_string();
+    let mut shown: Vec<&str> = Vec::new();
+    for link in &report.errors {
+        for guidance in link.notes.iter().chain(link.warnings.iter()) {
+            let guidance = guidance.trim();
+            if guidance.is_empty() || shown.contains(&guidance) {
+                continue;
+            }
+            shown.push(guidance);
+            message.push('\n');
+            message.push_str(guidance);
+        }
+    }
+    Some(message)
 }
 
 fn resolve_procfile_build_command(
@@ -5845,5 +5892,51 @@ enclave "default" {
         assert_eq!(ApiClient::ssh_key_identity("not-a-valid-key"), None);
         assert_eq!(ApiClient::ssh_key_identity(""), None);
         assert_eq!(ApiClient::ssh_key_identity("ssh-ed25519"), None);
+    }
+}
+
+#[cfg(test)]
+mod structured_error_tests {
+    use super::structured_error_message;
+
+    const REGENERATE: &str =
+        "Re-generate the bundle with `caution quorum init`, then upload it again.";
+
+    #[test]
+    fn a_report_renders_the_client_text_then_each_guidance_once() {
+        let body = serde_json::json!({
+            "error": "invalid quorum bundle",
+            "errors": [
+                {"error": "invalid quorum bundle", "notes": [], "warnings": []},
+                {"error": "expected proofed v1 quorum bundle", "notes": [REGENERATE], "warnings": []},
+                {"error": "a later link", "notes": [REGENERATE], "warnings": ["Nothing was stored."]},
+            ],
+        })
+        .to_string();
+
+        assert_eq!(
+            structured_error_message(&body).expect("a report"),
+            format!("invalid quorum bundle\n{REGENERATE}\nNothing was stored.")
+        );
+    }
+
+    #[test]
+    fn a_body_without_an_errors_array_is_not_a_report() {
+        for body in [
+            "plain text",
+            r#"{"error": "username_required"}"#,
+            r#"{"error": "insufficient_balance"}"#,
+            "",
+        ] {
+            assert_eq!(structured_error_message(body), None, "body: {body}");
+        }
+    }
+
+    #[test]
+    fn an_empty_client_text_is_not_a_report() {
+        assert_eq!(
+            structured_error_message(r#"{"error": "  ", "errors": []}"#),
+            None
+        );
     }
 }
