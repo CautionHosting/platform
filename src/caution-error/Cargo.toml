@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 Caution SEZC
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
+
+[package]
+name = "caution-error"
+version = "0.1.0"
+edition = "2024"
+description = "Stable generic member access for errors: a std::error::Error trait with a provider API that does not require nightly."
+
+[dependencies]

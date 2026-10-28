@@ -12,6 +12,7 @@ members = [
     "src/sentry-middleware",
     "src/environment-heuristics",
     "src/caution-config", 
+    "src/caution-error",
     "src/caution-admin",
     "src/hcl-patcher",
     "src/drift-detector",
