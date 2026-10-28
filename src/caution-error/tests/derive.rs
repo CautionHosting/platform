@@ -350,3 +350,37 @@ fn optional_source_none_wires_nothing() {
     assert!(ProviderError::provider_source(&err).is_none());
     assert!(request_ref_in_chain::<String>(&err).is_none());
 }
+
+/// A field named `source` but not marked `#[source]` must not be wired.
+#[derive(Debug, ProviderError)]
+struct NamedSource {
+    source: Inner,
+}
+
+impl fmt::Display for NamedSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("named source failed")
+    }
+}
+
+impl std::error::Error for NamedSource {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+#[test]
+fn unannotated_source_field_is_not_wired() {
+    let err = NamedSource {
+        source: Inner {
+            device: "named".to_string(),
+        },
+    };
+
+    assert!(ProviderError::provider_source(&err).is_none());
+    assert!(
+        std::error::Error::source(&err).is_some(),
+        "std source still works"
+    );
+    assert!(request_ref_in_chain::<String>(&err).is_none());
+}

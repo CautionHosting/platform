@@ -52,7 +52,7 @@
 //! assert!(request_ref::<u16>(&err).is_none(), "only #[provide] fields are exposed");
 //! ```
 //!
-//! A `#[source]` (or `#[from]`, or a field named `source`) wires
+//! A field marked `#[source]` (or `#[from]`) wires
 //! [`ProviderError::provider_source`] automatically. The source type does not
 //! have to implement the trait: the derive probes it at compile time, so a typed
 //! source is chained and anything else (for example a `Box<dyn Error + Send +

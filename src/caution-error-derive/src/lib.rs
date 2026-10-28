@@ -23,11 +23,11 @@ use syn::{
 /// and never cloned; a consumer asks for it with
 /// `request_ref::<FieldType>(error)`.
 ///
-/// A `#[source]` (or `#[from]`, or a field named `source`) wires
-/// `provider_source` automatically. The source's type is not required to
-/// implement the trait: the generated code probes it at compile time, returning
-/// `Some` for a [`caution_error::ProviderError`] and `None` otherwise, so a
-/// typed source and a `Box<dyn Error + Send + Sync>` source both build.
+/// A field marked `#[source]` (or `#[from]`) wires `provider_source`
+/// automatically. The source's type is not required to implement the trait: the
+/// generated code probes it at compile time, returning `Some` for a
+/// [`caution_error::ProviderError`] and `None` otherwise, so a typed source and
+/// a `Box<dyn Error + Send + Sync>` source both build.
 ///
 /// `Option<T>` sources are unwrapped first: `None` yields `None`, and `Some` is
 /// probed like any other source. `Box<T>`, `Box<dyn ProviderError>`, and
@@ -296,12 +296,10 @@ fn is_provided(field: &Field) -> bool {
     has_attribute(field, "provide")
 }
 
-/// Returns true when a field is the error source: `#[source]`, `#[from]`, or a
-/// field that `thiserror` treats as the source because it is named `source`.
+/// Returns true when a field is the error source, marked with `#[source]` or
+/// `#[from]`. An unannotated field named `source` is not treated as a source.
 fn is_source(field: &Field) -> bool {
-    has_attribute(field, "source")
-        || has_attribute(field, "from")
-        || field.ident.as_ref().is_some_and(|ident| ident == "source")
+    has_attribute(field, "source") || has_attribute(field, "from")
 }
 
 /// Returns true when a field carries the named attribute.
