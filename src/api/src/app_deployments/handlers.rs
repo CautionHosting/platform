@@ -191,10 +191,11 @@ impl DeploymentRow {
 }
 
 /// Failure modes for [`query_rows_with`].
-#[derive(Debug, thiserror::Error, CtxError)]
-pub(super) enum QueryRowsError {
-    #[error("database error while reading deployments [{location}]")]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
+pub(crate) enum QueryRowsError {
+    #[error("database error while reading deployments")]
     Database {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -342,27 +343,51 @@ async fn load_views(
         .collect())
 }
 
-fn error_response(status: StatusCode, error: impl caution_error::ProviderError) -> Response {
-    let report = caution_error::ErrorReport::from_error(&error);
+/// Answers `status` with a structured report; `fallback` is the client text when
+/// the error (or its root) provides [`caution_error::Opaque`]. The error is
+/// attached for Sentry either way, so the full chain still reaches the logs.
+fn error_response(
+    status: StatusCode,
+    error: impl caution_error::ProviderError,
+    fallback: &'static str,
+) -> Response {
+    let report = caution_error::ErrorReport::from_error_with(&error, fallback);
     sentry_middleware::error_response_provider(status, Json(report), error)
 }
 
 /// Failure modes for [`list_handler`].
-#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
+#[derive(Debug, thiserror::Error, CtxError)]
 #[error("failed to list the deployments of app {app_id}")]
 pub(crate) struct ListDeploymentsError {
     app_id: Uuid,
-    #[provide]
     #[location]
     location: Location,
     #[source]
-    source: BoxError,
+    source: QueryRowsError,
 }
 
 impl IntoResponse for ListDeploymentsError {
     fn into_response(self) -> Response {
         tracing::error!(error = ?self, "failed to list deployments");
-        error_response(StatusCode::INTERNAL_SERVER_ERROR, self)
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            self,
+            "Failed to list deployments.",
+        )
+    }
+}
+
+/// The app id and the database detail stay on the server: this error provides
+/// [`caution_error::Opaque`], so a client report keeps only the fallback text.
+/// The typed source still chains for the logs.
+impl caution_error::ProviderError for ListDeploymentsError {
+    fn provide<'a>(&'a self, request: &mut caution_error::Request<'a>) {
+        request.provide_value(caution_error::Opaque);
+        request.provide_value(self.location);
+    }
+
+    fn provider_source(&self) -> Option<&(dyn caution_error::ProviderError + 'static)> {
+        Some(&self.source)
     }
 }
 
@@ -420,7 +445,7 @@ impl IntoResponse for GetDeploymentInAppError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         };
-        error_response(status, self)
+        error_response(status, self, "Failed to read the deployment.")
     }
 }
 
@@ -484,7 +509,7 @@ impl IntoResponse for GetDeploymentError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         };
-        error_response(status, self)
+        error_response(status, self, "Failed to read the deployment.")
     }
 }
 
@@ -722,7 +747,10 @@ mod tests {
         let list = ListDeploymentsError {
             app_id: Uuid::new_v4(),
             location: std::panic::Location::caller(),
-            source: Box::new(std::io::Error::other("boom")),
+            source: QueryRowsError::Database {
+                location: std::panic::Location::caller(),
+                source: Box::new(std::io::Error::other("boom")),
+            },
         };
         let response = list.into_response();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -745,5 +773,34 @@ mod tests {
         let response = not_found.into_response();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert!(response.extensions().get::<SentryReportable>().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_list_failure_returns_only_the_generic_body() {
+        use axum::body::to_bytes;
+        use axum::response::IntoResponse;
+
+        let app_id = Uuid::new_v4();
+        let error = ListDeploymentsError {
+            app_id,
+            location: std::panic::Location::caller(),
+            source: QueryRowsError::Database {
+                location: std::panic::Location::caller(),
+                source: Box::new(std::io::Error::other("boom-internal")),
+            },
+        };
+
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body is collected");
+        let text = String::from_utf8(body.to_vec()).expect("body is UTF-8");
+
+        assert!(text.contains("Failed to list deployments."), "{text}");
+        assert!(!text.contains(&app_id.to_string()), "no app id: {text}");
+        assert!(!text.contains("boom-internal"), "no source text: {text}");
+        assert!(!text.contains(".rs:"), "no call site: {text}");
     }
 }
