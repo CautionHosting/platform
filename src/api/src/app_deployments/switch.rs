@@ -16,7 +16,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use caution_error::{Note, Opaque, Warning};
+use caution_error::{Note, Opaque, OpaqueChild, Warning};
 use dterror::{CtxError, Location, ResultExt};
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -188,6 +188,8 @@ pub(crate) enum SwitchError {
     Unhealthy {
         #[provide(ref)]
         note: Note,
+        #[provide]
+        opaque_child: OpaqueChild,
         #[provide]
         #[location]
         location: Location,
@@ -591,7 +593,7 @@ async fn execute(
         };
         crate::wait_for_deployment_health(&public_ip, 15)
             .await
-            .with_context(Ctx::unhealthy(UNHEALTHY_NOTE))?;
+            .with_context(Ctx::unhealthy(UNHEALTHY_NOTE, OpaqueChild))?;
     }
 
     // 2. The AWS calls under the lock take seconds, not the health wait.
@@ -759,6 +761,7 @@ mod tests {
     fn unhealthy_error(location: Location) -> SwitchError {
         SwitchError::Unhealthy {
             note: Note::from(UNHEALTHY_NOTE),
+            opaque_child: OpaqueChild,
             location,
             source: crate::WaitForHealthError::HealthTimeout {
                 timeout_secs: 1,
@@ -1059,6 +1062,11 @@ mod tests {
         );
         assert_eq!(report.errors[0].notes.len(), 1);
         assert!(report.errors[0].notes[0].0.contains("debug mode"));
+        assert_eq!(
+            report.errors.len(),
+            1,
+            "the health-check source is withheld"
+        );
         assert!(
             caution_error::location(&error).is_some(),
             "location provided"

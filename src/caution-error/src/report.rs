@@ -279,9 +279,66 @@ impl ErrorReport {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Opaque;
 
+/// A marker a link provides when the failure may be sent, but none of its
+/// sources may.
+///
+/// [`ErrorReport::from_error`] keeps the link that provides it and drops every
+/// source below, so the link's own message and guidance survive while its cause
+/// stays on the server. Compare [`Opaque`], which drops the link as well.
+/// Provide it by value, because it is a `Copy` unit type:
+///
+/// ```rust
+/// use caution_error::{ErrorReport, OpaqueChild, ProviderError, Request};
+///
+/// #[derive(Debug)]
+/// struct Wrapper {
+///     source: Inner,
+/// }
+///
+/// #[derive(Debug)]
+/// struct Inner;
+///
+/// impl std::fmt::Display for Wrapper {
+///     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+///         f.write_str("the health check failed")
+///     }
+/// }
+///
+/// impl std::fmt::Display for Inner {
+///     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+///         f.write_str("a detail the client must not see")
+///     }
+/// }
+///
+/// impl std::error::Error for Wrapper {}
+/// impl std::error::Error for Inner {}
+/// impl ProviderError for Inner {}
+///
+/// impl ProviderError for Wrapper {
+///     fn provide<'a>(&'a self, request: &mut Request<'a>) {
+///         request.provide_value(OpaqueChild);
+///     }
+///
+///     fn provider_source(&self) -> Option<&(dyn ProviderError + 'static)> {
+///         Some(&self.source)
+///     }
+/// }
+///
+/// let report = ErrorReport::from_error(&Wrapper { source: Inner });
+/// assert_eq!(report.error, "the health check failed");
+/// assert_eq!(report.errors.len(), 1, "the source is withheld");
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OpaqueChild;
+
 /// Whether a link asks that it and every source below it be withheld.
 fn is_opaque(error: &dyn ProviderError) -> bool {
     request_value::<Opaque>(error).is_some()
+}
+
+/// Whether a link asks that it be sent but every source below it withheld.
+fn is_opaque_child(error: &dyn ProviderError) -> bool {
+    request_value::<OpaqueChild>(error).is_some()
 }
 
 /// Builds a report from an error and its chain. See [`ErrorReport::from_error`].
@@ -414,13 +471,17 @@ impl<'a> Iterator for Chain<'a> {
     }
 }
 
-/// Builds one [`ErrorResponse`] per link of the chain, stopping before the first
-/// link that provides [`Opaque`].
+/// Builds one [`ErrorResponse`] per link of the chain, stopping at a link that
+/// provides [`Opaque`] (dropped) or [`OpaqueChild`] (kept, but nothing below).
 fn responses(root: &dyn ProviderError) -> Vec<ErrorResponse> {
     let mut responses = Vec::new();
     for node in chain(root) {
-        let (notes, warnings) = match node.provider() {
-            Some(provider) if is_opaque(provider) => break,
+        let provider = node.provider();
+        if provider.is_some_and(is_opaque) {
+            break;
+        }
+        let steps_down = provider.is_some_and(is_opaque_child);
+        let (notes, warnings) = match provider {
             Some(provider) => (notes(provider), warnings(provider)),
             None => (Vec::new(), Vec::new()),
         };
@@ -429,6 +490,9 @@ fn responses(root: &dyn ProviderError) -> Vec<ErrorResponse> {
             notes,
             warnings,
         });
+        if steps_down {
+            break;
+        }
     }
     responses
 }
@@ -566,6 +630,56 @@ mod tests {
             ErrorReport::from_error(&error).errors.is_empty(),
             "the root is dropped, leaving no link",
         );
+    }
+
+    #[test]
+    fn an_opaque_child_keeps_the_link_and_drops_below() {
+        #[derive(Debug)]
+        struct Wrapper {
+            inner: Confidential,
+        }
+
+        #[derive(Debug)]
+        struct Confidential;
+
+        impl fmt::Display for Wrapper {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("wrapper failed")
+            }
+        }
+
+        impl fmt::Display for Confidential {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a secret the client must not see")
+            }
+        }
+
+        impl std::error::Error for Wrapper {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.inner)
+            }
+        }
+
+        impl std::error::Error for Confidential {}
+
+        impl ProviderError for Wrapper {
+            fn provide<'a>(&'a self, request: &mut Request<'a>) {
+                request.provide_value(crate::OpaqueChild);
+            }
+
+            fn provider_source(&self) -> Option<&(dyn ProviderError + 'static)> {
+                Some(&self.inner)
+            }
+        }
+
+        impl ProviderError for Confidential {}
+
+        let report = ErrorReport::from_error(&Wrapper {
+            inner: Confidential,
+        });
+        assert_eq!(report.error, "wrapper failed");
+        assert_eq!(report.errors.len(), 1, "the source is withheld");
+        assert_eq!(report.errors[0].error, "wrapper failed");
     }
 
     #[test]
