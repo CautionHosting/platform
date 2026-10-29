@@ -167,28 +167,20 @@ pub(crate) fn expected_holder(
     live_instance_id
 }
 
-#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
+#[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum SwitchError {
     #[error("Deployment not found.")]
-    NotFound {
-        #[provide]
-        location: Location,
-    },
+    NotFound { location: Location },
     #[error("{rejection}")]
     Rejected {
         rejection: SwitchRejection,
-        #[provide(ref = [caution_error::Note])]
         notes: &'static [Note],
-        #[provide(ref = [caution_error::Warning])]
         warnings: &'static [Warning],
-        #[provide]
         location: Location,
     },
     #[error("The deployment failed the platform health check.")]
     Unhealthy {
-        #[provide(ref)]
         note: Note,
-        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -197,13 +189,9 @@ pub(crate) enum SwitchError {
     #[error(
         "The app address is unassigned or held by an unexpected instance; switching is blocked until it is repaired."
     )]
-    AssociationMismatch {
-        #[provide]
-        location: Location,
-    },
+    AssociationMismatch { location: Location },
     #[error("Switch failed.")]
     AwsMove {
-        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -211,7 +199,6 @@ pub(crate) enum SwitchError {
     },
     #[error("Switch failed.")]
     AwsObserve {
-        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -219,7 +206,6 @@ pub(crate) enum SwitchError {
     },
     #[error("Switch failed.")]
     InspectAccount {
-        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -227,7 +213,6 @@ pub(crate) enum SwitchError {
     },
     #[error("Switch failed.")]
     InspectRuntime {
-        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -235,7 +220,6 @@ pub(crate) enum SwitchError {
     },
     #[error("Switch failed.")]
     Database {
-        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -243,7 +227,6 @@ pub(crate) enum SwitchError {
     },
     #[error("Switch failed.")]
     Lock {
-        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -251,7 +234,6 @@ pub(crate) enum SwitchError {
     },
     #[error("Switch failed.")]
     RecordRequest {
-        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -259,32 +241,69 @@ pub(crate) enum SwitchError {
     },
     #[error("Switch failed.")]
     ProjectLive {
-        #[provide]
         #[location]
         location: Location,
         #[source]
         source: super::lifecycle::ProjectLiveError,
     },
     #[error("This operation requires signature verification")]
-    Unsigned {
-        #[provide]
-        location: Location,
-    },
+    Unsigned { location: Location },
     #[error(
         "The app address is unassigned or held by an unexpected instance; switching is blocked until it is repaired."
     )]
-    HolderMismatch {
-        #[provide]
-        location: Location,
-    },
+    HolderMismatch { location: Location },
     #[error("Switch failed.")]
     Task {
-        #[provide]
         #[location]
         location: Location,
         #[source]
         source: tokio::task::JoinError,
     },
+}
+
+/// [`caution_error::ProviderError`] is hand-written rather than derived: the
+/// server-fault variants (every 500) provide [`caution_error::Opaque`], so a
+/// client report drops them and their whole chain. The `Display` text of an
+/// internal failure stays in the logs and Sentry.
+impl caution_error::ProviderError for SwitchError {
+    fn provide<'a>(&'a self, request: &mut caution_error::Request<'a>) {
+        if self.status().is_server_error() {
+            request.provide_value(caution_error::Opaque);
+        }
+        match self {
+            Self::Rejected {
+                notes, warnings, ..
+            } => {
+                request.provide_ref::<[Note]>(notes);
+                request.provide_ref::<[Warning]>(warnings);
+            }
+            Self::Unhealthy { note, .. } => {
+                request.provide_ref::<Note>(note);
+            }
+            _ => {}
+        }
+        request.provide_value(self.location());
+    }
+
+    fn provider_source(&self) -> Option<&(dyn caution_error::ProviderError + 'static)> {
+        match self {
+            Self::Unhealthy { source, .. } => Some(source),
+            Self::AwsMove { source, .. } => Some(source),
+            Self::AwsObserve { source, .. } => Some(source),
+            Self::InspectAccount { source, .. } => Some(source),
+            Self::InspectRuntime { source, .. } => Some(source),
+            Self::Lock { source, .. } => Some(source),
+            Self::RecordRequest { source, .. } => Some(source),
+            Self::ProjectLive { source, .. } => Some(source),
+            Self::Database { .. }
+            | Self::Task { .. }
+            | Self::NotFound { .. }
+            | Self::Rejected { .. }
+            | Self::AssociationMismatch { .. }
+            | Self::Unsigned { .. }
+            | Self::HolderMismatch { .. } => None,
+        }
+    }
 }
 
 impl SwitchError {
@@ -333,6 +352,27 @@ impl SwitchError {
         }
     }
 
+    /// The call site this failure was recorded at.
+    fn location(&self) -> Location {
+        match self {
+            Self::NotFound { location }
+            | Self::Rejected { location, .. }
+            | Self::Unhealthy { location, .. }
+            | Self::AssociationMismatch { location }
+            | Self::AwsMove { location, .. }
+            | Self::AwsObserve { location, .. }
+            | Self::InspectAccount { location, .. }
+            | Self::InspectRuntime { location, .. }
+            | Self::Database { location, .. }
+            | Self::Lock { location, .. }
+            | Self::RecordRequest { location, .. }
+            | Self::ProjectLive { location, .. }
+            | Self::Unsigned { location }
+            | Self::HolderMismatch { location }
+            | Self::Task { location, .. } => location,
+        }
+    }
+
     /// Refused before the address could move. `AssociationMismatch` is not:
     /// it is raised after a move, when the (retried) association check still
     /// disagrees. `HolderMismatch` is the pre-move case, so it settles at once
@@ -357,7 +397,7 @@ impl IntoResponse for SwitchError {
     fn into_response(self) -> Response {
         let status = self.status();
         tracing::warn!(error = ?self, "deployment switch failed");
-        let report = caution_error::ErrorReport::from_error(&self);
+        let report = caution_error::ErrorReport::from_error_with(&self, self.client_message());
         sentry_middleware::error_response_provider(status, Json(report), self)
     }
 }
@@ -1115,6 +1155,42 @@ mod tests {
         for error in errors {
             assert_eq!(error.to_string(), error.client_message(), "{error:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_server_fault_is_withheld_from_the_client() {
+        use axum::body::to_bytes;
+        use axum::response::IntoResponse;
+        use sentry_middleware::SentryReportable;
+
+        let location = std::panic::Location::caller();
+        let error = SwitchError::AwsMove {
+            location,
+            source: ec2::MoveAppAddressError::AssociateAddress {
+                location,
+                source: throwaway_source(),
+            },
+        };
+
+        assert!(
+            caution_error::ErrorReport::from_error(&error)
+                .errors
+                .is_empty(),
+            "an opaque root drops itself and its chain",
+        );
+
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(response.extensions().get::<SentryReportable>().is_some());
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body is collected");
+        let text = String::from_utf8(body.to_vec()).expect("body is UTF-8");
+
+        assert!(text.contains("Switch failed."), "{text}");
+        assert!(!text.contains("Elastic IP"), "no source text: {text}");
+        assert!(!text.contains(".rs:"), "no call site: {text}");
     }
 
     /// Serves each scripted holder in turn, then repeats the last.

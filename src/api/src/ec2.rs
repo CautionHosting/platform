@@ -235,10 +235,11 @@ fn run_instances_request_params(params: &RunInstancesParams) -> Vec<(String, Str
 }
 
 /// Failure modes for [`Ec2Client::signed_request`].
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum Ec2SignedRequestError {
-    #[error("EC2 API request failed [{location}]")]
+    #[error("EC2 API request failed")]
     Request {
+        #[provide]
         #[location]
         location: Location,
         #[source]
