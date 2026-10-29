@@ -439,6 +439,9 @@ async fn send_email_handler(
         "legal_notice" => generate_legal_notice_email(&req.data),
         "fully_managed_capacity_alert" => generate_fully_managed_capacity_alert_email(&req.data),
         "organization_invite" => generate_organization_invite_email(&req.data),
+        "organization_invite_existing_user" => {
+            generate_organization_invite_existing_user_email(&req.data)
+        }
         "webauthn_reset" => generate_webauthn_reset_email(&req.data),
         _ => {
             return Ok(Json(SendEmailResponse {
@@ -716,6 +719,32 @@ fn generate_organization_invite_email(data: &serde_json::Value) -> (String, Stri
         inviter = inviter_raw,
         invite_url = invite_url_raw,
         expires_at = expires_at_raw
+    );
+
+    (subject, html_body, text_body)
+}
+
+fn generate_organization_invite_existing_user_email(
+    data: &serde_json::Value,
+) -> (String, String, String) {
+    let org_name_raw = data["organization_name"].as_str().unwrap_or("Caution");
+    let inviter_raw = data["inviter_email"].as_str().unwrap_or("a Caution user");
+
+    let org_name = html_escape(org_name_raw);
+    let inviter = html_escape(inviter_raw);
+    let subject = format!("You were invited to {} on Caution.co", org_name_raw);
+
+    let html_body = format!(
+        include_str!("../templates/organization_invite_existing_user.html"),
+        org_name = org_name,
+        inviter = inviter,
+        footer = html_email_footer()
+    );
+
+    let text_body = format!(
+        include_str!("../templates/organization_invite_existing_user.txt"),
+        org_name = org_name_raw,
+        inviter = inviter_raw
     );
 
     (subject, html_body, text_body)
@@ -1599,6 +1628,22 @@ mod tests {
     }
 
     // ---- existing templates still work ----
+
+    #[test]
+    fn test_organization_invite_existing_user_states_the_account_conflict() {
+        let data = serde_json::json!({
+            "organization_name": "Acme",
+            "inviter_email": "owner@example.test",
+        });
+
+        let (subject, html, text) = generate_organization_invite_existing_user_email(&data);
+
+        assert!(subject.contains("Acme"), "{subject}");
+        assert!(html.contains("already has a Caution account"), "{html}");
+        assert!(html.contains("</html>"), "{html}");
+        assert!(text.contains("already has a Caution account"), "{text}");
+        assert!(text.contains("Caution Team"), "{text}");
+    }
 
     #[test]
     fn test_payment_failure_email_has_update_link() {

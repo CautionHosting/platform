@@ -773,6 +773,9 @@ pub async fn list_members(
 /// Guidance when an invitation already exists.
 const ALREADY_INVITED_NOTE: &str = "To resend the invitation, cancel the existing invitation.";
 
+/// Guidance when the organization has used its daily invitation budget.
+const INVITE_LIMIT_NOTE: &str = "Try again tomorrow.";
+
 /// Failure modes for [`invite_member`].
 #[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub enum InviteMemberError {
@@ -796,8 +799,10 @@ pub enum InviteMemberError {
         location: Location,
     },
 
-    #[error("a platform user with this email already exists")]
-    UserAlreadyExists {
+    #[error("this organization has sent its daily invitation limit")]
+    LimitReached {
+        #[provide(ref)]
+        note: Note,
         #[provide]
         location: Location,
     },
@@ -823,9 +828,8 @@ impl IntoResponse for InviteMemberError {
     fn into_response(self) -> Response {
         let status = match &self {
             Self::Forbidden { .. } => StatusCode::FORBIDDEN,
-            Self::AlreadyMember { .. }
-            | Self::AlreadyInvited { .. }
-            | Self::UserAlreadyExists { .. } => StatusCode::CONFLICT,
+            Self::AlreadyMember { .. } | Self::AlreadyInvited { .. } => StatusCode::CONFLICT,
+            Self::LimitReached { .. } => StatusCode::TOO_MANY_REQUESTS,
             Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::Database { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -921,21 +925,16 @@ pub async fn invite_member(
             .await
             .with_context(Ctx::database())?;
 
-    if existing_user {
-        return Err(InviteMemberError::UserAlreadyExists {
-            location: std::panic::Location::caller(),
-        });
-    }
-
-    let org_name: String = sqlx::query_scalar("SELECT name FROM organizations WHERE id = $1")
-        .bind(org_id)
-        .fetch_optional(&state.db)
-        .await
-        .with_context(Ctx::database())?
-        .ok_or_else(|| InviteMemberError::NotFound {
-            org_id,
-            location: std::panic::Location::caller(),
-        })?;
+    let (org_name, invitation_daily_limit): (String, i32) =
+        sqlx::query_as("SELECT name, invitation_daily_limit FROM organizations WHERE id = $1")
+            .bind(org_id)
+            .fetch_optional(&state.db)
+            .await
+            .with_context(Ctx::database())?
+            .ok_or_else(|| InviteMemberError::NotFound {
+                org_id,
+                location: std::panic::Location::caller(),
+            })?;
 
     let inviter_email: Option<String> = sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
         .bind(auth.user_id)
@@ -946,6 +945,34 @@ pub async fn invite_member(
 
     let (token, token_hash) = generate_invitation_token();
     let expires_at = Utc::now() + Duration::hours(INVITATION_EXPIRY_HOURS);
+
+    // Count and insert under a per-organization lock so concurrent invites cannot
+    // all slip past the daily budget. Namespace 3 keeps it apart from the org
+    // entitlement lock (namespace 0) and the app/resource locks.
+    let mut tx = state.db.begin().await.with_context(Ctx::database())?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 3))")
+        .bind(org_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .with_context(Ctx::database())?;
+
+    let sent_today: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+         FROM organization_invitations
+         WHERE organization_id = $1
+           AND created_at > NOW() - INTERVAL '1 day'",
+    )
+    .bind(org_id)
+    .fetch_one(&mut *tx)
+    .await
+    .with_context(Ctx::database())?;
+
+    if sent_today >= i64::from(invitation_daily_limit) {
+        return Err(InviteMemberError::LimitReached {
+            note: Note::from(INVITE_LIMIT_NOTE),
+            location: std::panic::Location::caller(),
+        });
+    }
 
     let invitation = sqlx::query_as::<_, OrganizationInvitation>(
         "INSERT INTO organization_invitations
@@ -968,7 +995,7 @@ pub async fn invite_member(
     .bind(&token_hash)
     .bind(auth.user_id)
     .bind(expires_at)
-    .fetch_one(&state.db)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| {
         if e.as_database_error()
@@ -986,14 +1013,30 @@ pub async fn invite_member(
         }
     })?;
 
-    let email_sent = send_organization_invite_email(
-        &email,
-        &public_organization_name(&org_name),
-        inviter_email.as_deref(),
-        &token,
-        expires_at,
-    )
-    .await;
+    tx.commit().await.with_context(Ctx::database())?;
+
+    // The address already has an account, so an invitation link cannot add it:
+    // the accept flow creates a new user. The invitation row is recorded either
+    // way, so the response body and the invitations list stay identical whether
+    // or not an account exists; only the recipient can tell the two emails apart.
+    let email_sent = if existing_user {
+        send_organization_invite_existing_user_email(
+            &email,
+            &public_organization_name(&org_name),
+            inviter_email.as_deref(),
+        )
+        .await
+    } else {
+        send_organization_invite_email(
+            &email,
+            &public_organization_name(&org_name),
+            inviter_email.as_deref(),
+            &token,
+            expires_at,
+        )
+        .await
+    }
+    .is_ok();
 
     Ok(Json(InviteMemberResponse {
         invitation,
@@ -1144,14 +1187,31 @@ pub async fn cancel_invitation(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[tracing::instrument(skip_all)]
+/// Failure modes for the invitation emails.
+#[derive(Debug, thiserror::Error, CtxError)]
+enum SendInviteEmailError {
+    #[error("invitation email service returned status {status} [{location}]")]
+    Service { status: u16, location: Location },
+
+    #[error("could not reach the invitation email service [{location}]")]
+    Transport {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+#[tracing::instrument(skip_all, err)]
 async fn send_organization_invite_email(
     email: &str,
     org_name: &str,
     inviter_email: Option<&str>,
     token: &str,
     expires_at: DateTime<Utc>,
-) -> bool {
+) -> Result<(), SendInviteEmailError> {
+    use SendInviteEmailErrorCtx as Ctx;
+
     let email_service_url =
         std::env::var("EMAIL_SERVICE_URL").unwrap_or_else(|_| "http://email:8082".to_string());
     let frontend_url =
@@ -1179,21 +1239,53 @@ async fn send_organization_invite_email(
         .send()
         .await
     {
-        Ok(response) if response.status().is_success() => true,
-        Ok(response) => {
-            tracing::error!(
-                "Email service returned {} while sending organization invite",
-                response.status()
-            );
-            false
+        Ok(response) if response.status().is_success() => Ok(()),
+        Ok(response) => Err(SendInviteEmailError::Service {
+            status: response.status().as_u16(),
+            location: std::panic::Location::caller(),
+        }),
+        Err(error) => Err(error).with_context(Ctx::transport()),
+    }
+}
+
+/// Emails an address that already has a Caution account, so an invitation link
+/// cannot add it (the accept flow creates a new user).
+///
+/// Sent instead of the normal invite so the caller's response is identical
+/// whether or not the address has an account; only the recipient sees which
+/// email they got.
+#[tracing::instrument(skip_all, err)]
+async fn send_organization_invite_existing_user_email(
+    email: &str,
+    org_name: &str,
+    inviter_email: Option<&str>,
+) -> Result<(), SendInviteEmailError> {
+    use SendInviteEmailErrorCtx as Ctx;
+
+    let email_service_url =
+        std::env::var("EMAIL_SERVICE_URL").unwrap_or_else(|_| "http://email:8082".to_string());
+
+    let email_request = serde_json::json!({
+        "to": email,
+        "template": "organization_invite_existing_user",
+        "data": {
+            "organization_name": org_name,
+            "inviter_email": inviter_email,
         }
-        Err(e) => {
-            tracing::error!(
-                "Failed to call email service for organization invite: {:?}",
-                e
-            );
-            false
-        }
+    });
+
+    match reqwest::Client::new()
+        .post(format!("{}/send", email_service_url))
+        .json(&email_request)
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => Ok(()),
+        Ok(response) => Err(SendInviteEmailError::Service {
+            status: response.status().as_u16(),
+            location: std::panic::Location::caller(),
+        }),
+        Err(error) => Err(error).with_context(Ctx::transport()),
     }
 }
 
@@ -1457,7 +1549,7 @@ pub async fn remove_member(
 
 #[cfg(test)]
 mod tests {
-    use super::{ALREADY_INVITED_NOTE, InviteMemberError};
+    use super::{ALREADY_INVITED_NOTE, INVITE_LIMIT_NOTE, InviteMemberError};
 
     #[test]
     fn already_invited_reports_the_cancel_route() {
@@ -1484,6 +1576,39 @@ mod tests {
 
         let response = error.into_response();
         assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(
+            response
+                .extensions()
+                .get::<sentry_middleware::SentryReportable>()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn invite_limit_reports_the_configured_cap() {
+        use axum::http::StatusCode;
+        use axum::response::IntoResponse;
+        use caution_error::Note;
+
+        let error = InviteMemberError::LimitReached {
+            note: Note::from(INVITE_LIMIT_NOTE),
+            location: std::panic::Location::caller(),
+        };
+
+        let report = caution_error::ErrorReport::from_error(&error);
+        assert_eq!(
+            report.error,
+            "this organization has sent its daily invitation limit"
+        );
+        assert_eq!(report.errors[0].notes.len(), 1);
+        assert_eq!(report.errors[0].notes[0].0, INVITE_LIMIT_NOTE);
+        assert!(
+            caution_error::location(&error).is_some(),
+            "location provided"
+        );
+
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert!(
             response
                 .extensions()

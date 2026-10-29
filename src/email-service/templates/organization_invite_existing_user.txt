@@ -1,0 +1,8 @@
+{inviter} invited you to join {org_name}.
+
+This address already has a Caution account, so this invitation link cannot add it.
+
+Ask {inviter} to add you to {org_name} from the organization's member settings.
+
+--
+Caution Team
