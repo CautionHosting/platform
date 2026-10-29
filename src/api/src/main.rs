@@ -2278,18 +2278,58 @@ async fn set_builder_config(
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum DeployLogicError {
     #[error("could not prepare pinned component artifacts [{location}]")]
-    Components {
+    ComponentSelection {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: component_artifacts::SelectionError,
+    },
+
+    #[error("could not prepare pinned component artifacts [{location}]")]
+    ComponentLoad {
+        #[location]
+        location: Location,
+        #[source]
+        source: component_artifacts::SelectedComponentsError,
+    },
+
+    #[error("could not prepare pinned component artifacts [{location}]")]
+    ComponentPins {
+        #[location]
+        location: Location,
+        #[source]
+        source: component_artifacts::ComponentPinsError,
+    },
+
+    #[error("could not prepare pinned component artifacts [{location}]")]
+    CacheDecode {
+        #[location]
+        location: Location,
+        #[source]
+        source: builder::CheckBuildCacheError,
+    },
+
+    #[error("could not prepare pinned component artifacts [{location}]")]
+    ComponentMismatch {
+        #[location]
+        location: Location,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("could not prepare pinned component artifacts [{location}]")]
+    BuilderComponents {
+        #[location]
+        location: Location,
+        #[source]
+        source: builder::ExecuteRemoteBuildError,
     },
     #[error("invalid platform framework commit [{location}]")]
     FrameworkCommit {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: builder::RequirePlatformFrameworkCommitError,
     },
 
     #[error("failed to check organization membership [{location}]")]
@@ -2297,7 +2337,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: sqlx::Error,
     },
 
     #[error("user does not belong to this organization [{location}]")]
@@ -2308,7 +2348,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: sqlx::Error,
     },
 
     #[error("no active provider account found [{location}]")]
@@ -2322,7 +2362,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: sqlx::Error,
     },
 
     #[error("failed to check existing resource [{location}]")]
@@ -2330,7 +2370,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: sqlx::Error,
     },
 
     #[error("deployment already in progress [{location}]")]
@@ -2350,7 +2390,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: cloud_credentials::GetCredentialByResourceError,
     },
 
     #[error("unable to check deployment entitlement [{location}]")]
@@ -2358,7 +2398,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: sqlx::Error,
     },
 
     #[error("managed on-premises deployment requires an active subscription [{location}]")]
@@ -2375,7 +2415,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: sqlx::Error,
     },
 
     #[error("app limit reached [{location}]")]
@@ -2386,7 +2426,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: sqlx::Error,
     },
 
     #[error("failed to read ledger balance [{location}]")]
@@ -2394,7 +2434,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: billing::GetLedgerBalanceCentsError,
     },
 
     #[error("minimum $25.00 in credits required to deploy [{location}]")]
@@ -2405,7 +2445,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: sqlx::Error,
     },
 
     #[error("organization is suspended due to credit exhaustion [{location}]")]
@@ -2416,7 +2456,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: sqlx::Error,
     },
 
     #[error("resource limit reached [{location}]")]
@@ -2427,7 +2467,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: sqlx::Error,
     },
 
     #[error("failed to update resource state [{location}]")]
@@ -2435,7 +2475,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: sqlx::Error,
     },
 
     #[error("failed to get commit SHA for branch [{location}]")]
@@ -2443,7 +2483,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: GetCommitShaError,
     },
 
     #[error("commit_sha does not match branch head [{location}]")]
@@ -2451,7 +2491,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: SelectDeployCommitShaError,
     },
 
     #[error("failed to load build config from git [{location}]")]
@@ -2459,14 +2499,14 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: LoadBuildConfigForDeployError,
     },
     #[error("invalid network policy [{location}]")]
     NetworkPolicy {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: caution_config::NetworkPolicyError,
     },
     #[error("recovery without HTTP requires explicit ingress sources [{location}]")]
     RecoveryIngressRequired { location: Location },
@@ -2476,7 +2516,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: ResolveContainerfileForDeployError,
     },
 
     #[error("invalid enclave unit configuration [{location}]")]
@@ -2484,7 +2524,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: caution_config::FromStrError,
     },
 
     #[error("encryptor not configured [{location}]")]
@@ -2495,7 +2535,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: cloud_credentials::GetManagedOnpremCredentialError,
     },
 
     #[error("BYOC provider configuration requires linked credentials [{location}]")]
@@ -2509,7 +2549,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: deployment::EnclaveSizingError,
     },
 
     #[error("failed to read EIF build metadata [{location}]")]
@@ -2517,7 +2557,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: sqlx::Error,
     },
 
     #[error("EIF size exceeds allocated enclave memory [{location}]")]
@@ -2528,7 +2568,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: ResolveBuilderTargetError,
     },
 
     #[error("cache lookup failed [{location}]")]
@@ -2536,7 +2576,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: builder::CheckBuildCacheError,
     },
 
     #[error("insufficient credits for builder [{location}]")]
@@ -2546,9 +2586,8 @@ pub(crate) enum DeployLogicError {
     BuilderAlreadyRunning {
         #[location]
         location: Location,
-        /// The builder error that knows why the build is running, held as a
-        /// provider source so its guidance reaches the deploy frame.
-        conflict: Box<dyn caution_error::ProviderError>,
+        #[source]
+        source: builder::ExecuteRemoteBuildError,
     },
 
     #[error("failed to upload source archive [{location}]")]
@@ -2556,7 +2595,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: builder::UploadSourceArchiveError,
     },
 
     #[error("dedicated builder failed [{location}]")]
@@ -2564,7 +2603,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: builder::ExecuteRemoteBuildError,
     },
 
     #[error("database error while reserving fully managed capacity [{location}]")]
@@ -2572,18 +2611,26 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: fully_managed_capacity::CapacityError,
     },
 
     #[error("no deployment region resolved [{location}]")]
     NoRegion { location: Location },
 
     #[error("Nitro deployment failed [{location}]")]
-    NitroDeploy {
+    NitroEnclave {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: deployment::DeployNitroEnclaveError,
+    },
+
+    #[error("Nitro deployment failed [{location}]")]
+    ProvisionCandidate {
+        #[location]
+        location: Location,
+        #[source]
+        source: ProvisionCandidateError,
     },
 
     #[error("enclave failed to become healthy [{location}]")]
@@ -2591,7 +2638,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: WaitForHealthError,
     },
 
     #[error("failed to update resource [{location}]")]
@@ -2599,7 +2646,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: sqlx::Error,
     },
 
     #[error(
@@ -2612,7 +2659,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: metering::UpsertTrackedResourceError,
     },
 
     #[error("failed to read the app lifecycle [{location}]")]
@@ -2620,7 +2667,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: app_deployments::AppLifecycleError,
     },
 
     #[error("deployments-lifecycle push without a reserved deployment [{location}]")]
@@ -2642,11 +2689,19 @@ pub(crate) enum DeployLogicError {
     LinkedBuilderMissing { location: Location },
 
     #[error("failed to read the app network [{location}]")]
-    AppNetwork {
+    AppNetworkQuery {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: sqlx::Error,
+    },
+
+    #[error("failed to read the app network [{location}]")]
+    AppNetworkParse {
+        #[location]
+        location: Location,
+        #[source]
+        source: serde_json::Error,
     },
 
     #[error("failed to check instance type offerings in the app zone [{location}]")]
@@ -2654,7 +2709,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: ec2::InstanceTypeOfferedError,
     },
 
     #[error("instance type is not offered in the app availability zone [{location}]")]
@@ -2668,7 +2723,7 @@ pub(crate) enum DeployLogicError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: app_deployments::lifecycle::CompleteRunningError,
     },
 
     #[error("deploy task panicked [{location}]")]
@@ -2680,7 +2735,7 @@ pub(crate) enum DeployLogicError {
 /// The deployment is Running and metered unless it was destroyed or its app
 /// stopped meanwhile, so the outcome is a caution and the next step is a note.
 fn activation_guidance(
-    source: &dterror::BoxError,
+    source: &app_deployments::lifecycle::CompleteRunningError,
 ) -> (
     &'static [caution_error::Note],
     &'static [caution_error::Warning],
@@ -2701,8 +2756,8 @@ fn activation_guidance(
         "The deployment was destroyed, or its app is suspended or being destroyed, so it will not become live.",
     )];
 
-    match source.downcast_ref::<CompleteRunningError>() {
-        Some(CompleteRunningError::AttachAddress { source, .. })
+    match source {
+        CompleteRunningError::AttachAddress { source, .. }
             if matches!(
                 source.downcast_ref::<ec2::MoveAppAddressError>(),
                 Some(ec2::MoveAppAddressError::HolderMismatch { .. })
@@ -2710,9 +2765,9 @@ fn activation_guidance(
         {
             (WATCH, STILL_RUNNING)
         }
-        Some(
-            CompleteRunningError::OwnershipLost { .. } | CompleteRunningError::AppNotActive { .. },
-        ) => (WATCH, NOT_LIVE),
+        CompleteRunningError::OwnershipLost { .. } | CompleteRunningError::AppNotActive { .. } => {
+            (WATCH, NOT_LIVE)
+        }
         _ => (CHECK_THEN_PUSH, &[]),
     }
 }
@@ -2721,7 +2776,13 @@ impl DeployLogicError {
     /// Client status and diagnostic for each failure path.
     fn client_response(&self) -> (StatusCode, String) {
         let (status, message) = match self {
-            DeployLogicError::FrameworkCommit { .. } | DeployLogicError::Components { .. } => {
+            DeployLogicError::FrameworkCommit { .. }
+            | DeployLogicError::ComponentSelection { .. }
+            | DeployLogicError::ComponentLoad { .. }
+            | DeployLogicError::ComponentPins { .. }
+            | DeployLogicError::CacheDecode { .. }
+            | DeployLogicError::ComponentMismatch { .. }
+            | DeployLogicError::BuilderComponents { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
             DeployLogicError::OrgMembership { .. } => {
@@ -2820,8 +2881,8 @@ impl DeployLogicError {
                 "Requested commit_sha does not match the branch head",
             ),
             DeployLogicError::BuildConfigGit { source, .. } => {
-                match source.downcast_ref::<LoadBuildConfigForDeployError>() {
-                    Some(LoadBuildConfigForDeployError::HclParse { .. }) => {
+                match source {
+                    LoadBuildConfigForDeployError::HclParse { .. } => {
                         let mut message = self.to_string();
                         let mut source = std::error::Error::source(self);
                         while let Some(cause) = source {
@@ -2854,7 +2915,7 @@ impl DeployLogicError {
                             .collect();
                         return (StatusCode::BAD_REQUEST, message);
                     }
-                    Some(LoadBuildConfigForDeployError::ProcfileParse { source, .. })
+                    LoadBuildConfigForDeployError::ProcfileParse { source, .. }
                         if matches!(
                             source.downcast_ref::<config::FromProcfileError>(),
                             Some(config::FromProcfileError::NetworkPolicy { .. })
@@ -2865,13 +2926,9 @@ impl DeployLogicError {
                     _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
                 }
             }
-            DeployLogicError::NetworkPolicy { source, .. } => (
-                StatusCode::BAD_REQUEST,
-                source
-                    .downcast_ref::<config::NetworkPolicyError>()
-                    .map(config::NetworkPolicyError::client_message)
-                    .unwrap_or("Invalid caution.hcl network policy"),
-            ),
+            DeployLogicError::NetworkPolicy { source, .. } => {
+                (StatusCode::BAD_REQUEST, source.client_message())
+            }
             DeployLogicError::RecoveryIngressRequired { .. } => (
                 StatusCode::BAD_REQUEST,
                 "Recovery without HTTP requires explicit network.recovery_ingress sources",
@@ -2936,7 +2993,7 @@ impl DeployLogicError {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "No deployment region resolved",
             ),
-            DeployLogicError::NitroDeploy { .. } => {
+            DeployLogicError::NitroEnclave { .. } | DeployLogicError::ProvisionCandidate { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Nitro deployment failed")
             }
             DeployLogicError::EnclaveUnhealthy { .. } => (
@@ -2983,7 +3040,7 @@ impl DeployLogicError {
                 StatusCode::CONFLICT,
                 "This app's linked AWS environment predates the BYOC builder.",
             ),
-            DeployLogicError::AppNetwork { .. } => {
+            DeployLogicError::AppNetworkQuery { .. } | DeployLogicError::AppNetworkParse { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
             DeployLogicError::ZoneOffering { .. } => {
@@ -3162,7 +3219,12 @@ impl DeployLogicError {
         use DeployLogicError::*;
 
         match self {
-            Components { location, .. }
+            ComponentSelection { location, .. }
+            | ComponentLoad { location, .. }
+            | ComponentPins { location, .. }
+            | CacheDecode { location, .. }
+            | ComponentMismatch { location, .. }
+            | BuilderComponents { location, .. }
             | FrameworkCommit { location, .. }
             | OrgMembership { location, .. }
             | NotOrgMember { location, .. }
@@ -3212,7 +3274,8 @@ impl DeployLogicError {
             | BuilderFailed { location, .. }
             | CapacityDatabase { location, .. }
             | NoRegion { location, .. }
-            | NitroDeploy { location, .. }
+            | NitroEnclave { location, .. }
+            | ProvisionCandidate { location, .. }
             | EnclaveUnhealthy { location, .. }
             | ResourceUpdate { location, .. }
             | PublishConflict { location, .. }
@@ -3222,7 +3285,8 @@ impl DeployLogicError {
             | DeploymentClaim { location, .. }
             | LinkedNetworkChanged { location, .. }
             | LinkedBuilderMissing { location, .. }
-            | AppNetwork { location, .. }
+            | AppNetworkQuery { location, .. }
+            | AppNetworkParse { location, .. }
             | ZoneOffering { location, .. }
             | InstanceTypeUnavailableInZone { location, .. }
             | RegionFull { location, .. }
@@ -3244,8 +3308,12 @@ impl caution_error::ProviderError for DeployLogicError {
     }
 
     fn provider_source(&self) -> Option<&(dyn caution_error::ProviderError + 'static)> {
+        // Variants whose source is already a `ProviderError` are reachable here;
+        // the rest fall back to `std::error::Error::source` until their source
+        // types implement `ProviderError` (see the typed sources on this enum).
         match self {
-            Self::BuilderAlreadyRunning { conflict, .. } => Some(&**conflict),
+            Self::BuilderAlreadyRunning { source, .. } => Some(source),
+            Self::EnclaveUnhealthy { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -3794,10 +3862,10 @@ mod activation_message_tests {
     use dterror::BoxError;
     use uuid::Uuid;
 
-    fn activation(source: impl Into<BoxError>) -> DeployLogicError {
+    fn activation(source: CompleteRunningError) -> DeployLogicError {
         DeployLogicError::Activation {
             location: std::panic::Location::caller(),
-            source: source.into(),
+            source,
         }
     }
 
@@ -3970,7 +4038,7 @@ mod deploy_containerfile_tests {
             let result = load_build_config_for_deploy(git_dir.to_str().unwrap(), &commit_sha).await;
             if domain.is_empty() {
                 let error = super::DeployLogicError::BuildConfigGit {
-                    source: Box::new(result.unwrap_err()),
+                    source: result.unwrap_err(),
                     location: std::panic::Location::caller(),
                 };
                 let (status, message) = error.client_response();
@@ -4010,7 +4078,7 @@ mod deploy_containerfile_tests {
             super::LoadBuildConfigForDeployError::HclParse { .. }
         ));
         let error = super::DeployLogicError::BuildConfigGit {
-            source: Box::new(error),
+            source: error,
             location: std::panic::Location::caller(),
         };
         let (status, body) = error.client_response();
@@ -4042,7 +4110,7 @@ mod deploy_containerfile_tests {
             .await
             .unwrap_err();
         let error = super::DeployLogicError::BuildConfigGit {
-            source: Box::new(source),
+            source,
             location: std::panic::Location::caller(),
         };
         let (status, body) = error.client_response();
@@ -4071,7 +4139,7 @@ mod deploy_containerfile_tests {
                 .await
                 .unwrap_err();
             let error = super::DeployLogicError::BuildConfigGit {
-                source: Box::new(source),
+                source,
                 location: std::panic::Location::caller(),
             };
             assert_eq!(
@@ -4564,12 +4632,12 @@ async fn deploy_logic(
         std::env::var("COMPONENTS_S3_BUCKET").ok(),
         &state.builder_config.eif_s3_bucket,
     )
-    .with_context(Ctx::components())?;
+    .with_context(Ctx::component_selection())?;
     let selected_components = match component_selection {
         Some(selection) => Some(
             component_artifacts::SelectedComponents::load(selection)
                 .await
-                .with_context(Ctx::components())?,
+                .with_context(Ctx::component_load())?,
         ),
         None => None,
     };
@@ -4803,7 +4871,7 @@ async fn deploy_logic(
                 .bind(resource_id)
                 .fetch_optional(&state.db)
                 .await
-                .with_context(Ctx::app_network())?;
+                .with_context(Ctx::app_network_query())?;
         if let Some((scope, vpc, region)) = &environment
             && !app_deployments::account::keeps_environment(
                 (scope.as_deref(), vpc.as_deref(), region.as_deref()),
@@ -4878,7 +4946,7 @@ async fn deploy_logic(
                     .has_vault_env()
                     .then_some(enclave_builder::build::resolve_locksmith_commit().as_str()),
             )
-            .with_context(Ctx::components())?;
+            .with_context(Ctx::component_pins())?;
         }
         let cache_key = builder::compute_cache_key(
             &commit_sha,
@@ -4914,7 +4982,7 @@ async fn deploy_logic(
             )
             .await;
             if matches!(&result, Err(builder::CheckBuildCacheError::Decode { .. })) {
-                result.with_context(Ctx::components())?
+                result.with_context(Ctx::cache_decode())?
             } else {
                 result.with_context(Ctx::cache_lookup())?
             }
@@ -4948,13 +5016,13 @@ async fn deploy_logic(
                     )
                 })
                 .transpose()
-                .with_context(Ctx::components())?;
+                .with_context(Ctx::component_load())?;
             if cached.component_artifacts != expected {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "cached EIF component provenance does not match captured selection",
                 ))
-                .with_context(Ctx::components());
+                .with_context(Ctx::component_mismatch());
             }
             let _ = tx.send(Ok(milestone("Using cached build..."))).await;
             tracing::info!(
@@ -4995,7 +5063,7 @@ async fn deploy_logic(
                         ),
                     )
                     .await
-                    .with_context(Ctx::components())?;
+                    .with_context(Ctx::component_load())?;
             }
             let build_id = uuid::Uuid::new_v4();
             let source_artifact = builder::upload_source_archive(
@@ -5069,33 +5137,29 @@ async fn deploy_logic(
             .await;
             match build_result {
                 Err(error @ builder::ExecuteRemoteBuildError::Components { .. }) => {
-                    Err(error).with_context(Ctx::components())
+                    Err(error).with_context(Ctx::builder_components())
                 }
                 Err(
                     error @ (builder::ExecuteRemoteBuildError::AlreadyLocked { .. }
                     | builder::ExecuteRemoteBuildError::ActiveBuildConflict { .. }),
-                ) => {
-                    let conflict: Box<dyn caution_error::ProviderError> = Box::new(error);
-                    Err(DeployLogicError::BuilderAlreadyRunning {
-                        location: std::panic::Location::caller(),
-                        conflict,
-                    })
-                }
+                ) => Err(error).with_context(Ctx::builder_already_running()),
                 other => other.with_context(Ctx::builder_failed()),
             }
         }
     }
     .await;
-    if matches!(&build_result, Err(DeployLogicError::Components { .. }))
-        && let Err(error) = restore_pending_deploy_rejection(
-            &state.db,
-            req.org_id,
-            resource_id,
-            deploy_attempt_id,
-            previous_state,
-            was_destroyed,
-        )
-        .await
+    if matches!(
+        &build_result,
+        Err(DeployLogicError::BuilderComponents { .. })
+    ) && let Err(error) = restore_pending_deploy_rejection(
+        &state.db,
+        req.org_id,
+        resource_id,
+        deploy_attempt_id,
+        previous_state,
+        was_destroyed,
+    )
+    .await
     {
         tracing::error!(?error, "failed to restore pending deploy rejection");
     }
@@ -5168,11 +5232,11 @@ async fn deploy_logic(
                     .bind(resource_id)
                     .fetch_one(&state.db)
                     .await
-                    .with_context(Ctx::app_network())?;
+                    .with_context(Ctx::app_network_query())?;
                 let network = network
                     .map(serde_json::from_value)
                     .transpose()
-                    .with_context(Ctx::app_network())?;
+                    .with_context(Ctx::app_network_parse())?;
                 (network, region)
             }
             DeployTarget::Legacy { .. } => (None, None),
@@ -5340,7 +5404,7 @@ async fn deploy_logic(
     let deployment_result: Result<_, DeployLogicError> = match deploy_target {
         DeployTarget::Legacy { .. } => deployment::deploy_nitro_enclave(nitro_request)
             .await
-            .with_context(Ctx::nitro_deploy()),
+            .with_context(Ctx::nitro_enclave()),
         DeployTarget::Candidate { deployment_id } => provision_candidate(
             &state,
             &req,
@@ -5354,7 +5418,7 @@ async fn deploy_logic(
             &deployment_requirements,
         )
         .await
-        .with_context(Ctx::nitro_deploy()),
+        .with_context(Ctx::provision_candidate()),
     };
     match &deployment_result {
         Ok(result) => {
@@ -6830,7 +6894,12 @@ mod deploy_guidance_tests {
             (
                 DeployLogicError::CommitMismatch {
                     location: at(),
-                    source: Box::new(std::io::Error::other("branch head moved")),
+                    source: crate::SelectDeployCommitShaError::Mismatch {
+                        branch: "main".to_string(),
+                        resolved_commit_sha: "a".to_string(),
+                        requested_commit_sha: "b".to_string(),
+                        location: at(),
+                    },
                 },
                 &["Fetch the branch head, then push the commit you intend to deploy again."],
             ),
@@ -6886,7 +6955,7 @@ mod deploy_guidance_tests {
         };
         let error = DeployLogicError::BuilderAlreadyRunning {
             location: at(),
-            conflict: Box::new(conflict),
+            source: conflict,
         };
 
         let (status, message) = error.client_response();
