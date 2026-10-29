@@ -15,6 +15,7 @@
 //! ephemeral EC2 instances that perform the build, upload the EIF to S3,
 //! and signal completion via an S3 status file.
 
+use caution_error::Note;
 use chrono::{DateTime, TimeDelta, Utc};
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use sha2::{Digest, Sha256};
@@ -248,6 +249,12 @@ pub struct BuildRequest {
 }
 
 pub const ACTIVE_BUILD_CONFLICT_MSG: &str = "A build is already in progress for this app.";
+
+/// Guidance for a build that is already running. Provided by the conflict errors
+/// below so it lives on the reason; `DeployLogicError::BuilderAlreadyRunning`
+/// currently re-states it because the deploy frame does not read source chains yet.
+pub(crate) const BUILD_IN_PROGRESS_NOTE: &str =
+    "Wait for the current build to finish, then push again.";
 
 /// Failure modes for [`validate_remote_containerfile_path`].
 #[derive(Debug, thiserror::Error)]
@@ -805,7 +812,7 @@ async fn ensure_managed_onprem_builder_security_group(
 }
 
 /// Failure modes for [`execute_remote_build`].
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub enum ExecuteRemoteBuildError {
     #[error("Failed to capture build component provenance [{location}]")]
     Components {
@@ -833,6 +840,8 @@ pub enum ExecuteRemoteBuildError {
     #[error("Deployment already locked for app: {app_name} [{location}]")]
     AlreadyLocked {
         app_name: String,
+        #[provide(ref)]
+        note: Note,
         location: Location,
     },
 
@@ -847,6 +856,8 @@ pub enum ExecuteRemoteBuildError {
     #[error("{message}")]
     ActiveBuildConflict {
         message: &'static str,
+        #[provide(ref)]
+        note: Note,
         location: Location,
     },
 
@@ -939,6 +950,7 @@ pub async fn execute_remote_build(
     if !is_locked {
         return Err(ExecuteRemoteBuildError::AlreadyLocked {
             app_name: request.app_name.clone(),
+            note: Note::from(BUILD_IN_PROGRESS_NOTE),
             location: std::panic::Location::caller(),
         });
     }
@@ -954,6 +966,7 @@ pub async fn execute_remote_build(
     if existing > 0 {
         return Err(ExecuteRemoteBuildError::ActiveBuildConflict {
             message: ACTIVE_BUILD_CONFLICT_MSG,
+            note: Note::from(BUILD_IN_PROGRESS_NOTE),
             location: std::panic::Location::caller(),
         });
     }
