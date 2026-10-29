@@ -167,10 +167,10 @@ pub struct ErrorResponse {
 /// The full error report: the root message plus every error in the chain.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorReport {
-    /// The root error's [`Display`](std::fmt::Display) output.
-    ///
-    /// This repeats `errors[0].error`. Clients that only read a flat `error`
-    /// string keep working.
+    /// The root error's [`Display`](std::fmt::Display) output, or the client-safe
+    /// fallback when the root is [`Opaque`]. It repeats `errors[0].error` whenever
+    /// the root's message is shown. Clients that only read a flat `error` string
+    /// keep working.
     pub error: String,
 
     /// One entry per error in the chain, root first.
@@ -186,41 +186,29 @@ impl ErrorReport {
     /// source that is not itself a [`ProviderError`]. A boxed source still
     /// appears (with no notes or warnings).
     ///
-    /// A link that provides [`Opaque`] and every source below it are dropped, so
-    /// the report never carries them. When the root itself is [`Opaque`] no link
-    /// remains and the report is empty; use [`ErrorReport::from_error_with`] to
-    /// supply the client-safe message for that case.
+    /// [`Opaque`] and [`OpaqueChild`] withhold messages, never guidance: a
+    /// withheld link keeps its notes and warnings, with an empty `error`, and is
+    /// dropped only when it has none. When the root itself is [`Opaque`] the
+    /// report's `error` is empty; use [`ErrorReport::from_error_with`] to supply
+    /// the client-safe message.
     #[must_use]
     pub fn from_error(error: &dyn ProviderError) -> Self {
-        Self::walk(error, None)
+        Self::from_error_with(error, "")
     }
 
     /// Builds a report from an error and its chain, using `fallback` as the
-    /// client message when no non-[`Opaque`] link remains.
+    /// client message when the root is [`Opaque`].
     ///
-    /// A root error that provides [`Opaque`] is dropped along with its chain, so
-    /// `fallback` is what the client sees. See [`ErrorReport::from_error`].
+    /// See [`ErrorReport::from_error`].
     #[must_use]
     pub fn from_error_with(error: &dyn ProviderError, fallback: impl Into<String>) -> Self {
-        Self::walk(error, Some(fallback.into()))
-    }
-
-    /// Walks the chain, substituting `fallback` for a report that is otherwise
-    /// empty.
-    fn walk(error: &dyn ProviderError, fallback: Option<String>) -> Self {
-        let errors = responses(error);
-        match errors.first() {
-            Some(first) => Self {
-                error: first.error.clone(),
-                errors,
+        Self {
+            error: if is_opaque(error) {
+                fallback.into()
+            } else {
+                error.to_string()
             },
-            None => match fallback {
-                Some(message) => Self::opaque(message),
-                None => Self {
-                    error: String::new(),
-                    errors,
-                },
-            },
+            errors: responses(error),
         }
     }
 
@@ -244,12 +232,14 @@ impl ErrorReport {
     }
 }
 
-/// A marker a link provides when the failure, and every source below it, must
-/// not reach a client.
+/// A marker a link provides when the messages of the failure and every source
+/// below it must not reach a client.
 ///
-/// [`ErrorReport::from_error`] stops at the first link that provides it, dropping
-/// that link and the rest of the chain; a root that provides it is dropped too.
-/// Logs, the journal and Sentry read the error directly and still see everything.
+/// [`ErrorReport::from_error`] withholds the message of the link that provides it
+/// and of every source below (each an empty `error`); a root that provides it
+/// makes the report's `error` empty too. Notes and warnings are still reported,
+/// because guidance is always client-actionable. Logs, the journal and Sentry
+/// read the error directly and still see every message.
 ///
 /// Provide it by value, because it is a `Copy` unit type:
 ///
@@ -279,12 +269,12 @@ impl ErrorReport {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Opaque;
 
-/// A marker a link provides when the failure may be sent, but none of its
-/// sources may.
+/// A marker a link provides when its message may be sent, but none of its
+/// sources' messages may.
 ///
-/// [`ErrorReport::from_error`] keeps the link that provides it and drops every
-/// source below, so the link's own message and guidance survive while its cause
-/// stays on the server. Compare [`Opaque`], which drops the link as well.
+/// [`ErrorReport::from_error`] keeps that link's message and withholds every
+/// source below (each an empty `error`); guidance is always reported. Compare
+/// [`Opaque`], which withholds the link's message too.
 /// Provide it by value, because it is a `Copy` unit type:
 ///
 /// ```rust
@@ -471,28 +461,36 @@ impl<'a> Iterator for Chain<'a> {
     }
 }
 
-/// Builds one [`ErrorResponse`] per link of the chain, stopping at a link that
-/// provides [`Opaque`] (dropped) or [`OpaqueChild`] (kept, but nothing below).
+/// Builds one [`ErrorResponse`] per chain link. Messages follow [`Opaque`] and
+/// [`OpaqueChild`]; notes and warnings are collected from every link regardless,
+/// so a withheld link keeps its guidance (with an empty `error`) and is dropped
+/// only when it has none.
 fn responses(root: &dyn ProviderError) -> Vec<ErrorResponse> {
     let mut responses = Vec::new();
+    let mut hidden = false;
     for node in chain(root) {
         let provider = node.provider();
-        if provider.is_some_and(is_opaque) {
-            break;
-        }
-        let steps_down = provider.is_some_and(is_opaque_child);
+        let opaque_self = provider.is_some_and(is_opaque);
+        let withholds_below = opaque_self || provider.is_some_and(is_opaque_child);
+        let withheld = hidden || opaque_self;
+        hidden = hidden || withholds_below;
+
         let (notes, warnings) = match provider {
             Some(provider) => (notes(provider), warnings(provider)),
             None => (Vec::new(), Vec::new()),
         };
+        if withheld && notes.is_empty() && warnings.is_empty() {
+            continue;
+        }
         responses.push(ErrorResponse {
-            error: node.error().to_string(),
+            error: if withheld {
+                String::new()
+            } else {
+                node.error().to_string()
+            },
             notes,
             warnings,
         });
-        if steps_down {
-            break;
-        }
     }
     responses
 }
@@ -623,13 +621,14 @@ mod tests {
 
         let report = ErrorReport::from_error_with(&error, "internal error");
         assert_eq!(report.error, "internal error");
-        assert_eq!(report.errors.len(), 1);
-        assert_eq!(report.errors[0].error, "internal error");
-
         assert!(
-            ErrorReport::from_error(&error).errors.is_empty(),
-            "the root is dropped, leaving no link",
+            report.errors.is_empty(),
+            "a withheld link with no guidance is dropped",
         );
+
+        let report = ErrorReport::from_error(&error);
+        assert_eq!(report.error, "");
+        assert!(report.errors.is_empty());
     }
 
     #[test]
@@ -764,9 +763,15 @@ mod tests {
 
         let report = ErrorReport::from_error_with(&error, "internal error");
         assert_eq!(report.error, "safe failed");
-        assert_eq!(report.errors.len(), 1, "the opaque link and below are gone");
+        assert_eq!(
+            report.errors.len(),
+            2,
+            "the withheld link keeps its guidance"
+        );
         assert_eq!(report.errors[0].error, "safe failed");
         assert_eq!(report.errors[0].notes[0].0, "root note");
+        assert_eq!(report.errors[1].error, "", "the withheld message is empty");
+        assert_eq!(report.errors[1].notes[0].0, "secret note");
     }
 
     #[test]
