@@ -356,16 +356,22 @@ fn error_response(
 }
 
 /// Failure modes for [`list_handler`].
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 #[error("failed to list the deployments of app {app_id}")]
 pub(crate) struct ListDeploymentsError {
     app_id: Uuid,
+    #[provide]
+    opaque: Opaque,
+    #[provide]
     #[location]
     location: Location,
     #[source]
     source: QueryRowsError,
 }
 
+/// The app id and the database detail stay on the server: the error provides
+/// [`caution_error::Opaque`], so a client report keeps only the fallback text.
+/// The typed source still chains for the logs.
 impl IntoResponse for ListDeploymentsError {
     fn into_response(self) -> Response {
         tracing::error!(error = ?self, "failed to list deployments");
@@ -374,20 +380,6 @@ impl IntoResponse for ListDeploymentsError {
             self,
             "Failed to list deployments.",
         )
-    }
-}
-
-/// The app id and the database detail stay on the server: this error provides
-/// [`caution_error::Opaque`], so a client report keeps only the fallback text.
-/// The typed source still chains for the logs.
-impl caution_error::ProviderError for ListDeploymentsError {
-    fn provide<'a>(&'a self, request: &mut caution_error::Request<'a>) {
-        request.provide_value(caution_error::Opaque);
-        request.provide_value(self.location);
-    }
-
-    fn provider_source(&self) -> Option<&(dyn caution_error::ProviderError + 'static)> {
-        Some(&self.source)
     }
 }
 
@@ -412,7 +404,7 @@ pub(crate) async fn list_handler(
     )
     .await
     .map(Json)
-    .with_context(ListDeploymentsErrorCtx::new(app_id))
+    .with_context(ListDeploymentsErrorCtx::new(app_id, Opaque))
 }
 
 /// Failure modes for [`get_in_app_handler`].
@@ -751,6 +743,7 @@ mod tests {
 
         let list = ListDeploymentsError {
             app_id: Uuid::new_v4(),
+            opaque: Opaque,
             location: std::panic::Location::caller(),
             source: QueryRowsError::Database {
                 location: std::panic::Location::caller(),
@@ -789,6 +782,7 @@ mod tests {
         let app_id = Uuid::new_v4();
         let error = ListDeploymentsError {
             app_id,
+            opaque: Opaque,
             location: std::panic::Location::caller(),
             source: QueryRowsError::Database {
                 location: std::panic::Location::caller(),

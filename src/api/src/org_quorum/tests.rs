@@ -606,23 +606,6 @@ fn credential_snapshots_require_uv_and_enforce_recovery_bounds_without_reorderin
 
 #[test]
 fn verification_failures_carry_actionable_guidance() {
-    use caution_error::{Note, Warning};
-
-    static REGENERATE: &[Note] = &[Note::from_static(
-        "Re-generate the bundle with `caution quorum init`, then upload it again.",
-    )];
-    static REIMPORT: &[Note] = &[Note::from_static(
-        "Re-import the file with `caution quorum legacy`, then upload it again.",
-    )];
-    static UNVERIFIED: &[Warning] = &[Warning::from_static(
-        "The payload imports as unverified metadata only: no key-service generation proof backs it.",
-    )];
-    static RETRY_KEY_SERVICE: &[Note] =
-        &[Note::from_static("Retry when the key service is healthy.")];
-    static KEY_SERVICE: &[Warning] = &[Warning::from_static(
-        "The key service could not check the payload, so nothing was stored.",
-    )];
-
     fn source() -> BoxError {
         Box::new(std::io::Error::other("boom"))
     }
@@ -633,13 +616,17 @@ fn verification_failures_carry_actionable_guidance() {
 
     let guidance: [(VerifyUploadError, &[Note], &[Warning]); 9] = [
         (
-            VerifyUploadError::LegacyOptIn { location: at() },
+            VerifyUploadError::LegacyOptIn {
+                location: at(),
+                warnings: UNVERIFIED,
+            },
             &[],
             UNVERIFIED,
         ),
         (
             VerifyUploadError::LegacyParse {
                 location: at(),
+                notes: REIMPORT,
                 source: source(),
             },
             REIMPORT,
@@ -648,6 +635,7 @@ fn verification_failures_carry_actionable_guidance() {
         (
             VerifyUploadError::Parse {
                 location: at(),
+                notes: REGENERATE,
                 source: source(),
             },
             REGENERATE,
@@ -656,6 +644,8 @@ fn verification_failures_carry_actionable_guidance() {
         (
             VerifyUploadError::PolicyPath {
                 location: at(),
+                notes: RETRY_KEY_SERVICE,
+                warnings: KEY_SERVICE,
                 source: source(),
             },
             RETRY_KEY_SERVICE,
@@ -664,6 +654,8 @@ fn verification_failures_carry_actionable_guidance() {
         (
             VerifyUploadError::Policy {
                 location: at(),
+                notes: RETRY_KEY_SERVICE,
+                warnings: KEY_SERVICE,
                 source: source(),
             },
             RETRY_KEY_SERVICE,
@@ -672,19 +664,24 @@ fn verification_failures_carry_actionable_guidance() {
         (
             VerifyUploadError::Proof {
                 location: at(),
+                notes: REGENERATE,
                 source: source(),
             },
             REGENERATE,
             &[],
         ),
         (
-            VerifyUploadError::InvalidBundle { location: at() },
+            VerifyUploadError::InvalidBundle {
+                location: at(),
+                notes: REGENERATE,
+            },
             REGENERATE,
             &[],
         ),
         (
             VerifyUploadError::Keyring {
                 location: at(),
+                notes: REGENERATE,
                 source: source(),
             },
             REGENERATE,
@@ -693,6 +690,7 @@ fn verification_failures_carry_actionable_guidance() {
         (
             VerifyUploadError::PublicKey {
                 location: at(),
+                notes: REGENERATE,
                 source: source(),
             },
             REGENERATE,
@@ -701,7 +699,11 @@ fn verification_failures_carry_actionable_guidance() {
     ];
 
     for (error, notes, warnings) in &guidance {
-        assert_eq!(error.notes(), *notes, "notes for {error}");
-        assert_eq!(error.warnings(), *warnings, "warnings for {error}");
+        assert_eq!(caution_error::notes(error), *notes, "notes for {error}");
+        assert_eq!(
+            caution_error::warnings(error),
+            *warnings,
+            "warnings for {error}"
+        );
     }
 }

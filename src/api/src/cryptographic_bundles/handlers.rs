@@ -740,6 +740,7 @@ mod tests {
     fn parse_failure() -> VerifyUploadError {
         VerifyUploadError::Parse {
             location: std::panic::Location::caller(),
+            notes: crate::org_quorum::REGENERATE,
             source: source(),
         }
     }
@@ -748,6 +749,8 @@ mod tests {
     fn missing_policy() -> VerifyUploadError {
         VerifyUploadError::PolicyPath {
             location: std::panic::Location::caller(),
+            notes: crate::org_quorum::RETRY_KEY_SERVICE,
+            warnings: crate::org_quorum::KEY_SERVICE,
             source: source(),
         }
     }
@@ -886,6 +889,8 @@ mod tests {
             missing_policy(),
             VerifyUploadError::Policy {
                 location: std::panic::Location::caller(),
+                notes: crate::org_quorum::RETRY_KEY_SERVICE,
+                warnings: crate::org_quorum::KEY_SERVICE,
                 source: source(),
             },
         ] {
@@ -899,24 +904,30 @@ mod tests {
             parse_failure(),
             V::LegacyOptIn {
                 location: std::panic::Location::caller(),
+                warnings: crate::org_quorum::UNVERIFIED,
             },
             V::LegacyParse {
                 location: std::panic::Location::caller(),
+                notes: crate::org_quorum::REIMPORT,
                 source: source(),
             },
             V::Proof {
                 location: std::panic::Location::caller(),
+                notes: crate::org_quorum::REGENERATE,
                 source: source(),
             },
             V::InvalidBundle {
                 location: std::panic::Location::caller(),
+                notes: crate::org_quorum::REGENERATE,
             },
             V::Keyring {
                 location: std::panic::Location::caller(),
+                notes: crate::org_quorum::REGENERATE,
                 source: source(),
             },
             V::PublicKey {
                 location: std::panic::Location::caller(),
+                notes: crate::org_quorum::REGENERATE,
                 source: source(),
             },
         ];

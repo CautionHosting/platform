@@ -1065,59 +1065,112 @@ pub async fn generate_org_quorum_bundle(
     .with_context(Ctx::store(org_id, created_by))
 }
 
+/// Guidance for a client whose upload was rejected, held by the variant that
+/// rejects it, so the derived [`ProviderError`](caution_error::ProviderError)
+/// reports it.
+pub(crate) const REGENERATE: &[Note] = &[Note::from_static(
+    "Re-generate the bundle with `caution quorum init`, then upload it again.",
+)];
+pub(crate) const REIMPORT: &[Note] = &[Note::from_static(
+    "Re-import the file with `caution quorum legacy`, then upload it again.",
+)];
+pub(crate) const RETRY_KEY_SERVICE: &[Note] =
+    &[Note::from_static("Retry when the key service is healthy.")];
+pub(crate) const UNVERIFIED: &[Warning] = &[Warning::from_static(
+    "The payload imports as unverified metadata only: no key-service generation proof backs it.",
+)];
+pub(crate) const KEY_SERVICE: &[Warning] = &[Warning::from_static(
+    "The key service could not check the payload, so nothing was stored.",
+)];
+
 /// Failure modes for [`verify_upload`]: one variant per rejected upload.
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum VerifyUploadError {
     #[error("legacy upload requires explicit allow_legacy: true")]
-    LegacyOptIn { location: Location },
+    LegacyOptIn {
+        #[provide]
+        location: Location,
+        #[provide(ref = [Warning])]
+        warnings: &'static [Warning],
+    },
     #[error("invalid imported legacy bundle (public validation only)")]
     LegacyParse {
+        #[provide]
         #[location]
         location: Location,
+        #[provide(ref = [Note])]
+        notes: &'static [Note],
         #[source]
         source: BoxError,
     },
     #[error("expected proofed v1 quorum bundle")]
     Parse {
+        #[provide]
         #[location]
         location: Location,
+        #[provide(ref = [Note])]
+        notes: &'static [Note],
         #[source]
         source: BoxError,
     },
     #[error("required key-service endpoint or trust policy is not configured")]
     PolicyPath {
+        #[provide]
         #[location]
         location: Location,
+        #[provide(ref = [Note])]
+        notes: &'static [Note],
+        #[provide(ref = [Warning])]
+        warnings: &'static [Warning],
         #[source]
         source: BoxError,
     },
     #[error("invalid key-service PCR policy")]
     Policy {
+        #[provide]
         #[location]
         location: Location,
+        #[provide(ref = [Note])]
+        notes: &'static [Note],
+        #[provide(ref = [Warning])]
+        warnings: &'static [Warning],
         #[source]
         source: BoxError,
     },
     #[error("uploaded quorum proof verification failed")]
     Proof {
+        #[provide]
         #[location]
         location: Location,
+        #[provide(ref = [Note])]
+        notes: &'static [Note],
         #[source]
         source: BoxError,
     },
     #[error("invalid uploaded quorum")]
-    InvalidBundle { location: Location },
+    InvalidBundle {
+        #[provide]
+        location: Location,
+        #[provide(ref = [Note])]
+        notes: &'static [Note],
+    },
     #[error("invalid uploaded quorum keyring")]
     Keyring {
+        #[provide]
         #[location]
         location: Location,
+        #[provide(ref = [Note])]
+        notes: &'static [Note],
         #[source]
         source: BoxError,
     },
     #[error("invalid quorum public key")]
     PublicKey {
+        #[provide]
         #[location]
         location: Location,
+        #[provide(ref = [Note])]
+        notes: &'static [Note],
         #[source]
         source: BoxError,
     },
@@ -1134,101 +1187,30 @@ pub(crate) fn verify_upload(
         if !allow_legacy {
             return Err(VerifyUploadError::LegacyOptIn {
                 location: std::panic::Location::caller(),
+                warnings: UNVERIFIED,
             });
         }
         locksmith::legacy::ImportedV0::from_json(&data.to_string())
-            .with_context(Ctx::legacy_parse())?;
+            .with_context(Ctx::legacy_parse(REIMPORT))?;
         return Ok(());
     }
     let response: GenerateQuorumResponse =
-        serde_json::from_value(data.clone()).with_context(Ctx::parse())?;
-    let policy_path = configured("KEYMAKER_PCR_POLICY_PATH").with_context(Ctx::policy_path())?;
-    let policy = load_policy(Path::new(&policy_path)).with_context(Ctx::policy())?;
+        serde_json::from_value(data.clone()).with_context(Ctx::parse(REGENERATE))?;
+    let policy_path = configured("KEYMAKER_PCR_POLICY_PATH")
+        .with_context(Ctx::policy_path(RETRY_KEY_SERVICE, KEY_SERVICE))?;
+    let policy = load_policy(Path::new(&policy_path))
+        .with_context(Ctx::policy(RETRY_KEY_SERVICE, KEY_SERVICE))?;
     let (bundle, at) = locksmith::bundle::load_response_with_timestamp(response, &policy)
-        .with_context(Ctx::proof())?;
+        .with_context(Ctx::proof(REGENERATE))?;
     let bundle = bundle.to_latest();
     if bundle.keyring.is_empty() || bundle.keyring.len() > 254 || bundle.shardfile.is_empty() {
         return Err(VerifyUploadError::InvalidBundle {
             location: std::panic::Location::caller(),
+            notes: REGENERATE,
         });
     }
     // Only the explicitly gated synthetic test proof has no authenticated time.
-    validate_keyring(&bundle.keyring, at).with_context(Ctx::keyring())?;
-    Cert::from_bytes(bundle.public_key.as_bytes()).with_context(Ctx::public_key())?;
+    validate_keyring(&bundle.keyring, at).with_context(Ctx::keyring(REGENERATE))?;
+    Cert::from_bytes(bundle.public_key.as_bytes()).with_context(Ctx::public_key(REGENERATE))?;
     Ok(())
-}
-
-/// Guidance for a client whose upload was rejected.
-impl VerifyUploadError {
-    /// Notes for a rejected upload. Empty when the `Display` text already says
-    /// what the client can do.
-    fn notes(&self) -> &'static [Note] {
-        static REGENERATE: &[Note] = &[Note::from_static(
-            "Re-generate the bundle with `caution quorum init`, then upload it again.",
-        )];
-        static REIMPORT: &[Note] = &[Note::from_static(
-            "Re-import the file with `caution quorum legacy`, then upload it again.",
-        )];
-        static RETRY_KEY_SERVICE: &[Note] =
-            &[Note::from_static("Retry when the key service is healthy.")];
-
-        match self {
-            Self::LegacyParse { .. } => REIMPORT,
-            Self::Parse { .. }
-            | Self::Proof { .. }
-            | Self::InvalidBundle { .. }
-            | Self::Keyring { .. }
-            | Self::PublicKey { .. } => REGENERATE,
-            Self::PolicyPath { .. } | Self::Policy { .. } => RETRY_KEY_SERVICE,
-            Self::LegacyOptIn { .. } => &[],
-        }
-    }
-
-    /// Warnings for a rejected upload. Empty when there is nothing beyond the
-    /// message.
-    fn warnings(&self) -> &'static [Warning] {
-        static UNVERIFIED: &[Warning] = &[Warning::from_static(
-            "The payload imports as unverified metadata only: no key-service generation proof backs it.",
-        )];
-        static KEY_SERVICE: &[Warning] = &[Warning::from_static(
-            "The key service could not check the payload, so nothing was stored.",
-        )];
-
-        match self {
-            Self::LegacyOptIn { .. } => UNVERIFIED,
-            Self::PolicyPath { .. } | Self::Policy { .. } => KEY_SERVICE,
-            Self::LegacyParse { .. }
-            | Self::Parse { .. }
-            | Self::Proof { .. }
-            | Self::InvalidBundle { .. }
-            | Self::Keyring { .. }
-            | Self::PublicKey { .. } => &[],
-        }
-    }
-
-    /// The call site that rejected the upload.
-    fn location(&self) -> Location {
-        match self {
-            Self::LegacyOptIn { location }
-            | Self::LegacyParse { location, .. }
-            | Self::Parse { location, .. }
-            | Self::PolicyPath { location, .. }
-            | Self::Policy { location, .. }
-            | Self::Proof { location, .. }
-            | Self::InvalidBundle { location }
-            | Self::Keyring { location, .. }
-            | Self::PublicKey { location, .. } => location,
-        }
-    }
-}
-
-/// [`ProviderError`](caution_error::ProviderError) is hand-written here rather
-/// than derived, because the derive provides guidance held in fields and this
-/// error derives its guidance from the variant.
-impl caution_error::ProviderError for VerifyUploadError {
-    fn provide<'a>(&'a self, request: &mut caution_error::Request<'a>) {
-        request.provide_ref::<[Note]>(self.notes());
-        request.provide_ref::<[Warning]>(self.warnings());
-        request.provide_value(self.location());
-    }
 }
