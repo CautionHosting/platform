@@ -271,31 +271,33 @@ pub(crate) async fn release_stale_reservations(
 }
 
 /// Failure modes for [`claim_for_build`].
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum ClaimError {
-    #[error(
-        "deployment {deployment_id} is no longer reserved for app {app_id}; push again [{location}]"
-    )]
+    #[error("deployment {deployment_id} is no longer reserved for app {app_id}; push again")]
     ReservationGone {
         app_id: Uuid,
         deployment_id: Uuid,
+        #[provide]
         location: Location,
     },
-    #[error("app {app_id} is {state} and cannot start a build [{location}]")]
+    #[error("app {app_id} is {state} and cannot start a build")]
     NotPushable {
         app_id: Uuid,
         state: String,
+        #[provide]
         location: Location,
     },
-    #[error("failed to lock app operations [{location}]")]
+    #[error("failed to lock app operations")]
     Lock {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("database error while claiming deployment [{location}]")]
+    #[error("database error while claiming deployment")]
     Database {
+        #[provide]
         #[location]
         location: Location,
         #[source]

@@ -367,36 +367,45 @@ pub enum SetDefaultCredentialError {
 }
 
 /// Failure modes for [`get_managed_onprem_credential`].
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub enum GetManagedOnpremCredentialError {
-    #[error("failed to look up credential [{location}]")]
+    #[error("failed to look up credential")]
     Lookup {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
 
-    #[error("credential is not a managed on-prem type [{location}]")]
-    NotManagedOnPrem { location: Location },
+    #[error("credential is not a managed on-prem type")]
+    NotManagedOnPrem {
+        #[provide]
+        location: Location,
+    },
 
-    #[error("failed to get secrets [{location}]")]
+    #[error("failed to get secrets")]
     Secrets {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
 
-    #[error("secrets not found [{location}]")]
-    SecretsMissing { location: Location },
+    #[error("secrets not found")]
+    SecretsMissing {
+        #[provide]
+        location: Location,
+    },
 }
 
 /// Failure modes for [`get_credential_by_resource`].
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub enum GetCredentialByResourceError {
-    #[error("failed to query credential by resource [{location}]")]
+    #[error("failed to query credential by resource")]
     Query {
+        #[provide]
         #[location]
         location: Location,
         #[source]

@@ -130,55 +130,67 @@ pub enum Ipv4CidrError {
 
 /// Failure to normalize a network allowlist.
 #[non_exhaustive]
-#[derive(Debug, thiserror::Error, dterror::CtxError)]
+#[derive(Debug, thiserror::Error, dterror::CtxError, caution_error::ProviderError)]
 pub enum NetworkPolicyError {
     /// The policy exceeds an enforcement resource budget.
-    #[error("network policy exceeds {resource} limit {max} [{location}]")]
+    #[error("network policy exceeds {resource} limit {max}")]
     Limit {
         resource: &'static str,
         max: usize,
+        #[provide]
         location: dterror::Location,
     },
     /// An application listener conflicts with platform services.
-    #[error("ingress port {port} is reserved for platform services [{location}]")]
+    #[error("ingress port {port} is reserved for platform services")]
     ReservedPort {
         port: u16,
+        #[provide]
         location: dterror::Location,
     },
     /// HTTP cannot be exposed without an explicit covering ingress declaration.
-    #[error("HTTP port {port} must be present in ingress rules [{location}]")]
+    #[error("HTTP port {port} must be present in ingress rules")]
     HttpPortNotInIngress {
         port: u16,
+        #[provide]
         location: dterror::Location,
     },
     /// Narrow ACME challenge forwarding is not implemented yet.
-    #[error("enclave TLS with restricted HTTP sources is not supported [{location}]")]
-    RestrictedTls { location: dterror::Location },
+    #[error("enclave TLS with restricted HTTP sources is not supported")]
+    RestrictedTls {
+        #[provide]
+        location: dterror::Location,
+    },
     /// Enclave Caddy owns the public HTTP and HTTPS listener ports in TLS mode.
-    #[error("enclave TLS application port conflicts with the Caddy listener [{location}]")]
-    TlsListenerCollision { location: dterror::Location },
+    #[error("enclave TLS application port conflicts with the Caddy listener")]
+    TlsListenerCollision {
+        #[provide]
+        location: dterror::Location,
+    },
     /// A source/destination CIDR failed validation.
-    #[error("invalid {direction} CIDR in rule {index} [{location}]")]
+    #[error("invalid {direction} CIDR in rule {index}")]
     InvalidCidr {
         direction: &'static str,
         index: usize,
+        #[provide]
         #[location]
         location: dterror::Location,
         #[source]
         source: dterror::BoxError,
     },
     /// Protocol is unsupported for the rule's direction.
-    #[error("unsupported {direction} protocol in rule {index} [{location}]")]
+    #[error("unsupported {direction} protocol in rule {index}")]
     InvalidProtocol {
         direction: &'static str,
         index: usize,
+        #[provide]
         location: dterror::Location,
     },
     /// Missing/invalid interval or all-protocol rule with an interval.
-    #[error("invalid {direction} ports in rule {index} [{location}]")]
+    #[error("invalid {direction} ports in rule {index}")]
     InvalidPorts {
         direction: &'static str,
         index: usize,
+        #[provide]
         location: dterror::Location,
     },
 }

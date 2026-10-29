@@ -160,30 +160,34 @@ pub(crate) fn candidate_regions_for(pin: Option<&str>, discovered: Vec<String>) 
     }
 }
 
-#[derive(Debug, Error, CtxError)]
+#[derive(Debug, Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum CapacityError {
-    #[error("No fully managed deployment regions are available. [{location}]")]
-    NoRegionsAvailable { location: Location },
+    #[error("No fully managed deployment regions are available.")]
+    NoRegionsAvailable {
+        #[provide]
+        location: Location,
+    },
 
-    #[error("invalid enclave vCPU request [{location}]")]
+    #[error("invalid enclave vCPU request")]
     NoCapacity {
         message: &'static str,
+        #[provide]
         location: Location,
     },
 
     #[error(
-        "No fully managed capacity is available in this app's region ({region}) for a new candidate. [{location}]"
+        "No fully managed capacity is available in this app's region ({region}) for a new candidate."
     )]
     RegionFull {
         region: String,
+        #[provide]
         #[location]
         location: Location,
     },
 
-    #[error(
-        "Unable to check fully managed capacity right now. Please try again later. [{location}]"
-    )]
+    #[error("Unable to check fully managed capacity right now. Please try again later.")]
     CheckFailed {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -191,8 +195,9 @@ pub(crate) enum CapacityError {
         source: Option<BoxError>,
     },
 
-    #[error("Database error while reserving fully managed capacity. [{location}]")]
+    #[error("Database error while reserving fully managed capacity.")]
     Database {
+        #[provide]
         #[location]
         location: Location,
         #[source]

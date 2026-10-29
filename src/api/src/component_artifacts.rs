@@ -5,22 +5,37 @@ use dterror::ResultExt;
 use enclave_builder::components::{Component, ComponentSet};
 use sha2::{Digest, Sha256};
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, caution_error::ProviderError)]
 pub(crate) enum SelectionError {
     #[error(
-        "prebuilt component mode requires COMPONENT_SET_SHA256; prepare a release or explicitly set COMPONENT_BUILD_MODE=source and clear COMPONENT_SET_SHA256 and COMPONENTS_S3_BUCKET [{location}]"
+        "prebuilt component mode requires COMPONENT_SET_SHA256; prepare a release or explicitly set COMPONENT_BUILD_MODE=source and clear COMPONENT_SET_SHA256 and COMPONENTS_S3_BUCKET"
     )]
-    MissingDigest { location: dterror::Location },
-    #[error("COMPONENT_BUILD_MODE must be source or prebuilt [{location}]")]
-    InvalidMode { location: dterror::Location },
+    MissingDigest {
+        #[provide]
+        location: dterror::Location,
+    },
+    #[error("COMPONENT_BUILD_MODE must be source or prebuilt")]
+    InvalidMode {
+        #[provide]
+        location: dterror::Location,
+    },
     #[error(
-        "COMPONENT_BUILD_MODE=source requires COMPONENT_SET_SHA256 and COMPONENTS_S3_BUCKET to be unset or empty [{location}]"
+        "COMPONENT_BUILD_MODE=source requires COMPONENT_SET_SHA256 and COMPONENTS_S3_BUCKET to be unset or empty"
     )]
-    SourceSelectionConflict { location: dterror::Location },
-    #[error("COMPONENT_SET_SHA256 must be a lowercase SHA-256 digest [{location}]")]
-    InvalidDigest { location: dterror::Location },
-    #[error("invalid component bucket name [{location}]")]
-    InvalidBucket { location: dterror::Location },
+    SourceSelectionConflict {
+        #[provide]
+        location: dterror::Location,
+    },
+    #[error("COMPONENT_SET_SHA256 must be a lowercase SHA-256 digest")]
+    InvalidDigest {
+        #[provide]
+        location: dterror::Location,
+    },
+    #[error("invalid component bucket name")]
+    InvalidBucket {
+        #[provide]
+        location: dterror::Location,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,23 +137,26 @@ pub(crate) fn cache_key_with_components(base: &str, digest: Option<&str>) -> Str
     }
 }
 
-#[derive(Debug, thiserror::Error, dterror::CtxError)]
+#[derive(Debug, thiserror::Error, dterror::CtxError, caution_error::ProviderError)]
 pub(crate) enum ComponentPinsError {
-    #[error("invalid component set [{location}]")]
+    #[error("invalid component set")]
     InvalidSet {
+        #[provide]
         #[location]
         location: dterror::Location,
         #[source]
         source: dterror::BoxError,
     },
-    #[error("component set does not match the selected {component} source revision [{location}]")]
+    #[error("component set does not match the selected {component} source revision")]
     Mismatch {
         component: String,
+        #[provide]
         location: dterror::Location,
     },
-    #[error("component set does not match the active {component} build recipe [{location}]")]
+    #[error("component set does not match the active {component} build recipe")]
     RecipeMismatch {
         component: String,
+        #[provide]
         location: dterror::Location,
     },
 }
@@ -262,10 +280,11 @@ pub(crate) async fn validate_startup(
     validate_startup_pins(selected.set(), platform_git_sha, tools)
 }
 
-#[derive(Debug, thiserror::Error, dterror::CtxError)]
-#[error("could not {operation} selected component artifacts [{location}]")]
+#[derive(Debug, thiserror::Error, dterror::CtxError, caution_error::ProviderError)]
+#[error("could not {operation} selected component artifacts")]
 pub(crate) struct SelectedComponentsError {
     operation: &'static str,
+    #[provide]
     #[location]
     location: dterror::Location,
     #[source]

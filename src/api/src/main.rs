@@ -799,20 +799,22 @@ pub(crate) async fn wait_for_attestation_health(
 }
 
 /// Failure modes for [`get_commit_sha`].
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum GetCommitShaError {
-    #[error("Failed to run git rev-parse [{location}]")]
+    #[error("Failed to run git rev-parse")]
     Spawn {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
 
-    #[error("Failed to get commit SHA for branch '{branch}': {stderr} [{location}]")]
+    #[error("Failed to get commit SHA for branch '{branch}': {stderr}")]
     CommandFailed {
         branch: String,
         stderr: String,
+        #[provide]
         location: Location,
     },
 }
@@ -849,15 +851,16 @@ async fn get_commit_sha(
 }
 
 /// Failure modes for [`select_deploy_commit_sha`] (leaf error: no underlying source).
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, caution_error::ProviderError)]
 pub(crate) enum SelectDeployCommitShaError {
     #[error(
-        "commit_sha does not match refs/heads/{branch} (expected {resolved_commit_sha}, got {requested_commit_sha}) [{location}]"
+        "commit_sha does not match refs/heads/{branch} (expected {resolved_commit_sha}, got {requested_commit_sha})"
     )]
     Mismatch {
         branch: String,
         resolved_commit_sha: String,
         requested_commit_sha: String,
+        #[provide]
         location: Location,
     },
 }
@@ -2027,16 +2030,23 @@ async fn cached_object_exists(s3: &aws_sdk_s3::Client, bucket: &str, key: &str) 
 
 /// Failure modes for [`resolve_builder_target`] (source-less domain failures plus a
 /// boxed inner failure).
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum ResolveBuilderTargetError {
-    #[error("Managed on-prem builder path selected without managed_onprem config [{location}]")]
-    MissingOnpremConfig { location: Location },
+    #[error("Managed on-prem builder path selected without managed_onprem config")]
+    MissingOnpremConfig {
+        #[provide]
+        location: Location,
+    },
 
-    #[error("Managed on-prem builder path selected without customer credentials [{location}]")]
-    MissingCredentials { location: Location },
+    #[error("Managed on-prem builder path selected without customer credentials")]
+    MissingCredentials {
+        #[provide]
+        location: Location,
+    },
 
-    #[error("Failed to resolve managed on-prem builder target [{location}]")]
+    #[error("Failed to resolve managed on-prem builder target")]
     Resolve {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -3308,12 +3318,40 @@ impl caution_error::ProviderError for DeployLogicError {
     }
 
     fn provider_source(&self) -> Option<&(dyn caution_error::ProviderError + 'static)> {
-        // Variants whose source is already a `ProviderError` are reachable here;
-        // the rest fall back to `std::error::Error::source` until their source
-        // types implement `ProviderError` (see the typed sources on this enum).
+        use DeployLogicError::*;
         match self {
-            Self::BuilderAlreadyRunning { source, .. } => Some(source),
-            Self::EnclaveUnhealthy { source, .. } => Some(source),
+            ComponentSelection { source, .. } => Some(source),
+            ComponentLoad { source, .. } => Some(source),
+            ComponentPins { source, .. } => Some(source),
+            CacheDecode { source, .. } => Some(source),
+            BuilderComponents { source, .. } => Some(source),
+            FrameworkCommit { source, .. } => Some(source),
+            CredentialLookup { source, .. } => Some(source),
+            BalanceQuery { source, .. } => Some(source),
+            CommitSha { source, .. } => Some(source),
+            CommitMismatch { source, .. } => Some(source),
+            BuildConfigGit { source, .. } => Some(source),
+            NetworkPolicy { source, .. } => Some(source),
+            RepoInspect { source, .. } => Some(source),
+            UnitConfig { source, .. } => Some(source),
+            OnpremSecrets { source, .. } => Some(source),
+            SizingInvalid { source, .. } => Some(source),
+            BuilderTarget { source, .. } => Some(source),
+            CacheLookup { source, .. } => Some(source),
+            BuilderAlreadyRunning { source, .. } => Some(source),
+            UploadSource { source, .. } => Some(source),
+            BuilderFailed { source, .. } => Some(source),
+            CapacityDatabase { source, .. } => Some(source),
+            NitroEnclave { source, .. } => Some(source),
+            ProvisionCandidate { source, .. } => Some(source),
+            EnclaveUnhealthy { source, .. } => Some(source),
+            Metering { source, .. } => Some(source),
+            Lifecycle { source, .. } => Some(source),
+            DeploymentClaim { source, .. } => Some(source),
+            ZoneOffering { source, .. } => Some(source),
+            Activation { source, .. } => Some(source),
+            // Sources that are not `ProviderError` (sqlx, serde_json, std::io)
+            // stay reachable through `std::error::Error::source` only.
             _ => None,
         }
     }
@@ -3570,24 +3608,27 @@ async fn repo_has_file_at_commit(
 
 /// Failure modes shared by [`validate_explicit_containerfile_for_deploy`] and
 /// [`resolve_containerfile_for_deploy`] (sibling helpers whose caller unifies on one type).
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum ResolveContainerfileForDeployError {
-    #[error("Invalid containerfile path [{location}]")]
+    #[error("Invalid containerfile path")]
     InvalidPath {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
 
-    #[error("Procfile field `containerfile:` points to missing file: {containerfile} [{location}]")]
+    #[error("Procfile field `containerfile:` points to missing file: {containerfile}")]
     MissingFile {
         containerfile: String,
+        #[provide]
         location: Location,
     },
 
-    #[error("Failed to inspect repository contents [{location}]")]
+    #[error("Failed to inspect repository contents")]
     Inspect {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -3624,26 +3665,29 @@ async fn validate_explicit_containerfile_for_deploy(
 }
 
 /// Failure modes for [`load_build_config_for_deploy`].
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum LoadBuildConfigForDeployError {
-    #[error("Git command failed while reading caution.hcl [{location}]")]
+    #[error("Git command failed while reading caution.hcl")]
     HclGit {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
 
-    #[error("Invalid caution.hcl [{location}]")]
+    #[error("Invalid caution.hcl")]
     HclParse {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
 
-    #[error("Git command failed while reading Procfile [{location}]")]
+    #[error("Git command failed while reading Procfile")]
     ProcfileGit {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -3651,12 +3695,16 @@ pub(crate) enum LoadBuildConfigForDeployError {
     },
 
     #[error(
-        "No configuration file found in repository root. Add a `caution.hcl` file or a `Procfile` with a required `run:` field. [{location}]"
+        "No configuration file found in repository root. Add a `caution.hcl` file or a `Procfile` with a required `run:` field."
     )]
-    NoConfigFile { location: Location },
+    NoConfigFile {
+        #[provide]
+        location: Location,
+    },
 
-    #[error("Invalid Procfile [{location}]")]
+    #[error("Invalid Procfile")]
     ProcfileParse {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -5818,31 +5866,35 @@ async fn publish_managed_dns(
 }
 
 /// Failure modes for [`provision_candidate`].
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum ProvisionCandidateError {
-    #[error("failed to provision the app network [{location}]")]
+    #[error("failed to provision the app network")]
     AppNetwork {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("failed to encode the app network [{location}]")]
+    #[error("failed to encode the app network")]
     EncodeNetwork {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("database error while provisioning a candidate [{location}]")]
+    #[error("database error while provisioning a candidate")]
     Database {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("failed to provision the candidate deployment [{location}]")]
+    #[error("failed to provision the candidate deployment")]
     Provision {
+        #[provide]
         #[location]
         location: Location,
         #[source]

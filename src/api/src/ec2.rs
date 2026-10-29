@@ -131,10 +131,11 @@ pub(crate) enum DescribeRegionsError {
 
 /// Failure modes for [`Ec2Client::instance_type_offered`] and
 /// [`Ec2Client::instance_type_offered_in_zone`].
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum InstanceTypeOfferedError {
-    #[error("failed to check instance type offering [{location}]")]
+    #[error("failed to check instance type offering")]
     Request {
+        #[provide]
         #[location]
         location: Location,
         #[source]

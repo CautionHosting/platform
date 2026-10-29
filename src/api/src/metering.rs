@@ -13,24 +13,26 @@ use dterror::{BoxError, CtxError, Location, ResultExt};
 use uuid::Uuid;
 
 /// Failure modes for [`upsert_tracked_resource`].
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub enum UpsertTrackedResourceError {
     #[error(
-        "Failed to query cloud credentials for organization '{organization_id}' and application '{application_id}' [{location}]"
+        "Failed to query cloud credentials for organization '{organization_id}' and application '{application_id}'"
     )]
     QueryCloudCredentials {
         organization_id: Uuid,
         application_id: Uuid,
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
 
-    #[error("Failed to upsert tracked resource '{resource_id}' [{location}]")]
+    #[error("Failed to upsert tracked resource '{resource_id}'")]
     Upsert {
         #[context(borrow = str)]
         resource_id: String,
+        #[provide]
         #[location]
         location: Location,
         #[source]

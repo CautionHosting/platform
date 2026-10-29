@@ -466,13 +466,19 @@ pub fn compute_cache_key(
 }
 
 /// Failure modes for [`require_platform_framework_commit`] (leaf error: no underlying source).
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, caution_error::ProviderError)]
 pub enum RequirePlatformFrameworkCommitError {
-    #[error("PLATFORM_GIT_SHA is required for EIF builds [{location}]")]
-    Missing { location: Location },
+    #[error("PLATFORM_GIT_SHA is required for EIF builds")]
+    Missing {
+        #[provide]
+        location: Location,
+    },
 
-    #[error("PLATFORM_GIT_SHA must be a 40-character Git commit SHA [{location}]")]
-    Invalid { location: Location },
+    #[error("PLATFORM_GIT_SHA must be a 40-character Git commit SHA")]
+    Invalid {
+        #[provide]
+        location: Location,
+    },
 }
 
 #[tracing::instrument(skip_all)]
@@ -494,25 +500,28 @@ pub fn require_platform_framework_commit(
 }
 
 /// Failure modes for [`check_build_cache`].
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub enum CheckBuildCacheError {
-    #[error("Failed to decode cached component provenance [{location}]")]
+    #[error("Failed to decode cached component provenance")]
     Decode {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("Failed to query resource-scoped eif_builds cache [{location}]")]
+    #[error("Failed to query resource-scoped eif_builds cache")]
     ResourceScopedQuery {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
 
-    #[error("Failed to query eif_builds cache [{location}]")]
+    #[error("Failed to query eif_builds cache")]
     Query {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -574,21 +583,27 @@ pub async fn check_build_cache(
 }
 
 /// Failure modes for [`upload_source_archive`].
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub enum UploadSourceArchiveError {
-    #[error("Failed to run git archive [{location}]")]
+    #[error("Failed to run git archive")]
     RunGitArchive {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
 
-    #[error("git archive failed: {stderr} [{location}]")]
-    GitArchiveFailed { stderr: String, location: Location },
+    #[error("git archive failed: {stderr}")]
+    GitArchiveFailed {
+        stderr: String,
+        #[provide]
+        location: Location,
+    },
 
-    #[error("Failed to upload source archive to S3 [{location}]")]
+    #[error("Failed to upload source archive to S3")]
     Upload {
+        #[provide]
         #[location]
         location: Location,
         #[source]

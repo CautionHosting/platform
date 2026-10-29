@@ -519,111 +519,114 @@ pub enum FromProcfileError {
 }
 
 #[non_exhaustive]
-#[derive(Debug, thiserror::Error, dterror::CtxError)]
+#[derive(Debug, thiserror::Error, dterror::CtxError, caution_error::ProviderError)]
 pub enum FromStrError {
-    #[error("invalid network policy for enclave '{enclave}' [{location}]")]
+    #[error("invalid network policy for enclave '{enclave}'")]
     NetworkPolicy {
         enclave: String,
+        #[provide]
         #[location]
         location: dterror::Location,
         #[source]
         source: dterror::BoxError,
     },
-    #[error("Ports 49500-49600 are reserved; choose a different application port. [{location}]")]
+    #[error("Ports 49500-49600 are reserved; choose a different application port.")]
     ReservedPort {
-        #[location]
+        #[provide]
         location: dterror::Location,
     },
 
-    #[error("Multiple enclaves defined; only one enclave is supported [{location}]")]
+    #[error("Multiple enclaves defined; only one enclave is supported")]
     MultipleEnclaves {
-        #[location]
+        #[provide]
         location: dterror::Location,
     },
 
-    #[error("Multiple units defined; only one unit is supported [{location}]")]
+    #[error("Multiple units defined; only one unit is supported")]
     MultipleUnits {
-        #[location]
+        #[provide]
         location: dterror::Location,
     },
 
-    #[error("http_port {port} must also be present in ingress rules [{location}]")]
+    #[error("http_port {port} must also be present in ingress rules")]
     HttpPortNotInPorts {
         port: u16,
-        #[location]
+        #[provide]
         location: dterror::Location,
     },
 
-    #[error(
-        "key_exchange is only supported when e2e_encryption resolves to mode = \"steve\" [{location}]"
-    )]
+    #[error("key_exchange is only supported when e2e_encryption resolves to mode = \"steve\"")]
     KeyExchangeRequiresSteve {
-        #[location]
+        #[provide]
         location: dterror::Location,
     },
 
-    #[error("a domain is required when e2e_encryption resolves to mode = \"tls\" [{location}]")]
+    #[error("a domain is required when e2e_encryption resolves to mode = \"tls\"")]
     TlsRequiresDomain {
-        #[location]
+        #[provide]
         location: dterror::Location,
     },
 
     #[error(
-        "Invalid env expression for key '{key}'; only string literals and env::vault(...) are allowed [{location}]"
+        "Invalid env expression for key '{key}'; only string literals and env::vault(...) are allowed"
     )]
     InvalidEnvExpression {
         key: String,
-        #[location]
+        #[provide]
         location: dterror::Location,
     },
 
     #[error(
-        "Invalid env key '{key}'; keys must match [A-Za-z_][A-Za-z0-9_]* to be safely exported [{location}]"
+        "Invalid env key '{key}'; keys must match [A-Za-z_][A-Za-z0-9_]* to be safely exported"
     )]
     InvalidEnvKey {
         key: String,
-        #[location]
+        #[provide]
         location: dterror::Location,
     },
 
-    #[error("Command contains characters that cannot be shell-quoted (e.g. NUL byte) [{location}]")]
+    #[error("Command contains characters that cannot be shell-quoted (e.g. NUL byte)")]
     UnquotableCommand {
-        #[location]
+        #[provide]
         location: dterror::Location,
     },
 
-    #[error("Unit has no executable command (only inline env assignments found) [{location}]")]
+    #[error("Unit has no executable command (only inline env assignments found)")]
     NoCommand {
-        #[location]
+        #[provide]
         location: dterror::Location,
     },
 
-    #[error("Failed to parse HCL [{location}]")]
+    #[error("Failed to parse HCL")]
     HclParse {
+        #[provide]
         #[location]
         location: dterror::Location,
         #[source]
         source: dterror::BoxError,
     },
 
-    #[error("invalid domain [{location}]")]
+    #[error("invalid domain")]
     InvalidDomain {
+        #[provide]
         #[location]
         location: dterror::Location,
         #[source]
         source: dterror::BoxError,
     },
 
-    #[error("invalid ssh key [{location}]")]
+    #[error("invalid ssh key")]
     InvalidSshKey {
+        #[provide]
         #[location]
         location: dterror::Location,
         #[source]
         source: dterror::BoxError,
     },
 
-    #[error("invalid provider config [{location}]")]
+    #[error("invalid provider config")]
     InvalidProvider {
+        #[provide]
         #[location]
         location: dterror::Location,
         #[source]

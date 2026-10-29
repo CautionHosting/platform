@@ -1799,6 +1799,7 @@ dependencies = [
 name = "caution-config"
 version = "0.1.0"
 dependencies = [
+ "caution-error",
  "dterror 0.4.1",
  "hcl-rs",
  "serde",

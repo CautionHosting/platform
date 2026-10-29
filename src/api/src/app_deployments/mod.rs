@@ -141,10 +141,11 @@ pub(crate) async fn lock_app_operations(
 }
 
 /// Failure modes for [`app_lifecycle`].
-#[derive(Debug, thiserror::Error, CtxError)]
-#[error("failed to read the lifecycle of app {app_id} [{location}]")]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
+#[error("failed to read the lifecycle of app {app_id}")]
 pub(crate) struct AppLifecycleError {
     app_id: Uuid,
+    #[provide]
     #[location]
     location: Location,
     #[source]

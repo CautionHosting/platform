@@ -245,10 +245,11 @@ pub(crate) fn build_credit_packages(
 }
 
 /// Failure modes for [`get_ledger_balance_cents`].
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub enum GetLedgerBalanceCentsError {
-    #[error("could not read credit ledger balance [{location}]")]
+    #[error("could not read credit ledger balance")]
     Query {
+        #[provide]
         #[location]
         location: Location,
         #[source]

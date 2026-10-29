@@ -469,42 +469,53 @@ fn managed_onprem_uses_direct_customer_bucket(
             .starts_with(&format!("s3://{}/", managed_onprem.eif_bucket))
 }
 
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum DeployNitroEnclaveError {
-    #[error("deployment region is required [{location}]")]
-    MissingRegion { location: Location },
-    #[error("credentials required for managed on-prem [{location}]")]
-    MissingCredentials { location: Location },
-    #[error("failed to upload EIF to customer bucket [{location}]")]
+    #[error("deployment region is required")]
+    MissingRegion {
+        #[provide]
+        location: Location,
+    },
+    #[error("credentials required for managed on-prem")]
+    MissingCredentials {
+        #[provide]
+        location: Location,
+    },
+    #[error("failed to upload EIF to customer bucket")]
     UploadEifCustomerBucket {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("failed to upload paired TAP tunnel helper [{location}]")]
+    #[error("failed to upload paired TAP tunnel helper")]
     UploadTapFramer {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("failed to upload EIF to S3 [{location}]")]
+    #[error("failed to upload EIF to S3")]
     UploadEifS3 {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("managed on-prem provisioning failed [{location}]")]
+    #[error("managed on-prem provisioning failed")]
     ProvisionManagedOnprem {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("nitro enclave provisioning failed [{location}]")]
+    #[error("nitro enclave provisioning failed")]
     ProvisionNitroEnclave {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -3932,20 +3943,30 @@ pub(crate) struct EnclaveSizing {
     pub(crate) host_vcpus: u32,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, caution_error::ProviderError)]
 pub(crate) enum EnclaveSizingError {
-    #[error("Enclave vCPU count must be at least 1 [{location}]")]
-    ZeroCpu { location: dterror::Location },
-    #[error("Enclave memory_mb must be at least 1 [{location}]")]
-    ZeroMemory { location: dterror::Location },
-    #[error("Enclave resource request is too large [{location}]")]
-    Overflow { location: dterror::Location },
+    #[error("Enclave vCPU count must be at least 1")]
+    ZeroCpu {
+        #[provide]
+        location: dterror::Location,
+    },
+    #[error("Enclave memory_mb must be at least 1")]
+    ZeroMemory {
+        #[provide]
+        location: dterror::Location,
+    },
+    #[error("Enclave resource request is too large")]
+    Overflow {
+        #[provide]
+        location: dterror::Location,
+    },
     #[error(
-        "Requested enclave resources ({cpu_count} vCPUs, {memory_mb} MiB) exceed the supported r6i.12xlarge host capacity [{location}]"
+        "Requested enclave resources ({cpu_count} vCPUs, {memory_mb} MiB) exceed the supported r6i.12xlarge host capacity"
     )]
     NoSupportedInstance {
         cpu_count: u32,
         memory_mb: u32,
+        #[provide]
         location: dterror::Location,
     },
 }

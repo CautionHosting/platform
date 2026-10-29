@@ -135,35 +135,40 @@ pub(crate) async fn record_instance(
 }
 
 /// Failure modes for [`complete_running`].
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum CompleteRunningError {
-    #[error("deployment {deployment_id} is no longer owned by this process [{location}]")]
+    #[error("deployment {deployment_id} is no longer owned by this process")]
     OwnershipLost {
         deployment_id: Uuid,
+        #[provide]
         location: Location,
     },
-    #[error("app {app_id} became {state} during the deployment [{location}]")]
+    #[error("app {app_id} became {state} during the deployment")]
     AppNotActive {
         app_id: Uuid,
         state: String,
+        #[provide]
         location: Location,
     },
-    #[error("failed to lock app operations [{location}]")]
+    #[error("failed to lock app operations")]
     Lock {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("failed to attach the app Elastic IP [{location}]")]
+    #[error("failed to attach the app Elastic IP")]
     AttachAddress {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("database error while completing a deployment [{location}]")]
+    #[error("database error while completing a deployment")]
     Database {
+        #[provide]
         #[location]
         location: Location,
         #[source]
