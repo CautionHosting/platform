@@ -550,7 +550,7 @@ pub(crate) enum WaitForHealthError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: reqwest::Error,
     },
 
     #[error("Health endpoint did not become healthy within {timeout_secs} seconds")]
