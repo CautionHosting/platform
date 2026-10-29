@@ -54,7 +54,9 @@
 //! ```
 //!
 //! A field marked `#[source]` (or `#[from]`) wires
-//! [`ProviderError::provider_source`] automatically. The source type does not
+//! [`ProviderError::provider_source`] automatically. Only the first such field is
+//! wired: a struct, or one variant, contributes at most one provider source. The
+//! source type does not
 //! have to implement the trait: the derive probes it at compile time, so a typed
 //! source is chained and anything else (for example a `Box<dyn Error + Send +
 //! Sync>`) safely yields `None`:
@@ -79,6 +81,16 @@
 //! let err = ReadError { cause: Inner { device: "nvme0".into() } };
 //! assert_eq!(request_ref_in_chain::<String>(&err).map(String::as_str), Some("nvme0"));
 //! ```
+//!
+//! # Guidance and erased sources
+//!
+//! Guidance is read by walking [`ProviderError::provider_source`], then, past a
+//! link that is not a [`ProviderError`], [`std::error::Error::source`]. A source
+//! stored as `dterror::BoxError` (`Box<dyn Error + Send + Sync>`) is reached only
+//! through the latter: it is a `dyn Error`, so its provider view (its [`Note`]s,
+//! [`Warning`]s and [`Location`]) is unreachable. A report keeps that link's
+//! `Display` and nothing more. Put guidance on the link that stays a
+//! [`ProviderError`], or hold the source typed so the chain can read it.
 //!
 //! # Choosing between a Note and a Warning
 //!
@@ -180,6 +192,7 @@ pub use request::{
 ///
 /// Emits only the `ProviderError` implementation. Fields marked `#[provide]` are
 /// exposed (by value, or as a reference with `#[provide(ref = T)]`); nothing else
-/// is provided. The derive never implements `std::error::Error`, so it composes
-/// with `thiserror` and `dterror`.
+/// is provided. Only the first `#[source]`/`#[from]` field is wired into
+/// `provider_source`. The derive never implements `std::error::Error`, so it
+/// composes with `thiserror` and `dterror`.
 pub use caution_error_derive::ProviderError;

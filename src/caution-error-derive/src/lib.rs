@@ -30,7 +30,9 @@ use syn::{
 ///   a reference field with `ref = X` provides `&X`.
 ///
 /// A field marked `#[source]` (or `#[from]`) wires `provider_source`
-/// automatically. The source's type is not required to implement the trait: the
+/// automatically. Only the first such field is wired: a struct, or one variant,
+/// contributes at most one provider source. The source's type is not required to
+/// implement the trait: the
 /// generated code probes it at compile time, returning `Some` for a
 /// [`caution_error::ProviderError`] and `None` otherwise, so a typed source and
 /// a `Box<dyn Error + Send + Sync>` source both build.
