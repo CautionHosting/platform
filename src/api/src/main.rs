@@ -2542,6 +2542,9 @@ pub(crate) enum DeployLogicError {
     #[error("insufficient credits for builder [{location}]")]
     BuilderCredits { location: Location },
 
+    #[error("a build is already running for this app [{location}]")]
+    BuilderAlreadyRunning { location: Location },
+
     #[error("failed to upload source archive [{location}]")]
     UploadSource {
         #[location]
@@ -2909,6 +2912,10 @@ impl DeployLogicError {
                 StatusCode::PAYMENT_REQUIRED,
                 "Insufficient credits for builder",
             ),
+            DeployLogicError::BuilderAlreadyRunning { .. } => (
+                StatusCode::CONFLICT,
+                "A build is already in progress for this app.",
+            ),
             DeployLogicError::UploadSource { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
@@ -3018,6 +3025,9 @@ impl DeployLogicError {
         static WAIT_FOR_DEPLOYMENT: &[Note] = &[Note::from_static(
             "Wait for the deployment to finish; `caution apps get -d <id>` shows its state.",
         )];
+        static WAIT_FOR_BUILD: &[Note] = &[Note::from_static(
+            "Wait for the current build to finish, then push again.",
+        )];
         static WAIT_FOR_TEARDOWN: &[Note] = &[Note::from_static(
             "Wait for teardown to complete before deploying it again.",
         )];
@@ -3088,6 +3098,7 @@ impl DeployLogicError {
             Self::SubscriptionNoCapacity { .. } => FREE_CAPACITY,
             Self::AppLimitReached { .. } => UPGRADE_PLAN,
             Self::InsufficientCredits { .. } | Self::BuilderCredits { .. } => BUY_CREDITS,
+            Self::BuilderAlreadyRunning { .. } => WAIT_FOR_BUILD,
             Self::CreditSuspended { .. } => ADD_CREDITS,
             Self::ResourceLimitReached { .. } => FREE_RESOURCES,
             Self::VcpuLimit { .. } => CONTACT_SUPPORT,
@@ -3194,6 +3205,7 @@ impl DeployLogicError {
             | BuilderTarget { location, .. }
             | CacheLookup { location, .. }
             | BuilderCredits { location, .. }
+            | BuilderAlreadyRunning { location, .. }
             | UploadSource { location, .. }
             | BuilderFailed { location, .. }
             | CapacityDatabase { location, .. }
@@ -5012,13 +5024,17 @@ async fn deploy_logic(
                 auth.user_id,
             )
             .await;
-            if matches!(
-                &build_result,
-                Err(builder::ExecuteRemoteBuildError::Components { .. })
-            ) {
-                build_result.with_context(Ctx::components())
-            } else {
-                build_result.with_context(Ctx::builder_failed())
+            match build_result {
+                Err(error @ builder::ExecuteRemoteBuildError::Components { .. }) => {
+                    Err(error).with_context(Ctx::components())
+                }
+                Err(
+                    builder::ExecuteRemoteBuildError::AlreadyLocked { .. }
+                    | builder::ExecuteRemoteBuildError::ActiveBuildConflict { .. },
+                ) => Err(DeployLogicError::BuilderAlreadyRunning {
+                    location: std::panic::Location::caller(),
+                }),
+                other => other.with_context(Ctx::builder_failed()),
             }
         }
     }
@@ -6809,6 +6825,25 @@ mod deploy_guidance_tests {
         assert_eq!(
             error.client_message(),
             "Insufficient credits for builder. Purchase credits in Settings at https://dashboard.caution.co before redeploying."
+        );
+    }
+
+    #[test]
+    fn a_running_build_is_a_conflict_with_a_wait_note() {
+        use axum::http::StatusCode;
+
+        let error = DeployLogicError::BuilderAlreadyRunning { location: at() };
+
+        let (status, message) = error.client_response();
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(message, "A build is already in progress for this app.");
+        assert_eq!(
+            notes(&error),
+            vec!["Wait for the current build to finish, then push again.".to_string()]
+        );
+        assert_eq!(
+            error.client_message(),
+            "A build is already in progress for this app. Wait for the current build to finish, then push again."
         );
     }
 }
