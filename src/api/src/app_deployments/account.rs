@@ -53,28 +53,38 @@ impl AppAccount {
 }
 
 /// Failure modes for [`app_account`].
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum AppAccountError {
-    #[error("database error while reading the account of app {app_id} [{location}]")]
+    #[error("database error while reading the account of app {app_id}")]
     Database {
         app_id: Uuid,
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("failed to read the linked AWS access of app {app_id} [{location}]")]
+    #[error("failed to read the linked AWS access of app {app_id}")]
     Credential {
         app_id: Uuid,
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
-    #[error("the linked AWS access of app {app_id} is unavailable [{location}]")]
-    Unavailable { app_id: Uuid, location: Location },
-    #[error("app {app_id} is linked to another environment than its network's [{location}]")]
-    EnvironmentChanged { app_id: Uuid, location: Location },
+    #[error("the linked AWS access of app {app_id} is unavailable")]
+    Unavailable {
+        app_id: Uuid,
+        #[provide]
+        location: Location,
+    },
+    #[error("app {app_id} is linked to another environment than its network's")]
+    EnvironmentChanged {
+        app_id: Uuid,
+        #[provide]
+        location: Location,
+    },
 }
 
 /// The account of `app_id`'s deployments in `region` (the caller's resources'

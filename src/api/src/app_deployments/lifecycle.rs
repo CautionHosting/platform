@@ -244,11 +244,12 @@ impl AppAddressMover for AccountMover<'_> {
 }
 
 /// Failure modes for [`project_live`].
-#[derive(Debug, thiserror::Error, CtxError)]
-#[error("failed to record deployment {deployment_id} live for app {app_id} [{location}]")]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
+#[error("failed to record deployment {deployment_id} live for app {app_id}")]
 pub(crate) struct ProjectLiveError {
     app_id: Uuid,
     deployment_id: Uuid,
+    #[provide]
     #[location]
     location: Location,
     #[source]

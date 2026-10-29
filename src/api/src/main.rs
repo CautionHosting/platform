@@ -542,27 +542,28 @@ pub(crate) fn deployment_health_timeout_secs() -> u64 {
 
 /// Failure modes shared by [`wait_for_health`] and [`wait_for_attestation_health`]
 /// (sibling helpers whose callers unify on one return type).
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum WaitForHealthError {
-    #[error("Failed to create HTTP client [{location}]")]
+    #[error("Failed to create HTTP client")]
     ClientBuild {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
 
-    #[error("Health endpoint did not become healthy within {timeout_secs} seconds [{location}]")]
+    #[error("Health endpoint did not become healthy within {timeout_secs} seconds")]
     HealthTimeout {
         timeout_secs: u64,
+        #[provide]
         location: Location,
     },
 
-    #[error(
-        "Attestation endpoint did not become healthy within {timeout_secs} seconds [{location}]"
-    )]
+    #[error("Attestation endpoint did not become healthy within {timeout_secs} seconds")]
     AttestationTimeout {
         timeout_secs: u64,
+        #[provide]
         location: Location,
     },
 }

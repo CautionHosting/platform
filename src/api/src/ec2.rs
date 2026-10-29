@@ -456,25 +456,30 @@ impl AssociateAppAddressError {
 }
 
 /// Failure modes for [`parse_app_address`] (leaf error: no underlying source).
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, caution_error::ProviderError)]
 pub(crate) enum ParseAppAddressError {
-    #[error("expected exactly one Elastic IP tagged for app [{location}]")]
-    NotExactlyOne { location: Location },
+    #[error("expected exactly one Elastic IP tagged for app")]
+    NotExactlyOne {
+        #[provide]
+        location: Location,
+    },
 }
 
 /// Failure modes for [`Ec2Client::describe_app_address`].
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum DescribeAppAddressError {
-    #[error("could not describe Elastic IP addresses [{location}]")]
+    #[error("could not describe Elastic IP addresses")]
     DescribeAddresses {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
 
-    #[error("could not parse app Elastic IP address [{location}]")]
+    #[error("could not parse app Elastic IP address")]
     ParseAddress {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -483,10 +488,11 @@ pub(crate) enum DescribeAppAddressError {
 }
 
 /// Failure modes for [`Ec2Client::move_app_address`].
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum MoveAppAddressError {
-    #[error("could not read the app Elastic IP address [{location}]")]
+    #[error("could not read the app Elastic IP address")]
     DescribeAddress {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -496,7 +502,7 @@ pub(crate) enum MoveAppAddressError {
     /// The address is held by someone other than the expected holder. Nothing
     /// was moved.
     #[error(
-        "app Elastic IP is held by {}, expected {} [{location}]",
+        "app Elastic IP is held by {}, expected {}",
         holder_label(.actual),
         holder_label(.expected)
     )]
@@ -506,11 +512,13 @@ pub(crate) enum MoveAppAddressError {
         expected: Option<String>,
         /// Instance that holds the address now (`None` = unassociated).
         actual: Option<String>,
+        #[provide]
         location: Location,
     },
 
-    #[error("could not associate Elastic IP address [{location}]")]
+    #[error("could not associate Elastic IP address")]
     AssociateAddress {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -523,18 +531,20 @@ fn holder_label(holder: &Option<String>) -> &str {
 }
 
 /// Failure modes for [`Ec2Client::describe_instance_runtime`].
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum DescribeInstanceRuntimeError {
-    #[error("EC2 DescribeInstances request failed [{location}]")]
+    #[error("EC2 DescribeInstances request failed")]
     Request {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: BoxError,
     },
 
-    #[error("could not parse the EC2 DescribeInstances response [{location}]")]
+    #[error("could not parse the EC2 DescribeInstances response")]
     Parse {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -543,12 +553,18 @@ pub(crate) enum DescribeInstanceRuntimeError {
 }
 
 /// Failure modes for [`parse_instance_runtime`] (leaf error: no underlying source).
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, caution_error::ProviderError)]
 pub(crate) enum ParseInstanceRuntimeError {
-    #[error("DescribeInstances response has no reservation set [{location}]")]
-    NoReservationSet { location: Location },
-    #[error("DescribeInstances response lists an instance without a state [{location}]")]
-    NoState { location: Location },
+    #[error("DescribeInstances response has no reservation set")]
+    NoReservationSet {
+        #[provide]
+        location: Location,
+    },
+    #[error("DescribeInstances response lists an instance without a state")]
+    NoState {
+        #[provide]
+        location: Location,
+    },
 }
 
 /// What [`Ec2Client::move_app_address`] has to do to reach the target.
