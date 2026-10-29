@@ -16,7 +16,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use caution_error::{Note, Warning};
+use caution_error::{Note, Opaque, Warning};
 use dterror::{CtxError, Location, ResultExt};
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -167,20 +167,28 @@ pub(crate) fn expected_holder(
     live_instance_id
 }
 
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum SwitchError {
     #[error("Deployment not found.")]
-    NotFound { location: Location },
+    NotFound {
+        #[provide]
+        location: Location,
+    },
     #[error("{rejection}")]
     Rejected {
         rejection: SwitchRejection,
+        #[provide(ref = [caution_error::Note])]
         notes: &'static [Note],
+        #[provide(ref = [caution_error::Warning])]
         warnings: &'static [Warning],
+        #[provide]
         location: Location,
     },
     #[error("The deployment failed the platform health check.")]
     Unhealthy {
+        #[provide(ref)]
         note: Note,
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -189,9 +197,15 @@ pub(crate) enum SwitchError {
     #[error(
         "The app address is unassigned or held by an unexpected instance; switching is blocked until it is repaired."
     )]
-    AssociationMismatch { location: Location },
+    AssociationMismatch {
+        #[provide]
+        location: Location,
+    },
     #[error("Switch failed.")]
     AwsMove {
+        #[provide]
+        opaque: Opaque,
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -199,6 +213,9 @@ pub(crate) enum SwitchError {
     },
     #[error("Switch failed.")]
     AwsObserve {
+        #[provide]
+        opaque: Opaque,
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -206,6 +223,9 @@ pub(crate) enum SwitchError {
     },
     #[error("Switch failed.")]
     InspectAccount {
+        #[provide]
+        opaque: Opaque,
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -213,6 +233,9 @@ pub(crate) enum SwitchError {
     },
     #[error("Switch failed.")]
     InspectRuntime {
+        #[provide]
+        opaque: Opaque,
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -220,6 +243,9 @@ pub(crate) enum SwitchError {
     },
     #[error("Switch failed.")]
     Database {
+        #[provide]
+        opaque: Opaque,
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -227,6 +253,9 @@ pub(crate) enum SwitchError {
     },
     #[error("Switch failed.")]
     Lock {
+        #[provide]
+        opaque: Opaque,
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -234,6 +263,9 @@ pub(crate) enum SwitchError {
     },
     #[error("Switch failed.")]
     RecordRequest {
+        #[provide]
+        opaque: Opaque,
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -241,69 +273,36 @@ pub(crate) enum SwitchError {
     },
     #[error("Switch failed.")]
     ProjectLive {
+        #[provide]
+        opaque: Opaque,
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: super::lifecycle::ProjectLiveError,
     },
     #[error("This operation requires signature verification")]
-    Unsigned { location: Location },
+    Unsigned {
+        #[provide]
+        location: Location,
+    },
     #[error(
         "The app address is unassigned or held by an unexpected instance; switching is blocked until it is repaired."
     )]
-    HolderMismatch { location: Location },
+    HolderMismatch {
+        #[provide]
+        location: Location,
+    },
     #[error("Switch failed.")]
     Task {
+        #[provide]
+        opaque: Opaque,
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: tokio::task::JoinError,
     },
-}
-
-/// [`caution_error::ProviderError`] is hand-written rather than derived: the
-/// server-fault variants (every 500) provide [`caution_error::Opaque`], so a
-/// client report drops them and their whole chain. The `Display` text of an
-/// internal failure stays in the logs and Sentry.
-impl caution_error::ProviderError for SwitchError {
-    fn provide<'a>(&'a self, request: &mut caution_error::Request<'a>) {
-        if self.status().is_server_error() {
-            request.provide_value(caution_error::Opaque);
-        }
-        match self {
-            Self::Rejected {
-                notes, warnings, ..
-            } => {
-                request.provide_ref::<[Note]>(notes);
-                request.provide_ref::<[Warning]>(warnings);
-            }
-            Self::Unhealthy { note, .. } => {
-                request.provide_ref::<Note>(note);
-            }
-            _ => {}
-        }
-        request.provide_value(self.location());
-    }
-
-    fn provider_source(&self) -> Option<&(dyn caution_error::ProviderError + 'static)> {
-        match self {
-            Self::Unhealthy { source, .. } => Some(source),
-            Self::AwsMove { source, .. } => Some(source),
-            Self::AwsObserve { source, .. } => Some(source),
-            Self::InspectAccount { source, .. } => Some(source),
-            Self::InspectRuntime { source, .. } => Some(source),
-            Self::Lock { source, .. } => Some(source),
-            Self::RecordRequest { source, .. } => Some(source),
-            Self::ProjectLive { source, .. } => Some(source),
-            Self::Database { .. }
-            | Self::Task { .. }
-            | Self::NotFound { .. }
-            | Self::Rejected { .. }
-            | Self::AssociationMismatch { .. }
-            | Self::Unsigned { .. }
-            | Self::HolderMismatch { .. } => None,
-        }
-    }
 }
 
 impl SwitchError {
@@ -349,27 +348,6 @@ impl SwitchError {
             | Self::ProjectLive { .. }
             | Self::Task { .. } => "Switch failed.",
             Self::Unsigned { .. } => "This operation requires signature verification",
-        }
-    }
-
-    /// The call site this failure was recorded at.
-    fn location(&self) -> Location {
-        match self {
-            Self::NotFound { location }
-            | Self::Rejected { location, .. }
-            | Self::Unhealthy { location, .. }
-            | Self::AssociationMismatch { location }
-            | Self::AwsMove { location, .. }
-            | Self::AwsObserve { location, .. }
-            | Self::InspectAccount { location, .. }
-            | Self::InspectRuntime { location, .. }
-            | Self::Database { location, .. }
-            | Self::Lock { location, .. }
-            | Self::RecordRequest { location, .. }
-            | Self::ProjectLive { location, .. }
-            | Self::Unsigned { location }
-            | Self::HolderMismatch { location }
-            | Self::Task { location, .. } => location,
         }
     }
 
@@ -497,7 +475,7 @@ pub(crate) async fn signed_switch_request(
     ))
     .fetch_one(db)
     .await
-    .with_context(SwitchErrorCtx::database())?;
+    .with_context(SwitchErrorCtx::database(Opaque))?;
     if bound { Ok(id) } else { Err(unsigned()) }
 }
 
@@ -511,7 +489,7 @@ pub(crate) async fn switch_handler(
     // address move and the commit, nor leaves its operation unanswered.
     tokio::spawn(async move { switch(&state, &auth, app_id, deployment_id, &request).await })
         .await
-        .with_context(SwitchErrorCtx::task())?
+        .with_context(SwitchErrorCtx::task(Opaque))?
         .map(Json)
 }
 
@@ -533,7 +511,7 @@ async fn switch(
         .bind(LIFECYCLE_DEPLOYMENTS)
         .fetch_optional(&state.db)
         .await
-        .with_context(SwitchErrorCtx::database())?;
+        .with_context(SwitchErrorCtx::database(Opaque))?;
     let Some(row) = row else {
         return Err(SwitchError::NotFound {
             location: std::panic::Location::caller(),
@@ -553,7 +531,7 @@ async fn switch(
         },
     )
     .await
-    .with_context(SwitchErrorCtx::record_request())?;
+    .with_context(SwitchErrorCtx::record_request(Opaque))?;
     let result = execute(state, auth, app_id, deployment_id, request, &row).await;
     match &result {
         Ok(_) => events::finish(&state.db, operation_id, events::Outcome::Succeeded, None).await,
@@ -593,13 +571,13 @@ async fn execute(
     // A failed account read moved nothing (`Inspect`).
     let ec2 = account::app_account(state, app_id, &region)
         .await
-        .with_context(Ctx::inspect_account())?
+        .with_context(Ctx::inspect_account(Opaque))?
         .ec2();
     if let SwitchPlan::Move = plan {
         let runtime = ec2
             .describe_instance_runtime(&instance_id)
             .await
-            .with_context(Ctx::inspect_runtime())?;
+            .with_context(Ctx::inspect_runtime(Opaque))?;
         let Some(public_ip) = runtime
             .filter(|runtime| runtime.state == "running")
             .and_then(|runtime| runtime.public_ip)
@@ -669,10 +647,10 @@ pub(super) async fn commit_switch(
 ) -> Result<SwitchResponse, SwitchError> {
     use SwitchErrorCtx as Ctx;
 
-    let mut tx = db.begin().await.with_context(Ctx::database())?;
+    let mut tx = db.begin().await.with_context(Ctx::database(Opaque))?;
     lock_app_operations(&mut tx, app_id)
         .await
-        .with_context(Ctx::lock())?;
+        .with_context(Ctx::lock(Opaque))?;
     let row: Option<SwitchRow> = sqlx::query_as(switch_row_sql(" FOR UPDATE OF cr, d"))
         .bind(app_id)
         .bind(deployment_id)
@@ -680,7 +658,7 @@ pub(super) async fn commit_switch(
         .bind(LIFECYCLE_DEPLOYMENTS)
         .fetch_optional(&mut *tx)
         .await
-        .with_context(Ctx::database())?;
+        .with_context(Ctx::database(Opaque))?;
     let Some(row) = row else {
         return Err(SwitchError::NotFound {
             location: std::panic::Location::caller(),
@@ -706,7 +684,7 @@ pub(super) async fn commit_switch(
                     location: std::panic::Location::caller(),
                 });
             }
-            Err(error) => return Err(error).with_context(Ctx::aws_move()),
+            Err(error) => return Err(error).with_context(Ctx::aws_move(Opaque)),
         }
     }
     // Confirm the observed association: it is the source of truth for the
@@ -726,7 +704,7 @@ pub(super) async fn commit_switch(
         ASSOCIATION_READ_INTERVAL,
     )
     .await
-    .with_context(Ctx::aws_observe())?;
+    .with_context(Ctx::aws_observe(Opaque))?;
     if observed.instance_id.as_deref() != Some(instance_id.as_str()) {
         // With no move (`AlreadyLive`), nothing moved: a pre-move mismatch.
         let location = std::panic::Location::caller();
@@ -745,9 +723,9 @@ pub(super) async fn commit_switch(
             managed_dns_enabled,
         )
         .await
-        .with_context(Ctx::project_live())?;
+        .with_context(Ctx::project_live(Opaque))?;
     }
-    tx.commit().await.with_context(Ctx::database())?;
+    tx.commit().await.with_context(Ctx::database(Opaque))?;
     Ok(SwitchResponse {
         live_deployment_id: deployment_id,
         previous_live_deployment_id: row.live_deployment_id.filter(|id| *id != deployment_id),
@@ -899,6 +877,7 @@ mod tests {
             SwitchError::Unsigned { location },
             SwitchError::HolderMismatch { location },
             SwitchError::InspectAccount {
+                opaque: Opaque,
                 location,
                 source: account::AppAccountError::Unavailable {
                     app_id: Uuid::nil(),
@@ -906,6 +885,7 @@ mod tests {
                 },
             },
             SwitchError::InspectRuntime {
+                opaque: Opaque,
                 location,
                 source: ec2::DescribeInstanceRuntimeError::Request {
                     location,
@@ -918,6 +898,7 @@ mod tests {
         for error in [
             SwitchError::AssociationMismatch { location },
             SwitchError::AwsMove {
+                opaque: Opaque,
                 location,
                 source: ec2::MoveAppAddressError::AssociateAddress {
                     location,
@@ -925,6 +906,7 @@ mod tests {
                 },
             },
             SwitchError::AwsObserve {
+                opaque: Opaque,
                 location,
                 source: ec2::DescribeAppAddressError::DescribeAddresses {
                     location,
@@ -932,10 +914,12 @@ mod tests {
                 },
             },
             SwitchError::Database {
+                opaque: Opaque,
                 location,
                 source: sqlx::Error::RowNotFound,
             },
             SwitchError::Lock {
+                opaque: Opaque,
                 location,
                 source: super::super::LockAppOperationsError {
                     app_id: Uuid::nil(),
@@ -944,6 +928,7 @@ mod tests {
                 },
             },
             SwitchError::Task {
+                opaque: Opaque,
                 location,
                 source: cancelled_join_error().await,
             },
@@ -952,6 +937,7 @@ mod tests {
         }
         assert_eq!(
             SwitchError::InspectRuntime {
+                opaque: Opaque,
                 location,
                 source: ec2::DescribeInstanceRuntimeError::Request {
                     location,
@@ -960,6 +946,7 @@ mod tests {
             }
             .client_message(),
             SwitchError::AwsMove {
+                opaque: Opaque,
                 location,
                 source: ec2::MoveAppAddressError::AssociateAddress {
                     location,
@@ -1106,6 +1093,7 @@ mod tests {
             unhealthy_error(location),
             SwitchError::AssociationMismatch { location },
             SwitchError::AwsMove {
+                opaque: Opaque,
                 location,
                 source: ec2::MoveAppAddressError::AssociateAddress {
                     location,
@@ -1113,6 +1101,7 @@ mod tests {
                 },
             },
             SwitchError::AwsObserve {
+                opaque: Opaque,
                 location,
                 source: ec2::DescribeAppAddressError::DescribeAddresses {
                     location,
@@ -1120,6 +1109,7 @@ mod tests {
                 },
             },
             SwitchError::InspectAccount {
+                opaque: Opaque,
                 location,
                 source: account::AppAccountError::Unavailable {
                     app_id: Uuid::nil(),
@@ -1127,6 +1117,7 @@ mod tests {
                 },
             },
             SwitchError::InspectRuntime {
+                opaque: Opaque,
                 location,
                 source: ec2::DescribeInstanceRuntimeError::Request {
                     location,
@@ -1134,10 +1125,12 @@ mod tests {
                 },
             },
             SwitchError::Database {
+                opaque: Opaque,
                 location,
                 source: sqlx::Error::RowNotFound,
             },
             SwitchError::Lock {
+                opaque: Opaque,
                 location,
                 source: super::super::LockAppOperationsError {
                     app_id: Uuid::nil(),
@@ -1148,6 +1141,7 @@ mod tests {
             SwitchError::Unsigned { location },
             SwitchError::HolderMismatch { location },
             SwitchError::Task {
+                opaque: Opaque,
                 location,
                 source: cancelled_join_error().await,
             },
@@ -1165,6 +1159,7 @@ mod tests {
 
         let location = std::panic::Location::caller();
         let error = SwitchError::AwsMove {
+            opaque: Opaque,
             location,
             source: ec2::MoveAppAddressError::AssociateAddress {
                 location,
