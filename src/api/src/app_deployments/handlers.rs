@@ -17,7 +17,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use caution_error::Note;
+use caution_error::{Note, Opaque};
 use chrono::{DateTime, Utc};
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use sqlx::PgPool;
@@ -422,12 +422,15 @@ pub(crate) enum GetDeploymentInAppError {
     NotFound {
         app_id: Uuid,
         deployment_id: Uuid,
+        #[provide]
         location: Location,
     },
     #[error("failed to read deployment {deployment_id} of app {app_id}")]
     Load {
         app_id: Uuid,
         deployment_id: Uuid,
+        #[provide]
+        opaque: Opaque,
         #[provide]
         #[location]
         location: Location,
@@ -465,7 +468,7 @@ pub(crate) async fn get_in_app_handler(
         false,
     )
     .await
-    .with_context(Ctx::load(app_id, deployment_id))?
+    .with_context(Ctx::load(app_id, deployment_id, Opaque))?
     .pop()
     .map(Json)
     .ok_or_else(|| GetDeploymentInAppError::NotFound {
@@ -492,6 +495,8 @@ pub(crate) enum GetDeploymentError {
     #[error("failed to read deployment {deployment_id}")]
     Load {
         deployment_id: Uuid,
+        #[provide]
+        opaque: Opaque,
         #[provide]
         #[location]
         location: Location,
@@ -523,7 +528,7 @@ pub(crate) async fn get_handler(
 
     load_views(&state, auth.user_id, None, Some(deployment_id), false)
         .await
-        .with_context(Ctx::load(deployment_id))?
+        .with_context(Ctx::load(deployment_id, Opaque))?
         .pop()
         .map(Json)
         .ok_or_else(|| GetDeploymentError::NotFound {
@@ -758,6 +763,7 @@ mod tests {
 
         let load = GetDeploymentError::Load {
             deployment_id: Uuid::new_v4(),
+            opaque: Opaque,
             location: std::panic::Location::caller(),
             source: Box::new(std::io::Error::other("boom")),
         };
@@ -802,5 +808,21 @@ mod tests {
         assert!(!text.contains(&app_id.to_string()), "no app id: {text}");
         assert!(!text.contains("boom-internal"), "no source text: {text}");
         assert!(!text.contains(".rs:"), "no call site: {text}");
+    }
+
+    #[test]
+    fn a_load_failure_is_withheld() {
+        let error = GetDeploymentError::Load {
+            deployment_id: Uuid::new_v4(),
+            opaque: Opaque,
+            location: std::panic::Location::caller(),
+            source: Box::new(std::io::Error::other("boom-internal")),
+        };
+        assert!(
+            caution_error::ErrorReport::from_error(&error)
+                .errors
+                .is_empty(),
+            "a 500 root is opaque",
+        );
     }
 }

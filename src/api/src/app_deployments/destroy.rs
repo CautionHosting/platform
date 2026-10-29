@@ -16,7 +16,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use caution_error::Note;
+use caution_error::{Note, Opaque};
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -571,6 +571,8 @@ pub(crate) enum DestroyError {
     #[error("Deployment destroy failed; retry.")]
     Aws {
         #[provide]
+        opaque: Opaque,
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -579,6 +581,8 @@ pub(crate) enum DestroyError {
     #[error("Deployment destroy failed; retry.")]
     Database {
         #[provide]
+        opaque: Opaque,
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -586,6 +590,8 @@ pub(crate) enum DestroyError {
     },
     #[error("Deployment destroy failed; retry.")]
     DestroyFailed {
+        #[provide]
+        opaque: Opaque,
         #[provide]
         #[location]
         location: Location,
@@ -610,7 +616,8 @@ impl IntoResponse for DestroyError {
     fn into_response(self) -> Response {
         let status = self.status();
         tracing::warn!(error = ?self, "deployment destroy failed");
-        let report = caution_error::ErrorReport::from_error(&self);
+        let report =
+            caution_error::ErrorReport::from_error_with(&self, "Deployment destroy failed; retry.");
         sentry_middleware::error_response_provider(status, Json(report), self)
     }
 }
@@ -658,13 +665,13 @@ pub(crate) async fn destroy_handler(
             ),
         };
         events::finish(&task_state.db, operation_id, outcome, error).await;
-        destroyed.with_context(Ctx::destroy_failed())
+        destroyed.with_context(Ctx::destroy_failed(Opaque))
     });
     match task.await {
         Ok(destroyed) => destroyed.map(|()| StatusCode::NO_CONTENT),
         Err(error) => {
             fail_destroying(&state.db, deployment_id).await;
-            Err(error).with_context(Ctx::destroy_failed())
+            Err(error).with_context(Ctx::destroy_failed(Opaque))
         }
     }
 }
@@ -709,10 +716,10 @@ pub(super) async fn begin_destroy(
 ) -> Result<Option<(DestroyTarget, Uuid)>, DestroyError> {
     use DestroyErrorCtx as Ctx;
 
-    let mut tx = db.begin().await.with_context(Ctx::database())?;
+    let mut tx = db.begin().await.with_context(Ctx::database(Opaque))?;
     lock_app_operations(&mut tx, app_id)
         .await
-        .with_context(Ctx::database())?;
+        .with_context(Ctx::database(Opaque))?;
     // Membership join as in the switch.
     let row: Option<DestroyRow> = sqlx::query_as(
         "SELECT cr.live_deployment_id, COALESCE(cr.region, d.region) AS region,
@@ -729,7 +736,7 @@ pub(super) async fn begin_destroy(
     .bind(LIFECYCLE_DEPLOYMENTS)
     .fetch_optional(&mut *tx)
     .await
-    .with_context(Ctx::database())?;
+    .with_context(Ctx::database(Opaque))?;
     let Some(row) = row else {
         return Err(DestroyError::NotFound {
             location: std::panic::Location::caller(),
@@ -765,11 +772,11 @@ pub(super) async fn begin_destroy(
         let account = backend
             .app_account(app_id, region)
             .await
-            .with_context(Ctx::aws())?;
+            .with_context(Ctx::aws(Opaque))?;
         let holder = backend
             .address_holder(app_id, &account)
             .await
-            .with_context(Ctx::aws())?;
+            .with_context(Ctx::aws(Opaque))?;
         if holder.as_deref() == Some(instance_id) {
             return Err(DestroyError::HoldsAddress {
                 notes: HOLDS_ADDRESS_NOTES,
@@ -787,7 +794,7 @@ pub(super) async fn begin_destroy(
     .bind(*PROCESS_ID)
     .fetch_one(&mut *tx)
     .await
-    .with_context(Ctx::database())?;
+    .with_context(Ctx::database(Opaque))?;
     let operation_id = events::begin(
         &mut *tx,
         events::NewOperation {
@@ -801,8 +808,8 @@ pub(super) async fn begin_destroy(
         },
     )
     .await
-    .with_context(Ctx::database())?;
-    tx.commit().await.with_context(Ctx::database())?;
+    .with_context(Ctx::database(Opaque))?;
+    tx.commit().await.with_context(Ctx::database(Opaque))?;
     Ok(Some((target, operation_id)))
 }
 
@@ -1123,6 +1130,21 @@ mod tests {
         assert_eq!(
             leftover_instances(&instances, app, deployment, &["i-live".to_string()]),
             vec!["i-leftover".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_destroy_failure_is_withheld() {
+        let error = DestroyError::Database {
+            opaque: Opaque,
+            location: std::panic::Location::caller(),
+            source: Box::new(std::io::Error::other("boom-internal")),
+        };
+        assert!(
+            caution_error::ErrorReport::from_error(&error)
+                .errors
+                .is_empty(),
+            "a 500 root is opaque",
         );
     }
 }

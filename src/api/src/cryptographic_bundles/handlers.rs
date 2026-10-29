@@ -12,6 +12,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use caution_error::Opaque;
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -74,6 +75,8 @@ pub(crate) enum CreateQuorumBundleError {
     #[error("could not look up the primary organization")]
     PrimaryOrgLookup {
         #[provide]
+        opaque: Opaque,
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -101,6 +104,8 @@ pub(crate) enum CreateQuorumBundleError {
     #[error("failed to store quorum bundle")]
     Store {
         #[provide]
+        opaque: Opaque,
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -118,13 +123,24 @@ impl IntoResponse for CreateQuorumBundleError {
                 StatusCode::SERVICE_UNAVAILABLE
             }
         };
-        error_response(status, self)
+        let fallback = match &self {
+            CreateQuorumBundleError::PrimaryOrgLookup { .. } => "unable to resolve organization",
+            CreateQuorumBundleError::Store { .. } => "unable to store quorum bundle",
+            CreateQuorumBundleError::UnverifiedBundle { .. }
+            | CreateQuorumBundleError::KeyServiceUnavailable { .. } => "",
+        };
+        error_response(status, self, fallback)
     }
 }
 
-/// Sends an error as a structured report and reports it to Sentry.
-fn error_response(status: StatusCode, error: impl caution_error::ProviderError) -> Response {
-    let report = caution_error::ErrorReport::from_error(&error);
+/// Sends an error as a structured report and reports it to Sentry. `fallback`
+/// is the client text when the error (or its root) is opaque.
+fn error_response(
+    status: StatusCode,
+    error: impl caution_error::ProviderError,
+    fallback: &'static str,
+) -> Response {
+    let report = caution_error::ErrorReport::from_error_with(&error, fallback);
     sentry_middleware::error_response_provider(status, Json(report), error)
 }
 
@@ -148,7 +164,7 @@ pub(crate) async fn create_quorum_bundle(
 
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .with_context(Ctx::primary_org_lookup())?;
+        .with_context(Ctx::primary_org_lookup(Opaque))?;
 
     org_quorum::verify_upload(&req.data, req.allow_legacy).map_err(|source| {
         let location = std::panic::Location::caller();
@@ -160,7 +176,7 @@ pub(crate) async fn create_quorum_bundle(
     })?;
     let bundle = super::create_quorum_bundle(&state.db, org_id, auth.user_id, req)
         .await
-        .with_context(Ctx::store())?;
+        .with_context(Ctx::store(Opaque))?;
     Ok(Json(bundle))
 }
 
@@ -234,6 +250,8 @@ pub(crate) enum UpdateQuorumBundleError {
     #[error("could not look up the primary organization")]
     PrimaryOrgLookup {
         #[provide]
+        opaque: Opaque,
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -261,6 +279,8 @@ pub(crate) enum UpdateQuorumBundleError {
     #[error("failed to update quorum bundle")]
     Update {
         #[provide]
+        opaque: Opaque,
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -287,7 +307,14 @@ impl IntoResponse for UpdateQuorumBundleError {
             }
             UpdateQuorumBundleError::NotFound { .. } => StatusCode::NOT_FOUND,
         };
-        error_response(status, self)
+        let fallback = match &self {
+            UpdateQuorumBundleError::PrimaryOrgLookup { .. } => "unable to resolve organization",
+            UpdateQuorumBundleError::Update { .. } => "unable to update quorum bundle",
+            UpdateQuorumBundleError::UnverifiedBundle { .. }
+            | UpdateQuorumBundleError::KeyServiceUnavailable { .. }
+            | UpdateQuorumBundleError::NotFound { .. } => "",
+        };
+        error_response(status, self, fallback)
     }
 }
 
@@ -302,7 +329,7 @@ pub(crate) async fn update_quorum_bundle(
 
     let org_id = get_user_primary_org(&state.db, auth.user_id)
         .await
-        .with_context(Ctx::primary_org_lookup())?;
+        .with_context(Ctx::primary_org_lookup(Opaque))?;
 
     if let Some(data) = &req.data {
         org_quorum::verify_upload(data, req.allow_legacy).map_err(|source| {
@@ -316,7 +343,7 @@ pub(crate) async fn update_quorum_bundle(
     }
     let bundle = super::update_quorum_bundle(&state.db, org_id, id, req)
         .await
-        .with_context(Ctx::update())?
+        .with_context(Ctx::update(Opaque))?
         .ok_or_else(|| UpdateQuorumBundleError::NotFound {
             bundle_id: id,
             location: std::panic::Location::caller(),
@@ -899,5 +926,22 @@ mod tests {
                 "the upload is at fault: {upload_fault}"
             );
         }
+    }
+
+    #[test]
+    fn a_lookup_failure_is_withheld() {
+        let error = CreateQuorumBundleError::PrimaryOrgLookup {
+            opaque: caution_error::Opaque,
+            location: std::panic::Location::caller(),
+            source: crate::GetUserPrimaryOrgError::NotFound {
+                location: std::panic::Location::caller(),
+            },
+        };
+        assert!(
+            caution_error::ErrorReport::from_error(&error)
+                .errors
+                .is_empty(),
+            "a 500 root is opaque",
+        );
     }
 }

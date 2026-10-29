@@ -8,7 +8,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use caution_error::Note;
+use caution_error::{Note, Opaque};
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use serde::Serialize;
 use sqlx::PgPool;
@@ -320,6 +320,8 @@ pub enum OnboardingMiddlewareError {
     #[error("internal error")]
     Internal {
         #[provide]
+        opaque: Opaque,
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -333,7 +335,7 @@ impl IntoResponse for OnboardingMiddlewareError {
             Self::NotOnboarded { .. } => StatusCode::PAYMENT_REQUIRED,
             Self::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        let report = caution_error::ErrorReport::from_error(&self);
+        let report = caution_error::ErrorReport::from_error_with(&self, "internal error");
         sentry_middleware::error_response_provider(status, Json(report), self)
     }
 }
@@ -356,7 +358,7 @@ pub async fn onboarding_middleware(
             location: std::panic::Location::caller(),
         });
     }
-    org.with_context(Ctx::internal())?;
+    org.with_context(Ctx::internal(Opaque))?;
 
     request.extensions_mut().insert(auth);
     Ok(next.run(request).await)
@@ -562,6 +564,21 @@ mod tests {
                 .extensions()
                 .get::<sentry_middleware::SentryReportable>()
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn an_internal_failure_is_withheld() {
+        let error = OnboardingMiddlewareError::Internal {
+            opaque: caution_error::Opaque,
+            location: std::panic::Location::caller(),
+            source: Box::new(std::io::Error::other("boom-internal")),
+        };
+        assert!(
+            caution_error::ErrorReport::from_error(&error)
+                .errors
+                .is_empty(),
+            "a 500 root is opaque",
         );
     }
 }

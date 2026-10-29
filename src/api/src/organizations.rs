@@ -16,7 +16,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use caution_error::Note;
+use caution_error::{Note, Opaque};
 use chrono::{DateTime, Duration, Utc};
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use rand::{RngCore, rngs::OsRng};
@@ -817,6 +817,8 @@ pub enum InviteMemberError {
     #[error("failed to create invitation")]
     Database {
         #[provide]
+        opaque: Opaque,
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -833,7 +835,7 @@ impl IntoResponse for InviteMemberError {
             Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::Database { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        let report = caution_error::ErrorReport::from_error(&self);
+        let report = caution_error::ErrorReport::from_error_with(&self, "internal error");
         sentry_middleware::error_response_provider(status, Json(report), self)
     }
 }
@@ -849,7 +851,7 @@ pub async fn invite_member(
 
     let role = check_org_access(&state.db, auth.user_id, org_id)
         .await
-        .with_context(Ctx::database())?;
+        .with_context(Ctx::database(Opaque))?;
 
     if !can_manage_org(&role) {
         return Err(InviteMemberError::Forbidden {
@@ -871,7 +873,7 @@ pub async fn invite_member(
     .bind(&email)
     .fetch_one(&state.db)
     .await
-    .with_context(Ctx::database())?;
+    .with_context(Ctx::database(Opaque))?;
 
     if already_member {
         return Err(InviteMemberError::AlreadyMember {
@@ -894,7 +896,7 @@ pub async fn invite_member(
     .bind(&email)
     .fetch_one(&state.db)
     .await
-    .with_context(Ctx::database())?;
+    .with_context(Ctx::database(Opaque))?;
 
     if already_invited {
         return Err(InviteMemberError::AlreadyInvited {
@@ -916,21 +918,21 @@ pub async fn invite_member(
     .bind(&email)
     .execute(&state.db)
     .await
-    .with_context(Ctx::database())?;
+    .with_context(Ctx::database(Opaque))?;
 
     let existing_user: bool =
         sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE lower(email) = $1)")
             .bind(&email)
             .fetch_one(&state.db)
             .await
-            .with_context(Ctx::database())?;
+            .with_context(Ctx::database(Opaque))?;
 
     let (org_name, invitation_daily_limit): (String, i32) =
         sqlx::query_as("SELECT name, invitation_daily_limit FROM organizations WHERE id = $1")
             .bind(org_id)
             .fetch_optional(&state.db)
             .await
-            .with_context(Ctx::database())?
+            .with_context(Ctx::database(Opaque))?
             .ok_or_else(|| InviteMemberError::NotFound {
                 org_id,
                 location: std::panic::Location::caller(),
@@ -940,7 +942,7 @@ pub async fn invite_member(
         .bind(auth.user_id)
         .fetch_optional(&state.db)
         .await
-        .with_context(Ctx::database())?
+        .with_context(Ctx::database(Opaque))?
         .flatten();
 
     let (token, token_hash) = generate_invitation_token();
@@ -949,12 +951,12 @@ pub async fn invite_member(
     // Count and insert under a per-organization lock so concurrent invites cannot
     // all slip past the daily budget. Namespace 3 keeps it apart from the org
     // entitlement lock (namespace 0) and the app/resource locks.
-    let mut tx = state.db.begin().await.with_context(Ctx::database())?;
+    let mut tx = state.db.begin().await.with_context(Ctx::database(Opaque))?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 3))")
         .bind(org_id.to_string())
         .execute(&mut *tx)
         .await
-        .with_context(Ctx::database())?;
+        .with_context(Ctx::database(Opaque))?;
 
     let sent_today: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)
@@ -965,7 +967,7 @@ pub async fn invite_member(
     .bind(org_id)
     .fetch_one(&mut *tx)
     .await
-    .with_context(Ctx::database())?;
+    .with_context(Ctx::database(Opaque))?;
 
     if sent_today >= i64::from(invitation_daily_limit) {
         return Err(InviteMemberError::LimitReached {
@@ -1008,12 +1010,13 @@ pub async fn invite_member(
             };
         }
         InviteMemberError::Database {
+            opaque: Opaque,
             location: std::panic::Location::caller(),
             source: Box::new(e),
         }
     })?;
 
-    tx.commit().await.with_context(Ctx::database())?;
+    tx.commit().await.with_context(Ctx::database(Opaque))?;
 
     // The address already has an account, so an invitation link cannot add it:
     // the accept flow creates a new user. The invitation row is recorded either
@@ -1614,6 +1617,21 @@ mod tests {
                 .extensions()
                 .get::<sentry_middleware::SentryReportable>()
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn a_database_failure_is_withheld() {
+        let error = InviteMemberError::Database {
+            opaque: caution_error::Opaque,
+            location: std::panic::Location::caller(),
+            source: Box::new(std::io::Error::other("boom-internal")),
+        };
+        assert!(
+            caution_error::ErrorReport::from_error(&error)
+                .errors
+                .is_empty(),
+            "a 500 root is opaque",
         );
     }
 }
