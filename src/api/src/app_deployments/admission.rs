@@ -279,6 +279,8 @@ pub(crate) enum ClaimError {
         deployment_id: Uuid,
         #[provide]
         location: Location,
+        #[provide(ref = [caution_error::Note])]
+        notes: &'static [caution_error::Note],
     },
     #[error("app {app_id} is {state} and cannot start a build")]
     NotPushable {
@@ -357,6 +359,7 @@ pub(crate) async fn claim_for_build(
             app_id,
             deployment_id,
             location: std::panic::Location::caller(),
+            notes: crate::PUSH_AGAIN,
         });
     }
     sqlx::query(

@@ -2285,10 +2285,11 @@ async fn set_builder_config(
 
 /// Failure modes for [`deploy_logic`]. Client-visible bodies are fixed literals;
 /// the underlying sources stay chained on the error and never reach the client.
-#[derive(Debug, thiserror::Error, CtxError)]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum DeployLogicError {
     #[error("could not prepare pinned component artifacts [{location}]")]
     ComponentSelection {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2297,6 +2298,7 @@ pub(crate) enum DeployLogicError {
 
     #[error("could not prepare pinned component artifacts [{location}]")]
     ComponentLoad {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2305,6 +2307,7 @@ pub(crate) enum DeployLogicError {
 
     #[error("could not prepare pinned component artifacts [{location}]")]
     ComponentPins {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2313,6 +2316,7 @@ pub(crate) enum DeployLogicError {
 
     #[error("could not prepare pinned component artifacts [{location}]")]
     CacheDecode {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2321,6 +2325,7 @@ pub(crate) enum DeployLogicError {
 
     #[error("could not prepare pinned component artifacts [{location}]")]
     ComponentMismatch {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2329,6 +2334,7 @@ pub(crate) enum DeployLogicError {
 
     #[error("could not prepare pinned component artifacts [{location}]")]
     BuilderComponents {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2336,6 +2342,7 @@ pub(crate) enum DeployLogicError {
     },
     #[error("invalid platform framework commit [{location}]")]
     FrameworkCommit {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2344,6 +2351,7 @@ pub(crate) enum DeployLogicError {
 
     #[error("failed to check organization membership [{location}]")]
     OrgMembership {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2351,10 +2359,14 @@ pub(crate) enum DeployLogicError {
     },
 
     #[error("user does not belong to this organization [{location}]")]
-    NotOrgMember { location: Location },
+    NotOrgMember {
+        #[provide]
+        location: Location,
+    },
 
     #[error("failed to fetch provider account [{location}]")]
     ProviderAccountQuery {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2362,13 +2374,24 @@ pub(crate) enum DeployLogicError {
     },
 
     #[error("no active provider account found [{location}]")]
-    NoProviderAccount { location: Location },
+    NoProviderAccount {
+        #[provide]
+        location: Location,
+        #[provide(ref = [caution_error::Note])]
+        notes: &'static [caution_error::Note],
+    },
 
     #[error("provider account has no AWS account ID configured [{location}]")]
-    NoAwsAccountId { location: Location },
+    NoAwsAccountId {
+        #[provide]
+        location: Location,
+        #[provide(ref = [caution_error::Note])]
+        notes: &'static [caution_error::Note],
+    },
 
     #[error("failed to get resource type [{location}]")]
     ResourceTypeQuery {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2377,6 +2400,7 @@ pub(crate) enum DeployLogicError {
 
     #[error("failed to check existing resource [{location}]")]
     ResourceLookup {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2384,19 +2408,31 @@ pub(crate) enum DeployLogicError {
     },
 
     #[error("deployment already in progress [{location}]")]
-    DeployInProgress { location: Location },
+    DeployInProgress {
+        #[provide]
+        location: Location,
+        #[provide(ref = [caution_error::Note])]
+        notes: &'static [caution_error::Note],
+    },
 
     #[error("app is being destroyed [{location}]")]
-    Terminating { location: Location },
+    Terminating {
+        #[provide]
+        location: Location,
+        #[provide(ref = [caution_error::Note])]
+        notes: &'static [caution_error::Note],
+    },
 
     #[error("app with id {resource_id} not found [{location}]")]
     AppNotFound {
         resource_id: Uuid,
+        #[provide]
         location: Location,
     },
 
     #[error("failed to load cloud credential [{location}]")]
     CredentialLookup {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2405,6 +2441,7 @@ pub(crate) enum DeployLogicError {
 
     #[error("unable to check deployment entitlement [{location}]")]
     EntitlementQuery {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2412,16 +2449,32 @@ pub(crate) enum DeployLogicError {
     },
 
     #[error("managed on-premises deployment requires an active subscription [{location}]")]
-    NoSubscription { location: Location },
+    NoSubscription {
+        #[provide]
+        location: Location,
+        #[provide(ref = [caution_error::Note])]
+        notes: &'static [caution_error::Note],
+    },
 
     #[error("managed on-premises subscription is not active [{location}]")]
-    SubscriptionInactive { location: Location },
+    SubscriptionInactive {
+        #[provide]
+        location: Location,
+        #[provide(ref = [caution_error::Note])]
+        notes: &'static [caution_error::Note],
+    },
 
     #[error("managed on-premises subscription has no deployment capacity [{location}]")]
-    SubscriptionNoCapacity { location: Location },
+    SubscriptionNoCapacity {
+        #[provide]
+        location: Location,
+        #[provide(ref = [caution_error::Note])]
+        notes: &'static [caution_error::Note],
+    },
 
     #[error("unable to check deployment capacity [{location}]")]
     AppCountQuery {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2429,10 +2482,16 @@ pub(crate) enum DeployLogicError {
     },
 
     #[error("app limit reached [{location}]")]
-    AppLimitReached { location: Location },
+    AppLimitReached {
+        #[provide]
+        location: Location,
+        #[provide(ref = [caution_error::Note])]
+        notes: &'static [caution_error::Note],
+    },
 
     #[error("unable to finish deployment entitlement check [{location}]")]
     EntitlementCommit {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2441,6 +2500,7 @@ pub(crate) enum DeployLogicError {
 
     #[error("failed to read ledger balance [{location}]")]
     BalanceQuery {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2448,10 +2508,16 @@ pub(crate) enum DeployLogicError {
     },
 
     #[error("minimum $25.00 in credits required to deploy [{location}]")]
-    InsufficientCredits { location: Location },
+    InsufficientCredits {
+        #[provide]
+        location: Location,
+        #[provide(ref = [caution_error::Note])]
+        notes: &'static [caution_error::Note],
+    },
 
     #[error("failed to read suspension status [{location}]")]
     SuspensionQuery {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2459,10 +2525,16 @@ pub(crate) enum DeployLogicError {
     },
 
     #[error("organization is suspended due to credit exhaustion [{location}]")]
-    CreditSuspended { location: Location },
+    CreditSuspended {
+        #[provide]
+        location: Location,
+        #[provide(ref = [caution_error::Note])]
+        notes: &'static [caution_error::Note],
+    },
 
     #[error("failed to count active resources [{location}]")]
     ActiveResourcesQuery {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2470,10 +2542,16 @@ pub(crate) enum DeployLogicError {
     },
 
     #[error("resource limit reached [{location}]")]
-    ResourceLimitReached { location: Location },
+    ResourceLimitReached {
+        #[provide]
+        location: Location,
+        #[provide(ref = [caution_error::Note])]
+        notes: &'static [caution_error::Note],
+    },
 
     #[error("failed to reactivate resource [{location}]")]
     ReactivateUpdate {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2482,6 +2560,7 @@ pub(crate) enum DeployLogicError {
 
     #[error("failed to update resource state [{location}]")]
     PendingUpdate {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2490,6 +2569,7 @@ pub(crate) enum DeployLogicError {
 
     #[error("failed to get commit SHA for branch [{location}]")]
     CommitSha {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2498,14 +2578,18 @@ pub(crate) enum DeployLogicError {
 
     #[error("commit_sha does not match branch head [{location}]")]
     CommitMismatch {
+        #[provide]
         #[location]
         location: Location,
+        #[provide(ref = [caution_error::Note])]
+        notes: &'static [caution_error::Note],
         #[source]
         source: SelectDeployCommitShaError,
     },
 
     #[error("failed to load build config from git [{location}]")]
     BuildConfigGit {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2513,16 +2597,23 @@ pub(crate) enum DeployLogicError {
     },
     #[error("invalid network policy [{location}]")]
     NetworkPolicy {
+        #[provide]
         #[location]
         location: Location,
         #[source]
         source: caution_config::NetworkPolicyError,
     },
     #[error("recovery without HTTP requires explicit ingress sources [{location}]")]
-    RecoveryIngressRequired { location: Location },
+    RecoveryIngressRequired {
+        #[provide]
+        location: Location,
+        #[provide(ref = [caution_error::Note])]
+        notes: &'static [caution_error::Note],
+    },
 
     #[error("failed to inspect repository contents [{location}]")]
     RepoInspect {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2531,6 +2622,7 @@ pub(crate) enum DeployLogicError {
 
     #[error("invalid enclave unit configuration [{location}]")]
     UnitConfig {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2538,10 +2630,14 @@ pub(crate) enum DeployLogicError {
     },
 
     #[error("encryptor not configured [{location}]")]
-    EncryptorMissing { location: Location },
+    EncryptorMissing {
+        #[provide]
+        location: Location,
+    },
 
     #[error("failed to load managed on-prem credential [{location}]")]
     OnpremSecrets {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2549,13 +2645,24 @@ pub(crate) enum DeployLogicError {
     },
 
     #[error("BYOC provider configuration requires linked credentials [{location}]")]
-    ByocRequired { location: Location },
+    ByocRequired {
+        #[provide]
+        location: Location,
+        #[provide(ref = [caution_error::Note])]
+        notes: &'static [caution_error::Note],
+    },
 
     #[error("vCPU request exceeds fully managed limit [{location}]")]
-    VcpuLimit { location: Location },
+    VcpuLimit {
+        #[provide]
+        location: Location,
+        #[provide(ref = [caution_error::Note])]
+        notes: &'static [caution_error::Note],
+    },
 
     #[error("invalid enclave resource request [{location}]")]
     SizingInvalid {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2564,6 +2671,7 @@ pub(crate) enum DeployLogicError {
 
     #[error("failed to read EIF build metadata [{location}]")]
     EifMetadata {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2571,10 +2679,16 @@ pub(crate) enum DeployLogicError {
     },
 
     #[error("EIF size exceeds allocated enclave memory [{location}]")]
-    EifTooLarge { location: Location },
+    EifTooLarge {
+        #[provide]
+        location: Location,
+        #[provide(ref = [caution_error::Note])]
+        notes: &'static [caution_error::Note],
+    },
 
     #[error("builder target resolution failed [{location}]")]
     BuilderTarget {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2583,6 +2697,7 @@ pub(crate) enum DeployLogicError {
 
     #[error("cache lookup failed [{location}]")]
     CacheLookup {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2590,10 +2705,16 @@ pub(crate) enum DeployLogicError {
     },
 
     #[error("insufficient credits for builder [{location}]")]
-    BuilderCredits { location: Location },
+    BuilderCredits {
+        #[provide]
+        location: Location,
+        #[provide(ref = [caution_error::Note])]
+        notes: &'static [caution_error::Note],
+    },
 
     #[error("a build is already running for this app [{location}]")]
     BuilderAlreadyRunning {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2602,6 +2723,7 @@ pub(crate) enum DeployLogicError {
 
     #[error("failed to upload source archive [{location}]")]
     UploadSource {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2610,6 +2732,7 @@ pub(crate) enum DeployLogicError {
 
     #[error("dedicated builder failed [{location}]")]
     BuilderFailed {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2618,6 +2741,7 @@ pub(crate) enum DeployLogicError {
 
     #[error("database error while reserving fully managed capacity [{location}]")]
     CapacityDatabase {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2625,10 +2749,14 @@ pub(crate) enum DeployLogicError {
     },
 
     #[error("no deployment region resolved [{location}]")]
-    NoRegion { location: Location },
+    NoRegion {
+        #[provide]
+        location: Location,
+    },
 
     #[error("Nitro deployment failed [{location}]")]
     NitroEnclave {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2637,6 +2765,7 @@ pub(crate) enum DeployLogicError {
 
     #[error("Nitro deployment failed [{location}]")]
     ProvisionCandidate {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2645,6 +2774,7 @@ pub(crate) enum DeployLogicError {
 
     #[error("enclave failed to become healthy [{location}]")]
     EnclaveUnhealthy {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2653,6 +2783,7 @@ pub(crate) enum DeployLogicError {
 
     #[error("failed to update resource [{location}]")]
     ResourceUpdate {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2662,10 +2793,14 @@ pub(crate) enum DeployLogicError {
     #[error(
         "Deployment completed after the app lifecycle changed; refusing to publish it [{location}]"
     )]
-    PublishConflict { location: Location },
+    PublishConflict {
+        #[provide]
+        location: Location,
+    },
 
     #[error("deployment succeeded but metering registration failed [{location}]")]
     Metering {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2674,6 +2809,7 @@ pub(crate) enum DeployLogicError {
 
     #[error("failed to read the app lifecycle [{location}]")]
     Lifecycle {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2681,25 +2817,41 @@ pub(crate) enum DeployLogicError {
     },
 
     #[error("deployments-lifecycle push without a reserved deployment [{location}]")]
-    DeploymentNotReserved { location: Location },
+    DeploymentNotReserved {
+        #[provide]
+        location: Location,
+        #[provide(ref = [caution_error::Note])]
+        notes: &'static [caution_error::Note],
+    },
 
-    // `source` is the thiserror source by its name. It is not marked
-    // `#[source]` because the CtxError derive would then require a `BoxError`;
-    // it stays typed so `client_response` can match it.
+    // `source` stays typed so `client_response` can match its variant.
     #[error("failed to claim the reserved deployment [{location}]")]
     DeploymentClaim {
+        #[provide]
         location: Location,
+        #[source]
         source: app_deployments::admission::ClaimError,
     },
 
     #[error("the push targets another AWS environment than the app network's [{location}]")]
-    LinkedNetworkChanged { location: Location },
+    LinkedNetworkChanged {
+        #[provide]
+        location: Location,
+        #[provide(ref = [caution_error::Note])]
+        notes: &'static [caution_error::Note],
+    },
 
     #[error("the linked environment has no BYOC builder instance profile [{location}]")]
-    LinkedBuilderMissing { location: Location },
+    LinkedBuilderMissing {
+        #[provide]
+        location: Location,
+        #[provide(ref = [caution_error::Note])]
+        notes: &'static [caution_error::Note],
+    },
 
     #[error("failed to read the app network [{location}]")]
     AppNetworkQuery {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2708,6 +2860,7 @@ pub(crate) enum DeployLogicError {
 
     #[error("failed to read the app network [{location}]")]
     AppNetworkParse {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2716,6 +2869,7 @@ pub(crate) enum DeployLogicError {
 
     #[error("failed to check instance type offerings in the app zone [{location}]")]
     ZoneOffering {
+        #[provide]
         #[location]
         location: Location,
         #[source]
@@ -2723,21 +2877,38 @@ pub(crate) enum DeployLogicError {
     },
 
     #[error("instance type is not offered in the app availability zone [{location}]")]
-    InstanceTypeUnavailableInZone { location: Location },
+    InstanceTypeUnavailableInZone {
+        #[provide]
+        location: Location,
+    },
 
     #[error("no fully managed capacity left in app region {region} [{location}]")]
-    RegionFull { region: String, location: Location },
+    RegionFull {
+        region: String,
+        #[provide]
+        location: Location,
+        #[provide(ref = [caution_error::Note])]
+        notes: &'static [caution_error::Note],
+    },
 
     #[error("failed to record the deployment as running [{location}]")]
     Activation {
+        #[provide]
         #[location]
         location: Location,
+        #[provide(ref = [caution_error::Note])]
+        notes: &'static [caution_error::Note],
+        #[provide(ref = [caution_error::Warning])]
+        warnings: &'static [caution_error::Warning],
         #[source]
         source: app_deployments::lifecycle::CompleteRunningError,
     },
 
     #[error("deploy task panicked [{location}]")]
-    Panicked { location: Location },
+    Panicked {
+        #[provide]
+        location: Location,
+    },
 }
 
 /// Guidance for a failure in `complete_running`: `(notes, warnings)`.
@@ -3076,129 +3247,84 @@ impl DeployLogicError {
     }
 }
 
-/// Guidance for a deploy failure whose client text is the diagnosis alone.
+/// Guidance for a deploy failure, held by the variant that states it.
 ///
-/// The remedy for a failure, and the caution it owes the client, live here
-/// rather than in the message, so the message has one job: say what failed.
+/// The remedy for a failure, and the caution it owes the client, live in the
+/// variant's fields rather than in the message, so the message has one job: say
+/// what failed. The derived [`ProviderError`](caution_error::ProviderError)
+/// reports them.
+const CLOUD_ACCOUNT: &[caution_error::Note] = &[caution_error::Note::from_static(
+    "Link a cloud provider account in Settings at https://dashboard.caution.co.",
+)];
+const AWS_ACCOUNT_ID: &[caution_error::Note] = &[caution_error::Note::from_static(
+    "Set the AWS account ID on the linked provider account.",
+)];
+const WAIT_FOR_DEPLOYMENT: &[caution_error::Note] = &[caution_error::Note::from_static(
+    "Wait for the deployment to finish; `caution apps get -d <id>` shows its state.",
+)];
+const WAIT_FOR_TEARDOWN: &[caution_error::Note] = &[caution_error::Note::from_static(
+    "Wait for teardown to complete before deploying it again.",
+)];
+const CHOOSE_PLAN: &[caution_error::Note] = &[caution_error::Note::from_static(
+    "Choose a plan in Settings at https://dashboard.caution.co.",
+)];
+const REACTIVATE_SUBSCRIPTION: &[caution_error::Note] = &[caution_error::Note::from_static(
+    "Reactivate the subscription in Settings at https://dashboard.caution.co.",
+)];
+const FREE_CAPACITY: &[caution_error::Note] = &[caution_error::Note::from_static(
+    "Free deployment capacity on the plan, or upgrade in Settings at https://dashboard.caution.co.",
+)];
+const UPGRADE_PLAN: &[caution_error::Note] = &[caution_error::Note::from_static(
+    "Upgrade the plan in Settings at https://dashboard.caution.co, or destroy an app you no longer need.",
+)];
+const BUY_CREDITS: &[caution_error::Note] = &[caution_error::Note::from_static(
+    "Purchase credits in Settings at https://dashboard.caution.co before redeploying.",
+)];
+const ADD_CREDITS: &[caution_error::Note] = &[caution_error::Note::from_static(
+    "Add credits in Settings at https://dashboard.caution.co to resume deployments.",
+)];
+const FREE_RESOURCES: &[caution_error::Note] = &[caution_error::Note::from_static(
+    "Destroy unused resources, or contact support for a higher limit.",
+)];
+const CONTACT_SUPPORT: &[caution_error::Note] = &[caution_error::Note::from_static(
+    "Contact support for a larger request.",
+)];
+const INCREASE_MEMORY: &[caution_error::Note] = &[caution_error::Note::from_static(
+    "Increase `memory_mb` in the enclave configuration.",
+)];
+const BYOC_ROUTES: &[caution_error::Note] = &[
+    caution_error::Note::from_static(
+        "Reuse the original BYOC app and remote for this repository; its linked credentials already cover it.",
+    ),
+    caution_error::Note::from_static(
+        "To attach BYOC credentials to this app, run `caution init --byoc --config <decrypted-json>`.",
+    ),
+    caution_error::Note::from_static(
+        "For a new BYOC app, use a fresh unlinked checkout and run `caution init --byoc`; `caution apps create` provisions managed capacity instead.",
+    ),
+];
+const DESTROY_CANDIDATE: &[caution_error::Note] = &[caution_error::Note::from_static(
+    "Destroy a candidate, or retry once other candidates are cleaned up.",
+)];
+const KEEP_ENVIRONMENT: &[caution_error::Note] = &[caution_error::Note::from_static(
+    "Keep that environment, or destroy the app before moving it.",
+)];
+const REINIT_BYOC: &[caution_error::Note] = &[
+    caution_error::Note::from_static(
+        "Run `caution init --byoc` again to provision a current environment.",
+    ),
+    caution_error::Note::from_static("Destroy the app first if it has deployments."),
+];
+const RECOVERY_INGRESS: &[caution_error::Note] = &[caution_error::Note::from_static(
+    "Add explicit `network.recovery_ingress` sources to `caution.hcl`.",
+)];
+const BRANCH_HEAD: &[caution_error::Note] = &[caution_error::Note::from_static(
+    "Fetch the branch head, then push the commit you intend to deploy again.",
+)];
+pub(crate) const PUSH_AGAIN: &[caution_error::Note] =
+    &[caution_error::Note::from_static("Push again.")];
+
 impl DeployLogicError {
-    /// Notes for a deploy failure: what the client can do about it.
-    ///
-    /// The message carries the diagnosis only, so a variant whose remedy used to
-    /// be glued to its message now carries that remedy here. A variant with no
-    /// remedy to offer gets none.
-    fn notes(&self) -> &'static [caution_error::Note] {
-        use caution_error::Note;
-
-        static CLOUD_ACCOUNT: &[Note] = &[Note::from_static(
-            "Link a cloud provider account in Settings at https://dashboard.caution.co.",
-        )];
-        static AWS_ACCOUNT_ID: &[Note] = &[Note::from_static(
-            "Set the AWS account ID on the linked provider account.",
-        )];
-        static WAIT_FOR_DEPLOYMENT: &[Note] = &[Note::from_static(
-            "Wait for the deployment to finish; `caution apps get -d <id>` shows its state.",
-        )];
-        static WAIT_FOR_TEARDOWN: &[Note] = &[Note::from_static(
-            "Wait for teardown to complete before deploying it again.",
-        )];
-        static CHOOSE_PLAN: &[Note] = &[Note::from_static(
-            "Choose a plan in Settings at https://dashboard.caution.co.",
-        )];
-        static REACTIVATE_SUBSCRIPTION: &[Note] = &[Note::from_static(
-            "Reactivate the subscription in Settings at https://dashboard.caution.co.",
-        )];
-        static FREE_CAPACITY: &[Note] = &[Note::from_static(
-            "Free deployment capacity on the plan, or upgrade in Settings at https://dashboard.caution.co.",
-        )];
-        static UPGRADE_PLAN: &[Note] = &[Note::from_static(
-            "Upgrade the plan in Settings at https://dashboard.caution.co, or destroy an app you no longer need.",
-        )];
-        static BUY_CREDITS: &[Note] = &[Note::from_static(
-            "Purchase credits in Settings at https://dashboard.caution.co before redeploying.",
-        )];
-        static ADD_CREDITS: &[Note] = &[Note::from_static(
-            "Add credits in Settings at https://dashboard.caution.co to resume deployments.",
-        )];
-        static FREE_RESOURCES: &[Note] = &[Note::from_static(
-            "Destroy unused resources, or contact support for a higher limit.",
-        )];
-        static CONTACT_SUPPORT: &[Note] =
-            &[Note::from_static("Contact support for a larger request.")];
-        static INCREASE_MEMORY: &[Note] = &[Note::from_static(
-            "Increase `memory_mb` in the enclave configuration.",
-        )];
-        static BYOC_ROUTES: &[Note] = &[
-            Note::from_static(
-                "Reuse the original BYOC app and remote for this repository; its linked credentials already cover it.",
-            ),
-            Note::from_static(
-                "To attach BYOC credentials to this app, run `caution init --byoc --config <decrypted-json>`.",
-            ),
-            Note::from_static(
-                "For a new BYOC app, use a fresh unlinked checkout and run `caution init --byoc`; `caution apps create` provisions managed capacity instead.",
-            ),
-        ];
-        static DESTROY_CANDIDATE: &[Note] = &[Note::from_static(
-            "Destroy a candidate, or retry once other candidates are cleaned up.",
-        )];
-        static KEEP_ENVIRONMENT: &[Note] = &[Note::from_static(
-            "Keep that environment, or destroy the app before moving it.",
-        )];
-        static REINIT_BYOC: &[Note] = &[
-            Note::from_static(
-                "Run `caution init --byoc` again to provision a current environment.",
-            ),
-            Note::from_static("Destroy the app first if it has deployments."),
-        ];
-        static RECOVERY_INGRESS: &[Note] = &[Note::from_static(
-            "Add explicit `network.recovery_ingress` sources to `caution.hcl`.",
-        )];
-        static BRANCH_HEAD: &[Note] = &[Note::from_static(
-            "Fetch the branch head, then push the commit you intend to deploy again.",
-        )];
-        static PUSH_AGAIN: &[Note] = &[Note::from_static("Push again.")];
-
-        match self {
-            Self::NoProviderAccount { .. } => CLOUD_ACCOUNT,
-            Self::NoAwsAccountId { .. } => AWS_ACCOUNT_ID,
-            Self::DeployInProgress { .. } => WAIT_FOR_DEPLOYMENT,
-            Self::Terminating { .. } => WAIT_FOR_TEARDOWN,
-            Self::NoSubscription { .. } => CHOOSE_PLAN,
-            Self::SubscriptionInactive { .. } => REACTIVATE_SUBSCRIPTION,
-            Self::SubscriptionNoCapacity { .. } => FREE_CAPACITY,
-            Self::AppLimitReached { .. } => UPGRADE_PLAN,
-            Self::InsufficientCredits { .. } | Self::BuilderCredits { .. } => BUY_CREDITS,
-            Self::CreditSuspended { .. } => ADD_CREDITS,
-            Self::ResourceLimitReached { .. } => FREE_RESOURCES,
-            Self::VcpuLimit { .. } => CONTACT_SUPPORT,
-            Self::EifTooLarge { .. } => INCREASE_MEMORY,
-            Self::ByocRequired { .. } => BYOC_ROUTES,
-            Self::RegionFull { .. } => DESTROY_CANDIDATE,
-            Self::LinkedNetworkChanged { .. } => KEEP_ENVIRONMENT,
-            Self::LinkedBuilderMissing { .. } => REINIT_BYOC,
-            Self::RecoveryIngressRequired { .. } => RECOVERY_INGRESS,
-            Self::CommitMismatch { .. } => BRANCH_HEAD,
-            Self::DeploymentNotReserved { .. } => PUSH_AGAIN,
-            Self::DeploymentClaim { source, .. } => match source {
-                app_deployments::admission::ClaimError::ReservationGone { .. } => PUSH_AGAIN,
-                app_deployments::admission::ClaimError::NotPushable { .. }
-                | app_deployments::admission::ClaimError::Lock { .. }
-                | app_deployments::admission::ClaimError::Database { .. } => &[],
-            },
-            Self::Activation { source, .. } => activation_guidance(source).0,
-            _ => &[],
-        }
-    }
-
-    /// Warnings for a deploy failure: the consequences the client cannot change
-    /// but should weigh.
-    fn warnings(&self) -> &'static [caution_error::Warning] {
-        match self {
-            Self::Activation { source, .. } => activation_guidance(source).1,
-            _ => &[],
-        }
-    }
-
     /// The message and its guidance as one line, for the callers that record it:
     /// the rejection journal and the deployment stream.
     ///
@@ -3225,138 +3351,6 @@ impl DeployLogicError {
             text.push_str(&guidance);
         }
         text
-    }
-
-    /// The call site that failed the push.
-    fn location(&self) -> Location {
-        use DeployLogicError::*;
-
-        match self {
-            ComponentSelection { location, .. }
-            | ComponentLoad { location, .. }
-            | ComponentPins { location, .. }
-            | CacheDecode { location, .. }
-            | ComponentMismatch { location, .. }
-            | BuilderComponents { location, .. }
-            | FrameworkCommit { location, .. }
-            | OrgMembership { location, .. }
-            | NotOrgMember { location, .. }
-            | ProviderAccountQuery { location, .. }
-            | NoProviderAccount { location, .. }
-            | NoAwsAccountId { location, .. }
-            | ResourceTypeQuery { location, .. }
-            | ResourceLookup { location, .. }
-            | DeployInProgress { location, .. }
-            | Terminating { location, .. }
-            | AppNotFound { location, .. }
-            | CredentialLookup { location, .. }
-            | EntitlementQuery { location, .. }
-            | NoSubscription { location, .. }
-            | SubscriptionInactive { location, .. }
-            | SubscriptionNoCapacity { location, .. }
-            | AppCountQuery { location, .. }
-            | AppLimitReached { location, .. }
-            | EntitlementCommit { location, .. }
-            | BalanceQuery { location, .. }
-            | InsufficientCredits { location, .. }
-            | SuspensionQuery { location, .. }
-            | CreditSuspended { location, .. }
-            | ActiveResourcesQuery { location, .. }
-            | ResourceLimitReached { location, .. }
-            | ReactivateUpdate { location, .. }
-            | PendingUpdate { location, .. }
-            | CommitSha { location, .. }
-            | CommitMismatch { location, .. }
-            | BuildConfigGit { location, .. }
-            | NetworkPolicy { location, .. }
-            | RecoveryIngressRequired { location, .. }
-            | RepoInspect { location, .. }
-            | UnitConfig { location, .. }
-            | EncryptorMissing { location, .. }
-            | OnpremSecrets { location, .. }
-            | ByocRequired { location, .. }
-            | VcpuLimit { location, .. }
-            | SizingInvalid { location, .. }
-            | EifMetadata { location, .. }
-            | EifTooLarge { location, .. }
-            | BuilderTarget { location, .. }
-            | CacheLookup { location, .. }
-            | BuilderCredits { location, .. }
-            | BuilderAlreadyRunning { location, .. }
-            | UploadSource { location, .. }
-            | BuilderFailed { location, .. }
-            | CapacityDatabase { location, .. }
-            | NoRegion { location, .. }
-            | NitroEnclave { location, .. }
-            | ProvisionCandidate { location, .. }
-            | EnclaveUnhealthy { location, .. }
-            | ResourceUpdate { location, .. }
-            | PublishConflict { location, .. }
-            | Metering { location, .. }
-            | Lifecycle { location, .. }
-            | DeploymentNotReserved { location, .. }
-            | DeploymentClaim { location, .. }
-            | LinkedNetworkChanged { location, .. }
-            | LinkedBuilderMissing { location, .. }
-            | AppNetworkQuery { location, .. }
-            | AppNetworkParse { location, .. }
-            | ZoneOffering { location, .. }
-            | InstanceTypeUnavailableInZone { location, .. }
-            | RegionFull { location, .. }
-            | Activation { location, .. }
-            | Panicked { location, .. } => location,
-        }
-    }
-}
-
-/// [`ProviderError`](caution_error::ProviderError) is hand-written rather than
-/// derived: the derive provides guidance held in fields, and this error derives
-/// its guidance from the variant, which keeps the mapping in one place instead
-/// of in 65 variant declarations and their construction sites.
-impl caution_error::ProviderError for DeployLogicError {
-    fn provide<'a>(&'a self, request: &mut caution_error::Request<'a>) {
-        request.provide_ref::<[caution_error::Note]>(self.notes());
-        request.provide_ref::<[caution_error::Warning]>(self.warnings());
-        request.provide_value(self.location());
-    }
-
-    fn provider_source(&self) -> Option<&(dyn caution_error::ProviderError + 'static)> {
-        use DeployLogicError::*;
-        match self {
-            ComponentSelection { source, .. } => Some(source),
-            ComponentLoad { source, .. } => Some(source),
-            ComponentPins { source, .. } => Some(source),
-            CacheDecode { source, .. } => Some(source),
-            BuilderComponents { source, .. } => Some(source),
-            FrameworkCommit { source, .. } => Some(source),
-            CredentialLookup { source, .. } => Some(source),
-            BalanceQuery { source, .. } => Some(source),
-            CommitSha { source, .. } => Some(source),
-            CommitMismatch { source, .. } => Some(source),
-            BuildConfigGit { source, .. } => Some(source),
-            NetworkPolicy { source, .. } => Some(source),
-            RepoInspect { source, .. } => Some(source),
-            UnitConfig { source, .. } => Some(source),
-            OnpremSecrets { source, .. } => Some(source),
-            SizingInvalid { source, .. } => Some(source),
-            BuilderTarget { source, .. } => Some(source),
-            CacheLookup { source, .. } => Some(source),
-            BuilderAlreadyRunning { source, .. } => Some(source),
-            UploadSource { source, .. } => Some(source),
-            BuilderFailed { source, .. } => Some(source),
-            CapacityDatabase { source, .. } => Some(source),
-            NitroEnclave { source, .. } => Some(source),
-            ProvisionCandidate { source, .. } => Some(source),
-            EnclaveUnhealthy { source, .. } => Some(source),
-            Metering { source, .. } => Some(source),
-            Lifecycle { source, .. } => Some(source),
-            DeploymentClaim { source, .. } => Some(source),
-            ZoneOffering { source, .. } => Some(source),
-            Activation { source, .. } => Some(source),
-            // Sources that are not `ProviderError` (sqlx, serde_json, std::io)
-            // stay reachable through `std::error::Error::source` only.
-            _ => None,
-        }
     }
 }
 
@@ -3877,7 +3871,7 @@ mod deployment_target_tests {
 
 #[cfg(test)]
 mod activation_message_tests {
-    use super::DeployLogicError;
+    use super::{DeployLogicError, activation_guidance};
     use crate::app_deployments::lifecycle::CompleteRunningError;
     use crate::ec2::MoveAppAddressError;
     use axum::http::StatusCode;
@@ -3887,6 +3881,8 @@ mod activation_message_tests {
     fn activation(source: CompleteRunningError) -> DeployLogicError {
         DeployLogicError::Activation {
             location: std::panic::Location::caller(),
+            notes: activation_guidance(&source).0,
+            warnings: activation_guidance(&source).1,
             source,
         }
     }
@@ -4384,6 +4380,7 @@ async fn deploy_logic(
     let (provider_account_id, aws_account_id_opt, role_arn_opt) =
         provider_account.ok_or_else(|| DeployLogicError::NoProviderAccount {
             location: std::panic::Location::caller(),
+            notes: CLOUD_ACCOUNT,
         })?;
 
     tracing::info!(
@@ -4395,6 +4392,7 @@ async fn deploy_logic(
 
     let aws_account_id = aws_account_id_opt.ok_or_else(|| DeployLogicError::NoAwsAccountId {
         location: std::panic::Location::caller(),
+        notes: AWS_ACCOUNT_ID,
     })?;
 
     if let Some(ref role_arn) = role_arn_opt {
@@ -4440,11 +4438,13 @@ async fn deploy_logic(
                 if *state == types::ResourceState::Pending {
                     return Err(DeployLogicError::DeployInProgress {
                         location: std::panic::Location::caller(),
+                        notes: WAIT_FOR_DEPLOYMENT,
                     });
                 }
                 if *state == types::ResourceState::Terminating {
                     return Err(DeployLogicError::Terminating {
                         location: std::panic::Location::caller(),
+                        notes: WAIT_FOR_TEARDOWN,
                     });
                 }
                 let name = name_opt.clone().unwrap_or_else(|| "unnamed".to_string());
@@ -4472,7 +4472,8 @@ async fn deploy_logic(
 
     let commit_sha =
         select_deploy_commit_sha(&req.branch, &resolved_commit_sha, req.commit_sha.as_deref())
-            .with_context(Ctx::commit_mismatch())?;
+            // The remedy is a variant field, so the context constructor carries it.
+            .with_context(Ctx::commit_mismatch(BRANCH_HEAD))?;
 
     let git_dir = format!("{}/git-repos/{}.git", state.data_dir, app_id_str);
     let (config_content, config_file) = load_build_config_for_deploy(&git_dir, &commit_sha)
@@ -4489,6 +4490,7 @@ async fn deploy_logic(
         (app_deployments::LIFECYCLE_DEPLOYMENTS, None) => {
             return Err(DeployLogicError::DeploymentNotReserved {
                 location: std::panic::Location::caller(),
+                notes: PUSH_AGAIN,
             });
         }
         _ => None,
@@ -4538,6 +4540,7 @@ async fn deploy_logic(
         else {
             return Err(DeployLogicError::NoSubscription {
                 location: std::panic::Location::caller(),
+                notes: CHOOSE_PLAN,
             });
         };
 
@@ -4553,6 +4556,7 @@ async fn deploy_logic(
         if !status_permits_deploy {
             return Err(DeployLogicError::SubscriptionInactive {
                 location: std::panic::Location::caller(),
+                notes: REACTIVATE_SUBSCRIPTION,
             });
         }
 
@@ -4562,6 +4566,7 @@ async fn deploy_logic(
         if max_apps <= 0 {
             return Err(DeployLogicError::SubscriptionNoCapacity {
                 location: std::panic::Location::caller(),
+                notes: FREE_CAPACITY,
             });
         }
 
@@ -4583,6 +4588,7 @@ async fn deploy_logic(
         if current_apps + 1 > max_apps as i64 {
             return Err(DeployLogicError::AppLimitReached {
                 location: std::panic::Location::caller(),
+                notes: UPGRADE_PLAN,
             });
         }
         entitlement_tx
@@ -4605,6 +4611,7 @@ async fn deploy_logic(
         if balance < 2500 {
             return Err(DeployLogicError::InsufficientCredits {
                 location: std::panic::Location::caller(),
+                notes: BUY_CREDITS,
             });
         }
 
@@ -4620,6 +4627,7 @@ async fn deploy_logic(
         if credit_suspended.is_some() {
             return Err(DeployLogicError::CreditSuspended {
                 location: std::panic::Location::caller(),
+                notes: ADD_CREDITS,
             });
         }
 
@@ -4645,6 +4653,7 @@ async fn deploy_logic(
     if active_resources + 1 > max_resources {
         return Err(DeployLogicError::ResourceLimitReached {
             location: std::panic::Location::caller(),
+            notes: FREE_RESOURCES,
         });
     }
 
@@ -4682,6 +4691,7 @@ async fn deploy_logic(
             if updated.rows_affected() == 0 {
                 return Err(DeployLogicError::DeployInProgress {
                     location: std::panic::Location::caller(),
+                    notes: WAIT_FOR_DEPLOYMENT,
                 });
             }
         } else {
@@ -4701,6 +4711,7 @@ async fn deploy_logic(
             if updated.rows_affected() == 0 {
                 return Err(DeployLogicError::DeployInProgress {
                     location: std::panic::Location::caller(),
+                    notes: WAIT_FOR_DEPLOYMENT,
                 });
             }
         }
@@ -4808,6 +4819,7 @@ async fn deploy_logic(
     if config_file.has_vault_env() && network.http.is_none() && network.recovery_ingress.is_none() {
         return Err(DeployLogicError::RecoveryIngressRequired {
             location: std::panic::Location::caller(),
+            notes: RECOVERY_INGRESS,
         });
     }
     let egress = network_policy.egress_enabled();
@@ -4847,6 +4859,7 @@ async fn deploy_logic(
     if provider_requires_linked_byoc(&config_file, managed_onprem_config.is_some()) {
         let error = DeployLogicError::ByocRequired {
             location: std::panic::Location::caller(),
+            notes: BYOC_ROUTES,
         };
         deploy_target
             .reject(&state, req.org_id, resource_id, &error.client_message())
@@ -4857,6 +4870,7 @@ async fn deploy_logic(
     if !is_managed_onprem && cpu_count > fully_managed_capacity::MAX_FULLY_MANAGED_ENCLAVE_VCPUS {
         let error = DeployLogicError::VcpuLimit {
             location: std::panic::Location::caller(),
+            notes: CONTACT_SUPPORT,
         };
         deploy_target
             .reject(&state, req.org_id, resource_id, &error.client_message())
@@ -4909,6 +4923,7 @@ async fn deploy_logic(
         {
             let error = DeployLogicError::LinkedNetworkChanged {
                 location: std::panic::Location::caller(),
+                notes: KEEP_ENVIRONMENT,
             };
             deploy_target
                 .reject(&state, req.org_id, resource_id, &error.client_message())
@@ -4930,6 +4945,7 @@ async fn deploy_logic(
     {
         let error = DeployLogicError::LinkedBuilderMissing {
             location: std::panic::Location::caller(),
+            notes: REINIT_BYOC,
         };
         deploy_target
             .reject(&state, req.org_id, resource_id, &error.client_message())
@@ -5070,6 +5086,7 @@ async fn deploy_logic(
             if balance < min_build_cost_cents {
                 return Err(DeployLogicError::BuilderCredits {
                     location: std::panic::Location::caller(),
+                    notes: BUY_CREDITS,
                 });
             }
 
@@ -5234,6 +5251,7 @@ async fn deploy_logic(
     if eif_size_bytes > memory_bytes {
         return Err(DeployLogicError::EifTooLarge {
             location: std::panic::Location::caller(),
+            notes: INCREASE_MEMORY,
         });
     }
     if eif_size_bytes > memory_bytes * 80 / 100 {
@@ -5320,6 +5338,7 @@ async fn deploy_logic(
                 Err(DeployLogicError::RegionFull {
                     region,
                     location: std::panic::Location::caller(),
+                    notes: DESTROY_CANDIDATE,
                 })
             }
             (
@@ -5328,6 +5347,7 @@ async fn deploy_logic(
             ) => Err(DeployLogicError::RegionFull {
                 region: region.to_string(),
                 location: std::panic::Location::caller(),
+                notes: DESTROY_CANDIDATE,
             }),
             (reservation, _) => reservation.with_context(Ctx::capacity_database()),
         };
@@ -5570,7 +5590,12 @@ async fn deploy_logic(
             },
         )
         .await
-        .with_context(Ctx::activation());
+        .map_err(|source| DeployLogicError::Activation {
+            location: std::panic::Location::caller(),
+            notes: activation_guidance(&source).0,
+            warnings: activation_guidance(&source).1,
+            source,
+        });
         if let Some(reservation) = capacity_reservation.as_ref() {
             // Success or failure, the instance now counts through live EC2 usage.
             fully_managed_capacity::release_reservation(&state.db, reservation).await;
@@ -6789,7 +6814,7 @@ mod component_rejection_tests {
 
 #[cfg(test)]
 mod deploy_guidance_tests {
-    use super::{DeployLogicError, deploy_error_frame};
+    use super::*;
 
     fn at() -> dterror::Location {
         std::panic::Location::caller()
@@ -6824,89 +6849,141 @@ mod deploy_guidance_tests {
     fn a_remedy_the_message_does_not_carry_becomes_a_note() {
         let guided: [(DeployLogicError, &[&str]); 21] = [
             (
-                DeployLogicError::NoProviderAccount { location: at() },
+                DeployLogicError::NoProviderAccount {
+                    location: at(),
+                    notes: CLOUD_ACCOUNT,
+                },
                 &["Link a cloud provider account in Settings at https://dashboard.caution.co."],
             ),
             (
-                DeployLogicError::NoAwsAccountId { location: at() },
+                DeployLogicError::NoAwsAccountId {
+                    location: at(),
+                    notes: AWS_ACCOUNT_ID,
+                },
                 &["Set the AWS account ID on the linked provider account."],
             ),
             (
-                DeployLogicError::DeployInProgress { location: at() },
+                DeployLogicError::DeployInProgress {
+                    location: at(),
+                    notes: WAIT_FOR_DEPLOYMENT,
+                },
                 &["Wait for the deployment to finish; `caution apps get -d <id>` shows its state."],
             ),
             (
-                DeployLogicError::Terminating { location: at() },
+                DeployLogicError::Terminating {
+                    location: at(),
+                    notes: WAIT_FOR_TEARDOWN,
+                },
                 &["Wait for teardown to complete before deploying it again."],
             ),
             (
-                DeployLogicError::NoSubscription { location: at() },
+                DeployLogicError::NoSubscription {
+                    location: at(),
+                    notes: CHOOSE_PLAN,
+                },
                 &["Choose a plan in Settings at https://dashboard.caution.co."],
             ),
             (
-                DeployLogicError::SubscriptionInactive { location: at() },
+                DeployLogicError::SubscriptionInactive {
+                    location: at(),
+                    notes: REACTIVATE_SUBSCRIPTION,
+                },
                 &["Reactivate the subscription in Settings at https://dashboard.caution.co."],
             ),
             (
-                DeployLogicError::SubscriptionNoCapacity { location: at() },
+                DeployLogicError::SubscriptionNoCapacity {
+                    location: at(),
+                    notes: FREE_CAPACITY,
+                },
                 &[
                     "Free deployment capacity on the plan, or upgrade in Settings at https://dashboard.caution.co.",
                 ],
             ),
             (
-                DeployLogicError::AppLimitReached { location: at() },
+                DeployLogicError::AppLimitReached {
+                    location: at(),
+                    notes: UPGRADE_PLAN,
+                },
                 &[
                     "Upgrade the plan in Settings at https://dashboard.caution.co, or destroy an app you no longer need.",
                 ],
             ),
             (
-                DeployLogicError::InsufficientCredits { location: at() },
+                DeployLogicError::InsufficientCredits {
+                    location: at(),
+                    notes: BUY_CREDITS,
+                },
                 &[
                     "Purchase credits in Settings at https://dashboard.caution.co before redeploying.",
                 ],
             ),
             (
-                DeployLogicError::BuilderCredits { location: at() },
+                DeployLogicError::BuilderCredits {
+                    location: at(),
+                    notes: BUY_CREDITS,
+                },
                 &[
                     "Purchase credits in Settings at https://dashboard.caution.co before redeploying.",
                 ],
             ),
             (
-                DeployLogicError::CreditSuspended { location: at() },
+                DeployLogicError::CreditSuspended {
+                    location: at(),
+                    notes: ADD_CREDITS,
+                },
                 &["Add credits in Settings at https://dashboard.caution.co to resume deployments."],
             ),
             (
-                DeployLogicError::ResourceLimitReached { location: at() },
+                DeployLogicError::ResourceLimitReached {
+                    location: at(),
+                    notes: FREE_RESOURCES,
+                },
                 &["Destroy unused resources, or contact support for a higher limit."],
             ),
             (
-                DeployLogicError::VcpuLimit { location: at() },
+                DeployLogicError::VcpuLimit {
+                    location: at(),
+                    notes: CONTACT_SUPPORT,
+                },
                 &["Contact support for a larger request."],
             ),
             (
-                DeployLogicError::EifTooLarge { location: at() },
+                DeployLogicError::EifTooLarge {
+                    location: at(),
+                    notes: INCREASE_MEMORY,
+                },
                 &["Increase `memory_mb` in the enclave configuration."],
             ),
             (
                 DeployLogicError::RegionFull {
                     region: "us-east-1".to_string(),
                     location: at(),
+                    notes: DESTROY_CANDIDATE,
                 },
                 &["Destroy a candidate, or retry once other candidates are cleaned up."],
             ),
             (
-                DeployLogicError::LinkedNetworkChanged { location: at() },
+                DeployLogicError::LinkedNetworkChanged {
+                    location: at(),
+                    notes: KEEP_ENVIRONMENT,
+                },
                 &["Keep that environment, or destroy the app before moving it."],
             ),
             (
-                DeployLogicError::LinkedBuilderMissing { location: at() },
+                DeployLogicError::LinkedBuilderMissing {
+                    location: at(),
+                    notes: REINIT_BYOC,
+                },
                 &[
                     "Run `caution init --byoc` again to provision a current environment.",
                     "Destroy the app first if it has deployments.",
                 ],
             ),
             (
-                DeployLogicError::ByocRequired { location: at() },
+                DeployLogicError::ByocRequired {
+                    location: at(),
+                    notes: BYOC_ROUTES,
+                },
                 &[
                     "Reuse the original BYOC app and remote for this repository; its linked credentials already cover it.",
                     "To attach BYOC credentials to this app, run `caution init --byoc --config <decrypted-json>`.",
@@ -6914,12 +6991,16 @@ mod deploy_guidance_tests {
                 ],
             ),
             (
-                DeployLogicError::RecoveryIngressRequired { location: at() },
+                DeployLogicError::RecoveryIngressRequired {
+                    location: at(),
+                    notes: RECOVERY_INGRESS,
+                },
                 &["Add explicit `network.recovery_ingress` sources to `caution.hcl`."],
             ),
             (
                 DeployLogicError::CommitMismatch {
                     location: at(),
+                    notes: BRANCH_HEAD,
                     source: crate::SelectDeployCommitShaError::Mismatch {
                         branch: "main".to_string(),
                         resolved_commit_sha: "a".to_string(),
@@ -6930,7 +7011,10 @@ mod deploy_guidance_tests {
                 &["Fetch the branch head, then push the commit you intend to deploy again."],
             ),
             (
-                DeployLogicError::DeploymentNotReserved { location: at() },
+                DeployLogicError::DeploymentNotReserved {
+                    location: at(),
+                    notes: PUSH_AGAIN,
+                },
                 &["Push again."],
             ),
         ];
@@ -6946,7 +7030,10 @@ mod deploy_guidance_tests {
 
     #[test]
     fn a_failed_push_frame_carries_the_status_text_and_guidance() {
-        let error = DeployLogicError::BuilderCredits { location: at() };
+        let error = DeployLogicError::BuilderCredits {
+            location: at(),
+            notes: BUY_CREDITS,
+        };
         assert!(
             caution_error::location(&error).is_some(),
             "the call site is provided"
