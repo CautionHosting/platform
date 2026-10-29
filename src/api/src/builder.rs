@@ -250,9 +250,11 @@ pub struct BuildRequest {
 
 pub const ACTIVE_BUILD_CONFLICT_MSG: &str = "A build is already in progress for this app.";
 
-/// Guidance for a build that is already running. Provided by the conflict errors
-/// below so it lives on the reason; `DeployLogicError::BuilderAlreadyRunning`
-/// currently re-states it because the deploy frame does not read source chains yet.
+/// Guidance for a build that is already running. The conflict errors below
+/// provide it, so it lives on the error that knows the reason.
+/// `DeployLogicError::BuilderAlreadyRunning` reports it from that error through
+/// its `#[source]` chain rather than re-stating it: the deploy frame and
+/// `client_message` both read the guidance of every link.
 pub(crate) const BUILD_IN_PROGRESS_NOTE: &str =
     "Wait for the current build to finish, then push again.";
 
