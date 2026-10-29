@@ -840,6 +840,29 @@ impl IntoResponse for InviteMemberError {
     }
 }
 
+/// Invites an address to the organization by email.
+///
+/// # Why a row is recorded even for an address that already has an account
+///
+/// This endpoint must not reveal whether an arbitrary address has a Caution
+/// account: an organization manager could otherwise probe addresses one at a
+/// time to build a list of platform users (a user-enumeration oracle). The
+/// response body and the invitations list are therefore identical whether or
+/// not an account exists; only the recipient can tell the two emails apart.
+///
+/// Recording the invitation row unconditionally is what keeps that property.
+/// Several details would otherwise distinguish an existing account:
+///
+/// - the row's presence in `organization_invitations`, visible through the
+///   invitations list and the list of active invitations;
+/// - the daily invitation budget, which counts rows;
+/// - the audit trail of who attempted to invite whom.
+///
+/// For an address that already has an account the invitation link cannot be
+/// accepted (the accept flow creates a new user), so the row is never redeemed;
+/// it is still written on purpose. Invalid invitations must still be tracked.
+/// A row that was skipped for an existing account would leak the very fact this
+/// endpoint is designed to hide, and would drop the record of the attempt.
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn invite_member(
     State(state): State<Arc<AppState>>,
@@ -920,6 +943,9 @@ pub async fn invite_member(
     .await
     .with_context(Ctx::database(Opaque))?;
 
+    // Chooses which email to send, not which response to return. See
+    // `invite_member` for why the invitation row below is recorded regardless:
+    // the account's existence must not be observable to the caller.
     let existing_user: bool =
         sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE lower(email) = $1)")
             .bind(&email)
@@ -1018,10 +1044,14 @@ pub async fn invite_member(
 
     tx.commit().await.with_context(Ctx::database(Opaque))?;
 
-    // The address already has an account, so an invitation link cannot add it:
-    // the accept flow creates a new user. The invitation row is recorded either
-    // way, so the response body and the invitations list stay identical whether
-    // or not an account exists; only the recipient can tell the two emails apart.
+    // The row above was recorded whether or not the address has an account, and
+    // that is intentional, not an oversight: skipping it for an address that
+    // already has an account would let an organization manager probe addresses
+    // for platform accounts (a user-enumeration oracle) via the invitations
+    // list, the daily budget, or the audit trail. Invalid invitations must still
+    // be tracked. Only the email differs here, and only its recipient sees it:
+    // an invitation link cannot add an account (the accept flow creates a new
+    // user), so that address gets a notice instead of a redeemable link.
     let email_sent = if existing_user {
         send_organization_invite_existing_user_email(
             &email,
@@ -1257,6 +1287,11 @@ async fn send_organization_invite_email(
 /// Sent instead of the normal invite so the caller's response is identical
 /// whether or not the address has an account; only the recipient sees which
 /// email they got.
+///
+/// This is the only observable difference between inviting an existing account
+/// and inviting a new one. See [`invite_member`] for why the invitation row is
+/// recorded either way: it closes a user-enumeration oracle, and invalid
+/// invitations must still be tracked.
 #[tracing::instrument(skip_all, err)]
 async fn send_organization_invite_existing_user_email(
     email: &str,
