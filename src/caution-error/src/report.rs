@@ -230,6 +230,37 @@ impl ErrorReport {
             error,
         }
     }
+
+    /// Every [`Note`] the report carries, in chain order and deduplicated.
+    ///
+    /// The flat form of the guidance held per link in [`errors`](Self::errors),
+    /// for a caller that renders one list (a single-line frame, a journal line).
+    #[must_use]
+    pub fn notes(&self) -> Vec<Note> {
+        let mut notes: Vec<Note> = Vec::new();
+        for error in &self.errors {
+            for note in &error.notes {
+                if !notes.contains(note) {
+                    notes.push(note.clone());
+                }
+            }
+        }
+        notes
+    }
+
+    /// Every [`Warning`] the report carries. See [`ErrorReport::notes`].
+    #[must_use]
+    pub fn warnings(&self) -> Vec<Warning> {
+        let mut warnings: Vec<Warning> = Vec::new();
+        for error in &self.errors {
+            for warning in &error.warnings {
+                if !warnings.contains(warning) {
+                    warnings.push(warning.clone());
+                }
+            }
+        }
+        warnings
+    }
 }
 
 /// A marker a link provides when the messages of the failure and every source
@@ -590,6 +621,81 @@ mod tests {
 
         assert_eq!(report.errors[2].error, "boxed failed");
         assert!(report.errors[2].notes.is_empty());
+    }
+
+    #[test]
+    fn guidance_is_aggregated_across_links_in_chain_order() {
+        let error = Root {
+            notes: vec![Note::from("root note")],
+            warnings: vec![Warning::from("root warning")],
+            source: Inner {
+                notes: vec![Note::from("inner note")],
+            },
+        };
+
+        let report = ErrorReport::from_error(&error);
+
+        assert_eq!(
+            report.notes(),
+            vec![Note::from("root note"), Note::from("inner note")],
+        );
+        assert_eq!(report.warnings(), vec![Warning::from("root warning")]);
+    }
+
+    #[test]
+    fn guidance_is_deduplicated_across_links() {
+        let error = Root {
+            notes: vec![Note::from("retry shortly")],
+            warnings: Vec::new(),
+            source: Inner {
+                notes: vec![Note::from("retry shortly"), Note::from("inner note")],
+            },
+        };
+
+        let report = ErrorReport::from_error(&error);
+
+        assert_eq!(
+            report.notes(),
+            vec![Note::from("retry shortly"), Note::from("inner note")],
+            "a note repeated by a link is reported once, where it first appears",
+        );
+    }
+
+    #[test]
+    fn an_opaque_links_guidance_is_still_aggregated() {
+        #[derive(Debug)]
+        struct Withheld {
+            notes: Vec<Note>,
+        }
+
+        impl fmt::Display for Withheld {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a database detail the client must not see")
+            }
+        }
+
+        impl std::error::Error for Withheld {}
+
+        impl ProviderError for Withheld {
+            fn provide<'a>(&'a self, request: &mut Request<'a>) {
+                request.provide_value(crate::Opaque);
+                request.provide_ref::<[Note]>(&self.notes);
+            }
+        }
+
+        let report = ErrorReport::from_error_with(
+            &Withheld {
+                notes: vec![Note::from("retry shortly")],
+            },
+            "internal error",
+        );
+
+        assert_eq!(report.error, "internal error");
+        assert_eq!(
+            report.notes(),
+            vec![Note::from("retry shortly")],
+            "opacity withholds the message, never the guidance",
+        );
     }
 
     #[test]

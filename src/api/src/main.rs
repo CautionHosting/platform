@@ -3206,11 +3206,14 @@ impl DeployLogicError {
     fn client_message(&self) -> String {
         let (_, message) = self.client_response();
         let mut text = message;
-        let guidance = chain_notes(self)
+        let report = caution_error::ErrorReport::from_error(self);
+        let guidance = report
+            .notes()
             .into_iter()
             .map(|note| note.to_string())
             .chain(
-                chain_warnings(self)
+                report
+                    .warnings()
                     .into_iter()
                     .map(|warning| warning.to_string()),
             );
@@ -3357,53 +3360,24 @@ impl caution_error::ProviderError for DeployLogicError {
     }
 }
 
-/// Guidance from `error` and every provider link below it, in chain order and
-/// deduplicated. Unlike the root-only reader, this surfaces guidance that lives
-/// on a source (for example a builder conflict's wait note).
-fn chain_notes(error: &DeployLogicError) -> Vec<caution_error::Note> {
-    let mut notes: Vec<caution_error::Note> = Vec::new();
-    for node in caution_error::chain(error) {
-        let Some(provider) = node.provider() else {
-            continue;
-        };
-        for note in caution_error::notes(provider) {
-            if !notes.contains(&note) {
-                notes.push(note);
-            }
-        }
-    }
-    notes
-}
-
-/// [`chain_notes`] for warnings.
-fn chain_warnings(error: &DeployLogicError) -> Vec<caution_error::Warning> {
-    let mut warnings: Vec<caution_error::Warning> = Vec::new();
-    for node in caution_error::chain(error) {
-        let Some(provider) = node.provider() else {
-            continue;
-        };
-        for warning in caution_error::warnings(provider) {
-            if !warnings.contains(&warning) {
-                warnings.push(warning);
-            }
-        }
-    }
-    warnings
-}
-
 /// The one-line JSON frame a failed push streams, and the body an
 /// already-rejected push returns: the client text, the status, and the guidance
 /// the text does not already state.
+///
+/// The guidance comes from the same report every other handler answers with, so
+/// a note that lives on a source (a builder conflict's wait note) is included
+/// exactly as the multi-link response includes it.
 fn deploy_error_frame(
     error: &DeployLogicError,
     status: StatusCode,
     message: &str,
 ) -> serde_json::Value {
+    let report = caution_error::ErrorReport::from_error(error);
     serde_json::json!({
         "error": message,
         "status": status.as_u16(),
-        "notes": chain_notes(error),
-        "warnings": chain_warnings(error),
+        "notes": report.notes(),
+        "warnings": report.warnings(),
     })
 }
 
