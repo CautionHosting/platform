@@ -49,6 +49,10 @@ use crate::{ProviderError, request_ref, request_value};
 
 /// A piece of guidance that helps a client resolve an error.
 ///
+/// Use it when the client can change the outcome: it names the next step, so
+/// the next attempt can succeed. See
+/// [choosing between a Note and a Warning](crate#choosing-between-a-note-and-a-warning).
+///
 /// Holds a [`Cow`] so a fixed message can borrow a `'static` literal and a
 /// computed message can own its string. [`From<&'static str>`](From) and
 /// `From<String>` let a `dterror` context field be built from a literal:
@@ -99,6 +103,10 @@ impl From<Cow<'static, str>> for Note {
 }
 
 /// A caution that a client may want to take into account.
+///
+/// Use it for a consequence the client cannot change but should weigh: a cost,
+/// a risk, or a property of the result. See
+/// [choosing between a Note and a Warning](crate#choosing-between-a-note-and-a-warning).
 ///
 /// Holds a [`Cow`] for the same reason as [`Note`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

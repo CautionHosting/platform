@@ -80,6 +80,50 @@
 //! assert_eq!(request_ref_in_chain::<String>(&err).map(String::as_str), Some("nvme0"));
 //! ```
 //!
+//! # Choosing between a Note and a Warning
+//!
+//! An error can carry two kinds of guidance for the client: [`Note`]s and
+//! [`Warning`]s. Both are read from the provider API and rendered in a report.
+//! Guidance says what the client can do about the failure; the message and the
+//! chain already say what failed, so guidance never restates them. The test
+//! that separates the two types is *agency*: can the client change the outcome?
+//!
+//! - A [`Note`] says how to change it, so the next attempt can succeed. "Link a
+//!   cloud provider account in Settings at …", "Wait for the deployment to
+//!   finish", "Fetch the branch head, then push the commit you intend to deploy
+//!   again".
+//! - A [`Warning`] says what to weigh when the client cannot change it: a cost,
+//!   a risk, or a property of the result. "Existing connections may close and
+//!   HTTPS can be unavailable until the certificate is issued", "The payload
+//!   imports as unverified metadata only".
+//!
+//! What belongs to neither: a restatement of the failure (the message has it),
+//! and an outcome the failure is named for (a destroy that found nothing to
+//! delete says so in its message). An outcome the client must weigh, such as
+//! money still being spent, is a warning; an outcome attached to an instruction
+//! folds into the note.
+//!
+//! Craft:
+//!
+//! - One idea per item. An item that also states an outcome is two items.
+//! - Imperative for notes, declarative for warnings, so a reader knows which
+//!   kind they have before parsing it.
+//! - Name the concrete thing: a command in backticks, a field, a setting, a URL.
+//!   "`caution apps get -d <id>` shows its state" beats "inspect it".
+//! - Keep notes to one to three items, most preferred first.
+//! - Keep warnings rare: a warning on an error that fires constantly is noise.
+//! - Advice carries its condition. "Retry once other candidates are cleaned up"
+//!   is a note; "retry later" is not.
+//! - Guidance reaches clients, so no secrets, no values from another tenant, and
+//!   no `[{location}]`-style internals.
+//! - When the message is a code the client keys on (an HTTP body of
+//!   `{"error": "insufficient_balance"}`), the code stays the message and the
+//!   human sentence becomes a note.
+//!
+//! Put guidance on the error that knows the reason, not on the wrapper that
+//! boxes it. Every link carries its own, so a wrapper's note and its source's
+//! note both arrive; a client that renders them shows each unique line once.
+//!
 //! # Example
 //!
 //! ```rust
