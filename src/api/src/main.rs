@@ -2543,7 +2543,13 @@ pub(crate) enum DeployLogicError {
     BuilderCredits { location: Location },
 
     #[error("a build is already running for this app [{location}]")]
-    BuilderAlreadyRunning { location: Location },
+    BuilderAlreadyRunning {
+        #[location]
+        location: Location,
+        /// The builder error that knows why the build is running, held as a
+        /// provider source so its guidance reaches the deploy frame.
+        conflict: Box<dyn caution_error::ProviderError>,
+    },
 
     #[error("failed to upload source archive [{location}]")]
     UploadSource {
@@ -3025,12 +3031,6 @@ impl DeployLogicError {
         static WAIT_FOR_DEPLOYMENT: &[Note] = &[Note::from_static(
             "Wait for the deployment to finish; `caution apps get -d <id>` shows its state.",
         )];
-        // TODO(chain-aware deploy errors): `builder::ExecuteRemoteBuildError`
-        // already provides this note. Once `DeployLogicError`'s sources are typed
-        // `ProviderError`s and `deploy_error_frame` reads the chain, drop this
-        // re-statement.
-        static WAIT_FOR_BUILD: &[Note] =
-            &[Note::from_static(crate::builder::BUILD_IN_PROGRESS_NOTE)];
         static WAIT_FOR_TEARDOWN: &[Note] = &[Note::from_static(
             "Wait for teardown to complete before deploying it again.",
         )];
@@ -3101,10 +3101,6 @@ impl DeployLogicError {
             Self::SubscriptionNoCapacity { .. } => FREE_CAPACITY,
             Self::AppLimitReached { .. } => UPGRADE_PLAN,
             Self::InsufficientCredits { .. } | Self::BuilderCredits { .. } => BUY_CREDITS,
-            // TODO(chain-aware deploy errors): drop once sources are typed and the
-            // frame reads the chain; the note already lives on
-            // `builder::ExecuteRemoteBuildError::{AlreadyLocked, ActiveBuildConflict}`.
-            Self::BuilderAlreadyRunning { .. } => WAIT_FOR_BUILD,
             Self::CreditSuspended { .. } => ADD_CREDITS,
             Self::ResourceLimitReached { .. } => FREE_RESOURCES,
             Self::VcpuLimit { .. } => CONTACT_SUPPORT,
@@ -3143,11 +3139,11 @@ impl DeployLogicError {
     fn client_message(&self) -> String {
         let (_, message) = self.client_response();
         let mut text = message;
-        let guidance = caution_error::notes(self)
+        let guidance = chain_notes(self)
             .into_iter()
             .map(|note| note.to_string())
             .chain(
-                caution_error::warnings(self)
+                chain_warnings(self)
                     .into_iter()
                     .map(|warning| warning.to_string()),
             );
@@ -3246,6 +3242,47 @@ impl caution_error::ProviderError for DeployLogicError {
         request.provide_ref::<[caution_error::Warning]>(self.warnings());
         request.provide_value(self.location());
     }
+
+    fn provider_source(&self) -> Option<&(dyn caution_error::ProviderError + 'static)> {
+        match self {
+            Self::BuilderAlreadyRunning { conflict, .. } => Some(&**conflict),
+            _ => None,
+        }
+    }
+}
+
+/// Guidance from `error` and every provider link below it, in chain order and
+/// deduplicated. Unlike the root-only reader, this surfaces guidance that lives
+/// on a source (for example a builder conflict's wait note).
+fn chain_notes(error: &DeployLogicError) -> Vec<caution_error::Note> {
+    let mut notes: Vec<caution_error::Note> = Vec::new();
+    for node in caution_error::chain(error) {
+        let Some(provider) = node.provider() else {
+            continue;
+        };
+        for note in caution_error::notes(provider) {
+            if !notes.contains(&note) {
+                notes.push(note);
+            }
+        }
+    }
+    notes
+}
+
+/// [`chain_notes`] for warnings.
+fn chain_warnings(error: &DeployLogicError) -> Vec<caution_error::Warning> {
+    let mut warnings: Vec<caution_error::Warning> = Vec::new();
+    for node in caution_error::chain(error) {
+        let Some(provider) = node.provider() else {
+            continue;
+        };
+        for warning in caution_error::warnings(provider) {
+            if !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
+        }
+    }
+    warnings
 }
 
 /// The one-line JSON frame a failed push streams, and the body an
@@ -3259,8 +3296,8 @@ fn deploy_error_frame(
     serde_json::json!({
         "error": message,
         "status": status.as_u16(),
-        "notes": caution_error::notes(error),
-        "warnings": caution_error::warnings(error),
+        "notes": chain_notes(error),
+        "warnings": chain_warnings(error),
     })
 }
 
@@ -5035,11 +5072,15 @@ async fn deploy_logic(
                     Err(error).with_context(Ctx::components())
                 }
                 Err(
-                    builder::ExecuteRemoteBuildError::AlreadyLocked { .. }
-                    | builder::ExecuteRemoteBuildError::ActiveBuildConflict { .. },
-                ) => Err(DeployLogicError::BuilderAlreadyRunning {
-                    location: std::panic::Location::caller(),
-                }),
+                    error @ (builder::ExecuteRemoteBuildError::AlreadyLocked { .. }
+                    | builder::ExecuteRemoteBuildError::ActiveBuildConflict { .. }),
+                ) => {
+                    let conflict: Box<dyn caution_error::ProviderError> = Box::new(error);
+                    Err(DeployLogicError::BuilderAlreadyRunning {
+                        location: std::panic::Location::caller(),
+                        conflict,
+                    })
+                }
                 other => other.with_context(Ctx::builder_failed()),
             }
         }
@@ -6838,14 +6879,25 @@ mod deploy_guidance_tests {
     fn a_running_build_is_a_conflict_with_a_wait_note() {
         use axum::http::StatusCode;
 
-        let error = DeployLogicError::BuilderAlreadyRunning { location: at() };
+        let conflict = crate::builder::ExecuteRemoteBuildError::ActiveBuildConflict {
+            message: crate::builder::ACTIVE_BUILD_CONFLICT_MSG,
+            note: caution_error::Note::from(crate::builder::BUILD_IN_PROGRESS_NOTE),
+            location: at(),
+        };
+        let error = DeployLogicError::BuilderAlreadyRunning {
+            location: at(),
+            conflict: Box::new(conflict),
+        };
 
         let (status, message) = error.client_response();
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(message, "A build is already in progress for this app.");
+
+        let frame = deploy_error_frame(&error, status, &message);
         assert_eq!(
-            notes(&error),
-            vec!["Wait for the current build to finish, then push again.".to_string()]
+            frame["notes"][0],
+            crate::builder::BUILD_IN_PROGRESS_NOTE,
+            "the source's note reaches the frame"
         );
         assert_eq!(
             error.client_message(),
