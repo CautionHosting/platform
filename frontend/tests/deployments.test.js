@@ -88,7 +88,7 @@ test('a rejected switch and destroy add the guidance the report carries', async 
       { error: 'unhealthy', notes: ['Enable debug mode on the target, then retry the switch once it passes its health check.'], warnings: [] },
     ],
   }
-  const switched = await switchDeployment({ sign, fetch: async () => ({ ok: false, status: 400, json: async () => report }), appId: 'app-1', deploymentId: 'b', body: '{}' })
+  const switched = await switchDeployment({ sign, fetch: async () => ({ ok: false, status: 409, json: async () => report }), appId: 'app-1', deploymentId: 'b', body: '{}' })
   assert.equal(switched.outcome, 'rejected')
   assert.equal(
     switched.message,
