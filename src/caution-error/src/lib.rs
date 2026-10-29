@@ -169,8 +169,8 @@ pub mod __private;
 
 pub use error::ProviderError;
 pub use report::{
-    Chain, ErrorNode, ErrorReport, ErrorResponse, Note, Warning, chain, location, notes, report,
-    warnings,
+    Chain, ErrorNode, ErrorReport, ErrorResponse, Note, Opaque, Warning, chain, location, notes,
+    report, warnings,
 };
 pub use request::{
     Request, request_ref, request_ref_in_chain, request_value, request_value_in_chain,

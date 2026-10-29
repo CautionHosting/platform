@@ -185,13 +185,103 @@ impl ErrorReport {
     /// sources are reached, and through [`std::error::Error::source`] for a
     /// source that is not itself a [`ProviderError`]. A boxed source still
     /// appears (with no notes or warnings).
+    ///
+    /// A link that provides [`Opaque`] and every source below it are dropped, so
+    /// the report never carries them. When the root itself is [`Opaque`] no link
+    /// remains and the report is empty; use [`ErrorReport::from_error_with`] to
+    /// supply the client-safe message for that case.
     #[must_use]
     pub fn from_error(error: &dyn ProviderError) -> Self {
-        Self {
-            error: error.to_string(),
-            errors: responses(error),
+        Self::walk(error, None)
+    }
+
+    /// Builds a report from an error and its chain, using `fallback` as the
+    /// client message when no non-[`Opaque`] link remains.
+    ///
+    /// A root error that provides [`Opaque`] is dropped along with its chain, so
+    /// `fallback` is what the client sees. See [`ErrorReport::from_error`].
+    #[must_use]
+    pub fn from_error_with(error: &dyn ProviderError, fallback: impl Into<String>) -> Self {
+        Self::walk(error, Some(fallback.into()))
+    }
+
+    /// Walks the chain, substituting `fallback` for a report that is otherwise
+    /// empty.
+    fn walk(error: &dyn ProviderError, fallback: Option<String>) -> Self {
+        let errors = responses(error);
+        match errors.first() {
+            Some(first) => Self {
+                error: first.error.clone(),
+                errors,
+            },
+            None => match fallback {
+                Some(message) => Self::opaque(message),
+                None => Self {
+                    error: String::new(),
+                    errors,
+                },
+            },
         }
     }
+
+    /// Builds a report that carries only a client-safe message and no chain.
+    ///
+    /// Use it for a failure whose detail must not leave the server: the message
+    /// is all the client sees, while the full error still reaches logs, the
+    /// journal and Sentry. `errors` holds one link mirroring the message, so a
+    /// client that reads either field sees the same text.
+    #[must_use]
+    pub fn opaque(message: impl Into<String>) -> Self {
+        let error = message.into();
+        Self {
+            errors: vec![ErrorResponse {
+                error: error.clone(),
+                notes: Vec::new(),
+                warnings: Vec::new(),
+            }],
+            error,
+        }
+    }
+}
+
+/// A marker a link provides when the failure, and every source below it, must
+/// not reach a client.
+///
+/// [`ErrorReport::from_error`] stops at the first link that provides it, dropping
+/// that link and the rest of the chain; a root that provides it is dropped too.
+/// Logs, the journal and Sentry read the error directly and still see everything.
+///
+/// Provide it by value, because it is a `Copy` unit type:
+///
+/// ```rust
+/// use caution_error::{ErrorReport, Opaque, ProviderError, Request};
+///
+/// #[derive(Debug)]
+/// struct Refused;
+///
+/// impl std::fmt::Display for Refused {
+///     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+///         f.write_str("a database detail the client must not see")
+///     }
+/// }
+///
+/// impl std::error::Error for Refused {}
+///
+/// impl ProviderError for Refused {
+///     fn provide<'a>(&'a self, request: &mut Request<'a>) {
+///         request.provide_value(Opaque);
+///     }
+/// }
+///
+/// let report = ErrorReport::from_error_with(&Refused, "internal error");
+/// assert_eq!(report.error, "internal error");
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Opaque;
+
+/// Whether a link asks that it and every source below it be withheld.
+fn is_opaque(error: &dyn ProviderError) -> bool {
+    request_value::<Opaque>(error).is_some()
 }
 
 /// Builds a report from an error and its chain. See [`ErrorReport::from_error`].
@@ -324,21 +414,30 @@ impl<'a> Iterator for Chain<'a> {
     }
 }
 
-/// Builds one [`ErrorResponse`] per link of the chain.
+/// Builds one [`ErrorResponse`] per link of the chain, stopping before the first
+/// link that provides [`Opaque`].
 fn responses(root: &dyn ProviderError) -> Vec<ErrorResponse> {
-    chain(root)
-        .map(|node| ErrorResponse {
+    let mut responses = Vec::new();
+    for node in chain(root) {
+        let (notes, warnings) = match node.provider() {
+            Some(provider) if is_opaque(provider) => break,
+            Some(provider) => (notes(provider), warnings(provider)),
+            None => (Vec::new(), Vec::new()),
+        };
+        responses.push(ErrorResponse {
             error: node.error().to_string(),
-            notes: node.provider().map(notes).unwrap_or_default(),
-            warnings: node.provider().map(warnings).unwrap_or_default(),
-        })
-        .collect()
+            notes,
+            warnings,
+        });
+    }
+    responses
 }
 
 #[cfg(test)]
 mod tests {
     use super::{ErrorReport, Note, Warning};
     use crate::{ProviderError, Request};
+    use std::fmt;
 
     #[derive(Debug)]
     struct Root {
@@ -429,6 +528,131 @@ mod tests {
 
         assert_eq!(report.errors[2].error, "boxed failed");
         assert!(report.errors[2].notes.is_empty());
+    }
+
+    #[test]
+    fn an_opaque_root_is_withheld() {
+        #[derive(Debug)]
+        struct Internal {
+            source: Boxed,
+        }
+
+        impl fmt::Display for Internal {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a database detail the client must not see")
+            }
+        }
+
+        impl std::error::Error for Internal {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.source)
+            }
+        }
+
+        impl ProviderError for Internal {
+            fn provide<'a>(&'a self, request: &mut Request<'a>) {
+                request.provide_value(crate::Opaque);
+            }
+        }
+
+        let error = Internal { source: Boxed };
+
+        let report = ErrorReport::from_error_with(&error, "internal error");
+        assert_eq!(report.error, "internal error");
+        assert_eq!(report.errors.len(), 1);
+        assert_eq!(report.errors[0].error, "internal error");
+
+        assert!(
+            ErrorReport::from_error(&error).errors.is_empty(),
+            "the root is dropped, leaving no link",
+        );
+    }
+
+    #[test]
+    fn an_opaque_source_is_withheld_with_everything_below_it() {
+        #[derive(Debug)]
+        struct Safe {
+            notes: Vec<Note>,
+            inner: Confidential,
+        }
+
+        #[derive(Debug)]
+        struct Confidential {
+            notes: Vec<Note>,
+            source: Secret,
+        }
+
+        #[derive(Debug)]
+        struct Secret;
+
+        impl fmt::Display for Safe {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("safe failed")
+            }
+        }
+
+        impl fmt::Display for Confidential {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a secret the client must not see")
+            }
+        }
+
+        impl fmt::Display for Secret {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a deeper secret")
+            }
+        }
+
+        impl std::error::Error for Safe {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.inner)
+            }
+        }
+
+        impl std::error::Error for Confidential {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.source)
+            }
+        }
+
+        impl std::error::Error for Secret {}
+
+        impl ProviderError for Safe {
+            fn provide<'a>(&'a self, request: &mut Request<'a>) {
+                request.provide_ref::<[Note]>(&self.notes);
+            }
+
+            fn provider_source(&self) -> Option<&(dyn ProviderError + 'static)> {
+                Some(&self.inner)
+            }
+        }
+
+        impl ProviderError for Confidential {
+            fn provide<'a>(&'a self, request: &mut Request<'a>) {
+                request.provide_value(crate::Opaque);
+                request.provide_ref::<[Note]>(&self.notes);
+            }
+
+            fn provider_source(&self) -> Option<&(dyn ProviderError + 'static)> {
+                Some(&self.source)
+            }
+        }
+
+        impl ProviderError for Secret {}
+
+        let error = Safe {
+            notes: vec![Note::from("root note")],
+            inner: Confidential {
+                notes: vec![Note::from("secret note")],
+                source: Secret,
+            },
+        };
+
+        let report = ErrorReport::from_error_with(&error, "internal error");
+        assert_eq!(report.error, "safe failed");
+        assert_eq!(report.errors.len(), 1, "the opaque link and below are gone");
+        assert_eq!(report.errors[0].error, "safe failed");
+        assert_eq!(report.errors[0].notes[0].0, "root note");
     }
 
     #[test]
