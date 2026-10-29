@@ -2287,7 +2287,7 @@ async fn set_builder_config(
 /// the underlying sources stay chained on the error and never reach the client.
 #[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
 pub(crate) enum DeployLogicError {
-    #[error("could not prepare pinned component artifacts [{location}]")]
+    #[error("could not prepare pinned component artifacts")]
     ComponentSelection {
         #[provide]
         #[location]
@@ -2296,7 +2296,7 @@ pub(crate) enum DeployLogicError {
         source: component_artifacts::SelectionError,
     },
 
-    #[error("could not prepare pinned component artifacts [{location}]")]
+    #[error("could not prepare pinned component artifacts")]
     ComponentLoad {
         #[provide]
         #[location]
@@ -2305,7 +2305,7 @@ pub(crate) enum DeployLogicError {
         source: component_artifacts::SelectedComponentsError,
     },
 
-    #[error("could not prepare pinned component artifacts [{location}]")]
+    #[error("could not prepare pinned component artifacts")]
     ComponentPins {
         #[provide]
         #[location]
@@ -2314,7 +2314,7 @@ pub(crate) enum DeployLogicError {
         source: component_artifacts::ComponentPinsError,
     },
 
-    #[error("could not prepare pinned component artifacts [{location}]")]
+    #[error("could not prepare pinned component artifacts")]
     CacheDecode {
         #[provide]
         #[location]
@@ -2323,7 +2323,7 @@ pub(crate) enum DeployLogicError {
         source: builder::CheckBuildCacheError,
     },
 
-    #[error("could not prepare pinned component artifacts [{location}]")]
+    #[error("could not prepare pinned component artifacts")]
     ComponentMismatch {
         #[provide]
         #[location]
@@ -2332,7 +2332,7 @@ pub(crate) enum DeployLogicError {
         source: std::io::Error,
     },
 
-    #[error("could not prepare pinned component artifacts [{location}]")]
+    #[error("could not prepare pinned component artifacts")]
     BuilderComponents {
         #[provide]
         #[location]
@@ -2340,7 +2340,7 @@ pub(crate) enum DeployLogicError {
         #[source]
         source: builder::ExecuteRemoteBuildError,
     },
-    #[error("invalid platform framework commit [{location}]")]
+    #[error("invalid platform framework commit")]
     FrameworkCommit {
         #[provide]
         #[location]
@@ -2349,7 +2349,7 @@ pub(crate) enum DeployLogicError {
         source: builder::RequirePlatformFrameworkCommitError,
     },
 
-    #[error("failed to check organization membership [{location}]")]
+    #[error("failed to check organization membership")]
     OrgMembership {
         #[provide]
         #[location]
@@ -2358,13 +2358,13 @@ pub(crate) enum DeployLogicError {
         source: sqlx::Error,
     },
 
-    #[error("user does not belong to this organization [{location}]")]
+    #[error("user does not belong to this organization")]
     NotOrgMember {
         #[provide]
         location: Location,
     },
 
-    #[error("failed to fetch provider account [{location}]")]
+    #[error("failed to fetch provider account")]
     ProviderAccountQuery {
         #[provide]
         #[location]
@@ -2373,7 +2373,7 @@ pub(crate) enum DeployLogicError {
         source: sqlx::Error,
     },
 
-    #[error("no active provider account found [{location}]")]
+    #[error("no active provider account found")]
     NoProviderAccount {
         #[provide]
         location: Location,
@@ -2381,7 +2381,7 @@ pub(crate) enum DeployLogicError {
         notes: &'static [caution_error::Note],
     },
 
-    #[error("provider account has no AWS account ID configured [{location}]")]
+    #[error("provider account has no AWS account ID configured")]
     NoAwsAccountId {
         #[provide]
         location: Location,
@@ -2389,7 +2389,7 @@ pub(crate) enum DeployLogicError {
         notes: &'static [caution_error::Note],
     },
 
-    #[error("failed to get resource type [{location}]")]
+    #[error("failed to get resource type")]
     ResourceTypeQuery {
         #[provide]
         #[location]
@@ -2398,7 +2398,7 @@ pub(crate) enum DeployLogicError {
         source: sqlx::Error,
     },
 
-    #[error("failed to check existing resource [{location}]")]
+    #[error("failed to check existing resource")]
     ResourceLookup {
         #[provide]
         #[location]
@@ -2407,7 +2407,7 @@ pub(crate) enum DeployLogicError {
         source: sqlx::Error,
     },
 
-    #[error("deployment already in progress [{location}]")]
+    #[error("deployment already in progress")]
     DeployInProgress {
         #[provide]
         location: Location,
@@ -2415,7 +2415,7 @@ pub(crate) enum DeployLogicError {
         notes: &'static [caution_error::Note],
     },
 
-    #[error("app is being destroyed [{location}]")]
+    #[error("app is being destroyed")]
     Terminating {
         #[provide]
         location: Location,
@@ -2423,14 +2423,14 @@ pub(crate) enum DeployLogicError {
         notes: &'static [caution_error::Note],
     },
 
-    #[error("app with id {resource_id} not found [{location}]")]
+    #[error("app with id {resource_id} not found")]
     AppNotFound {
         resource_id: Uuid,
         #[provide]
         location: Location,
     },
 
-    #[error("failed to load cloud credential [{location}]")]
+    #[error("failed to load cloud credential")]
     CredentialLookup {
         #[provide]
         #[location]
@@ -2439,7 +2439,7 @@ pub(crate) enum DeployLogicError {
         source: cloud_credentials::GetCredentialByResourceError,
     },
 
-    #[error("unable to check deployment entitlement [{location}]")]
+    #[error("unable to check deployment entitlement")]
     EntitlementQuery {
         #[provide]
         #[location]
@@ -2448,7 +2448,7 @@ pub(crate) enum DeployLogicError {
         source: sqlx::Error,
     },
 
-    #[error("managed on-premises deployment requires an active subscription [{location}]")]
+    #[error("managed on-premises deployment requires an active subscription")]
     NoSubscription {
         #[provide]
         location: Location,
@@ -2456,7 +2456,7 @@ pub(crate) enum DeployLogicError {
         notes: &'static [caution_error::Note],
     },
 
-    #[error("managed on-premises subscription is not active [{location}]")]
+    #[error("managed on-premises subscription is not active")]
     SubscriptionInactive {
         #[provide]
         location: Location,
@@ -2464,7 +2464,7 @@ pub(crate) enum DeployLogicError {
         notes: &'static [caution_error::Note],
     },
 
-    #[error("managed on-premises subscription has no deployment capacity [{location}]")]
+    #[error("managed on-premises subscription has no deployment capacity")]
     SubscriptionNoCapacity {
         #[provide]
         location: Location,
@@ -2472,7 +2472,7 @@ pub(crate) enum DeployLogicError {
         notes: &'static [caution_error::Note],
     },
 
-    #[error("unable to check deployment capacity [{location}]")]
+    #[error("unable to check deployment capacity")]
     AppCountQuery {
         #[provide]
         #[location]
@@ -2481,7 +2481,7 @@ pub(crate) enum DeployLogicError {
         source: sqlx::Error,
     },
 
-    #[error("app limit reached [{location}]")]
+    #[error("app limit reached")]
     AppLimitReached {
         #[provide]
         location: Location,
@@ -2489,7 +2489,7 @@ pub(crate) enum DeployLogicError {
         notes: &'static [caution_error::Note],
     },
 
-    #[error("unable to finish deployment entitlement check [{location}]")]
+    #[error("unable to finish deployment entitlement check")]
     EntitlementCommit {
         #[provide]
         #[location]
@@ -2498,7 +2498,7 @@ pub(crate) enum DeployLogicError {
         source: sqlx::Error,
     },
 
-    #[error("failed to read ledger balance [{location}]")]
+    #[error("failed to read ledger balance")]
     BalanceQuery {
         #[provide]
         #[location]
@@ -2507,7 +2507,7 @@ pub(crate) enum DeployLogicError {
         source: billing::GetLedgerBalanceCentsError,
     },
 
-    #[error("minimum $25.00 in credits required to deploy [{location}]")]
+    #[error("minimum $25.00 in credits required to deploy")]
     InsufficientCredits {
         #[provide]
         location: Location,
@@ -2515,7 +2515,7 @@ pub(crate) enum DeployLogicError {
         notes: &'static [caution_error::Note],
     },
 
-    #[error("failed to read suspension status [{location}]")]
+    #[error("failed to read suspension status")]
     SuspensionQuery {
         #[provide]
         #[location]
@@ -2524,7 +2524,7 @@ pub(crate) enum DeployLogicError {
         source: sqlx::Error,
     },
 
-    #[error("organization is suspended due to credit exhaustion [{location}]")]
+    #[error("organization is suspended due to credit exhaustion")]
     CreditSuspended {
         #[provide]
         location: Location,
@@ -2532,7 +2532,7 @@ pub(crate) enum DeployLogicError {
         notes: &'static [caution_error::Note],
     },
 
-    #[error("failed to count active resources [{location}]")]
+    #[error("failed to count active resources")]
     ActiveResourcesQuery {
         #[provide]
         #[location]
@@ -2541,7 +2541,7 @@ pub(crate) enum DeployLogicError {
         source: sqlx::Error,
     },
 
-    #[error("resource limit reached [{location}]")]
+    #[error("resource limit reached")]
     ResourceLimitReached {
         #[provide]
         location: Location,
@@ -2549,7 +2549,7 @@ pub(crate) enum DeployLogicError {
         notes: &'static [caution_error::Note],
     },
 
-    #[error("failed to reactivate resource [{location}]")]
+    #[error("failed to reactivate resource")]
     ReactivateUpdate {
         #[provide]
         #[location]
@@ -2558,7 +2558,7 @@ pub(crate) enum DeployLogicError {
         source: sqlx::Error,
     },
 
-    #[error("failed to update resource state [{location}]")]
+    #[error("failed to update resource state")]
     PendingUpdate {
         #[provide]
         #[location]
@@ -2567,7 +2567,7 @@ pub(crate) enum DeployLogicError {
         source: sqlx::Error,
     },
 
-    #[error("failed to get commit SHA for branch [{location}]")]
+    #[error("failed to get commit SHA for branch")]
     CommitSha {
         #[provide]
         #[location]
@@ -2576,7 +2576,7 @@ pub(crate) enum DeployLogicError {
         source: GetCommitShaError,
     },
 
-    #[error("commit_sha does not match branch head [{location}]")]
+    #[error("commit_sha does not match branch head")]
     CommitMismatch {
         #[provide]
         #[location]
@@ -2587,7 +2587,7 @@ pub(crate) enum DeployLogicError {
         source: SelectDeployCommitShaError,
     },
 
-    #[error("failed to load build config from git [{location}]")]
+    #[error("failed to load build config from git")]
     BuildConfigGit {
         #[provide]
         #[location]
@@ -2595,7 +2595,7 @@ pub(crate) enum DeployLogicError {
         #[source]
         source: LoadBuildConfigForDeployError,
     },
-    #[error("invalid network policy [{location}]")]
+    #[error("invalid network policy")]
     NetworkPolicy {
         #[provide]
         #[location]
@@ -2603,7 +2603,7 @@ pub(crate) enum DeployLogicError {
         #[source]
         source: caution_config::NetworkPolicyError,
     },
-    #[error("recovery without HTTP requires explicit ingress sources [{location}]")]
+    #[error("recovery without HTTP requires explicit ingress sources")]
     RecoveryIngressRequired {
         #[provide]
         location: Location,
@@ -2611,7 +2611,7 @@ pub(crate) enum DeployLogicError {
         notes: &'static [caution_error::Note],
     },
 
-    #[error("failed to inspect repository contents [{location}]")]
+    #[error("failed to inspect repository contents")]
     RepoInspect {
         #[provide]
         #[location]
@@ -2620,7 +2620,7 @@ pub(crate) enum DeployLogicError {
         source: ResolveContainerfileForDeployError,
     },
 
-    #[error("invalid enclave unit configuration [{location}]")]
+    #[error("invalid enclave unit configuration")]
     UnitConfig {
         #[provide]
         #[location]
@@ -2629,13 +2629,13 @@ pub(crate) enum DeployLogicError {
         source: caution_config::FromStrError,
     },
 
-    #[error("encryptor not configured [{location}]")]
+    #[error("encryptor not configured")]
     EncryptorMissing {
         #[provide]
         location: Location,
     },
 
-    #[error("failed to load managed on-prem credential [{location}]")]
+    #[error("failed to load managed on-prem credential")]
     OnpremSecrets {
         #[provide]
         #[location]
@@ -2644,7 +2644,7 @@ pub(crate) enum DeployLogicError {
         source: cloud_credentials::GetManagedOnpremCredentialError,
     },
 
-    #[error("BYOC provider configuration requires linked credentials [{location}]")]
+    #[error("BYOC provider configuration requires linked credentials")]
     ByocRequired {
         #[provide]
         location: Location,
@@ -2652,7 +2652,7 @@ pub(crate) enum DeployLogicError {
         notes: &'static [caution_error::Note],
     },
 
-    #[error("vCPU request exceeds fully managed limit [{location}]")]
+    #[error("vCPU request exceeds fully managed limit")]
     VcpuLimit {
         #[provide]
         location: Location,
@@ -2660,7 +2660,7 @@ pub(crate) enum DeployLogicError {
         notes: &'static [caution_error::Note],
     },
 
-    #[error("invalid enclave resource request [{location}]")]
+    #[error("invalid enclave resource request")]
     SizingInvalid {
         #[provide]
         #[location]
@@ -2669,7 +2669,7 @@ pub(crate) enum DeployLogicError {
         source: deployment::EnclaveSizingError,
     },
 
-    #[error("failed to read EIF build metadata [{location}]")]
+    #[error("failed to read EIF build metadata")]
     EifMetadata {
         #[provide]
         #[location]
@@ -2678,7 +2678,7 @@ pub(crate) enum DeployLogicError {
         source: sqlx::Error,
     },
 
-    #[error("EIF size exceeds allocated enclave memory [{location}]")]
+    #[error("EIF size exceeds allocated enclave memory")]
     EifTooLarge {
         #[provide]
         location: Location,
@@ -2686,7 +2686,7 @@ pub(crate) enum DeployLogicError {
         notes: &'static [caution_error::Note],
     },
 
-    #[error("builder target resolution failed [{location}]")]
+    #[error("builder target resolution failed")]
     BuilderTarget {
         #[provide]
         #[location]
@@ -2695,7 +2695,7 @@ pub(crate) enum DeployLogicError {
         source: ResolveBuilderTargetError,
     },
 
-    #[error("cache lookup failed [{location}]")]
+    #[error("cache lookup failed")]
     CacheLookup {
         #[provide]
         #[location]
@@ -2704,7 +2704,7 @@ pub(crate) enum DeployLogicError {
         source: builder::CheckBuildCacheError,
     },
 
-    #[error("insufficient credits for builder [{location}]")]
+    #[error("insufficient credits for builder")]
     BuilderCredits {
         #[provide]
         location: Location,
@@ -2712,7 +2712,7 @@ pub(crate) enum DeployLogicError {
         notes: &'static [caution_error::Note],
     },
 
-    #[error("a build is already running for this app [{location}]")]
+    #[error("a build is already running for this app")]
     BuilderAlreadyRunning {
         #[provide]
         #[location]
@@ -2721,7 +2721,7 @@ pub(crate) enum DeployLogicError {
         source: builder::ExecuteRemoteBuildError,
     },
 
-    #[error("failed to upload source archive [{location}]")]
+    #[error("failed to upload source archive")]
     UploadSource {
         #[provide]
         #[location]
@@ -2730,7 +2730,7 @@ pub(crate) enum DeployLogicError {
         source: builder::UploadSourceArchiveError,
     },
 
-    #[error("dedicated builder failed [{location}]")]
+    #[error("dedicated builder failed")]
     BuilderFailed {
         #[provide]
         #[location]
@@ -2739,7 +2739,7 @@ pub(crate) enum DeployLogicError {
         source: builder::ExecuteRemoteBuildError,
     },
 
-    #[error("database error while reserving fully managed capacity [{location}]")]
+    #[error("database error while reserving fully managed capacity")]
     CapacityDatabase {
         #[provide]
         #[location]
@@ -2748,13 +2748,13 @@ pub(crate) enum DeployLogicError {
         source: fully_managed_capacity::CapacityError,
     },
 
-    #[error("no deployment region resolved [{location}]")]
+    #[error("no deployment region resolved")]
     NoRegion {
         #[provide]
         location: Location,
     },
 
-    #[error("Nitro deployment failed [{location}]")]
+    #[error("Nitro deployment failed")]
     NitroEnclave {
         #[provide]
         #[location]
@@ -2763,7 +2763,7 @@ pub(crate) enum DeployLogicError {
         source: deployment::DeployNitroEnclaveError,
     },
 
-    #[error("Nitro deployment failed [{location}]")]
+    #[error("Nitro deployment failed")]
     ProvisionCandidate {
         #[provide]
         #[location]
@@ -2772,7 +2772,7 @@ pub(crate) enum DeployLogicError {
         source: ProvisionCandidateError,
     },
 
-    #[error("enclave failed to become healthy [{location}]")]
+    #[error("enclave failed to become healthy")]
     EnclaveUnhealthy {
         #[provide]
         #[location]
@@ -2781,7 +2781,7 @@ pub(crate) enum DeployLogicError {
         source: WaitForHealthError,
     },
 
-    #[error("failed to update resource [{location}]")]
+    #[error("failed to update resource")]
     ResourceUpdate {
         #[provide]
         #[location]
@@ -2790,15 +2790,13 @@ pub(crate) enum DeployLogicError {
         source: sqlx::Error,
     },
 
-    #[error(
-        "Deployment completed after the app lifecycle changed; refusing to publish it [{location}]"
-    )]
+    #[error("Deployment completed after the app lifecycle changed; refusing to publish it")]
     PublishConflict {
         #[provide]
         location: Location,
     },
 
-    #[error("deployment succeeded but metering registration failed [{location}]")]
+    #[error("deployment succeeded but metering registration failed")]
     Metering {
         #[provide]
         #[location]
@@ -2807,7 +2805,7 @@ pub(crate) enum DeployLogicError {
         source: metering::UpsertTrackedResourceError,
     },
 
-    #[error("failed to read the app lifecycle [{location}]")]
+    #[error("failed to read the app lifecycle")]
     Lifecycle {
         #[provide]
         #[location]
@@ -2816,7 +2814,7 @@ pub(crate) enum DeployLogicError {
         source: app_deployments::AppLifecycleError,
     },
 
-    #[error("deployments-lifecycle push without a reserved deployment [{location}]")]
+    #[error("deployments-lifecycle push without a reserved deployment")]
     DeploymentNotReserved {
         #[provide]
         location: Location,
@@ -2825,7 +2823,7 @@ pub(crate) enum DeployLogicError {
     },
 
     // `source` stays typed so `client_response` can match its variant.
-    #[error("failed to claim the reserved deployment [{location}]")]
+    #[error("failed to claim the reserved deployment")]
     DeploymentClaim {
         #[provide]
         location: Location,
@@ -2833,7 +2831,7 @@ pub(crate) enum DeployLogicError {
         source: app_deployments::admission::ClaimError,
     },
 
-    #[error("the push targets another AWS environment than the app network's [{location}]")]
+    #[error("the push targets another AWS environment than the app network's")]
     LinkedNetworkChanged {
         #[provide]
         location: Location,
@@ -2841,7 +2839,7 @@ pub(crate) enum DeployLogicError {
         notes: &'static [caution_error::Note],
     },
 
-    #[error("the linked environment has no BYOC builder instance profile [{location}]")]
+    #[error("the linked environment has no BYOC builder instance profile")]
     LinkedBuilderMissing {
         #[provide]
         location: Location,
@@ -2849,7 +2847,7 @@ pub(crate) enum DeployLogicError {
         notes: &'static [caution_error::Note],
     },
 
-    #[error("failed to read the app network [{location}]")]
+    #[error("failed to read the app network")]
     AppNetworkQuery {
         #[provide]
         #[location]
@@ -2858,7 +2856,7 @@ pub(crate) enum DeployLogicError {
         source: sqlx::Error,
     },
 
-    #[error("failed to read the app network [{location}]")]
+    #[error("failed to read the app network")]
     AppNetworkParse {
         #[provide]
         #[location]
@@ -2867,7 +2865,7 @@ pub(crate) enum DeployLogicError {
         source: serde_json::Error,
     },
 
-    #[error("failed to check instance type offerings in the app zone [{location}]")]
+    #[error("failed to check instance type offerings in the app zone")]
     ZoneOffering {
         #[provide]
         #[location]
@@ -2876,13 +2874,13 @@ pub(crate) enum DeployLogicError {
         source: ec2::InstanceTypeOfferedError,
     },
 
-    #[error("instance type is not offered in the app availability zone [{location}]")]
+    #[error("instance type is not offered in the app availability zone")]
     InstanceTypeUnavailableInZone {
         #[provide]
         location: Location,
     },
 
-    #[error("no fully managed capacity left in app region {region} [{location}]")]
+    #[error("no fully managed capacity left in app region {region}")]
     RegionFull {
         region: String,
         #[provide]
@@ -2891,7 +2889,7 @@ pub(crate) enum DeployLogicError {
         notes: &'static [caution_error::Note],
     },
 
-    #[error("failed to record the deployment as running [{location}]")]
+    #[error("failed to record the deployment as running")]
     Activation {
         #[provide]
         #[location]
@@ -2904,7 +2902,7 @@ pub(crate) enum DeployLogicError {
         source: app_deployments::lifecycle::CompleteRunningError,
     },
 
-    #[error("deploy task panicked [{location}]")]
+    #[error("deploy task panicked")]
     Panicked {
         #[provide]
         location: Location,
