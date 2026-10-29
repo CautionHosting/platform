@@ -69,11 +69,12 @@ pub(crate) fn safe_error(message: &str) -> String {
 }
 
 /// Failure modes for [`begin`].
-#[derive(Debug, thiserror::Error, CtxError)]
-#[error("failed to record the {operation} request for app {app_id} [{location}]")]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
+#[error("failed to record the {operation} request for app {app_id}")]
 pub(crate) struct BeginOperationError {
     app_id: Uuid,
     operation: &'static str,
+    #[provide]
     #[location]
     location: Location,
     #[source]

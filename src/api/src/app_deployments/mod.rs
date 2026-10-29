@@ -115,10 +115,11 @@ pub(crate) async fn assign_byoc_lifecycle(
 }
 
 /// Failure modes for [`lock_app_operations`].
-#[derive(Debug, thiserror::Error, CtxError)]
-#[error("failed to lock deployment operations for app {app_id} [{location}]")]
+#[derive(Debug, thiserror::Error, CtxError, caution_error::ProviderError)]
+#[error("failed to lock deployment operations for app {app_id}")]
 pub(crate) struct LockAppOperationsError {
     app_id: Uuid,
+    #[provide]
     #[location]
     location: Location,
     #[source]

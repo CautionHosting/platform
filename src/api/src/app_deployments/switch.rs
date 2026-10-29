@@ -17,7 +17,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use caution_error::{Note, Warning};
-use dterror::{BoxError, CtxError, Location, ResultExt};
+use dterror::{CtxError, Location, ResultExt};
 use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -192,7 +192,7 @@ pub(crate) enum SwitchError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: crate::WaitForHealthError,
     },
     #[error(
         "The app address is unassigned or held by an unexpected instance; switching is blocked until it is repaired."
@@ -202,20 +202,36 @@ pub(crate) enum SwitchError {
         location: Location,
     },
     #[error("Switch failed.")]
-    Aws {
+    AwsMove {
         #[provide]
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: ec2::MoveAppAddressError,
     },
     #[error("Switch failed.")]
-    Inspect {
+    AwsObserve {
         #[provide]
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: ec2::DescribeAppAddressError,
+    },
+    #[error("Switch failed.")]
+    InspectAccount {
+        #[provide]
+        #[location]
+        location: Location,
+        #[source]
+        source: account::AppAccountError,
+    },
+    #[error("Switch failed.")]
+    InspectRuntime {
+        #[provide]
+        #[location]
+        location: Location,
+        #[source]
+        source: ec2::DescribeInstanceRuntimeError,
     },
     #[error("Switch failed.")]
     Database {
@@ -223,7 +239,31 @@ pub(crate) enum SwitchError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: sqlx::Error,
+    },
+    #[error("Switch failed.")]
+    Lock {
+        #[provide]
+        #[location]
+        location: Location,
+        #[source]
+        source: super::LockAppOperationsError,
+    },
+    #[error("Switch failed.")]
+    RecordRequest {
+        #[provide]
+        #[location]
+        location: Location,
+        #[source]
+        source: events::BeginOperationError,
+    },
+    #[error("Switch failed.")]
+    ProjectLive {
+        #[provide]
+        #[location]
+        location: Location,
+        #[source]
+        source: super::lifecycle::ProjectLiveError,
     },
     #[error("This operation requires signature verification")]
     Unsigned {
@@ -243,7 +283,7 @@ pub(crate) enum SwitchError {
         #[location]
         location: Location,
         #[source]
-        source: BoxError,
+        source: tokio::task::JoinError,
     },
 }
 
@@ -260,9 +300,15 @@ impl SwitchError {
             | Self::AssociationMismatch { .. }
             | Self::HolderMismatch { .. } => StatusCode::CONFLICT,
             Self::Unsigned { .. } => StatusCode::FORBIDDEN,
-            Self::Aws { .. } | Self::Inspect { .. } | Self::Database { .. } | Self::Task { .. } => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            Self::AwsMove { .. }
+            | Self::AwsObserve { .. }
+            | Self::InspectAccount { .. }
+            | Self::InspectRuntime { .. }
+            | Self::Database { .. }
+            | Self::Lock { .. }
+            | Self::RecordRequest { .. }
+            | Self::ProjectLive { .. }
+            | Self::Task { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -274,9 +320,15 @@ impl SwitchError {
             Self::AssociationMismatch { .. } | Self::HolderMismatch { .. } => {
                 "The app address is unassigned or held by an unexpected instance; switching is blocked until it is repaired."
             }
-            Self::Aws { .. } | Self::Inspect { .. } | Self::Database { .. } | Self::Task { .. } => {
-                "Switch failed."
-            }
+            Self::AwsMove { .. }
+            | Self::AwsObserve { .. }
+            | Self::InspectAccount { .. }
+            | Self::InspectRuntime { .. }
+            | Self::Database { .. }
+            | Self::Lock { .. }
+            | Self::RecordRequest { .. }
+            | Self::ProjectLive { .. }
+            | Self::Task { .. } => "Switch failed.",
             Self::Unsigned { .. } => "This operation requires signature verification",
         }
     }
@@ -295,7 +347,8 @@ impl SwitchError {
                 | Self::Unhealthy { .. }
                 | Self::Unsigned { .. }
                 | Self::HolderMismatch { .. }
-                | Self::Inspect { .. }
+                | Self::InspectAccount { .. }
+                | Self::InspectRuntime { .. }
         )
     }
 }
@@ -460,13 +513,15 @@ async fn switch(
         },
     )
     .await
-    .with_context(SwitchErrorCtx::database())?;
+    .with_context(SwitchErrorCtx::record_request())?;
     let result = execute(state, auth, app_id, deployment_id, request, &row).await;
     match &result {
         Ok(_) => events::finish(&state.db, operation_id, events::Outcome::Succeeded, None).await,
         Err(error) if error.moved_nothing() => {
             let outcome = match error {
-                SwitchError::Inspect { .. } => events::Outcome::Failed,
+                SwitchError::InspectAccount { .. } | SwitchError::InspectRuntime { .. } => {
+                    events::Outcome::Failed
+                }
                 _ => events::Outcome::Rejected,
             };
             events::finish(
@@ -498,13 +553,13 @@ async fn execute(
     // A failed account read moved nothing (`Inspect`).
     let ec2 = account::app_account(state, app_id, &region)
         .await
-        .with_context(Ctx::inspect())?
+        .with_context(Ctx::inspect_account())?
         .ec2();
     if let SwitchPlan::Move = plan {
         let runtime = ec2
             .describe_instance_runtime(&instance_id)
             .await
-            .with_context(Ctx::inspect())?;
+            .with_context(Ctx::inspect_runtime())?;
         let Some(public_ip) = runtime
             .filter(|runtime| runtime.state == "running")
             .and_then(|runtime| runtime.public_ip)
@@ -577,7 +632,7 @@ pub(super) async fn commit_switch(
     let mut tx = db.begin().await.with_context(Ctx::database())?;
     lock_app_operations(&mut tx, app_id)
         .await
-        .with_context(Ctx::database())?;
+        .with_context(Ctx::lock())?;
     let row: Option<SwitchRow> = sqlx::query_as(switch_row_sql(" FOR UPDATE OF cr, d"))
         .bind(app_id)
         .bind(deployment_id)
@@ -611,7 +666,7 @@ pub(super) async fn commit_switch(
                     location: std::panic::Location::caller(),
                 });
             }
-            Err(error) => return Err(error).with_context(Ctx::aws()),
+            Err(error) => return Err(error).with_context(Ctx::aws_move()),
         }
     }
     // Confirm the observed association: it is the source of truth for the
@@ -631,7 +686,7 @@ pub(super) async fn commit_switch(
         ASSOCIATION_READ_INTERVAL,
     )
     .await
-    .with_context(Ctx::aws())?;
+    .with_context(Ctx::aws_observe())?;
     if observed.instance_id.as_deref() != Some(instance_id.as_str()) {
         // With no move (`AlreadyLive`), nothing moved: a pre-move mismatch.
         let location = std::panic::Location::caller();
@@ -650,7 +705,7 @@ pub(super) async fn commit_switch(
             managed_dns_enabled,
         )
         .await
-        .with_context(Ctx::database())?;
+        .with_context(Ctx::project_live())?;
     }
     tx.commit().await.with_context(Ctx::database())?;
     Ok(SwitchResponse {
@@ -677,6 +732,29 @@ mod tests {
             target_tls_after_switch: false,
             acknowledged_tls_pending: false,
         }
+    }
+
+    fn throwaway_source() -> dterror::BoxError {
+        "boom".into()
+    }
+
+    fn unhealthy_error(location: Location) -> SwitchError {
+        SwitchError::Unhealthy {
+            note: Note::from(UNHEALTHY_NOTE),
+            location,
+            source: crate::WaitForHealthError::HealthTimeout {
+                timeout_secs: 1,
+                location,
+            },
+        }
+    }
+
+    async fn cancelled_join_error() -> tokio::task::JoinError {
+        let handle = tokio::spawn(std::future::pending::<()>());
+        handle.abort();
+        handle
+            .await
+            .expect_err("an aborted task yields a join error")
     }
 
     #[test]
@@ -759,10 +837,9 @@ mod tests {
         assert_eq!(expected_holder(None, None, None), None);
     }
 
-    #[test]
-    fn moved_nothing_is_true_only_before_the_address_moves() {
+    #[tokio::test]
+    async fn moved_nothing_is_true_only_before_the_address_moves() {
         let location = std::panic::Location::caller();
-        let source = || -> BoxError { "boom".into() };
         let rejected = |rejection| {
             let notes = rejection_notes(&rejection);
             let warnings = rejection_warnings(&rejection);
@@ -778,46 +855,76 @@ mod tests {
             rejected(SwitchRejection::Stale),
             rejected(SwitchRejection::NotRunning),
             rejected(SwitchRejection::TlsNotAcknowledged),
-            SwitchError::Unhealthy {
-                note: Note::from(UNHEALTHY_NOTE),
-                location,
-                source: source(),
-            },
+            unhealthy_error(location),
             SwitchError::Unsigned { location },
             SwitchError::HolderMismatch { location },
-            SwitchError::Inspect {
+            SwitchError::InspectAccount {
                 location,
-                source: source(),
+                source: account::AppAccountError::Unavailable {
+                    app_id: Uuid::nil(),
+                    location,
+                },
+            },
+            SwitchError::InspectRuntime {
+                location,
+                source: ec2::DescribeInstanceRuntimeError::Request {
+                    location,
+                    source: throwaway_source(),
+                },
             },
         ] {
             assert!(error.moved_nothing(), "{error}");
         }
         for error in [
             SwitchError::AssociationMismatch { location },
-            SwitchError::Aws {
+            SwitchError::AwsMove {
                 location,
-                source: source(),
+                source: ec2::MoveAppAddressError::AssociateAddress {
+                    location,
+                    source: throwaway_source(),
+                },
+            },
+            SwitchError::AwsObserve {
+                location,
+                source: ec2::DescribeAppAddressError::DescribeAddresses {
+                    location,
+                    source: throwaway_source(),
+                },
             },
             SwitchError::Database {
                 location,
-                source: source(),
+                source: sqlx::Error::RowNotFound,
+            },
+            SwitchError::Lock {
+                location,
+                source: super::super::LockAppOperationsError {
+                    app_id: Uuid::nil(),
+                    location,
+                    source: throwaway_source(),
+                },
             },
             SwitchError::Task {
                 location,
-                source: source(),
+                source: cancelled_join_error().await,
             },
         ] {
             assert!(!error.moved_nothing(), "{error}");
         }
         assert_eq!(
-            SwitchError::Inspect {
+            SwitchError::InspectRuntime {
                 location,
-                source: source(),
+                source: ec2::DescribeInstanceRuntimeError::Request {
+                    location,
+                    source: throwaway_source(),
+                },
             }
             .client_message(),
-            SwitchError::Aws {
+            SwitchError::AwsMove {
                 location,
-                source: source(),
+                source: ec2::MoveAppAddressError::AssociateAddress {
+                    location,
+                    source: throwaway_source(),
+                },
             }
             .client_message()
         );
@@ -916,11 +1023,7 @@ mod tests {
     fn unhealthy_reports_the_debug_hint() {
         use axum::response::IntoResponse;
 
-        let error = SwitchError::Unhealthy {
-            note: Note::from(UNHEALTHY_NOTE),
-            location: std::panic::Location::caller(),
-            source: "boom".into(),
-        };
+        let error = unhealthy_error(std::panic::Location::caller());
 
         let report = caution_error::ErrorReport::from_error(&error);
         assert_eq!(
@@ -937,10 +1040,9 @@ mod tests {
         assert_eq!(error.into_response().status(), StatusCode::CONFLICT);
     }
 
-    #[test]
-    fn display_matches_the_client_message() {
+    #[tokio::test]
+    async fn display_matches_the_client_message() {
         let location = std::panic::Location::caller();
-        let source = || -> BoxError { "boom".into() };
         let rejected = |rejection| {
             let notes = rejection_notes(&rejection);
             let warnings = rejection_warnings(&rejection);
@@ -951,38 +1053,66 @@ mod tests {
                 location,
             }
         };
-        for error in [
+        // `RecordRequest` and `ProjectLive` sources are built inside their own
+        // modules, so they share the `Switch failed.` literal rather than being
+        // constructed here.
+        let errors = vec![
             SwitchError::NotFound { location },
             rejected(SwitchRejection::NotAcknowledged),
             rejected(SwitchRejection::AppUnavailable),
             rejected(SwitchRejection::NotRunning),
             rejected(SwitchRejection::TlsNotAcknowledged),
             rejected(SwitchRejection::Stale),
-            SwitchError::Unhealthy {
-                note: Note::from(UNHEALTHY_NOTE),
-                location,
-                source: source(),
-            },
+            unhealthy_error(location),
             SwitchError::AssociationMismatch { location },
-            SwitchError::Aws {
+            SwitchError::AwsMove {
                 location,
-                source: source(),
+                source: ec2::MoveAppAddressError::AssociateAddress {
+                    location,
+                    source: throwaway_source(),
+                },
             },
-            SwitchError::Inspect {
+            SwitchError::AwsObserve {
                 location,
-                source: source(),
+                source: ec2::DescribeAppAddressError::DescribeAddresses {
+                    location,
+                    source: throwaway_source(),
+                },
+            },
+            SwitchError::InspectAccount {
+                location,
+                source: account::AppAccountError::Unavailable {
+                    app_id: Uuid::nil(),
+                    location,
+                },
+            },
+            SwitchError::InspectRuntime {
+                location,
+                source: ec2::DescribeInstanceRuntimeError::Request {
+                    location,
+                    source: throwaway_source(),
+                },
             },
             SwitchError::Database {
                 location,
-                source: source(),
+                source: sqlx::Error::RowNotFound,
+            },
+            SwitchError::Lock {
+                location,
+                source: super::super::LockAppOperationsError {
+                    app_id: Uuid::nil(),
+                    location,
+                    source: throwaway_source(),
+                },
             },
             SwitchError::Unsigned { location },
             SwitchError::HolderMismatch { location },
             SwitchError::Task {
                 location,
-                source: source(),
+                source: cancelled_join_error().await,
             },
-        ] {
+        ];
+        for error in errors {
             assert_eq!(error.to_string(), error.client_message(), "{error:?}");
         }
     }
