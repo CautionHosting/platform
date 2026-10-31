@@ -47,7 +47,7 @@ keyforkd = { version = "0.1.5", registry = "distrust", default-features = false,
 keyforkd-client = { version = "0.2.2", registry = "distrust", default-features = false, features = ["ed25519"], optional = true }
 keyfork-derive-openpgp = { version = "0.2.1", registry = "distrust", default-features = false, optional = true }
 keyfork-mnemonic = { version = "0.4.2", registry = "distrust", default-features = false, optional = true }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time"], optional = true }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "time"], optional = true }
 axum = { version = "0.8", optional = true }
 serde = { version = "1", optional = true }
 

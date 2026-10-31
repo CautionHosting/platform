@@ -39,12 +39,12 @@ keymaker-models.workspace = true
 # Gateway-specific dependencies
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation", "conditional-ui", "danger-credential-internals"] }
 webauthn-rs-proto = "0.5"
-russh = "0.61"
+russh = "0.65.0"
 ssh-key = { version = "0.6.7", features = ["crypto"] }
 thiserror = { workspace = true }
 dterror = { workspace = true }
 sentry-middleware = { path = "../sentry-middleware" }
-bytes = "1"
+bytes = "1.11.1"
 rand010 = { package = "rand", version = "0.10", features = ["thread_rng"] }
 futures = "0.3"
 cookie = "0.18"

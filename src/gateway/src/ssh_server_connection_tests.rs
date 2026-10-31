@@ -42,9 +42,12 @@ impl Handler for DelayedDeploy {
     async fn channel_open_session(
         &mut self,
         channel: Channel<Msg>,
+        reply: ChannelOpenHandle,
         session: &mut Session,
-    ) -> Result<bool, Self::Error> {
-        self.gateway.channel_open_session(channel, session).await
+    ) -> Result<(), Self::Error> {
+        self.gateway
+            .channel_open_session(channel, reply, session)
+            .await
     }
 
     async fn data(
@@ -104,7 +107,10 @@ struct LocalClient {
 impl russh::client::Handler for LocalClient {
     type Error = russh::Error;
 
-    async fn check_server_key(&mut self, _key: &PublicKey) -> Result<bool, Self::Error> {
+    async fn check_server_key(
+        &mut self,
+        _key: &russh::keys::PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
         Ok(true)
     }
 
@@ -258,6 +264,56 @@ async fn session_errors_are_observable_without_logging_payloads() {
 }
 
 #[tokio::test]
+async fn rejected_authentication_attempts_close_the_connection_at_the_limit() {
+    tokio::time::timeout(WATCHDOG, async {
+        let host_key =
+            PrivateKey::random(&mut rand010::rng(), russh::keys::Algorithm::Ed25519).unwrap();
+        let mut config = ssh_server_config(host_key);
+        let max_attempts = config.max_auth_attempts;
+        assert!(
+            max_attempts > 0,
+            "the gateway must limit authentication attempts"
+        );
+        config.auth_rejection_time = Duration::ZERO;
+        config.auth_rejection_time_initial = Some(Duration::ZERO);
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+        let handler = local_server().new_client(None);
+        let server = tokio::spawn(async move {
+            russh::server::run_stream(Arc::new(config), server_stream, handler)
+                .await?
+                .await
+        });
+        let mut client = russh::client::connect_stream(
+            Arc::new(russh::client::Config::default()),
+            client_stream,
+            LocalClient {
+                progress_seen: None,
+                resume: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        for _ in 0..max_attempts {
+            assert!(!client
+                .authenticate_none("local-test")
+                .await
+                .unwrap()
+                .success());
+            assert!(!client.is_closed());
+        }
+        let _ = client.authenticate_none("local-test").await;
+        server.await.unwrap().unwrap();
+        assert!(
+            client.is_closed(),
+            "authentication attempts exceeded the limit"
+        );
+    })
+    .await
+    .expect("gateway did not disconnect after too many authentication attempts");
+}
+
+#[tokio::test]
 async fn responsive_client_survives_silent_deploy_after_channel_eof() {
     tokio::time::timeout(WATCHDOG, async {
         let mut connection = local_connection(None).await;
@@ -321,6 +377,9 @@ async fn peer_channel_close_during_deploy_does_not_close_transport() {
         assert!(!connection.server.is_finished());
         let another_channel = connection.client.channel_open_session().await.unwrap();
         another_channel.close().await.unwrap();
+        // Complete a round trip before disconnecting, so the server can flush
+        // its channel-close reply while the client's transport is still open.
+        connection.client.send_ping().await.unwrap();
         connection
             .client
             .disconnect(russh::Disconnect::ByApplication, "done", "")
