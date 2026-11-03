@@ -31,9 +31,9 @@ Terms as we intend them; tighten once the model is settled.
 ### Schema
 
 `organization_members.role` is the enum
-`user_role ('owner','admin','member','viewer')`
+`user_role ('owner','member','viewer')`
 (`src/api/migrations/001_initial.sql:135-151`). `organization_invitations.role`
-is the same enum with `DEFAULT 'owner'`
+is the same enum with `DEFAULT 'member'`
 (`src/api/migrations/044_organization_invitations.sql:7`). A user belongs to
 exactly one organization (`046_one_organization_per_user.sql`).
 
@@ -41,7 +41,7 @@ Rust mirror `types::UserRole` (`src/api/src/types.rs:7-35`) exposes the only two
 predicates in the codebase:
 
 ```rust
-fn can_manage_org(&self) -> bool { matches!(self, Owner | Admin) }
+fn can_manage_org(&self) -> bool { matches!(self, Owner) }
 fn is_owner(&self)       -> bool { matches!(self, Owner) }
 ```
 
@@ -58,10 +58,10 @@ handlers do not check a role at all.
 | `src/api/src/middleware.rs:256` `ensure_user_has_org` | `EXISTS (... organization_members WHERE user_id=$1)` + onboarding | ok / `MissingOrganization` / `NotOnboarded` |
 | `src/api/src/middleware.rs:335` `onboarding_middleware` | calls `ensure_user_has_org` | applied to the whole `resource_routes` group |
 | `src/api/src/organizations.rs:100` `user_has_organization` | `EXISTS (... organization_members WHERE user_id=$1)` | bool |
-| `src/api/src/main.rs:269` `can_manage_org` | `UserRole::can_manage_org` | owner or admin |
+| `src/api/src/main.rs:269` `can_manage_org` | `UserRole::can_manage_org` | owner (admin removed) |
 | `src/api/src/main.rs:273` `is_owner` | `UserRole::is_owner` | owner only |
 | `src/api/src/types.rs:28,32` `UserRole::{can_manage_org,is_owner}` | `matches!` on the enum | the two role predicates |
-| `src/api/src/subscriptions.rs:40` `require_billing_manager` | `check_org_access` + `can_manage_org` | owner or admin |
+| `src/api/src/subscriptions.rs:40` `require_billing_manager` | `check_org_access` + `can_manage_org` | owner (admin removed) |
 
 ### Owner grant sites
 
@@ -71,8 +71,8 @@ Where a user is given the `owner` role.
 |---|------|--------------|
 | 1 | `src/api/src/organizations.rs:307-314` (`create_organization_for_user`) | Creator of a new organization is inserted as `UserRole::Owner`. |
 | 2 | `organizations.rs:927-948` (`invite_member`) | Invitations now default to `UserRole::Member` (changed 2026-11-03); `InviteMemberRequest` has only `email` (`src/api/src/validated_types.rs:142-152`), so the inviter still cannot choose the role. |
-| 3 | `src/api/src/organizations.rs:1255-1274` (`add_member`) | Inserts `payload.role`; `validate_role` accepts `"owner"` (`validation.rs:182-183`, `validated_types.rs:128-140`). A manager can add a member directly as owner. |
-| 4 | `src/api/src/organizations.rs:1336-1355` (`update_member`) | `UPDATE ... SET role = $1::user_role`; `payload.role` may be `"owner"`. A manager can promote any member to owner. No guard prevents demoting the last owner. |
+| 3 | `src/api/src/organizations.rs:1255-1274` (`add_member`) | Inserts `payload.role`; `validate_role` accepts `"owner"` (`validation.rs:182-183`, `validated_types.rs:128-140`). Granting `owner` requires an owner caller. |
+| 4 | `src/api/src/organizations.rs:1336-1355` (`update_member`) | `UPDATE ... SET role = $1::user_role`; `payload.role` may be `"owner"`. Granting `owner` requires an owner caller, and an existing owner cannot be demoted. |
 | 5 | `src/gateway/src/db.rs:216-247` (`create_default_organization`) | Signup path: creates the user's default org and inserts them as `'owner'`. |
 | 6 | `src/gateway/src/db.rs:520-533` (`accept_invitation_and_create_user`) | Invitation signup: inserts `invitation.role`, which is `owner` because of (2) and the migration default. |
 | 7 | `src/api/migrations/044_organization_invitations.sql:7` | Invitation role default was `'owner'`; changed to `'member'` by `migrations/060_invitation_default_member_role.sql`. |
@@ -90,13 +90,18 @@ Not owner grants: `role_arn` / `Role:` matches are AWS IAM roles and deployment
 
 ### Role-specific gates
 
-**owner only**
+All gates are owner-only now that `admin` was removed. `owner only` uses
+`is_owner`; the manager gate (`can_manage_org` / `require_billing_manager`) is
+currently equivalent to `is_owner` but is kept as a separate name for the RBAC
+replacement.
+
+**owner only** (`is_owner`)
 
 | Handler | Site |
 |---------|------|
 | `organizations::delete_organization` | `organizations.rs:530-538` (`is_owner`) |
 
-**owner or admin** (`can_manage_org` / `require_billing_manager`)
+**manager gate** (`can_manage_org` / `require_billing_manager`, currently owner)
 
 | Handler | Site |
 |---------|------|
@@ -214,8 +219,10 @@ Record decisions here as they are made, newest first.
   `owner`; `update_member` rejects demoting an owner; `remove_member` rejects an
   admin removing an owner and refuses to remove the last owner. The dashboard's
   "cannot be undone" and owner-only rules now hold at the API.
-* `can_manage_org` treats `admin` identically to `owner`; the split must decide
-  `admin`'s fate.
+* Removing `admin` folded its manager powers into owner-only for now; the RBAC
+  user roles are meant to reintroduce finer-grained privileges.
+* Existing `admin` rows were mapped to `member` by migration 061 (least
+  privilege); confirm, or map them to `owner` instead.
 * Last-owner invariant is enforced server-side for removal (`remove_member`)
   and demotion (`update_member`); the dashboard rule
   (`frontend/src/utils/organizations.js`) mirrors it.
@@ -225,6 +232,17 @@ Record decisions here as they are made, newest first.
 
 Newest first.
 
+* **2026-11-03** — Verified migrations live against PostgreSQL 18.6. Fresh
+  database applied the full set three times (idempotent); a simulated legacy
+  database with `admin` rows migrated correctly (admins to `member`, enum
+  swapped to owner/member/viewer, defaults reset) and 061 re-ran cleanly. The
+  test exposed and fixed two 061 bugs: enum-literal coercion
+  (`role = 'admin'` -> `role::text = 'admin'`) and `ALTER COLUMN TYPE` failing
+  on the old default (now drops and re-adds the default).
+* **2026-11-03** — Removed the `admin` role: `UserRole` and the `user_role`
+  enum now hold `owner`, `member`, `viewer`; migration
+  `061_remove_admin_role.sql` reassigns existing admins to `member`. Manager
+  gates are owner-only until the RBAC roles land.
 * **2026-11-03** — Aligned `remove_member` with the dashboard: only an owner
   may remove an owner, and the last owner cannot be removed.
 * **2026-11-03** — Enforced owner-only granting of ownership

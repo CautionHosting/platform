@@ -9,7 +9,6 @@ use sqlx::Type;
 #[serde(rename_all = "lowercase")]
 pub enum UserRole {
     Owner,
-    Admin,
     Member,
     Viewer,
 }
@@ -18,15 +17,16 @@ impl UserRole {
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "owner" => Some(UserRole::Owner),
-            "admin" => Some(UserRole::Admin),
             "member" => Some(UserRole::Member),
             "viewer" => Some(UserRole::Viewer),
             _ => None,
         }
     }
 
+    /// Managing the organization is an owner-only power; `admin` was removed in
+    /// favour of the RBAC system.
     pub fn can_manage_org(&self) -> bool {
-        matches!(self, UserRole::Owner | UserRole::Admin)
+        matches!(self, UserRole::Owner)
     }
 
     pub fn is_owner(&self) -> bool {

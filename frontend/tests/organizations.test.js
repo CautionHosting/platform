@@ -136,13 +136,13 @@ test('failed creation messages prefer the API wording', () => {
   assert.equal(organizationCreationErrorMessage(null, '', 'fallback'), 'fallback')
 })
 
-test('member removal is limited to owners and admins acting on other members', () => {
+test('member removal is limited to owners acting on other members', () => {
   const options = { currentUserId: 'me', memberUserId: 'them', memberRole: 'member' }
 
   assert.equal(canRemoveOrganizationMember({ ...options, role: 'owner' }), true)
-  assert.equal(canRemoveOrganizationMember({ ...options, role: 'admin' }), true)
   assert.equal(canRemoveOrganizationMember({ ...options, role: 'Owner' }), true)
-  // Roles the API refuses to let manage the organization.
+  // Roles the API refuses to let manage the organization. `admin` was removed.
+  assert.equal(canRemoveOrganizationMember({ ...options, role: 'admin' }), false)
   assert.equal(canRemoveOrganizationMember({ ...options, role: 'member' }), false)
   assert.equal(canRemoveOrganizationMember({ ...options, role: 'viewer' }), false)
   assert.equal(canRemoveOrganizationMember({ ...options, role: null }), false)

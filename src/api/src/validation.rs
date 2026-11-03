@@ -372,9 +372,9 @@ mod tests {
     #[test]
     fn test_role_validation() {
         assert_eq!(validate_role("owner").unwrap(), UserRole::Owner);
-        assert_eq!(validate_role("admin").unwrap(), UserRole::Admin);
         assert_eq!(validate_role("member").unwrap(), UserRole::Member);
         assert_eq!(validate_role("viewer").unwrap(), UserRole::Viewer);
+        assert!(validate_role("admin").is_err());
         assert!(validate_role("invalid").is_err());
         assert!(validate_role("OWNER").is_err());
     }
