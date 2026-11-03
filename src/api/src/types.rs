@@ -10,7 +10,6 @@ use sqlx::Type;
 pub enum UserRole {
     Owner,
     Member,
-    Viewer,
 }
 
 impl UserRole {
@@ -18,7 +17,6 @@ impl UserRole {
         match s {
             "owner" => Some(UserRole::Owner),
             "member" => Some(UserRole::Member),
-            "viewer" => Some(UserRole::Viewer),
             _ => None,
         }
     }

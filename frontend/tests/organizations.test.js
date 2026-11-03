@@ -144,7 +144,6 @@ test('member removal is limited to owners acting on other members', () => {
   // Roles the API refuses to let manage the organization. `admin` was removed.
   assert.equal(canRemoveOrganizationMember({ ...options, role: 'admin' }), false)
   assert.equal(canRemoveOrganizationMember({ ...options, role: 'member' }), false)
-  assert.equal(canRemoveOrganizationMember({ ...options, role: 'viewer' }), false)
   assert.equal(canRemoveOrganizationMember({ ...options, role: null }), false)
   assert.equal(canRemoveOrganizationMember({ ...options, role: '' }), false)
   // A user never removes themselves from this page.
@@ -185,7 +184,6 @@ test('only an owner may promote another user to owner', () => {
   // Admins and ordinary members cannot hand out ownership.
   assert.equal(canPromoteOrganizationMemberToOwner({ ...options, role: 'admin' }), false)
   assert.equal(canPromoteOrganizationMemberToOwner({ ...options, role: 'member' }), false)
-  assert.equal(canPromoteOrganizationMemberToOwner({ ...options, role: 'viewer' }), false)
   assert.equal(canPromoteOrganizationMemberToOwner({ ...options, role: null }), false)
   // An owner is never promoted again; there is nothing to gain and the action
   // is not reversible.

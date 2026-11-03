@@ -132,7 +132,7 @@ CREATE OR REPLACE TRIGGER organizations_updated_at BEFORE UPDATE ON organization
 
 DO
 $$BEGIN
-    CREATE TYPE user_role AS ENUM ('owner', 'member', 'viewer');
+    CREATE TYPE user_role AS ENUM ('owner', 'member');
 EXCEPTION
     WHEN duplicate_object THEN NULL;
 END;$$;

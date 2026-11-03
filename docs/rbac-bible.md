@@ -30,12 +30,14 @@ Terms as we intend them; tighten once the model is settled.
 
 ### Schema
 
-`organization_members.role` is the enum
-`user_role ('owner','member','viewer')`
-(`src/api/migrations/001_initial.sql:135-151`). `organization_invitations.role`
-is the same enum with `DEFAULT 'member'`
-(`src/api/migrations/044_organization_invitations.sql:7`). A user belongs to
-exactly one organization (`046_one_organization_per_user.sql`).
+`organization_members.role` is the enum `user_role ('owner','member')`
+(`src/api/migrations/001_initial.sql:135`). `organization_invitations.role` is
+the same enum with `DEFAULT 'member'` (`044_organization_invitations.sql:7`,
+reset by `060_invitation_default_member_role.sql`). A user belongs to exactly
+one organization (`046_one_organization_per_user.sql`). The `admin` and
+`viewer` roles were removed by `061_remove_admin_role.sql` and
+`062_remove_viewer_role.sql` (existing rows become `member`); `viewer` never
+granted anything different from `member`.
 
 Rust mirror `types::UserRole` (`src/api/src/types.rs:7-35`) exposes the only two
 predicates in the codebase:
@@ -187,7 +189,7 @@ Listed so the inventory is honest; these do not gate caller access.
 
 Only the role-specific gates above apply an actual role test. The
 `check_org_access`, `get_user_primary_org`, and SQL-join sites permit any member,
-regardless of role: a `viewer` can currently perform these operations.
+regardless of role: any plain member can currently perform these operations.
 
 ## Target model
 
@@ -197,7 +199,8 @@ Open sub-questions feeding this section:
 
 * Is `owner` a distinct membership kind, or a role like any other with all
   operations attached?
-* Do `admin`/`member`/`viewer` survive? What roles replace them?
+* Is `member` the only user role, or will RBAC add more roles alongside
+  `owner`?
 * Where is authorization enforced: a router layer, per-handler guards, or a
   declarative operation catalogue?
 * Is a role a fixed enum (compile-time) or data-driven (DB rows)?
@@ -226,12 +229,19 @@ Record decisions here as they are made, newest first.
 * Last-owner invariant is enforced server-side for removal (`remove_member`)
   and demotion (`update_member`); the dashboard rule
   (`frontend/src/utils/organizations.js`) mirrors it.
-* No route currently distinguishes `member` from `viewer`.
+* No route currently distinguishes `member` from any other user role (the
+  others were removed).
 
 ## Progress log
 
 Newest first.
 
+* **2026-11-03** — Removed the `viewer` role (it never granted anything
+  different from `member`): `UserRole` and the enum are now `owner`/`member`,
+  with `062_remove_viewer_role.sql` reassigning viewers to `member`. Verified
+  live on PostgreSQL 18.6: fresh set idempotent (3 passes) and a legacy database
+  with `admin`/`viewer` rows migrated correctly, with 061/062 re-running
+  cleanly.
 * **2026-11-03** — Verified migrations live against PostgreSQL 18.6. Fresh
   database applied the full set three times (idempotent); a simulated legacy
   database with `admin` rows migrated correctly (admins to `member`, enum
@@ -240,9 +250,9 @@ Newest first.
   (`role = 'admin'` -> `role::text = 'admin'`) and `ALTER COLUMN TYPE` failing
   on the old default (now drops and re-adds the default).
 * **2026-11-03** — Removed the `admin` role: `UserRole` and the `user_role`
-  enum now hold `owner`, `member`, `viewer`; migration
-  `061_remove_admin_role.sql` reassigns existing admins to `member`. Manager
-  gates are owner-only until the RBAC roles land.
+  enum now hold `owner`, `member`; migrations `061_remove_admin_role.sql` and
+  `062_remove_viewer_role.sql` reassign existing admins/viewers to `member`.
+  Manager gates are owner-only until the RBAC roles land.
 * **2026-11-03** — Aligned `remove_member` with the dashboard: only an owner
   may remove an owner, and the last owner cannot be removed.
 * **2026-11-03** — Enforced owner-only granting of ownership

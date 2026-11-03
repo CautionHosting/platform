@@ -38,7 +38,7 @@ async fn fixture(pool: &PgPool) -> Uuid {
             user_id UUID, legal_document_id UUID, document_type TEXT,
             document_version TEXT, event_type TEXT, event_source TEXT,
             occurred_at TIMESTAMPTZ, ip_address INET, user_agent TEXT);
-         CREATE TYPE user_role AS ENUM ('owner', 'member', 'viewer');
+         CREATE TYPE user_role AS ENUM ('owner', 'member');
          CREATE TABLE organizations (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             name TEXT NOT NULL);
