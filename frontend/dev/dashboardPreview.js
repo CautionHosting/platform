@@ -203,8 +203,24 @@ const previewMembers = [
     user_id: 'user_preview_2',
     email: 'dev@example.com',
     username: 'preview-dev',
-    role: 'developer',
+    role: 'member',
     joined_at: '2026-08-11T15:00:00Z',
+  },
+  {
+    id: 'member_preview_3',
+    user_id: 'user_preview_3',
+    email: 'finance@example.com',
+    username: 'preview-finance',
+    role: 'member',
+    joined_at: '2026-09-02T09:15:00Z',
+  },
+  {
+    id: 'member_preview_4',
+    user_id: 'user_preview_4',
+    email: 'new-hire@example.com',
+    username: 'preview-new-hire',
+    role: 'member',
+    joined_at: '2026-10-28T16:40:00Z',
   },
 ]
 
@@ -212,11 +228,172 @@ const previewInvitations = [
   {
     id: 'invite_preview_1',
     email: 'security@example.com',
-    role: 'auditor',
+    role: 'member',
     created_at: '2026-08-12T10:20:00Z',
     expires_at: '2026-08-19T10:20:00Z',
   },
 ]
+
+// RBAC fixtures: roles with their rules, per-member assignments, and the
+// route inventory (mirrors src/api/src/rbac/inventory.rs).
+const previewRule = (roleId, index, effect, method, path, objects = null, priority = 0) => ({
+  id: `${roleId}_rule_${index}`,
+  role_id: roleId,
+  effect,
+  method,
+  path,
+  objects,
+  priority,
+  created_at: '2026-10-01T12:00:00Z',
+  updated_at: '2026-10-01T12:00:00Z',
+})
+
+const previewRoleDetails = [
+  {
+    id: 'role_preview_deployer',
+    organization_id: organizationId,
+    name: 'Deployer',
+    description: 'Deploys and manages the payments and hello-world apps.',
+    created_at: '2026-10-01T12:00:00Z',
+    updated_at: '2026-10-20T08:30:00Z',
+    rules: [
+      previewRule('role_preview_deployer', 1, 'allow', 'GET', '/users/me'),
+      previewRule('role_preview_deployer', 2, 'allow', 'GET', '/resources'),
+      previewRule('role_preview_deployer', 3, 'allow', '*', '/resources/{id}', { id: ['app_preview_1', 'app_preview_2'] }, 1),
+      previewRule('role_preview_deployer', 4, 'deny', 'DELETE', '/resources/{id}', { id: ['*'] }),
+      previewRule('role_preview_deployer', 5, 'allow', 'POST', '/deploy'),
+    ],
+  },
+  {
+    id: 'role_preview_read_only',
+    organization_id: organizationId,
+    name: 'Read only',
+    description: 'Sees apps and members without changing anything.',
+    created_at: '2026-10-02T09:00:00Z',
+    updated_at: '2026-10-02T09:00:00Z',
+    rules: [
+      previewRule('role_preview_read_only', 1, 'allow', 'GET', '/users/me'),
+      previewRule('role_preview_read_only', 2, 'allow', 'GET', '/resources'),
+      previewRule('role_preview_read_only', 3, 'allow', 'GET', '/resources/{id}', { id: ['*'] }),
+      previewRule('role_preview_read_only', 4, 'allow', 'GET', '/organizations/{id}/members', { id: [organizationId] }),
+    ],
+  },
+  {
+    id: 'role_preview_billing',
+    organization_id: organizationId,
+    name: 'Billing',
+    description: null,
+    created_at: '2026-10-05T14:10:00Z',
+    updated_at: '2026-10-05T14:10:00Z',
+    rules: [
+      previewRule('role_preview_billing', 1, 'allow', 'GET', '/users/me'),
+      previewRule('role_preview_billing', 2, 'allow', '*', '/billing/*'),
+    ],
+  },
+]
+
+const previewRoles = previewRoleDetails.map(({ rules, ...role }) => role)
+
+const previewMemberRoles = {
+  user_preview_2: ['role_preview_deployer', 'role_preview_read_only'],
+  user_preview_3: ['role_preview_billing'],
+  user_preview_4: [],
+}
+
+const previewMemberRoleRows = (userId) =>
+  (previewMemberRoles[userId] || []).map((roleId) => ({
+    organization_id: organizationId,
+    user_id: userId,
+    role_id: roleId,
+    granted_by: 'user_preview_1',
+    created_at: '2026-10-21T10:00:00Z',
+    updated_at: '2026-10-21T10:00:00Z',
+  }))
+
+const previewRoutes = [
+  ['GET', '/users/me'],
+  ['PATCH', '/users/me'],
+  ['DELETE', '/users/me'],
+  ['GET', '/organizations/{id}'],
+  ['PATCH', '/organizations/{id}'],
+  ['DELETE', '/organizations/{id}'],
+  ['GET', '/organizations/{id}/settings'],
+  ['PATCH', '/organizations/{id}/settings'],
+  ['GET', '/organizations/{id}/members'],
+  ['POST', '/organizations/{id}/members'],
+  ['GET', '/organizations/{id}/invitations'],
+  ['POST', '/organizations/{id}/invitations'],
+  ['DELETE', '/organizations/{id}/invitations/{invitation_id}'],
+  ['PATCH', '/organizations/{id}/members/{user_id}'],
+  ['DELETE', '/organizations/{id}/members/{user_id}'],
+  ['POST', '/organizations/{id}/fully-managed/waitlist'],
+  ['GET', '/organizations/{id}/roles'],
+  ['POST', '/organizations/{id}/roles'],
+  ['GET', '/organizations/{id}/roles/{role_id}'],
+  ['PUT', '/organizations/{id}/roles/{role_id}'],
+  ['DELETE', '/organizations/{id}/roles/{role_id}'],
+  ['GET', '/organizations/{id}/roles/{role_id}/rules'],
+  ['POST', '/organizations/{id}/roles/{role_id}/rules'],
+  ['GET', '/organizations/{id}/roles/{role_id}/rules/{rule_id}'],
+  ['PATCH', '/organizations/{id}/roles/{role_id}/rules/{rule_id}'],
+  ['DELETE', '/organizations/{id}/roles/{role_id}/rules/{rule_id}'],
+  ['GET', '/organizations/{id}/members/{user_id}/roles'],
+  ['POST', '/organizations/{id}/members/{user_id}/roles'],
+  ['DELETE', '/organizations/{id}/members/{user_id}/roles/{role_id}'],
+  ['POST', '/resources'],
+  ['GET', '/resources'],
+  ['GET', '/resources/{id}'],
+  ['PATCH', '/resources/{id}'],
+  ['DELETE', '/resources/{id}'],
+  ['GET', '/resources/{id}/deployments'],
+  ['GET', '/resources/{id}/deployments/{deployment_id}'],
+  ['DELETE', '/resources/{id}/deployments/{deployment_id}'],
+  ['GET', '/resources/{id}/history'],
+  ['GET', '/deployments/{id}'],
+  ['POST', '/resources/{id}/deployments/{deployment_id}/switch'],
+  ['POST', '/resources/{id}/attestation'],
+  ['GET', '/resources/{id}/builder-config'],
+  ['PUT', '/resources/{id}/builder-config'],
+  ['GET', '/resources/{id}/eif/download'],
+  ['POST', '/resources/managed-onprem'],
+  ['POST', '/deploy'],
+  ['GET', '/credentials'],
+  ['POST', '/credentials'],
+  ['GET', '/credentials/{id}'],
+  ['DELETE', '/credentials/{id}'],
+  ['POST', '/credentials/{id}/default'],
+  ['GET', '/quorum-bundles'],
+  ['POST', '/quorum-bundles'],
+  ['POST', '/quorum-bundles/from-org-users'],
+  ['GET', '/quorum-bundles/participants'],
+  ['GET', '/quorum-bundles/{id}'],
+  ['PATCH', '/quorum-bundles/{id}'],
+  ['DELETE', '/quorum-bundles/{id}'],
+  ['GET', '/secrets-bundles'],
+  ['POST', '/secrets-bundles'],
+  ['GET', '/secrets-bundles/{id}'],
+  ['PATCH', '/secrets-bundles/{id}'],
+  ['DELETE', '/secrets-bundles/{id}'],
+  ['GET', '/billing/usage'],
+  ['GET', '/billing/invoices'],
+  ['GET', '/billing/payment-methods'],
+  ['DELETE', '/billing/payment-methods/{id}'],
+  ['POST', '/billing/payment-methods/{id}/set-primary'],
+  ['GET', '/billing/paddle/client-token'],
+  ['POST', '/billing/paddle/transaction-completed'],
+  ['GET', '/billing/credits/balance'],
+  ['GET', '/billing/credits/packages'],
+  ['POST', '/billing/credits/purchase'],
+  ['GET', '/billing/credits/ledger'],
+  ['POST', '/billing/credits/redeem'],
+  ['GET', '/billing/subscription/tiers'],
+  ['GET', '/billing/subscription'],
+  ['POST', '/billing/subscription/checkout'],
+  ['POST', '/billing/subscription/subscribe'],
+  ['POST', '/billing/subscription/change-tier'],
+  ['POST', '/billing/subscription/cancel'],
+  ['GET', '/routes'],
+].map(([method, path]) => ({ method, path }))
 
 const previewPasskeys = [
   {
@@ -414,7 +591,16 @@ export const resolveDashboardPreviewRequest = (input, rawUrl) => {
   }
 
   if (path === '/api/user/status') return jsonResponse(200, previewUserStatus)
-  if (path === '/api/users/me') return jsonResponse(200, { email: 'operator@example.com', email_verified: true })
+  if (path === '/api/users/me') {
+    return jsonResponse(200, {
+      id: previewUserStatus.user_id,
+      username: previewUserStatus.username,
+      email: 'operator@example.com',
+      email_verified: true,
+      organization_id: organizationId,
+      organization_role: 'owner',
+    })
+  }
   if (path === '/user/username') {
     return jsonResponse(200, {
       username: previewUserStatus.username,
@@ -441,6 +627,16 @@ export const resolveDashboardPreviewRequest = (input, rawUrl) => {
   if (path === `/api/organizations/${organizationId}/settings`) return jsonResponse(200, previewOrgSettings)
   if (path === `/api/organizations/${organizationId}/members`) return jsonResponse(200, previewMembers)
   if (path === `/api/organizations/${organizationId}/invitations`) return jsonResponse(200, previewInvitations)
+  if (path === '/api/routes') return jsonResponse(200, previewRoutes)
+  if (path === `/api/organizations/${organizationId}/roles`) return jsonResponse(200, previewRoles)
+  const roleDetail = previewRoleDetails.find(
+    (role) => path === `/api/organizations/${organizationId}/roles/${role.id}`,
+  )
+  if (roleDetail) return jsonResponse(200, roleDetail)
+  const memberRolesMatch = path.match(
+    new RegExp(`^/api/organizations/${organizationId}/members/([^/]+)/roles$`),
+  )
+  if (memberRolesMatch) return jsonResponse(200, previewMemberRoleRows(memberRolesMatch[1]))
   if (path === '/passkeys') return jsonResponse(200, previewPasskeys)
   if (path === '/api/billing/usage') return jsonResponse(200, previewBillingUsage)
   if (path === '/api/billing/credits/balance') return jsonResponse(200, previewCreditBalance)

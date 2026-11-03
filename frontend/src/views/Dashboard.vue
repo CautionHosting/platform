@@ -757,10 +757,6 @@ make build-cli
           <p class="content-header-description">
             Manage organization access.
           </p>
-          <p v-if="isOwner" class="content-header-description">
-            As an owner you can promote a user to owner. This is permanent and cannot be
-            undone: an owner can never be demoted back to a user.
-          </p>
         </div>
       </div>
 
@@ -826,289 +822,370 @@ make build-cli
         </div>
       </div>
 
-      <div v-if="loadingMembers" class="list-item-empty">Loading users...</div>
-      <div v-else-if="organizationMembers.length === 0" class="list-item-empty">
-        No users found for this organization.
-      </div>
-      <div v-else class="passkey-list">
-        <div v-for="member in organizationMembers" :key="member.id" class="rbac-member">
-          <div class="passkey-item">
-            <div class="passkey-info">
-              <div class="passkey-header">
-                <div>
-                  <div class="passkey-title">{{ member.email || member.username || member.user_id }}</div>
-                </div>
-                <div class="passkey-badges">
-                  <span class="passkey-badge">{{ member.role }}</span>
-                </div>
-              </div>
-              <div class="passkey-meta">
-                <span v-if="member.username">{{ member.username }}</span>
-                <span>Joined {{ formatDate(member.joined_at) }}</span>
-              </div>
-            </div>
-            <div class="member-row-actions">
-              <button
-                v-if="isOwner"
-                type="button"
-                class="btn-secondary"
-                @click="toggleMemberRoles(member)"
-              >
-                {{ expandedMemberRoles === member.user_id ? "Hide roles" : "Roles" }}
-              </button>
-              <button
-                v-if="canPromoteMember(member)"
-                type="button"
-                class="btn-secondary"
-                :disabled="promotingMember === member.user_id"
-                title="Promoting to owner is permanent and cannot be undone."
-                @click="promoteMember(member)"
-              >
-                {{ promotingMember === member.user_id ? "Promoting..." : "Make owner" }}
-              </button>
-              <button
-                v-if="canRemoveMember(member)"
-                type="button"
-                class="btn-danger"
-                :disabled="removingMember === member.user_id"
-                @click="removeMember(member)"
-              >
-                {{ removingMember === member.user_id ? "Removing..." : "Remove" }}
-              </button>
-            </div>
-          </div>
-          <div v-if="expandedMemberRoles === member.user_id" class="rbac-member-roles">
-            <div v-if="!memberRolesLoaded" class="list-item-empty">Loading roles...</div>
-            <template v-else>
-              <div v-if="memberRoles.length === 0" class="list-item-empty">
-                No roles assigned.
-              </div>
-              <div v-else class="rbac-chip-row">
-                <span
-                  v-for="assignment in memberRoles"
-                  :key="assignment.role_id"
-                  class="rbac-chip"
-                >
-                  {{ roleNameFor(assignment.role_id) }}
-                  <button
-                    type="button"
-                    class="rbac-chip-remove"
-                    :disabled="savingAssignment"
-                    @click="unassignRole(member, assignment.role_id)"
-                  >
-                    ×
-                  </button>
-                </span>
-              </div>
-              <div class="rbac-assign-row">
-                <select v-model="roleToAssign" class="form-input">
-                  <option value="">Select a role...</option>
-                  <option v-for="role in assignableRoles" :key="role.id" :value="role.id">
-                    {{ role.name }}
-                  </option>
-                </select>
-                <button
-                  type="button"
-                  class="btn-secondary"
-                  :disabled="!roleToAssign || savingAssignment"
-                  @click="assignRole(member)"
-                >
-                  Add role
-                </button>
-              </div>
-              <div v-if="memberRolesError" class="message message--error">{{ memberRolesError }}</div>
-            </template>
-          </div>
+      <div class="content-subsection">
+        <div class="content-subsection-header">
+          <h3 class="content-subsection-title">Members</h3>
         </div>
+        <div v-if="loadingMembers" class="list-item-empty">Loading users...</div>
+        <div v-else-if="organizationMembers.length === 0" class="list-item-empty">
+          No users found for this organization.
+        </div>
+        <table v-else class="apps-table rbac-table" aria-label="Members">
+          <thead>
+            <tr>
+              <th scope="col" class="rbac-col-user">User</th>
+              <th scope="col">Access</th>
+              <th v-if="isOwner" scope="col" class="rbac-col-actions"><span class="rbac-sr-only">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="member in organizationMembers" :key="member.id" class="rbac-row">
+              <td>
+                <div class="rbac-row-title">{{ memberLabel(member) }}</div>
+                <div class="app-row-metadata">
+                  <span v-if="member.username && member.email">{{ member.username }}</span>
+                  <span>Joined {{ formatDate(member.joined_at) }}</span>
+                </div>
+              </td>
+              <td>
+                <div v-if="isOwnerRole(member.role)" class="rbac-access">
+                  <span class="rbac-owner-tag">Owner</span>
+                  <span class="rbac-access-note">Full access</span>
+                </div>
+                <div v-else-if="!isOwner" class="rbac-access">
+                  <span class="rbac-access-note">Member</span>
+                </div>
+                <div v-else class="rbac-access">
+                  <span v-if="!hasLoadedMemberRoles(member)" class="rbac-access-note">Loading roles...</span>
+                  <template v-else>
+                    <span
+                      v-for="assignment in memberRolesFor(member)"
+                      :key="assignment.role_id"
+                      class="rbac-chip"
+                    >
+                      {{ roleNameFor(assignment.role_id) }}
+                      <button
+                        type="button"
+                        class="rbac-chip-remove"
+                        :aria-label="`Remove ${roleNameFor(assignment.role_id)} from ${memberLabel(member)}`"
+                        :title="`Remove ${roleNameFor(assignment.role_id)}`"
+                        :disabled="savingAssignment"
+                        @click="unassignRole(member, assignment.role_id)"
+                      >
+                        <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+                          <path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+                        </svg>
+                      </button>
+                    </span>
+                    <span
+                      v-if="memberRolesFor(member).length === 0 && assigningRoleFor !== member.user_id"
+                      class="rbac-access-note rbac-access-note--warn"
+                      title="Members without a role are denied every request, including loading their own account."
+                    >
+                      No access yet
+                    </span>
+                    <select
+                      v-if="assigningRoleFor === member.user_id"
+                      class="rbac-assign-select"
+                      :aria-label="`Add a role to ${memberLabel(member)}`"
+                      @change="assignRole(member, $event.target.value)"
+                      @keydown.esc="assigningRoleFor = null"
+                      @blur="assigningRoleFor = null"
+                    >
+                      <option value="" disabled selected>Choose a role</option>
+                      <option v-for="role in assignableRolesFor(member)" :key="role.id" :value="role.id">
+                        {{ role.name }}
+                      </option>
+                    </select>
+                    <button
+                      v-else-if="assignableRolesFor(member).length"
+                      type="button"
+                      class="rbac-add-chip"
+                      :disabled="savingAssignment"
+                      @click="openAssignRole(member)"
+                    >
+                      <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+                        <path d="M5 1v8M1 5h8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+                      </svg>
+                      Add role
+                    </button>
+                  </template>
+                </div>
+              </td>
+              <td v-if="isOwner" class="rbac-actions-cell">
+                <div class="rbac-row-actions">
+                  <button
+                    v-if="canPromoteMember(member)"
+                    type="button"
+                    class="rbac-text-btn"
+                    :disabled="promotingMember === member.user_id"
+                    @click="confirmPromoteMember(member)"
+                  >
+                    {{ promotingMember === member.user_id ? "Promoting..." : "Make owner" }}
+                  </button>
+                  <button
+                    v-if="canRemoveMember(member)"
+                    type="button"
+                    class="rbac-text-btn rbac-text-btn--danger"
+                    :disabled="removingMember === member.user_id"
+                    @click="confirmRemoveMember(member)"
+                  >
+                    {{ removingMember === member.user_id ? "Removing..." : "Remove" }}
+                  </button>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-if="memberRolesError" class="message message--error">{{ memberRolesError }}</div>
+        <div v-if="removeMemberError" class="message message--error">{{ removeMemberError }}</div>
+        <div v-if="promoteMemberError" class="message message--error">{{ promoteMemberError }}</div>
       </div>
-      <div v-if="removeMemberError" class="message message--error">{{ removeMemberError }}</div>
-      <div v-if="promoteMemberError" class="message message--error">{{ promoteMemberError }}</div>
     </div>
 
     <!-- Roles Tab -->
     <div v-if="activeTab === 'roles'" class="content-card content-card--dashboard-tab">
-      <div class="content-header">
-        <div class="content-header-text">
-          <h2 class="content-header-title">Roles</h2>
-          <p class="content-header-description">
-            Roles grant members access to specific routes. Only owners can change them.
+      <template v-if="!roleEditorOpen">
+        <div class="content-header">
+          <div class="content-header-text">
+            <h2 class="content-header-title">Roles</h2>
+            <p class="content-header-description">
+              Roles decide which API routes a member can use. Owners always have full access.
+            </p>
+          </div>
+          <button
+            v-if="isOwner && roles.length"
+            type="button"
+            class="btn-primary"
+            @click="startCreateRole"
+          >
+            New role
+          </button>
+        </div>
+
+        <div v-if="rolesError" class="message message--error">{{ rolesError }}</div>
+        <div v-if="!rolesLoaded" class="list-item-empty">Loading roles...</div>
+        <div v-else-if="roles.length === 0" class="list-item-empty rbac-empty">
+          <p class="list-item-empty-copy">
+            No roles yet. Members without a role can't use anything in this organization.
           </p>
+          <button v-if="isOwner" type="button" class="btn-primary" @click="startCreateRole">
+            Create a role
+          </button>
         </div>
-        <button
-          v-if="isOwner && !roleEditorOpen"
-          type="button"
-          class="btn-primary"
-          @click="startCreateRole"
-        >
-          New role
-        </button>
-      </div>
-
-      <div v-if="rolesError" class="message message--error">{{ rolesError }}</div>
-      <div v-if="!rolesLoaded" class="list-item-empty">Loading roles...</div>
-      <div v-else-if="roles.length === 0" class="list-item-empty">No roles yet.</div>
-      <div v-else class="passkey-list">
-        <div v-for="role in roles" :key="role.id" class="passkey-item">
-          <div class="passkey-info">
-            <div class="passkey-header">
-              <div>
-                <div class="passkey-title">{{ role.name }}</div>
-              </div>
-            </div>
-            <div class="passkey-meta">
-              <span v-if="role.description">{{ role.description }}</span>
-              <span>Created {{ formatDate(role.created_at) }}</span>
-            </div>
-          </div>
-          <div class="member-row-actions">
-            <button
-              v-if="isOwner"
-              type="button"
-              class="btn-secondary"
-              @click="startEditRole(role)"
+        <table v-else class="apps-table rbac-table" aria-label="Roles">
+          <thead>
+            <tr>
+              <th scope="col">Role</th>
+              <th scope="col" class="rbac-col-date">Updated</th>
+              <th v-if="isOwner" scope="col" class="rbac-col-actions"><span class="rbac-sr-only">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="role in roles"
+              :key="role.id"
+              :class="['rbac-row', { 'rbac-row--link': isOwner }]"
+              @click="isOwner && startEditRole(role)"
             >
-              Edit
-            </button>
-            <button
-              v-if="isOwner"
-              type="button"
-              class="btn-danger"
-              :disabled="deletingRoleId === role.id"
-              @click="deleteRole(role)"
-            >
-              {{ deletingRoleId === role.id ? "Deleting..." : "Delete" }}
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <form v-if="roleEditorOpen" class="inline-form-panel" @submit.prevent="saveRole">
-        <h3 class="inline-form-panel-title">{{ roleEditorId ? "Edit role" : "New role" }}</h3>
-        <div class="form-group">
-          <label class="form-label" for="roleName">Name</label>
-          <input id="roleName" v-model="roleName" class="form-input" :disabled="savingRole" />
-        </div>
-        <div class="form-group">
-          <label class="form-label" for="roleDescription">Description</label>
-          <input
-            id="roleDescription"
-            v-model="roleDescription"
-            class="form-input"
-            placeholder="Optional"
-            :disabled="savingRole"
-          />
-        </div>
-
-        <h4 class="content-subsection-title">Rules</h4>
-        <div v-if="draftRules.length === 0" class="list-item-empty">No rules yet.</div>
-        <div v-else class="rbac-table-wrap">
-          <table class="rbac-table">
-            <thead>
-              <tr>
-                <th>Effect</th>
-                <th>Method</th>
-                <th>Path</th>
-                <th>Objects</th>
-                <th>Priority</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="(rule, index) in draftRules" :key="index">
-                <td>{{ rule.effect }}</td>
-                <td>{{ rule.method }}</td>
-                <td class="rbac-path">{{ rule.path }}</td>
-                <td class="rbac-objects">{{ rule.objects ? JSON.stringify(rule.objects) : "\u2014" }}</td>
-                <td>{{ rule.priority }}</td>
-                <td>
-                  <button type="button" class="btn-danger" @click="removeDraftRule(index)">
-                    Remove
+              <td>
+                <button
+                  v-if="isOwner"
+                  type="button"
+                  class="app-name-text"
+                  @click.stop="startEditRole(role)"
+                >
+                  {{ role.name }}
+                </button>
+                <div v-else class="rbac-row-title">{{ role.name }}</div>
+                <div class="app-row-metadata">
+                  <span>{{ role.description || "No description" }}</span>
+                </div>
+              </td>
+              <td class="rbac-muted-cell">{{ formatDate(role.updated_at || role.created_at) }}</td>
+              <td v-if="isOwner" class="rbac-actions-cell">
+                <div class="rbac-row-actions">
+                  <button type="button" class="rbac-text-btn" @click.stop="startEditRole(role)">
+                    Edit
                   </button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+                  <button
+                    type="button"
+                    class="rbac-text-btn rbac-text-btn--danger"
+                    :disabled="deletingRoleId === role.id"
+                    @click.stop="confirmDeleteRole(role)"
+                  >
+                    {{ deletingRoleId === role.id ? "Deleting..." : "Delete" }}
+                  </button>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-if="rolesLoaded && roles.length && !isOwner" class="rbac-footnote">
+          Only owners can change roles.
+        </p>
+      </template>
 
-        <h4 class="content-subsection-title">Add rule</h4>
-        <div class="rbac-rule-form">
+      <form v-else class="rbac-editor" @submit.prevent="saveRole">
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+          <button type="button" class="breadcrumb-link" @click="requestCloseRoleEditor">Roles</button>
+          <span class="breadcrumb-separator">/</span>
+          <span class="breadcrumb-current">{{ roleEditorId ? roleEditorOriginalName : "New role" }}</span>
+        </nav>
+        <h2 class="content-header-title rbac-editor-title">
+          {{ roleEditorId ? "Edit role" : "New role" }}
+        </h2>
+
+        <section class="rbac-editor-section" aria-labelledby="rbac-details-title">
+          <h3 id="rbac-details-title" class="content-subsection-title rbac-section-title">Details</h3>
           <div class="form-group">
-            <label class="form-label">Effect</label>
-            <select v-model="ruleForm.effect" class="form-input">
-              <option value="allow">allow</option>
-              <option value="deny">deny</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label class="form-label">Method</label>
-            <select v-model="ruleForm.method" class="form-input">
-              <option v-for="method in RBAC_METHODS" :key="method" :value="method">{{ method }}</option>
-            </select>
-          </div>
-          <div class="form-group rbac-rule-path">
-            <label class="form-label">Path</label>
+            <label class="form-label" for="roleName">Name</label>
             <input
-              v-model="ruleForm.path"
+              id="roleName"
+              v-model="roleName"
               class="form-input"
-              placeholder="* or /resources/{id}"
+              placeholder="Deployer"
+              autocomplete="off"
+              :disabled="savingRole"
             />
           </div>
           <div class="form-group">
-            <label class="form-label">Priority</label>
-            <input v-model.number="ruleForm.priority" type="number" min="0" class="form-input" />
+            <label class="form-label" for="roleDescription">Description</label>
+            <input
+              id="roleDescription"
+              v-model="roleDescription"
+              class="form-input"
+              placeholder="Optional"
+              autocomplete="off"
+              :disabled="savingRole"
+            />
           </div>
-        </div>
-        <div v-for="name in ruleParamNames" :key="name" class="form-group">
-          <label class="form-label">objects["{{ name }}"]</label>
-          <input
-            v-model="ruleParamValues[name]"
-            class="form-input"
-            placeholder="* or comma-separated values"
-          />
-        </div>
-        <div v-if="ruleFormError" class="message message--error">{{ ruleFormError }}</div>
-        <div class="form-actions">
-          <button type="button" class="btn-secondary" @click="addDraftRule">Add rule</button>
-        </div>
+        </section>
 
-        <h4 class="content-subsection-title">Available routes</h4>
-        <input
-          v-model="routeFilter"
-          class="form-input rbac-route-filter"
-          placeholder="Filter routes..."
-        />
-        <div v-if="routeCatalogError" class="message message--error">{{ routeCatalogError }}</div>
-        <div class="rbac-table-wrap rbac-route-table-wrap">
-          <table class="rbac-table">
-            <thead>
-              <tr>
-                <th>Method</th>
-                <th>Path</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="route in filteredRoutes" :key="route.method + ' ' + route.path">
-                <td>{{ route.method }}</td>
-                <td class="rbac-path">{{ route.path }}</td>
-                <td>
-                  <button type="button" class="btn-secondary" @click="useRoute(route)">
-                    Use
-                  </button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+        <section class="rbac-editor-section" aria-labelledby="rbac-rules-title">
+          <div class="content-subsection-header rbac-rules-header">
+            <h3 id="rbac-rules-title" class="content-subsection-title rbac-section-title">
+              Rules
+              <span class="rbac-count">{{ draftRules.length }}</span>
+            </h3>
+            <div class="rbac-section-actions">
+              <button type="button" class="rbac-outline-btn" @click="openRoutePicker">
+                Add from routes
+              </button>
+              <button type="button" class="rbac-text-btn" @click="addBlankRule">
+                Add custom rule
+              </button>
+            </div>
+          </div>
+          <p class="rbac-help">
+            When several rules match a request, the lowest priority number wins and deny wins a tie.
+            Anything no rule allows is denied. Leave an ID blank to match any value, or list IDs
+            separated by commas.
+          </p>
 
-        <div v-if="roleFormError" class="message message--error">{{ roleFormError }}</div>
-        <div class="form-actions">
-          <button type="submit" class="btn-primary" :disabled="savingRole">
-            {{ savingRole ? "Saving..." : roleEditorId ? "Save role" : "Create role" }}
-          </button>
-          <button type="button" class="btn-secondary" :disabled="savingRole" @click="closeRoleEditor">
-            Cancel
-          </button>
+          <div v-if="draftRules.length === 0" class="rbac-rules-empty">
+            No rules yet. Members holding only this role can't use anything.
+          </div>
+          <div v-else class="rbac-rules" role="list">
+            <div class="rbac-rules-head" aria-hidden="true">
+              <span>Effect</span>
+              <span>Method</span>
+              <span>Route</span>
+              <span>Applies to</span>
+              <span>Priority</span>
+              <span></span>
+            </div>
+            <div
+              v-for="(rule, index) in draftRules"
+              :key="rule.key"
+              role="listitem"
+              :class="['rbac-rule', `rbac-rule--${rule.effect}`, { 'rbac-rule--error': rule.error }]"
+            >
+              <select
+                v-model="rule.effect"
+                :class="['rbac-effect', `rbac-effect--${rule.effect}`]"
+                :aria-label="`Rule ${index + 1} effect`"
+                @change="rule.error = null"
+              >
+                <option value="allow">Allow</option>
+                <option value="deny">Deny</option>
+              </select>
+              <select
+                v-model="rule.method"
+                :class="['rbac-method-select', `rbac-method--${methodTone(rule.method)}`]"
+                :aria-label="`Rule ${index + 1} method`"
+                @change="rule.error = null"
+              >
+                <option v-for="method in RBAC_METHODS" :key="method" :value="method">
+                  {{ method === "*" ? "Any" : method }}
+                </option>
+              </select>
+              <input
+                v-model="rule.path"
+                class="rbac-path-input"
+                placeholder="/resources/{id}"
+                spellcheck="false"
+                autocomplete="off"
+                :aria-label="`Rule ${index + 1} route`"
+                @input="onRulePathInput(rule)"
+              />
+              <div class="rbac-params">
+                <span v-if="Object.keys(rule.params).length === 0" class="rbac-params-none">
+                  No IDs in this route
+                </span>
+                <label v-for="(value, name) in rule.params" :key="name" class="rbac-param">
+                  <span class="rbac-param-name">{{ name }}</span>
+                  <input
+                    v-model="rule.params[name]"
+                    class="rbac-param-input"
+                    placeholder="any"
+                    spellcheck="false"
+                    autocomplete="off"
+                    @input="rule.error = null"
+                  />
+                </label>
+              </div>
+              <label class="rbac-priority">
+                <span class="rbac-priority-label">Priority</span>
+                <input
+                  v-model.number="rule.priority"
+                  type="number"
+                  min="0"
+                  step="1"
+                  class="rbac-priority-input"
+                  :aria-label="`Rule ${index + 1} priority`"
+                  @input="rule.error = null"
+                />
+              </label>
+              <button
+                type="button"
+                class="rbac-icon-btn"
+                :aria-label="`Remove rule ${index + 1}`"
+                title="Remove rule"
+                @click="removeDraftRule(index)"
+              >
+                <svg width="12" height="12" viewBox="0 0 10 10" aria-hidden="true">
+                  <path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                </svg>
+              </button>
+              <p v-if="rule.error" class="rbac-rule-error">{{ rule.error }}</p>
+            </div>
+          </div>
+        </section>
+
+        <div class="rbac-editor-footer">
+          <div v-if="roleFormError" class="message message--error">{{ roleFormError }}</div>
+          <div class="rbac-editor-footer-row">
+            <span class="rbac-dirty-note" aria-live="polite">
+              {{ roleEditorDirty ? "Unsaved changes" : "" }}
+            </span>
+            <button type="button" class="btn-secondary" :disabled="savingRole" @click="requestCloseRoleEditor">
+              Cancel
+            </button>
+            <button type="submit" class="btn-primary" :disabled="savingRole">
+              {{ savingRole ? "Saving..." : roleEditorId ? "Save changes" : "Create role" }}
+            </button>
+          </div>
         </div>
       </form>
     </div>
@@ -1597,6 +1674,104 @@ make build-cli
             </div>
           </div>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- RBAC confirmation (users and roles) -->
+    <div v-if="rbacConfirm" class="modal-overlay" @click="closeRbacConfirm">
+      <div
+        class="modal-content"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="rbac-confirm-title"
+        aria-describedby="rbac-confirm-message"
+        @click.stop
+        @keydown.esc="closeRbacConfirm"
+      >
+        <h3 id="rbac-confirm-title" class="modal-title">{{ rbacConfirm.title }}</h3>
+        <p id="rbac-confirm-message" class="modal-message">{{ rbacConfirm.message }}</p>
+        <p v-if="rbacConfirm.note" class="modal-message modal-message--subtle">{{ rbacConfirm.note }}</p>
+        <div class="modal-actions">
+          <button ref="rbacConfirmCancel" type="button" class="btn-secondary" @click="closeRbacConfirm">
+            Cancel
+          </button>
+          <button
+            type="button"
+            :class="rbacConfirm.danger ? 'btn-danger' : 'btn-primary'"
+            @click="runRbacConfirm"
+          >
+            {{ rbacConfirm.confirmLabel }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- RBAC route picker -->
+    <div v-if="routePickerOpen" class="modal-overlay" @click="closeRoutePicker">
+      <div
+        class="modal-content rbac-picker"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="rbac-picker-title"
+        @click.stop
+        @keydown.esc="closeRoutePicker"
+      >
+        <h3 id="rbac-picker-title" class="modal-title rbac-picker-title">Add rules from routes</h3>
+        <p class="rbac-picker-copy">
+          Each route you pick becomes an allow rule that matches any ID. You can narrow it afterwards.
+        </p>
+        <input
+          ref="routePickerSearch"
+          v-model="routeFilter"
+          type="search"
+          class="rbac-picker-search"
+          placeholder="Filter by method or path"
+          aria-label="Filter routes"
+        />
+        <div v-if="routeCatalogError" class="message message--error">{{ routeCatalogError }}</div>
+        <div class="rbac-picker-list">
+          <p v-if="filteredRouteGroups.length === 0" class="rbac-picker-empty">
+            No routes match “{{ routeFilter }}”.
+          </p>
+          <section v-for="group in filteredRouteGroups" :key="group.name" class="rbac-picker-group">
+            <h4 class="rbac-picker-group-title">{{ group.name }}</h4>
+            <label
+              v-for="route in group.routes"
+              :key="routeKey(route)"
+              :class="['rbac-picker-route', { 'is-added': isRouteInDraft(route) }]"
+            >
+              <input
+                type="checkbox"
+                :checked="isRouteInDraft(route) || pickedRoutes.includes(routeKey(route))"
+                :disabled="isRouteInDraft(route)"
+                @change="togglePickedRoute(route)"
+              />
+              <span :class="['rbac-method-tag', `rbac-method--${methodTone(route.method)}`]">
+                {{ route.method }}
+              </span>
+              <span class="rbac-picker-path">
+                <span
+                  v-for="(part, partIndex) in routePathParts(route.path)"
+                  :key="partIndex"
+                  :class="{ 'rbac-path-param': part.param }"
+                >{{ part.text }}</span>
+              </span>
+              <span v-if="isRouteInDraft(route)" class="rbac-picker-added">In role</span>
+            </label>
+          </section>
+        </div>
+        <div class="modal-actions rbac-picker-actions">
+          <span class="rbac-picker-count">{{ pickedRoutes.length ? `${pickedRoutes.length} selected` : "" }}</span>
+          <button type="button" class="btn-secondary" @click="closeRoutePicker">Cancel</button>
+          <button
+            type="button"
+            class="btn-primary"
+            :disabled="pickedRoutes.length === 0"
+            @click="addPickedRoutes"
+          >
+            {{ pickedRoutes.length === 1 ? "Add 1 rule" : pickedRoutes.length ? `Add ${pickedRoutes.length} rules` : "Add rules" }}
+          </button>
         </div>
       </div>
     </div>
@@ -2311,8 +2486,11 @@ import {
 } from "../utils/organizations.js";
 import {
   RBAC_METHODS,
-  objectsFromParamInputs,
-  pathParameterNames,
+  draftFromRule,
+  groupRoutes,
+  methodTone,
+  ruleFromDraft,
+  syncDraftParams,
   validateRule,
 } from "../utils/rbac.js";
 import { getSubscriptionPlanAction } from "../utils/subscriptionPlan.js";
@@ -2801,40 +2979,44 @@ export default {
           route.method.toLowerCase().includes(needle),
       );
     });
+    const filteredRouteGroups = computed(() => groupRoutes(filteredRoutes.value));
     const roleEditorOpen = ref(false);
     const roleEditorId = ref(null);
+    const roleEditorOriginalName = ref("");
     const roleName = ref("");
     const roleDescription = ref("");
     const savingRole = ref(false);
     const roleFormError = ref("");
+    // Each draft rule holds one text input per path parameter (blank = any);
+    // see draftFromRule / ruleFromDraft.
     const draftRules = ref([]);
     const deletingRoleId = ref(null);
-    const ruleFormError = ref("");
-    const ruleForm = ref({ effect: "allow", method: "GET", path: "", priority: 0 });
-    const ruleParamValues = ref({});
-    const ruleParamNames = computed(() => pathParameterNames(ruleForm.value.path));
+    const routePickerOpen = ref(false);
+    const pickedRoutes = ref([]);
+    const routePickerSearch = ref(null);
 
-    // Per-member role assignments, kept per user so a refetch on expand never
-    // blanks the panel (the loading state shows only before a member's first
-    // load). The fetch still runs every time the panel is opened.
-    const expandedMemberRoles = ref(null);
+    // The editor is dirty when its saved shape differs from what was loaded.
+    const roleEditorSnapshot = ref("");
+    const serializeRoleEditor = () =>
+      JSON.stringify({
+        name: roleName.value.trim(),
+        description: roleDescription.value.trim(),
+        rules: draftRules.value.map(ruleFromDraft),
+      });
+    const roleEditorDirty = computed(
+      () => roleEditorOpen.value && serializeRoleEditor() !== roleEditorSnapshot.value,
+    );
+
+    // Per-member role assignments, kept per user so a refetch never blanks a
+    // row (the loading text shows only before a member's first load).
     const memberRolesByUser = ref({});
     const memberRolesError = ref("");
-    const roleToAssign = ref("");
+    const assigningRoleFor = ref(null);
     const savingAssignment = ref(false);
-    const memberRoles = computed(() =>
-      expandedMemberRoles.value ? memberRolesByUser.value[expandedMemberRoles.value] ?? [] : [],
-    );
-    const memberRolesLoaded = computed(
-      () =>
-        expandedMemberRoles.value != null &&
-        Object.prototype.hasOwnProperty.call(memberRolesByUser.value, expandedMemberRoles.value),
-    );
-    const assignableRoles = computed(() =>
-      roles.value.filter(
-        (role) => !memberRoles.value.some((assignment) => assignment.role_id === role.id),
-      ),
-    );
+
+    // One styled confirmation dialog for the Users and Roles tabs.
+    const rbacConfirm = ref(null);
+    const rbacConfirmCancel = ref(null);
     const inviteEmail = ref("");
     const invitingUser = ref(false);
     const inviteMessage = ref("");
@@ -3140,14 +3322,6 @@ export default {
     };
 
     const removeMember = async (member) => {
-      const label = member.email || member.username || member.user_id;
-      const confirmed = confirm(
-        `Remove ${label} from this organization?\n\n` +
-          "They lose access to its applications, secrets, users and credit balance. " +
-          "If this was their only organization, they must create a new one the next time they sign in.",
-      );
-      if (!confirmed) return;
-
       removingMember.value = member.user_id;
       removeMemberError.value = "";
 
@@ -3180,13 +3354,6 @@ export default {
 
     const promoteMember = async (member) => {
       const label = member.email || member.username || member.user_id;
-      const confirmed = confirm(
-        `Make ${label} an owner?\n\n` +
-          "Owners have full control of this organization, including its billing, users and " +
-          "applications. This cannot be undone: owners cannot be demoted back to a user.",
-      );
-      if (!confirmed) return;
-
       promotingMember.value = member.user_id;
       promoteMemberError.value = "";
 
@@ -3219,6 +3386,54 @@ export default {
         promotingMember.value = null;
       }
     };
+
+    const isOwnerRole = (role) => String(role || "").toLowerCase() === "owner";
+    const memberLabel = (member) => member.email || member.username || member.user_id;
+
+    const openRbacConfirm = async (options) => {
+      rbacConfirm.value = options;
+      await nextTick();
+      rbacConfirmCancel.value?.focus();
+    };
+
+    const closeRbacConfirm = () => {
+      rbacConfirm.value = null;
+    };
+
+    const runRbacConfirm = () => {
+      const action = rbacConfirm.value?.action;
+      rbacConfirm.value = null;
+      if (action) action();
+    };
+
+    const confirmPromoteMember = (member) =>
+      openRbacConfirm({
+        title: `Make ${memberLabel(member)} an owner?`,
+        message:
+          "Owners have full control of this organization, including its billing, users, roles and applications.",
+        note: "This is permanent. An owner can't be changed back to a member.",
+        confirmLabel: "Make owner",
+        action: () => promoteMember(member),
+      });
+
+    const confirmRemoveMember = (member) =>
+      openRbacConfirm({
+        title: `Remove ${memberLabel(member)}?`,
+        message: "They lose access to this organization's applications, secrets, users and credit balance.",
+        note: "If this was their only organization, they create a new one the next time they sign in.",
+        confirmLabel: "Remove user",
+        danger: true,
+        action: () => removeMember(member),
+      });
+
+    const confirmDeleteRole = (role) =>
+      openRbacConfirm({
+        title: `Delete the ${role.name} role?`,
+        message: "Members holding it lose the access it grants. This can't be undone.",
+        confirmLabel: "Delete role",
+        danger: true,
+        action: () => deleteRole(role),
+      });
 
     const loadRoles = async () => {
       loadingRoles.value = true;
@@ -3257,34 +3472,23 @@ export default {
       }
     };
 
-    // Fill the rule form from a known route; the path watcher resets the
-    // per-parameter object inputs to a wildcard default.
-    const useRoute = (route) => {
-      ruleForm.value = { ...ruleForm.value, method: route.method, path: route.path };
-      ruleFormError.value = "";
-    };
-
-    const resetRuleForm = () => {
-      ruleForm.value = { effect: "allow", method: "GET", path: "", priority: 0 };
-      ruleParamValues.value = {};
-      ruleFormError.value = "";
-    };
-
-    const startCreateRole = () => {
-      roleEditorId.value = null;
-      roleName.value = "";
-      roleDescription.value = "";
+    const openRoleEditor = ({ id = null, name = "", description = "", rules = [] }) => {
+      roleEditorId.value = id;
+      roleEditorOriginalName.value = name;
+      roleName.value = name;
+      roleDescription.value = description;
+      draftRules.value = rules.map(draftFromRule);
       roleFormError.value = "";
-      // Seed a usable role: a member can always load their own account.
-      draftRules.value = [
-        { effect: "allow", method: "GET", path: "/users/me", objects: null, priority: 0, error: null },
-      ];
-      resetRuleForm();
+      roleEditorSnapshot.value = serializeRoleEditor();
       roleEditorOpen.value = true;
     };
 
+    // Seed a usable role: a member can always load their own account.
+    const startCreateRole = () =>
+      openRoleEditor({ rules: [{ effect: "allow", method: "GET", path: "/users/me" }] });
+
     const startEditRole = async (role) => {
-      roleFormError.value = "";
+      rolesError.value = "";
       try {
         const orgId = await ensureCurrentOrgId();
         if (!orgId) {
@@ -3297,19 +3501,12 @@ export default {
           throw new Error(await readResponseError(response, "Failed to load role"));
         }
         const detail = await response.json();
-        roleEditorId.value = detail.id;
-        roleName.value = detail.name || "";
-        roleDescription.value = detail.description || "";
-        draftRules.value = (detail.rules || []).map((rule) => ({
-          effect: rule.effect,
-          method: rule.method,
-          path: rule.path,
-          objects: rule.objects ?? null,
-          priority: rule.priority,
-          error: null,
-        }));
-        resetRuleForm();
-        roleEditorOpen.value = true;
+        openRoleEditor({
+          id: detail.id,
+          name: detail.name || "",
+          description: detail.description || "",
+          rules: detail.rules || [],
+        });
       } catch (err) {
         rolesError.value = err.message || "Failed to load role";
       }
@@ -3318,34 +3515,74 @@ export default {
     const closeRoleEditor = () => {
       roleEditorOpen.value = false;
       roleFormError.value = "";
+      routePickerOpen.value = false;
     };
 
-    // Keep the per-parameter inputs in step with the path template.
-    watch(
-      () => ruleForm.value.path,
-      (path) => {
-        const next = {};
-        for (const name of pathParameterNames(path)) {
-          next[name] = ruleParamValues.value[name] ?? "*";
-        }
-        ruleParamValues.value = next;
-      },
-    );
-
-    const addDraftRule = () => {
-      const objects = objectsFromParamInputs(ruleForm.value.path, ruleParamValues.value);
-      const candidate = { ...ruleForm.value, objects };
-      const problem = validateRule(candidate);
-      if (problem) {
-        ruleFormError.value = problem;
+    const requestCloseRoleEditor = () => {
+      if (!roleEditorDirty.value) {
+        closeRoleEditor();
         return;
       }
-      draftRules.value = [...draftRules.value, { ...candidate, error: null }];
-      resetRuleForm();
+      openRbacConfirm({
+        title: "Discard changes?",
+        message: "Your edits to this role haven't been saved.",
+        confirmLabel: "Discard changes",
+        danger: true,
+        action: closeRoleEditor,
+      });
+    };
+
+    const addBlankRule = async () => {
+      draftRules.value = [...draftRules.value, draftFromRule({ path: "" })];
+      await nextTick();
+      const inputs = document.querySelectorAll(".rbac-path-input");
+      inputs[inputs.length - 1]?.focus();
+    };
+
+    const onRulePathInput = (rule) => {
+      rule.params = syncDraftParams(rule.path, rule.params);
+      rule.error = null;
     };
 
     const removeDraftRule = (index) => {
       draftRules.value = draftRules.value.filter((_, i) => i !== index);
+    };
+
+    const routeKey = (route) => `${route.method} ${route.path}`;
+    const isRouteInDraft = (route) =>
+      draftRules.value.some((rule) => rule.method === route.method && rule.path === route.path);
+    const routePathParts = (path) =>
+      String(path || "")
+        .split(/(\{[^}]+\})/)
+        .filter(Boolean)
+        .map((text) => ({ text, param: text.startsWith("{") }));
+
+    const openRoutePicker = async () => {
+      pickedRoutes.value = [];
+      routeFilter.value = "";
+      routePickerOpen.value = true;
+      if (routeCatalog.value.length === 0) loadRouteCatalog();
+      await nextTick();
+      routePickerSearch.value?.focus();
+    };
+
+    const closeRoutePicker = () => {
+      routePickerOpen.value = false;
+    };
+
+    const togglePickedRoute = (route) => {
+      const key = routeKey(route);
+      pickedRoutes.value = pickedRoutes.value.includes(key)
+        ? pickedRoutes.value.filter((item) => item !== key)
+        : [...pickedRoutes.value, key];
+    };
+
+    const addPickedRoutes = () => {
+      const additions = routeCatalog.value
+        .filter((route) => pickedRoutes.value.includes(routeKey(route)))
+        .map((route) => draftFromRule({ effect: "allow", method: route.method, path: route.path }));
+      draftRules.value = [...draftRules.value, ...additions];
+      closeRoutePicker();
     };
 
     const saveRole = async () => {
@@ -3355,23 +3592,20 @@ export default {
         roleFormError.value = "Enter a role name.";
         return;
       }
-      for (let i = 0; i < draftRules.value.length; i += 1) {
-        const problem = validateRule(draftRules.value[i]);
-        if (problem) {
-          roleFormError.value = `Rule ${i + 1}: ${problem}`;
-          return;
-        }
+      let invalid = 0;
+      for (const rule of draftRules.value) {
+        rule.error = validateRule(ruleFromDraft(rule));
+        if (rule.error) invalid += 1;
+      }
+      if (invalid) {
+        roleFormError.value =
+          invalid === 1 ? "Fix the highlighted rule to save." : `Fix the ${invalid} highlighted rules to save.`;
+        return;
       }
       const payload = {
         name,
         description: roleDescription.value.trim() || null,
-        rules: draftRules.value.map(({ effect, method, path, objects, priority }) => ({
-          effect,
-          method,
-          path,
-          objects: objects ?? null,
-          priority,
-        })),
+        rules: draftRules.value.map(ruleFromDraft),
       };
 
       savingRole.value = true;
@@ -3397,8 +3631,8 @@ export default {
           );
         }
         await loadRoles();
-        roleEditorOpen.value = false;
-        showToast(editing ? "Role updated" : "Role created");
+        closeRoleEditor();
+        showToast(editing ? "Role saved" : "Role created");
       } catch (err) {
         roleFormError.value = err.message || "Failed to save role";
       } finally {
@@ -3407,10 +3641,6 @@ export default {
     };
 
     const deleteRole = async (role) => {
-      const confirmed = confirm(
-        `Delete the role "${role.name}"?\n\nMembers holding it lose the access it grants.`,
-      );
-      if (!confirmed) return;
       deletingRoleId.value = role.id;
       rolesError.value = "";
       try {
@@ -3426,7 +3656,7 @@ export default {
         }
         roles.value = roles.value.filter((item) => item.id !== role.id);
         if (roleEditorId.value === role.id) {
-          roleEditorOpen.value = false;
+          closeRoleEditor();
         }
         showToast("Role deleted");
       } catch (err) {
@@ -3440,8 +3670,15 @@ export default {
     const roleNameFor = (roleId) =>
       roles.value.find((role) => role.id === roleId)?.name || roleId;
 
+    const memberRolesFor = (member) => memberRolesByUser.value[member.user_id] ?? [];
+    const hasLoadedMemberRoles = (member) =>
+      Object.prototype.hasOwnProperty.call(memberRolesByUser.value, member.user_id);
+    const assignableRolesFor = (member) =>
+      roles.value.filter(
+        (role) => !memberRolesFor(member).some((assignment) => assignment.role_id === role.id),
+      );
+
     const loadMemberRoles = async (userId) => {
-      memberRolesError.value = "";
       try {
         const orgId = await ensureCurrentOrgId();
         let data = [];
@@ -3459,31 +3696,40 @@ export default {
       } catch (err) {
         memberRolesError.value = err.message || "Failed to load member roles";
       } finally {
-        // Mark the member as loaded (even on error) so the loading state does
-        // not persist and does not reappear on re-expand.
+        // Mark the member as loaded (even on error) so the loading text does
+        // not persist.
         if (!Object.prototype.hasOwnProperty.call(memberRolesByUser.value, userId)) {
           memberRolesByUser.value = { ...memberRolesByUser.value, [userId]: [] };
         }
       }
     };
 
-    const toggleMemberRoles = async (member) => {
+    // Owners see every member's roles inline, so load them alongside the
+    // member list. Owners hold full access, so their rows need no lookup.
+    const loadAllMemberRoles = async () => {
+      if (!isOwner.value) return;
       memberRolesError.value = "";
-      if (expandedMemberRoles.value === member.user_id) {
-        expandedMemberRoles.value = null;
-        return;
-      }
-      expandedMemberRoles.value = member.user_id;
-      roleToAssign.value = "";
-      if (roles.value.length === 0) {
-        await loadRoles();
-      }
-      // Always refresh; the cached rows stay visible, so there is no flicker.
-      await loadMemberRoles(member.user_id);
+      await loadRoles();
+      await Promise.all(
+        organizationMembers.value
+          .filter((member) => !isOwnerRole(member.role))
+          .map((member) => loadMemberRoles(member.user_id)),
+      );
     };
 
-    const assignRole = async (member) => {
-      if (!roleToAssign.value) return;
+    watch([organizationMembers, isOwner], () => {
+      if (activeTab.value === "users") loadAllMemberRoles();
+    });
+
+    const openAssignRole = async (member) => {
+      assigningRoleFor.value = member.user_id;
+      await nextTick();
+      document.querySelector(".rbac-assign-select")?.focus();
+    };
+
+    const assignRole = async (member, roleId) => {
+      assigningRoleFor.value = null;
+      if (!roleId) return;
       savingAssignment.value = true;
       memberRolesError.value = "";
       try {
@@ -3496,15 +3742,14 @@ export default {
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ role_id: roleToAssign.value }),
+            body: JSON.stringify({ role_id: roleId }),
           },
         );
         if (!response.ok) {
           throw new Error(await readResponseError(response, "Failed to assign role"));
         }
-        roleToAssign.value = "";
         await loadMemberRoles(member.user_id);
-        showToast("Role assigned");
+        showToast(`${roleNameFor(roleId)} added`);
       } catch (err) {
         memberRolesError.value = err.message || "Failed to assign role";
       } finally {
@@ -3528,7 +3773,7 @@ export default {
           throw new Error(await readResponseError(response, "Failed to remove role"));
         }
         await loadMemberRoles(member.user_id);
-        showToast("Role removed");
+        showToast(`${roleNameFor(roleId)} removed`);
       } catch (err) {
         memberRolesError.value = err.message || "Failed to remove role";
       } finally {
@@ -6221,41 +6466,55 @@ export default {
       rolesError,
       roleEditorOpen,
       roleEditorId,
+      roleEditorOriginalName,
+      roleEditorDirty,
       roleName,
       roleDescription,
       savingRole,
       roleFormError,
       draftRules,
       deletingRoleId,
-      ruleForm,
-      ruleParamNames,
-      ruleParamValues,
-      ruleFormError,
-      routeCatalog,
       routeCatalogError,
       routeFilter,
-      filteredRoutes,
-      loadRouteCatalog,
-      useRoute,
+      filteredRouteGroups,
+      routePickerOpen,
+      routePickerSearch,
+      pickedRoutes,
+      routeKey,
+      routePathParts,
+      isRouteInDraft,
+      openRoutePicker,
+      closeRoutePicker,
+      togglePickedRoute,
+      addPickedRoutes,
       RBAC_METHODS,
+      methodTone,
       startCreateRole,
       startEditRole,
-      closeRoleEditor,
-      addDraftRule,
+      requestCloseRoleEditor,
+      addBlankRule,
+      onRulePathInput,
       removeDraftRule,
       saveRole,
-      deleteRole,
-      expandedMemberRoles,
-      memberRoles,
-      memberRolesLoaded,
+      confirmDeleteRole,
+      isOwnerRole,
+      memberLabel,
+      memberRolesFor,
+      hasLoadedMemberRoles,
+      assignableRolesFor,
       memberRolesError,
-      roleToAssign,
+      assigningRoleFor,
       savingAssignment,
-      assignableRoles,
       roleNameFor,
-      toggleMemberRoles,
+      openAssignRole,
       assignRole,
       unassignRole,
+      confirmPromoteMember,
+      confirmRemoveMember,
+      rbacConfirm,
+      rbacConfirmCancel,
+      closeRbacConfirm,
+      runRbacConfirm,
       inviteEmail,
       invitingUser,
       inviteMessage,
@@ -7884,117 +8143,744 @@ export default {
   border-radius: 10px;
 }
 
-.member-row-actions {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 8px;
-  flex-shrink: 0;
-}
+/* ==========================================================================
+   RBAC: members, roles, role editor, route picker
+   ========================================================================== */
 
-.rbac-table-wrap {
-  overflow-x: auto;
-  margin-top: 8px;
+.rbac-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .rbac-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
+  table-layout: auto;
 }
 
-.rbac-table th,
-.rbac-table td {
-  text-align: left;
-  padding: 8px 10px;
+.rbac-table .rbac-col-user {
+  width: 38%;
+}
+
+.rbac-table .rbac-col-date {
+  width: 9rem;
+}
+
+.rbac-table .rbac-col-actions {
+  width: 1%;
+}
+
+.rbac-row {
   border-bottom: 1px solid var(--theme-border);
+}
+
+.rbac-row:last-child {
+  border-bottom: none;
+}
+
+.rbac-row--link {
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.rbac-row--link:hover {
+  background: var(--theme-surface-subtle);
+}
+
+.rbac-row-title {
+  color: var(--theme-text-primary);
+  font-size: 1rem;
+  font-weight: 500;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.rbac-muted-cell {
+  color: var(--theme-text-muted);
+  font-size: 0.9rem;
   white-space: nowrap;
 }
 
-.rbac-table th {
-  font-weight: 600;
+.rbac-actions-cell {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.rbac-row-actions {
+  display: inline-flex;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.rbac-text-btn {
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
   color: var(--theme-text-secondary);
+  font: inherit;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
 }
 
-.rbac-path,
-.rbac-objects {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+.rbac-text-btn:hover:not(:disabled) {
+  background: var(--theme-hover);
+  color: var(--theme-text-primary);
 }
 
-.rbac-rule-form {
+.rbac-text-btn--danger {
+  color: var(--theme-danger);
+}
+
+.rbac-text-btn--danger:hover:not(:disabled) {
+  background: var(--theme-danger-bg);
+  color: var(--theme-danger);
+}
+
+.rbac-text-btn:disabled,
+.rbac-add-chip:disabled,
+.rbac-chip-remove:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.rbac-outline-btn {
+  padding: 7px 14px;
+  border: 1px solid var(--theme-border-strong);
+  border-radius: 8px;
+  background: var(--theme-surface);
+  color: var(--theme-text-primary);
+  font: inherit;
+  font-size: 0.875rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+
+.rbac-outline-btn:hover {
+  border-color: var(--theme-text-primary);
+}
+
+:is(
+  .rbac-text-btn,
+  .rbac-outline-btn,
+  .rbac-chip-remove,
+  .rbac-add-chip,
+  .rbac-icon-btn
+):focus-visible {
+  outline: 2px solid var(--theme-focus);
+  outline-offset: 2px;
+}
+
+/* Access column: owners get one solid tag; members get their role chips. */
+.rbac-access {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
-  align-items: flex-end;
+  align-items: center;
+  gap: 6px;
 }
 
-.rbac-rule-form .form-group {
-  margin: 0;
-  min-width: 120px;
+.rbac-owner-tag {
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--theme-control);
+  color: var(--theme-control-text);
+  font-size: 0.8rem;
+  font-weight: 600;
 }
 
-.rbac-rule-path {
-  flex: 1;
-  min-width: 220px;
+.rbac-access-note {
+  color: var(--theme-text-muted);
+  font-size: 0.875rem;
 }
 
-.rbac-route-filter {
-  margin-top: 8px;
-}
-
-.rbac-route-table-wrap {
-  max-height: 260px;
-  overflow-y: auto;
-  margin-top: 8px;
-}
-
-.rbac-member-roles {
-  margin-top: 8px;
-  padding: 12px 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  background: var(--theme-surface-subtle);
-  border: 1px solid var(--theme-border);
-  border-radius: 10px;
-}
-
-.rbac-chip-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+.rbac-access-note--warn {
+  color: var(--theme-warning);
+  cursor: help;
 }
 
 .rbac-chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
+  gap: 2px;
+  padding: 3px 4px 3px 10px;
+  border: 1px solid var(--theme-border);
   border-radius: 999px;
-  background: var(--theme-surface-muted);
+  background: var(--theme-surface-subtle);
   color: var(--theme-text-secondary);
-  font-size: 12px;
+  font-size: 0.8rem;
   font-weight: 600;
 }
 
 .rbac-chip-remove {
-  background: none;
-  border: none;
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
   padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--theme-text-faint);
   cursor: pointer;
-  color: inherit;
-  font-size: 14px;
-  line-height: 1;
 }
 
-.rbac-assign-row {
+.rbac-chip-remove:hover:not(:disabled) {
+  background: var(--theme-danger-bg);
+  color: var(--theme-danger);
+}
+
+.rbac-add-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border: 1px dashed var(--theme-border-strong);
+  border-radius: 999px;
+  background: none;
+  color: var(--theme-text-muted);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.rbac-add-chip:hover:not(:disabled) {
+  border-style: solid;
+  color: var(--theme-text-primary);
+}
+
+.rbac-assign-select {
+  padding: 4px 8px;
+  border: 1px solid var(--theme-focus);
+  border-radius: 8px;
+  background: var(--theme-surface);
+  color: var(--theme-text-primary);
+  font: inherit;
+  font-size: 0.85rem;
+  box-shadow: 0 0 0 3px var(--theme-focus-ring);
+}
+
+.rbac-empty {
+  flex-direction: column;
+  gap: 20px;
+}
+
+.rbac-footnote {
+  margin: 16px 0 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--theme-border);
+  color: var(--theme-text-muted);
+  font-size: 0.85rem;
+}
+
+/* Role editor */
+.rbac-editor {
   display: flex;
+  flex: 1;
+  flex-direction: column;
+}
+
+.rbac-editor-title {
+  margin-bottom: 0;
+}
+
+.rbac-editor-section {
+  margin-top: 36px;
+}
+
+.rbac-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+
+.rbac-editor-section .form-group {
+  grid-template-columns: 120px minmax(0, 1fr);
+  align-items: center;
+}
+
+.rbac-editor-section .form-input {
+  width: 100%;
+  max-width: 520px;
+  min-height: 45px;
+  margin-bottom: 0;
+  background: var(--theme-surface);
+  color: var(--theme-text-primary);
+}
+
+.rbac-rules-header {
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.rbac-rules-header .rbac-section-title {
+  margin-bottom: 0;
+}
+
+.rbac-section-actions {
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
 }
 
-.rbac-assign-row .form-input {
-  max-width: 260px;
+.rbac-count {
+  min-width: 22px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--theme-surface-muted);
+  color: var(--theme-text-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-align: center;
+}
+
+.rbac-help {
+  max-width: 72ch;
+  margin: 0 0 16px;
+  color: var(--theme-text-muted);
+  font-size: 0.875rem;
+  line-height: 1.55;
+}
+
+.rbac-rules-empty {
+  padding: 28px;
+  border: 1px dashed var(--theme-border-strong);
+  border-radius: 10px;
+  color: var(--theme-text-muted);
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+/* Each rule reads left to right as a sentence: allow GET /path for these IDs. */
+.rbac-rules {
+  --rbac-cols: 6.25rem 6.5rem minmax(12rem, 1.3fr) minmax(11rem, 1fr) 4.75rem 2rem;
+  border: 1px solid var(--theme-border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.rbac-rules-head,
+.rbac-rule {
+  display: grid;
+  grid-template-columns: var(--rbac-cols);
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px 10px 16px;
+}
+
+.rbac-rules-head {
+  padding-top: 9px;
+  padding-bottom: 9px;
+  border-bottom: 1px solid var(--theme-border);
+  background: var(--theme-surface-subtle);
+  color: var(--theme-text-faint);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.rbac-rule {
+  position: relative;
+  border-bottom: 1px solid var(--theme-border);
+}
+
+.rbac-rule:last-child {
+  border-bottom: none;
+}
+
+.rbac-rule::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 3px;
+  background: var(--theme-success-strong);
+}
+
+.rbac-rule--deny::before {
+  background: var(--theme-danger-strong);
+}
+
+.rbac-rule--error {
+  background: var(--theme-danger-bg);
+}
+
+.rbac-effect,
+.rbac-method-select {
+  width: 100%;
+  padding: 6px 24px 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238a8f98' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-position: right 9px center;
+  background-repeat: no-repeat;
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.rbac-method-select,
+.rbac-method-tag {
+  font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", monospace;
+}
+
+.rbac-effect--allow {
+  background-color: var(--theme-success-bg);
+  color: var(--theme-success);
+}
+
+.rbac-effect--deny {
+  background-color: var(--theme-danger-bg);
+  color: var(--theme-danger);
+}
+
+.rbac-method--read {
+  background-color: var(--theme-info-bg);
+  color: var(--theme-info);
+}
+
+.rbac-method--write {
+  background-color: var(--theme-warning-bg);
+  color: var(--theme-warning);
+}
+
+.rbac-method--delete {
+  background-color: var(--theme-danger-bg);
+  color: var(--theme-danger);
+}
+
+.rbac-method--any {
+  background-color: var(--theme-accent-bg);
+  color: var(--theme-accent);
+}
+
+.rbac-path-input,
+.rbac-param-input,
+.rbac-priority-input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 7px 10px;
+  border: 1px solid var(--theme-border);
+  border-radius: 8px;
+  background: var(--theme-surface);
+  color: var(--theme-text-primary);
+  font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", monospace;
+  font-size: 0.85rem;
+}
+
+.rbac-param-input {
+  border: 0;
+  border-radius: 0;
+}
+
+:is(.rbac-effect, .rbac-method-select, .rbac-path-input, .rbac-priority-input):focus,
+.rbac-param:focus-within {
+  outline: none;
+  border-color: var(--theme-focus);
+  box-shadow: 0 0 0 3px var(--theme-focus-ring);
+}
+
+.rbac-param-input:focus {
+  outline: none;
+}
+
+.rbac-params {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.rbac-param {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--theme-border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--theme-surface);
+}
+
+.rbac-param-name {
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  border-right: 1px solid var(--theme-border);
+  background: var(--theme-surface-muted);
+  color: var(--theme-text-muted);
+  font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", monospace;
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.rbac-params-none {
+  color: var(--theme-text-faint);
+  font-size: 0.8rem;
+}
+
+.rbac-priority-label {
+  display: none;
+}
+
+.rbac-icon-btn {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--theme-text-faint);
+  cursor: pointer;
+}
+
+.rbac-icon-btn:hover {
+  background: var(--theme-danger-bg);
+  color: var(--theme-danger);
+}
+
+.rbac-rule-error {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--theme-danger);
+  font-size: 0.825rem;
+}
+
+.rbac-editor-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  margin-top: auto;
+  padding: 16px 0 0;
+  border-top: 1px solid var(--theme-border);
+  background: var(--theme-surface);
+}
+
+.rbac-editor-section + .rbac-editor-footer {
+  margin-top: 36px;
+}
+
+.rbac-editor-footer .message {
+  margin-bottom: 8px;
+  padding-top: 0;
+}
+
+.rbac-editor-footer-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding-bottom: 4px;
+}
+
+.rbac-dirty-note {
+  margin-right: auto;
+  color: var(--theme-warning);
+  font-size: 0.85rem;
+}
+
+/* Route picker */
+.rbac-picker {
+  display: flex;
+  flex-direction: column;
+  max-width: 640px;
+  max-height: min(720px, 88vh);
+  padding: 28px;
+  box-sizing: border-box;
+}
+
+.rbac-picker-title {
+  margin-bottom: 6px;
+  font-size: 1.35rem;
+}
+
+.rbac-picker-copy {
+  margin: 0 0 16px;
+  color: var(--theme-text-muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.rbac-picker-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid var(--theme-border);
+  border-radius: 10px;
+  background: var(--theme-surface);
+  color: var(--theme-text-primary);
+  font: inherit;
+  font-size: 0.95rem;
+}
+
+.rbac-picker-search:focus {
+  outline: none;
+  border-color: var(--theme-focus);
+  box-shadow: 0 0 0 3px var(--theme-focus-ring);
+}
+
+.rbac-picker-list {
+  flex: 1;
+  min-height: 160px;
+  margin: 12px -8px 0;
+  padding: 0 8px;
+  overflow-y: auto;
+}
+
+.rbac-picker-group {
+  padding: 4px 0;
+}
+
+.rbac-picker-group-title {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  margin: 0;
+  padding: 8px 8px 6px;
+  background: var(--theme-surface);
+  color: var(--theme-text-faint);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.rbac-picker-route {
+  display: grid;
+  grid-template-columns: 16px 4.5rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.rbac-picker-route:hover {
+  background: var(--theme-hover);
+}
+
+.rbac-picker-route input {
+  margin: 0;
+  accent-color: var(--theme-control);
+}
+
+.rbac-picker-route.is-added {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.rbac-method-tag {
+  justify-self: start;
+  padding: 2px 7px;
+  border-radius: 5px;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.rbac-picker-path {
+  color: var(--theme-text-secondary);
+  font-family: ui-monospace, "SF Mono", Monaco, "Cascadia Code", monospace;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.rbac-path-param {
+  color: var(--theme-accent);
+}
+
+.rbac-picker-added {
+  color: var(--theme-text-faint);
+  font-size: 0.75rem;
+}
+
+.rbac-picker-empty {
+  padding: 24px 8px;
+  color: var(--theme-text-muted);
+  text-align: center;
+}
+
+.rbac-picker-actions {
+  align-items: center;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--theme-border);
+}
+
+.rbac-picker-count {
+  margin-right: auto;
+  color: var(--theme-text-muted);
+  font-size: 0.85rem;
+}
+
+/* The dashboard shows from 961px; below ~1080px the card is too narrow for one rule per line. */
+@media (max-width: 1080px) {
+  .rbac-rules-head {
+    display: none;
+  }
+
+  .rbac-rule {
+    grid-template-columns: auto auto 1fr auto;
+    grid-template-areas:
+      "effect method priority remove"
+      "path path path path"
+      "params params params params"
+      "error error error error";
+    gap: 8px;
+    padding: 14px 12px 14px 16px;
+  }
+
+  .rbac-effect {
+    grid-area: effect;
+  }
+
+  .rbac-method-select {
+    grid-area: method;
+  }
+
+  .rbac-path-input {
+    grid-area: path;
+  }
+
+  .rbac-params {
+    grid-area: params;
+  }
+
+  .rbac-priority {
+    grid-area: priority;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+
+  .rbac-priority-label {
+    display: inline;
+    color: var(--theme-text-faint);
+    font-size: 0.75rem;
+  }
+
+  .rbac-priority-input {
+    width: 4.25rem;
+  }
+
+  .rbac-icon-btn {
+    grid-area: remove;
+  }
+
+  .rbac-rule-error {
+    grid-area: error;
+  }
 }
 
 .passkey-info {

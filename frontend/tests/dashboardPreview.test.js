@@ -194,3 +194,30 @@ test('the preview serves a deployments app with live and candidate deployments',
   for (const entry of history.entries) assert.deepEqual(Object.keys(entry).sort(), entryKeys)
   assert.deepEqual(history.entries.map((entry) => entry.kind).sort(), ['attempt', 'operation'])
 })
+
+test('dashboard preview serves an owner session and RBAC fixtures', () => {
+  const me = parse(resolveDashboardPreviewRequest('GET', '/api/users/me'))
+  assert.equal(me.organization_role, 'owner')
+  assert.equal(Boolean(me.id && me.organization_id), true)
+
+  const roles = parse(resolveDashboardPreviewRequest('GET', `/api/organizations/${me.organization_id}/roles`))
+  assert.equal(roles.length >= 2, true)
+  assert.equal(roles[0].rules, undefined)
+
+  const detail = parse(
+    resolveDashboardPreviewRequest('GET', `/api/organizations/${me.organization_id}/roles/${roles[0].id}`),
+  )
+  assert.equal(detail.id, roles[0].id)
+  assert.equal(detail.rules.length > 0, true)
+
+  const routes = parse(resolveDashboardPreviewRequest('GET', '/api/routes'))
+  assert.equal(routes.some((route) => route.method === 'GET' && route.path === '/users/me'), true)
+
+  const members = parse(resolveDashboardPreviewRequest('GET', `/api/organizations/${me.organization_id}/members`))
+  assert.deepEqual([...new Set(members.map((member) => member.role))].sort(), ['member', 'owner'])
+  const assigned = parse(
+    resolveDashboardPreviewRequest('GET', `/api/organizations/${me.organization_id}/members/${members[1].user_id}/roles`),
+  )
+  assert.equal(assigned.length > 0, true)
+  assert.equal(assigned.every((row) => roles.some((role) => role.id === row.role_id)), true)
+})

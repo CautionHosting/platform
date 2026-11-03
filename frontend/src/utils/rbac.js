@@ -106,3 +106,73 @@ export function paramInputsFromObjects(path, objects = {}) {
   }
   return values
 }
+
+let draftKeySeq = 0
+
+/**
+ * Turns a rule into the editor's draft shape: one text input per path
+ * parameter, where blank means "any" (`["*"]`). `key` keeps list rendering
+ * stable while rows are added and removed.
+ */
+export function draftFromRule({
+  effect = 'allow',
+  method = 'GET',
+  path = '',
+  objects = null,
+  priority = 0,
+} = {}) {
+  const params = {}
+  for (const name of pathParameterNames(path)) {
+    const allowed = objects?.[name]
+    const isAny = !Array.isArray(allowed) || (allowed.length === 1 && allowed[0] === '*')
+    params[name] = isAny ? '' : allowed.join(', ')
+  }
+  draftKeySeq += 1
+  return { key: draftKeySeq, effect, method, path, params, priority, error: null }
+}
+
+/** Turns an editor draft back into the API's rule shape. */
+export function ruleFromDraft({ effect, method, path, params, priority }) {
+  return {
+    effect,
+    method,
+    path,
+    objects: objectsFromParamInputs(path, params),
+    priority: Number(priority),
+  }
+}
+
+/** Keeps a draft's parameter inputs in step with its path, keeping typed values. */
+export function syncDraftParams(path, params = {}) {
+  const next = {}
+  for (const name of pathParameterNames(path)) {
+    next[name] = params[name] ?? ''
+  }
+  return next
+}
+
+/** Groups route inventory entries by their first path segment, in order. */
+export function groupRoutes(routes = []) {
+  const groups = []
+  const byName = new Map()
+  for (const route of routes) {
+    const segment = String(route.path || '').split('/')[1] || ''
+    const words = segment.replace(/-/g, ' ')
+    const name = words ? words.charAt(0).toUpperCase() + words.slice(1) : 'Other'
+    if (!byName.has(name)) {
+      const group = { name, routes: [] }
+      byName.set(name, group)
+      groups.push(group)
+    }
+    byName.get(name).routes.push(route)
+  }
+  return groups
+}
+
+/** A colour family for a method tag: reads, writes, deletes, or any. */
+export function methodTone(method) {
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return 'read'
+  if (method === 'DELETE') return 'delete'
+  if (method === '*') return 'any'
+  return 'write'
+}

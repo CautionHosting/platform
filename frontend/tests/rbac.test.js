@@ -4,9 +4,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  draftFromRule,
+  groupRoutes,
+  methodTone,
   objectsFromParamInputs,
   paramInputsFromObjects,
   pathParameterNames,
+  ruleFromDraft,
+  syncDraftParams,
   validateRule,
 } from '../src/utils/rbac.js'
 
@@ -100,4 +105,54 @@ test('parameter inputs round-trip through objects', () => {
     id: '*',
     user_id: 'u1, u2',
   })
+})
+
+test('drafts round-trip rules, with blank inputs meaning any', () => {
+  const rule = {
+    effect: 'allow',
+    method: 'GET',
+    path: '/organizations/{id}/members/{user_id}',
+    objects: { id: ['*'], user_id: ['a', 'b'] },
+    priority: 2,
+  }
+  const draft = draftFromRule(rule)
+  assert.deepEqual(draft.params, { id: '', user_id: 'a, b' })
+  assert.equal(draft.error, null)
+  assert.deepEqual(ruleFromDraft(draft), rule)
+
+  const plain = draftFromRule({ effect: 'deny', method: '*', path: '/users/me', objects: null, priority: 0 })
+  assert.deepEqual(plain.params, {})
+  assert.equal(ruleFromDraft(plain).objects, null)
+  assert.notEqual(draftFromRule().key, draftFromRule().key)
+})
+
+test('draft parameters follow the path and keep typed values', () => {
+  assert.deepEqual(syncDraftParams('/resources/{id}/deployments/{deployment_id}', { id: 'app_1', stale: 'x' }), {
+    id: 'app_1',
+    deployment_id: '',
+  })
+  assert.deepEqual(syncDraftParams('/resources', { id: 'app_1' }), {})
+})
+
+test('routes are grouped by their first segment in order', () => {
+  const groups = groupRoutes([
+    { method: 'GET', path: '/users/me' },
+    { method: 'GET', path: '/quorum-bundles' },
+    { method: 'PATCH', path: '/users/me' },
+  ])
+  assert.deepEqual(
+    groups.map((group) => [group.name, group.routes.length]),
+    [
+      ['Users', 2],
+      ['Quorum bundles', 1],
+    ],
+  )
+})
+
+test('methods map to a tone', () => {
+  assert.equal(methodTone('GET'), 'read')
+  assert.equal(methodTone('POST'), 'write')
+  assert.equal(methodTone('PATCH'), 'write')
+  assert.equal(methodTone('DELETE'), 'delete')
+  assert.equal(methodTone('*'), 'any')
 })
