@@ -110,6 +110,27 @@ export function canRemoveOrganizationMember({
 }
 
 /**
+ * Whether the caller may promote a member to owner.
+ *
+ * Ownership is one-way: owners hold god powers over the organization and the
+ * platform offers no demotion path, so this action is never reversible. Only an
+ * owner may promote, never an admin, and a member never promotes their own row.
+ */
+export function canPromoteOrganizationMemberToOwner({
+  role,
+  memberRole,
+  currentUserId,
+  memberUserId,
+} = {}) {
+  const callerRole = String(role || '').toLowerCase()
+  if (callerRole !== 'owner') return false
+  if (!currentUserId || !memberUserId) return false
+  if (memberUserId === currentUserId) return false
+  if (String(memberRole || '').toLowerCase() === 'owner') return false
+  return true
+}
+
+/**
  * Mirrors the Platform API's organization-name validation so the form can
  * reject a bad name before a round trip. The API stays authoritative; the
  * messages here describe the same rules.

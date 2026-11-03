@@ -757,6 +757,10 @@ make build-cli
           <p class="content-header-description">
             Manage organization access.
           </p>
+          <p v-if="isOwner" class="content-header-description">
+            As an owner you can promote a user to owner. This is permanent and cannot be
+            undone: an owner can never be demoted back to a user.
+          </p>
         </div>
       </div>
 
@@ -842,18 +846,31 @@ make build-cli
               <span>Joined {{ formatDate(member.joined_at) }}</span>
             </div>
           </div>
-          <button
-            v-if="canRemoveMember(member)"
-            type="button"
-            class="btn-danger"
-            :disabled="removingMember === member.user_id"
-            @click="removeMember(member)"
-          >
-            {{ removingMember === member.user_id ? "Removing..." : "Remove" }}
-          </button>
+          <div class="member-row-actions">
+            <button
+              v-if="canPromoteMember(member)"
+              type="button"
+              class="btn-secondary"
+              :disabled="promotingMember === member.user_id"
+              title="Promoting to owner is permanent and cannot be undone."
+              @click="promoteMember(member)"
+            >
+              {{ promotingMember === member.user_id ? "Promoting..." : "Make owner" }}
+            </button>
+            <button
+              v-if="canRemoveMember(member)"
+              type="button"
+              class="btn-danger"
+              :disabled="removingMember === member.user_id"
+              @click="removeMember(member)"
+            >
+              {{ removingMember === member.user_id ? "Removing..." : "Remove" }}
+            </button>
+          </div>
         </div>
       </div>
       <div v-if="removeMemberError" class="message message--error">{{ removeMemberError }}</div>
+      <div v-if="promoteMemberError" class="message message--error">{{ promoteMemberError }}</div>
     </div>
 
     <!-- SSH Keys Tab -->
@@ -2048,7 +2065,10 @@ import {
   readAppListPreferences,
 } from "../utils/appList.js";
 import { formatLocalDate, formatLocalTime } from "../utils/dateTime.js";
-import { canRemoveOrganizationMember } from "../utils/organizations.js";
+import {
+  canPromoteOrganizationMemberToOwner,
+  canRemoveOrganizationMember,
+} from "../utils/organizations.js";
 import { getSubscriptionPlanAction } from "../utils/subscriptionPlan.js";
 import { getCurrentTheme } from "../utils/theme.js";
 import { isLegacyBundle, getQuorumBundleFiles, getQuorumBundleSummary, serializeQuorumBundle, bundleTitle, bundleIdentifiers, getEmbeddedBundleId, selectBundles } from "../utils/quorumBundle.js";
@@ -2509,8 +2529,13 @@ export default {
     const loadingMembers = ref(false);
     const currentUserId = ref(null);
     const currentMemberRole = ref(null);
+    const isOwner = computed(
+      () => String(currentMemberRole.value || "").toLowerCase() === "owner",
+    );
     const removingMember = ref(null);
     const removeMemberError = ref("");
+    const promotingMember = ref(null);
+    const promoteMemberError = ref("");
     const inviteEmail = ref("");
     const invitingUser = ref(false);
     const inviteMessage = ref("");
@@ -2785,6 +2810,16 @@ export default {
         memberUserId: member.user_id,
       });
 
+    // Promotion is reserved for owners and is deliberately one-way: there is no
+    // demotion path, so the UI says so before the request is sent.
+    const canPromoteMember = (member) =>
+      canPromoteOrganizationMemberToOwner({
+        role: currentMemberRole.value,
+        memberRole: member.role,
+        currentUserId: currentUserId.value,
+        memberUserId: member.user_id,
+      });
+
     const loadCurrentMembership = async () => {
       try {
         const response = await authFetch("/api/users/me", { cache: "no-store" });
@@ -2844,6 +2879,48 @@ export default {
         showToast(removeMemberError.value, "error");
       } finally {
         removingMember.value = null;
+      }
+    };
+
+    const promoteMember = async (member) => {
+      const label = member.email || member.username || member.user_id;
+      const confirmed = confirm(
+        `Make ${label} an owner?\n\n` +
+          "Owners have full control of this organization, including its billing, users and " +
+          "applications. This cannot be undone: owners cannot be demoted back to a user.",
+      );
+      if (!confirmed) return;
+
+      promotingMember.value = member.user_id;
+      promoteMemberError.value = "";
+
+      try {
+        const orgId = await ensureCurrentOrgId();
+        if (!orgId) {
+          throw new Error("No organization found.");
+        }
+
+        const response = await authFetch(`/api/organizations/${orgId}/members/${member.user_id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ role: "owner" }),
+        });
+
+        if (!response.ok) {
+          throw new Error(await readResponseError(response, "Failed to make user an owner"));
+        }
+
+        const updated = await response.json();
+        organizationMembers.value = organizationMembers.value.map((item) =>
+          item.user_id === member.user_id ? { ...item, role: updated.role } : item,
+        );
+        await loadCurrentMembership();
+        showToast(`${label} is now an owner. This cannot be undone.`);
+      } catch (err) {
+        promoteMemberError.value = err.message || "Failed to make user an owner";
+        showToast(promoteMemberError.value, "error");
+      } finally {
+        promotingMember.value = null;
       }
     };
 
@@ -5498,6 +5575,11 @@ export default {
       organizationMembers,
       loadingMembers,
       canRemoveMember,
+      isOwner,
+      promotingMember,
+      promoteMemberError,
+      canPromoteMember,
+      promoteMember,
       removingMember,
       removeMemberError,
       removeMember,
@@ -7127,6 +7209,14 @@ export default {
   background: var(--theme-surface-subtle);
   border: 1px solid var(--theme-border);
   border-radius: 10px;
+}
+
+.member-row-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 .passkey-info {

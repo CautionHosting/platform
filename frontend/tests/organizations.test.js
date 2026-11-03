@@ -8,6 +8,7 @@ import {
   ORGANIZATION_CREATION_OUTCOME,
   ORGANIZATION_NAME_MAX_LENGTH,
   ORGANIZATION_NAME_MIN_LENGTH,
+  canPromoteOrganizationMemberToOwner,
   canRemoveOrganizationMember,
   needsOrganizationSetup,
   organizationCreationErrorMessage,
@@ -174,4 +175,56 @@ test('member removal is limited to owners and admins acting on other members', (
     false,
   )
   assert.equal(canRemoveOrganizationMember(), false)
+})
+
+test('only an owner may promote another user to owner', () => {
+  const options = { currentUserId: 'me', memberUserId: 'them', memberRole: 'member' }
+
+  assert.equal(canPromoteOrganizationMemberToOwner({ ...options, role: 'owner' }), true)
+  assert.equal(canPromoteOrganizationMemberToOwner({ ...options, role: 'Owner' }), true)
+  // Admins and ordinary members cannot hand out ownership.
+  assert.equal(canPromoteOrganizationMemberToOwner({ ...options, role: 'admin' }), false)
+  assert.equal(canPromoteOrganizationMemberToOwner({ ...options, role: 'member' }), false)
+  assert.equal(canPromoteOrganizationMemberToOwner({ ...options, role: 'viewer' }), false)
+  assert.equal(canPromoteOrganizationMemberToOwner({ ...options, role: null }), false)
+  // An owner is never promoted again; there is nothing to gain and the action
+  // is not reversible.
+  assert.equal(
+    canPromoteOrganizationMemberToOwner({ ...options, role: 'owner', memberRole: 'owner' }),
+    false,
+  )
+  assert.equal(
+    canPromoteOrganizationMemberToOwner({ ...options, role: 'owner', memberRole: 'Owner' }),
+    false,
+  )
+  // A user never promotes their own row.
+  assert.equal(
+    canPromoteOrganizationMemberToOwner({
+      role: 'owner',
+      memberRole: 'member',
+      currentUserId: 'me',
+      memberUserId: 'me',
+    }),
+    false,
+  )
+  // Without the caller's identity the action is not offered.
+  assert.equal(
+    canPromoteOrganizationMemberToOwner({
+      role: 'owner',
+      memberRole: 'member',
+      currentUserId: null,
+      memberUserId: 'them',
+    }),
+    false,
+  )
+  assert.equal(
+    canPromoteOrganizationMemberToOwner({
+      role: 'owner',
+      memberRole: 'member',
+      currentUserId: 'me',
+      memberUserId: null,
+    }),
+    false,
+  )
+  assert.equal(canPromoteOrganizationMemberToOwner(), false)
 })

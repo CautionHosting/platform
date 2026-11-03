@@ -70,12 +70,12 @@ Where a user is given the `owner` role.
 | # | Site | What happens |
 |---|------|--------------|
 | 1 | `src/api/src/organizations.rs:307-314` (`create_organization_for_user`) | Creator of a new organization is inserted as `UserRole::Owner`. |
-| 2 | `src/api/src/organizations.rs:927-948` (`invite_member`) | Every invitation is written with a hardcoded `UserRole::Owner`. `InviteMemberRequest` has only `email` (`src/api/src/validated_types.rs:142-152`), so the inviter cannot choose the role and cannot avoid granting owner. |
+| 2 | `organizations.rs:927-948` (`invite_member`) | Invitations now default to `UserRole::Member` (changed 2026-11-03); `InviteMemberRequest` has only `email` (`src/api/src/validated_types.rs:142-152`), so the inviter still cannot choose the role. |
 | 3 | `src/api/src/organizations.rs:1255-1274` (`add_member`) | Inserts `payload.role`; `validate_role` accepts `"owner"` (`validation.rs:182-183`, `validated_types.rs:128-140`). A manager can add a member directly as owner. |
 | 4 | `src/api/src/organizations.rs:1336-1355` (`update_member`) | `UPDATE ... SET role = $1::user_role`; `payload.role` may be `"owner"`. A manager can promote any member to owner. No guard prevents demoting the last owner. |
 | 5 | `src/gateway/src/db.rs:216-247` (`create_default_organization`) | Signup path: creates the user's default org and inserts them as `'owner'`. |
 | 6 | `src/gateway/src/db.rs:520-533` (`accept_invitation_and_create_user`) | Invitation signup: inserts `invitation.role`, which is `owner` because of (2) and the migration default. |
-| 7 | `src/api/migrations/044_organization_invitations.sql:7` | Schema default `role user_role NOT NULL DEFAULT 'owner'`. |
+| 7 | `src/api/migrations/044_organization_invitations.sql:7` | Invitation role default was `'owner'`; changed to `'member'` by `migrations/060_invitation_default_member_role.sql`. |
 | 8 | `src/api/migrations/001_initial.sql:135` | Defines the `owner` variant of `user_role`. |
 
 Test/fixture grants (not production paths, but assume the role):
@@ -207,8 +207,12 @@ Record decisions here as they are made, newest first.
 ## Open questions / blockers
 
 * `invite_member` cannot assign a non-owner role: `InviteMemberRequest` has no
-  role field (`validated_types.rs:142-152`). Needs a decision before
-  non-owner invites are possible.
+  role field (`validated_types.rs:142-152`). Invitations now default to
+  `member`, but there is still no way to invite straight to owner.
+* Promotion to owner is enforced only in the dashboard UI
+  (`frontend/src/utils/organizations.js` `canPromoteOrganizationMemberToOwner`,
+  `Dashboard.vue`). The API's `update_member` still accepts `owner|admin` and any
+  role, so an admin can promote (or change roles) through the API.
 * `can_manage_org` treats `admin` identically to `owner`; the split must decide
   `admin`'s fate.
 * Last-owner invariant is frontend-only (`frontend/src/utils/organizations.js`);
@@ -219,6 +223,10 @@ Record decisions here as they are made, newest first.
 
 Newest first.
 
+* **2026-11-03** — Invitations now default to `member` (not `owner`); added
+  migration `060_invitation_default_member_role.sql`. Dashboard lets owners
+  promote a user to owner, stated as permanent/non-reversible; promotion is
+  gated in the UI by `canPromoteOrganizationMemberToOwner`.
 * **2026-11-03** — Removed the owner/admin gate from EIF download
   (`eif_download.rs`): any member of the org may now download.
 * **2026-11-03** — Consolidated the owner-permission scan and ownership-check

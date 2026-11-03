@@ -941,7 +941,9 @@ pub async fn invite_member(
     )
     .bind(org_id)
     .bind(&email)
-    .bind(types::UserRole::Owner)
+    // Invitations grant a plain membership by default; ownership is only ever
+    // handed out by an existing owner through `update_member`.
+    .bind(types::UserRole::Member)
     .bind(&token_hash)
     .bind(auth.user_id)
     .bind(expires_at)
