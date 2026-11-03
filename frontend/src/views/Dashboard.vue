@@ -1071,6 +1071,36 @@ make build-cli
           <button type="button" class="btn-secondary" @click="addDraftRule">Add rule</button>
         </div>
 
+        <h4 class="content-subsection-title">Available routes</h4>
+        <input
+          v-model="routeFilter"
+          class="form-input rbac-route-filter"
+          placeholder="Filter routes..."
+        />
+        <div v-if="routeCatalogError" class="message message--error">{{ routeCatalogError }}</div>
+        <div class="rbac-table-wrap rbac-route-table-wrap">
+          <table class="rbac-table">
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th>Path</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="route in filteredRoutes" :key="route.method + ' ' + route.path">
+                <td>{{ route.method }}</td>
+                <td class="rbac-path">{{ route.path }}</td>
+                <td>
+                  <button type="button" class="btn-secondary" @click="useRoute(route)">
+                    Use
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
         <div v-if="roleFormError" class="message message--error">{{ roleFormError }}</div>
         <div class="form-actions">
           <button type="submit" class="btn-primary" :disabled="savingRole">
@@ -2759,6 +2789,18 @@ export default {
     const loadingRoles = ref(false);
     const rolesLoaded = ref(false);
     const rolesError = ref("");
+    const routeCatalog = ref([]);
+    const routeCatalogError = ref("");
+    const routeFilter = ref("");
+    const filteredRoutes = computed(() => {
+      const needle = routeFilter.value.trim().toLowerCase();
+      if (!needle) return routeCatalog.value;
+      return routeCatalog.value.filter(
+        (route) =>
+          route.path.toLowerCase().includes(needle) ||
+          route.method.toLowerCase().includes(needle),
+      );
+    });
     const roleEditorOpen = ref(false);
     const roleEditorId = ref(null);
     const roleName = ref("");
@@ -3200,6 +3242,26 @@ export default {
         loadingRoles.value = false;
         rolesLoaded.value = true;
       }
+    };
+
+    const loadRouteCatalog = async () => {
+      routeCatalogError.value = "";
+      try {
+        const response = await authFetch("/api/routes", { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(await readResponseError(response, "Failed to load routes"));
+        }
+        routeCatalog.value = await response.json();
+      } catch (err) {
+        routeCatalogError.value = err.message || "Failed to load routes";
+      }
+    };
+
+    // Fill the rule form from a known route; the path watcher resets the
+    // per-parameter object inputs to a wildcard default.
+    const useRoute = (route) => {
+      ruleForm.value = { ...ruleForm.value, method: route.method, path: route.path };
+      ruleFormError.value = "";
     };
 
     const resetRuleForm = () => {
@@ -5529,6 +5591,7 @@ export default {
         // member list.
         loadCurrentMembership();
         loadRoles();
+        loadRouteCatalog();
       } else if (newTab === "credentials") {
         showAddCredentialForm.value = false;
         resetCredentialForm();
@@ -5829,6 +5892,7 @@ export default {
       } else if (activeTab.value === "roles") {
         loadCurrentMembership();
         loadRoles();
+        loadRouteCatalog();
       } else if (activeTab.value === "keys") {
         loadBundles();
       } else if (activeTab.value === "account") {
@@ -5955,6 +6019,7 @@ export default {
         } else if (activeTab.value === "roles") {
           loadCurrentMembership();
           loadRoles();
+          loadRouteCatalog();
         } else if (activeTab.value === "keys") {
           loadBundles();
         } else if (activeTab.value === "account") {
@@ -6160,6 +6225,12 @@ export default {
       ruleParamNames,
       ruleParamValues,
       ruleFormError,
+      routeCatalog,
+      routeCatalogError,
+      routeFilter,
+      filteredRoutes,
+      loadRouteCatalog,
+      useRoute,
       RBAC_METHODS,
       startCreateRole,
       startEditRole,
@@ -7859,6 +7930,16 @@ export default {
 .rbac-rule-path {
   flex: 1;
   min-width: 220px;
+}
+
+.rbac-route-filter {
+  margin-top: 8px;
+}
+
+.rbac-route-table-wrap {
+  max-height: 260px;
+  overflow-y: auto;
+  margin-top: 8px;
 }
 
 .rbac-member-roles {

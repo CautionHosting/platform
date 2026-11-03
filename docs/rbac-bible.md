@@ -297,6 +297,8 @@ variant per distinct failure branch.
 * `GET/PATCH/DELETE /roles/{role_id}/rules/{rule_id}`
 * `GET/POST /members/{user_id}/roles`
 * `DELETE /members/{user_id}/roles/{role_id}`
+* `GET /routes` — the method/path inventory of the protected routes
+  (`rbac/inventory.rs`), used by the editor to build its route table
 
 Role create/replace validates every rule in the payload (a typed
 `RuleValidationError` reported with the rule's index) and rejects duplicates
@@ -370,8 +372,10 @@ Backlog captured 2026-11-03. Grouped, roughly in priority order.
 
 4. Object-level (dynamic) ownership is not supported; `objects` is a static
    per-parameter list only.
-5. Route/rule drift: no route inventory, and a rule's `path` is not validated
-   against real routes when written.
+5. Route/rule drift: `GET /routes` exposes a maintained inventory
+   (`src/api/src/rbac/inventory.rs`) that the editor builds its route table
+   from, but the list is still hand-synced with `resource_routes`, and a rule's
+   `path` is not validated against it on write.
 
 **Verification**
 
@@ -413,6 +417,9 @@ Backlog captured 2026-11-03. Grouped, roughly in priority order.
 
 Newest first.
 
+* **2026-11-03** — Added a route inventory: `GET /routes` returns the
+  method/path pairs from `resource_routes` (`rbac/inventory.rs`), and the role
+  editor shows a filterable table to fill the rule form from a real route.
 * **2026-11-03** — Added wildcard rule paths: `*` matches any route and a
   trailing `*` is a prefix. Validation no longer rejects `/`. Verified live
   (migration upgrade idempotent; `*`/`/` rules insert) and unit-tested.

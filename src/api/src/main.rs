@@ -5995,6 +5995,7 @@ async fn main() -> Result<(), MainError> {
             "/organizations/{id}/members/{user_id}/roles/{role_id}",
             delete(rbac::handlers::detach_role),
         )
+        .route("/routes", get(rbac::inventory::list_routes))
         .route("/resources", post(resources::create_resource))
         .route("/resources", get(resources::list_resources))
         .route("/resources/{id}", get(resources::get_resource))

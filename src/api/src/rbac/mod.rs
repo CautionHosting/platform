@@ -12,6 +12,7 @@
 //! match denies.
 
 pub(crate) mod handlers;
+pub(crate) mod inventory;
 
 use std::sync::Arc;
 
