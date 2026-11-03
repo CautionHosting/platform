@@ -228,6 +228,7 @@ CREATE TABLE rbac_role_rules (
                     -- required when `path` has parameters, omitted otherwise
     priority INTEGER NOT NULL DEFAULT 0 CHECK (priority >= 0),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (role_id, effect, method, path)
 );
 
@@ -237,6 +238,7 @@ CREATE TABLE rbac_member_roles (
     role_id UUID NOT NULL,
     granted_by UUID REFERENCES users(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (organization_id, user_id, role_id),
     FOREIGN KEY (organization_id, user_id)
         REFERENCES organization_members (organization_id, user_id) ON DELETE CASCADE,
@@ -247,7 +249,7 @@ CREATE TABLE rbac_member_roles (
 
 The FKs guarantee a role is only assigned to an actual member and only within
 the organization that owns the role (roles are per-organization, no global
-built-ins).
+built-ins). All three tables carry `updated_at` with the standard trigger.
 
 ### Proposed enforcement
 
@@ -335,6 +337,11 @@ Record decisions here as they are made, newest first.
 
 Newest first.
 
+* **2026-11-03** — Added `updated_at` (with the standard trigger) to
+  `rbac_role_rules` and `rbac_member_roles`, matching `rbac_roles`. Migration 063
+  includes idempotent `ALTER ... ADD COLUMN IF NOT EXISTS` so already-migrated
+  databases pick it up on re-run; verified live (upgrade path and fresh apply,
+  triggers fire).
 * **2026-11-03** — Added `migrations/063_rbac_tables.sql`: `rbac_roles`,
   `rbac_role_rules`, `rbac_member_roles`. Verified live on PostgreSQL 18.6:
   applies and re-runs cleanly; unique/cross-org/non-member/effect/method/

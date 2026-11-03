@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS rbac_role_rules (
     objects JSONB,
     priority INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
     CONSTRAINT rbac_role_rules_effect_check CHECK (effect IN ('allow', 'deny')),
     CONSTRAINT rbac_role_rules_method_check CHECK (method IN
@@ -46,7 +47,14 @@ CREATE TABLE IF NOT EXISTS rbac_role_rules (
     CONSTRAINT rbac_role_rules_unique UNIQUE (role_id, effect, method, path)
 );
 
+-- Upgrades a table created before the column existed.
+ALTER TABLE rbac_role_rules
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
 CREATE INDEX IF NOT EXISTS idx_rbac_role_rules_role ON rbac_role_rules(role_id);
+
+CREATE OR REPLACE TRIGGER rbac_role_rules_updated_at BEFORE UPDATE ON rbac_role_rules
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 -- Assignment of roles to members. A member may hold any number of roles. The
 -- composite foreign keys keep a role within its organization and only assigned
@@ -57,6 +65,7 @@ CREATE TABLE IF NOT EXISTS rbac_member_roles (
     role_id UUID NOT NULL,
     granted_by UUID REFERENCES users(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
     CONSTRAINT rbac_member_roles_pkey PRIMARY KEY (organization_id, user_id, role_id),
     CONSTRAINT rbac_member_roles_member_fkey
@@ -67,4 +76,11 @@ CREATE TABLE IF NOT EXISTS rbac_member_roles (
         REFERENCES rbac_roles (organization_id, id) ON DELETE CASCADE
 );
 
+-- Upgrades a table created before the column existed.
+ALTER TABLE rbac_member_roles
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
 CREATE INDEX IF NOT EXISTS idx_rbac_member_roles_user ON rbac_member_roles(user_id);
+
+CREATE OR REPLACE TRIGGER rbac_member_roles_updated_at BEFORE UPDATE ON rbac_member_roles
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
