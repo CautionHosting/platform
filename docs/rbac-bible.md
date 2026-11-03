@@ -251,10 +251,10 @@ The composite FK guarantees a role is only assigned to an actual member.
 * Owners short-circuit to allow. Everyone else: deny if any matching `deny`
   rule exists, else allow if any matching `allow` rule exists, else `403`
   (deny by default, fail closed). `method = '*'` matches any method.
-* Exempt routes bypass RBAC: public (`/health`, `.well-known`, onboarding
-  verify), self (`/users/me`, `/user/status`, `/legal/accept`,
-  `/onboarding/send-verification`), organization bootstrap (`GET/POST
-  /organizations`), and all internal service routes.
+* No exempt routes. Everything not matched by an allow rule is denied. The UI
+  seeds every new role with an allow for `/users/me` so members can load their
+  own account. Public, onboarding, organization-bootstrap, and internal route
+  groups sit outside this middleware by construction rather than by exemption.
 * Path matching starts as exact route-template equality; a trailing `/*`
   wildcard could be added later.
 
@@ -280,7 +280,12 @@ The composite FK guarantees a role is only assigned to an actual member.
 
 Record decisions here as they are made, newest first.
 
-* (none yet)
+* **2026-11-03** — No baseline backfill. Owners bypass RBAC and existing
+  memberships are expected to all be `owner`, so there is nothing to migrate;
+  non-owner members created later must be given roles explicitly.
+* **2026-11-03** — Deny by default with no exempt routes. A new role is seeded
+  by the UI with an allow for `/users/me`; everything else needs an explicit
+  rule.
 
 ## Open questions / blockers
 
