@@ -65,6 +65,13 @@ pub(crate) struct RbacMemberRole {
     pub(crate) updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Serialize)]
+pub(crate) struct RbacRoleDetail {
+    #[serde(flatten)]
+    pub(crate) role: RbacRole,
+    pub(crate) rules: Vec<RbacRule>,
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct CreateRoleRequest {
     pub(crate) name: String,
@@ -562,6 +569,14 @@ pub(crate) enum GetRoleError {
         #[source]
         source: BoxError,
     },
+
+    #[error("failed to load role rules [{location}]")]
+    RulesQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 }
 
 impl_error_response!(GetRoleError {
@@ -569,6 +584,7 @@ impl_error_response!(GetRoleError {
     GetRoleError::Forbidden { .. } => (StatusCode::FORBIDDEN, "forbidden".to_string()),
     GetRoleError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found".to_string()),
     GetRoleError::Query { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()),
+    GetRoleError::RulesQuery { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()),
 });
 
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id, role_id = %role_id))]
@@ -576,7 +592,7 @@ pub(crate) async fn get_role(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path((org_id, role_id)): Path<(Uuid, Uuid)>,
-) -> Result<Json<RbacRole>, GetRoleError> {
+) -> Result<Json<RbacRoleDetail>, GetRoleError> {
     use GetRoleErrorCtx as Ctx;
     ensure_member!(state, auth.user_id, org_id, GetRoleError);
     let role = sqlx::query_as::<_, RbacRole>(
@@ -591,7 +607,15 @@ pub(crate) async fn get_role(
     .ok_or_else(|| GetRoleError::NotFound {
         location: std::panic::Location::caller(),
     })?;
-    Ok(Json(role))
+    let rules = sqlx::query_as::<_, RbacRule>(
+        "SELECT id, role_id, effect, method, path, objects, priority, created_at, updated_at
+         FROM rbac_role_rules WHERE role_id = $1 ORDER BY priority, id",
+    )
+    .bind(role_id)
+    .fetch_all(&state.db)
+    .await
+    .with_context(Ctx::rules_query())?;
+    Ok(Json(RbacRoleDetail { role, rules }))
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]

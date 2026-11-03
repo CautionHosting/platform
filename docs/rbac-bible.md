@@ -289,8 +289,8 @@ scoped `["*"]` cannot cross tenants. Each handler owns its error type, with one
 variant per distinct failure branch.
 
 * `GET/POST /roles` — POST body includes `rules`, applied in one transaction
-* `GET/PUT/DELETE /roles/{role_id}` — PUT is a full replacement (name,
-  description, and the complete rule set)
+* `GET/PUT/DELETE /roles/{role_id}` — GET returns the role with its rules; PUT
+  is a full replacement (name, description, and the complete rule set)
 * `GET/POST /roles/{role_id}/rules`
 * `GET/PATCH/DELETE /roles/{role_id}/rules/{rule_id}`
 * `GET/POST /members/{user_id}/roles`
