@@ -267,19 +267,18 @@ The composite FK guarantees a role is only assigned to an actual member.
 * Default-deny rollout: members can currently do everything, so enforcement
   breaks them. Proposal: seed a built-in baseline role matching today's member
   permissions and assign it, plus a feature flag while populating, then enforce.
-* Authoring/drift: rules reference route templates, so we need a canonical
-  route list or a startup coverage test that fails when a guarded route has no
-  rule and is not exempt.
-* Objective scope: route-level gating cannot express per-object ownership; the
-  existing `organization_members` SQL joins remain the tenancy boundary within
-  an organization.
 * Role management endpoints are owner-only (`is_owner`), never RBAC-gated, to
   avoid a bootstrap cycle.
+* Objective scope: route-level gating cannot express per-object ownership; the
+  existing SQL joins remain the tenancy boundary within an organization.
 
 ## Decision log
 
 Record decisions here as they are made, newest first.
 
+* **2026-11-03** — Route/rule drift: no special handling for now. Rules are
+  plain strings and a typo simply fails closed; validation (against a route
+  inventory) can be added later.
 * **2026-11-03** — No baseline backfill. Owners bypass RBAC and existing
   memberships are expected to all be `owner`, so there is nothing to migrate;
   non-owner members created later must be given roles explicitly.
