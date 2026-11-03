@@ -275,8 +275,8 @@ Implemented in `src/api/src/rbac.rs` and layered on the `resource_routes` group
   path without parameters (for example a list route) needs none. At request
   time the middleware reads the actual values with
   `axum::extract::RawPathParams` and admits only when each parameter matches
-  its list (`["*"]` means any). No resource state is read and list responses
-  are never filtered.
+  its array (`["*"]` means any; values are arrays, a bare string never
+  matches). No resource state is read and list responses are never filtered.
 * Path matching starts as exact route-template equality; a trailing `/*`
   wildcard could be added later.
 
@@ -340,6 +340,8 @@ Record decisions here as they are made, newest first.
 
 Newest first.
 
+* **2026-11-03** — `objects` values must be arrays (`["*"]` or a value list);
+  a bare string never matches (fails closed). Matcher test added.
 * **2026-11-03** — Implemented RBAC enforcement: `src/api/src/rbac.rs` (matcher
   + middleware, 7 unit tests) layered on `resource_routes` after onboarding.
   Owner bypass; otherwise deny-by-default with lowest-priority-wins and

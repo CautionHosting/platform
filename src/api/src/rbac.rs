@@ -117,8 +117,9 @@ fn param_value<'a>(params: &'a [(String, String)], key: &str) -> Option<&'a str>
 }
 
 fn allowed_value_matches(allowed: &Value, value: &str) -> bool {
+    // Only arrays are valid: `["*"]` or a list of concrete values. Anything
+    // else (a bare string, a number, an object) never matches.
     match allowed {
-        Value::String(entry) => entry == "*" || entry == value,
         Value::Array(entries) => entries.iter().any(|entry| match entry {
             Value::String(entry) => entry == "*" || entry == value,
             _ => false,
@@ -380,6 +381,27 @@ mod tests {
         let deny = rule(RuleEffect::Deny, "GET", "/billing/usage");
         assert_eq!(
             decide(&Method::GET, "/billing/usage", &[], &[allow, deny]),
+            Decision::Deny
+        );
+    }
+
+    #[test]
+    fn object_value_must_be_an_array() {
+        // A bare string is not a valid `objects` value and fails closed.
+        let rules = vec![Rule {
+            effect: RuleEffect::Allow,
+            method: "GET".to_string(),
+            path: "/resources/{id}".to_string(),
+            objects: Some(json!({"id": "*"})),
+            priority: 0,
+        }];
+        assert_eq!(
+            decide(
+                &Method::GET,
+                "/resources/{id}",
+                &params(&[("id", "anything")]),
+                &rules
+            ),
             Decision::Deny
         );
     }
