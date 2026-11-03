@@ -370,6 +370,11 @@ Record decisions here as they are made, newest first.
 
 Newest first.
 
+* **2026-11-03** — Frontend: added a Roles tab (`Dashboard.vue`) with a role
+  list and a create/edit editor (seeds `GET /users/me`), a draft rules table and
+  rule form with per-parameter object inputs, and delete. Validation is mirrored
+  in `frontend/src/utils/rbac.js` with node tests. Nav added in
+  `DashboardLayout.vue`.
 * **2026-11-03** — Role create/replace now takes the whole role: `POST /roles`
   and `PUT /roles/{role_id}` accept a `rules` array, validated together and
   written in one transaction. Update switched from PATCH to PUT (full

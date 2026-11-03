@@ -160,6 +160,28 @@
             <span>Users</span>
           </button>
 
+          <button
+            :class="['nav-item', { active: activeTab === 'roles' }]"
+            @click="selectTab('roles')"
+          >
+            <svg
+              class="nav-icon"
+              width="30"
+              height="30"
+              viewBox="0 0 30 30"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+              aria-hidden="true"
+            >
+              <rect v-if="activeTab === 'roles'" width="30" height="30" rx="15" fill="white"/>
+              <g transform="translate(5,5) scale(0.85)">
+                <path d="M12 2 4 5v6c0 5 3.5 8 8 11 4.5-3 8-6 8-11V5l-8-3z" :stroke="activeTab === 'roles' ? '#0F0F0F' : '#535455'" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M9 11.5l2 2 4-4" :stroke="activeTab === 'roles' ? '#0F0F0F' : '#535455'" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+              </g>
+            </svg>
+            <span>Roles</span>
+          </button>
+
           <div class="nav-group" :class="{ 'is-open': securityNavOpen }">
             <button
               :class="['nav-item', 'nav-item--parent', { active: isSecurityNavActive }]"

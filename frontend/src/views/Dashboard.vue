@@ -873,6 +873,164 @@ make build-cli
       <div v-if="promoteMemberError" class="message message--error">{{ promoteMemberError }}</div>
     </div>
 
+    <!-- Roles Tab -->
+    <div v-if="activeTab === 'roles'" class="content-card content-card--dashboard-tab">
+      <div class="content-header">
+        <div class="content-header-text">
+          <h2 class="content-header-title">Roles</h2>
+          <p class="content-header-description">
+            Roles grant members access to specific routes. Only owners can change them.
+          </p>
+        </div>
+        <button
+          v-if="isOwner && !roleEditorOpen"
+          type="button"
+          class="btn-primary"
+          @click="startCreateRole"
+        >
+          New role
+        </button>
+      </div>
+
+      <div v-if="rolesError" class="message message--error">{{ rolesError }}</div>
+      <div v-if="loadingRoles" class="list-item-empty">Loading roles...</div>
+      <div v-else-if="roles.length === 0" class="list-item-empty">No roles yet.</div>
+      <div v-else class="passkey-list">
+        <div v-for="role in roles" :key="role.id" class="passkey-item">
+          <div class="passkey-info">
+            <div class="passkey-header">
+              <div>
+                <div class="passkey-title">{{ role.name }}</div>
+              </div>
+            </div>
+            <div class="passkey-meta">
+              <span v-if="role.description">{{ role.description }}</span>
+              <span>Created {{ formatDate(role.created_at) }}</span>
+            </div>
+          </div>
+          <div class="member-row-actions">
+            <button
+              v-if="isOwner"
+              type="button"
+              class="btn-secondary"
+              @click="startEditRole(role)"
+            >
+              Edit
+            </button>
+            <button
+              v-if="isOwner"
+              type="button"
+              class="btn-danger"
+              :disabled="deletingRoleId === role.id"
+              @click="deleteRole(role)"
+            >
+              {{ deletingRoleId === role.id ? "Deleting..." : "Delete" }}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <form v-if="roleEditorOpen" class="inline-form-panel" @submit.prevent="saveRole">
+        <h3 class="inline-form-panel-title">{{ roleEditorId ? "Edit role" : "New role" }}</h3>
+        <div class="form-group">
+          <label class="form-label" for="roleName">Name</label>
+          <input id="roleName" v-model="roleName" class="form-input" :disabled="savingRole" />
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="roleDescription">Description</label>
+          <input
+            id="roleDescription"
+            v-model="roleDescription"
+            class="form-input"
+            placeholder="Optional"
+            :disabled="savingRole"
+          />
+        </div>
+
+        <h4 class="content-subsection-title">Rules</h4>
+        <div v-if="draftRules.length === 0" class="list-item-empty">No rules yet.</div>
+        <div v-else class="rbac-table-wrap">
+          <table class="rbac-table">
+            <thead>
+              <tr>
+                <th>Effect</th>
+                <th>Method</th>
+                <th>Path</th>
+                <th>Objects</th>
+                <th>Priority</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(rule, index) in draftRules" :key="index">
+                <td>{{ rule.effect }}</td>
+                <td>{{ rule.method }}</td>
+                <td class="rbac-path">{{ rule.path }}</td>
+                <td class="rbac-objects">{{ rule.objects ? JSON.stringify(rule.objects) : "\u2014" }}</td>
+                <td>{{ rule.priority }}</td>
+                <td>
+                  <button type="button" class="btn-danger" @click="removeDraftRule(index)">
+                    Remove
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h4 class="content-subsection-title">Add rule</h4>
+        <div class="rbac-rule-form">
+          <div class="form-group">
+            <label class="form-label">Effect</label>
+            <select v-model="ruleForm.effect" class="form-input">
+              <option value="allow">allow</option>
+              <option value="deny">deny</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Method</label>
+            <select v-model="ruleForm.method" class="form-input">
+              <option v-for="method in RBAC_METHODS" :key="method" :value="method">{{ method }}</option>
+            </select>
+          </div>
+          <div class="form-group rbac-rule-path">
+            <label class="form-label">Path</label>
+            <input
+              v-model="ruleForm.path"
+              class="form-input"
+              placeholder="/resources/{id}"
+            />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Priority</label>
+            <input v-model.number="ruleForm.priority" type="number" min="0" class="form-input" />
+          </div>
+        </div>
+        <div v-for="name in ruleParamNames" :key="name" class="form-group">
+          <label class="form-label">objects["{{ name }}"]</label>
+          <input
+            v-model="ruleParamValues[name]"
+            class="form-input"
+            placeholder="* or comma-separated values"
+          />
+        </div>
+        <div v-if="ruleFormError" class="message message--error">{{ ruleFormError }}</div>
+        <div class="form-actions">
+          <button type="button" class="btn-secondary" @click="addDraftRule">Add rule</button>
+        </div>
+
+        <div v-if="roleFormError" class="message message--error">{{ roleFormError }}</div>
+        <div class="form-actions">
+          <button type="submit" class="btn-primary" :disabled="savingRole">
+            {{ savingRole ? "Saving..." : roleEditorId ? "Save role" : "Create role" }}
+          </button>
+          <button type="button" class="btn-secondary" :disabled="savingRole" @click="closeRoleEditor">
+            Cancel
+          </button>
+        </div>
+      </form>
+    </div>
+
     <!-- SSH Keys Tab -->
     <div v-if="activeTab === 'ssh'" class="content-card content-card--dashboard-tab">
       <div class="content-header">
@@ -2069,6 +2227,12 @@ import {
   canPromoteOrganizationMemberToOwner,
   canRemoveOrganizationMember,
 } from "../utils/organizations.js";
+import {
+  RBAC_METHODS,
+  objectsFromParamInputs,
+  pathParameterNames,
+  validateRule,
+} from "../utils/rbac.js";
 import { getSubscriptionPlanAction } from "../utils/subscriptionPlan.js";
 import { getCurrentTheme } from "../utils/theme.js";
 import { isLegacyBundle, getQuorumBundleFiles, getQuorumBundleSummary, serializeQuorumBundle, bundleTitle, bundleIdentifiers, getEmbeddedBundleId, selectBundles } from "../utils/quorumBundle.js";
@@ -2130,6 +2294,7 @@ export default {
       keys: "keys",
       security: "security",
       users: "users",
+      roles: "roles",
       account: "account",
       billing: "billing",
       credentials: "credentials",
@@ -2536,6 +2701,23 @@ export default {
     const removeMemberError = ref("");
     const promotingMember = ref(null);
     const promoteMemberError = ref("");
+
+    // RBAC roles state
+    const roles = ref([]);
+    const loadingRoles = ref(false);
+    const rolesError = ref("");
+    const roleEditorOpen = ref(false);
+    const roleEditorId = ref(null);
+    const roleName = ref("");
+    const roleDescription = ref("");
+    const savingRole = ref(false);
+    const roleFormError = ref("");
+    const draftRules = ref([]);
+    const deletingRoleId = ref(null);
+    const ruleFormError = ref("");
+    const ruleForm = ref({ effect: "allow", method: "GET", path: "", priority: 0 });
+    const ruleParamValues = ref({});
+    const ruleParamNames = computed(() => pathParameterNames(ruleForm.value.path));
     const inviteEmail = ref("");
     const invitingUser = ref(false);
     const inviteMessage = ref("");
@@ -2921,6 +3103,202 @@ export default {
         showToast(promoteMemberError.value, "error");
       } finally {
         promotingMember.value = null;
+      }
+    };
+
+    const loadRoles = async () => {
+      loadingRoles.value = true;
+      rolesError.value = "";
+      try {
+        const orgId = await ensureCurrentOrgId();
+        if (!orgId) {
+          roles.value = [];
+          return;
+        }
+        const response = await authFetch(`/api/organizations/${orgId}/roles`, {
+          cache: "no-store",
+        });
+        if (!response.ok) {
+          throw new Error(await readResponseError(response, "Failed to load roles"));
+        }
+        roles.value = await response.json();
+      } catch (err) {
+        rolesError.value = err.message || "Failed to load roles";
+      } finally {
+        loadingRoles.value = false;
+      }
+    };
+
+    const resetRuleForm = () => {
+      ruleForm.value = { effect: "allow", method: "GET", path: "", priority: 0 };
+      ruleParamValues.value = {};
+      ruleFormError.value = "";
+    };
+
+    const startCreateRole = () => {
+      roleEditorId.value = null;
+      roleName.value = "";
+      roleDescription.value = "";
+      roleFormError.value = "";
+      // Seed a usable role: a member can always load their own account.
+      draftRules.value = [
+        { effect: "allow", method: "GET", path: "/users/me", objects: null, priority: 0, error: null },
+      ];
+      resetRuleForm();
+      roleEditorOpen.value = true;
+    };
+
+    const startEditRole = async (role) => {
+      roleFormError.value = "";
+      try {
+        const orgId = await ensureCurrentOrgId();
+        if (!orgId) {
+          throw new Error("No organization found.");
+        }
+        const response = await authFetch(`/api/organizations/${orgId}/roles/${role.id}`, {
+          cache: "no-store",
+        });
+        if (!response.ok) {
+          throw new Error(await readResponseError(response, "Failed to load role"));
+        }
+        const detail = await response.json();
+        roleEditorId.value = detail.id;
+        roleName.value = detail.name || "";
+        roleDescription.value = detail.description || "";
+        draftRules.value = (detail.rules || []).map((rule) => ({
+          effect: rule.effect,
+          method: rule.method,
+          path: rule.path,
+          objects: rule.objects ?? null,
+          priority: rule.priority,
+          error: null,
+        }));
+        resetRuleForm();
+        roleEditorOpen.value = true;
+      } catch (err) {
+        rolesError.value = err.message || "Failed to load role";
+      }
+    };
+
+    const closeRoleEditor = () => {
+      roleEditorOpen.value = false;
+      roleFormError.value = "";
+    };
+
+    // Keep the per-parameter inputs in step with the path template.
+    watch(
+      () => ruleForm.value.path,
+      (path) => {
+        const next = {};
+        for (const name of pathParameterNames(path)) {
+          next[name] = ruleParamValues.value[name] ?? "*";
+        }
+        ruleParamValues.value = next;
+      },
+    );
+
+    const addDraftRule = () => {
+      const objects = objectsFromParamInputs(ruleForm.value.path, ruleParamValues.value);
+      const candidate = { ...ruleForm.value, objects };
+      const problem = validateRule(candidate);
+      if (problem) {
+        ruleFormError.value = problem;
+        return;
+      }
+      draftRules.value = [...draftRules.value, { ...candidate, error: null }];
+      resetRuleForm();
+    };
+
+    const removeDraftRule = (index) => {
+      draftRules.value = draftRules.value.filter((_, i) => i !== index);
+    };
+
+    const saveRole = async () => {
+      roleFormError.value = "";
+      const name = roleName.value.trim();
+      if (!name) {
+        roleFormError.value = "Enter a role name.";
+        return;
+      }
+      for (let i = 0; i < draftRules.value.length; i += 1) {
+        const problem = validateRule(draftRules.value[i]);
+        if (problem) {
+          roleFormError.value = `Rule ${i + 1}: ${problem}`;
+          return;
+        }
+      }
+      const payload = {
+        name,
+        description: roleDescription.value.trim() || null,
+        rules: draftRules.value.map(({ effect, method, path, objects, priority }) => ({
+          effect,
+          method,
+          path,
+          objects: objects ?? null,
+          priority,
+        })),
+      };
+
+      savingRole.value = true;
+      try {
+        const orgId = await ensureCurrentOrgId();
+        if (!orgId) {
+          throw new Error("No organization found.");
+        }
+        const editing = Boolean(roleEditorId.value);
+        const response = await authFetch(
+          editing
+            ? `/api/organizations/${orgId}/roles/${roleEditorId.value}`
+            : `/api/organizations/${orgId}/roles`,
+          {
+            method: editing ? "PUT" : "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          },
+        );
+        if (!response.ok) {
+          throw new Error(
+            await readResponseError(response, editing ? "Failed to save role" : "Failed to create role"),
+          );
+        }
+        await loadRoles();
+        roleEditorOpen.value = false;
+        showToast(editing ? "Role updated" : "Role created");
+      } catch (err) {
+        roleFormError.value = err.message || "Failed to save role";
+      } finally {
+        savingRole.value = false;
+      }
+    };
+
+    const deleteRole = async (role) => {
+      const confirmed = confirm(
+        `Delete the role "${role.name}"?\n\nMembers holding it lose the access it grants.`,
+      );
+      if (!confirmed) return;
+      deletingRoleId.value = role.id;
+      rolesError.value = "";
+      try {
+        const orgId = await ensureCurrentOrgId();
+        if (!orgId) {
+          throw new Error("No organization found.");
+        }
+        const response = await authFetch(`/api/organizations/${orgId}/roles/${role.id}`, {
+          method: "DELETE",
+        });
+        if (!response.ok) {
+          throw new Error(await readResponseError(response, "Failed to delete role"));
+        }
+        roles.value = roles.value.filter((item) => item.id !== role.id);
+        if (roleEditorId.value === role.id) {
+          roleEditorOpen.value = false;
+        }
+        showToast("Role deleted");
+      } catch (err) {
+        rolesError.value = err.message || "Failed to delete role";
+        showToast(rolesError.value, "error");
+      } finally {
+        deletingRoleId.value = null;
       }
     };
 
@@ -4974,6 +5352,8 @@ export default {
       } else if (newTab === "users") {
         loadMembers();
         loadInvitations();
+      } else if (newTab === "roles") {
+        loadRoles();
       } else if (newTab === "credentials") {
         showAddCredentialForm.value = false;
         resetCredentialForm();
@@ -5271,6 +5651,8 @@ export default {
       } else if (activeTab.value === "users") {
         loadMembers();
         loadInvitations();
+      } else if (activeTab.value === "roles") {
+        loadRoles();
       } else if (activeTab.value === "keys") {
         loadBundles();
       } else if (activeTab.value === "account") {
@@ -5394,6 +5776,8 @@ export default {
         } else if (activeTab.value === "users") {
           loadMembers();
           loadInvitations();
+        } else if (activeTab.value === "roles") {
+          loadRoles();
         } else if (activeTab.value === "keys") {
           loadBundles();
         } else if (activeTab.value === "account") {
@@ -5583,6 +5967,29 @@ export default {
       removingMember,
       removeMemberError,
       removeMember,
+      roles,
+      loadingRoles,
+      rolesError,
+      roleEditorOpen,
+      roleEditorId,
+      roleName,
+      roleDescription,
+      savingRole,
+      roleFormError,
+      draftRules,
+      deletingRoleId,
+      ruleForm,
+      ruleParamNames,
+      ruleParamValues,
+      ruleFormError,
+      RBAC_METHODS,
+      startCreateRole,
+      startEditRole,
+      closeRoleEditor,
+      addDraftRule,
+      removeDraftRule,
+      saveRole,
+      deleteRole,
       inviteEmail,
       invitingUser,
       inviteMessage,
@@ -7217,6 +7624,52 @@ export default {
   align-items: flex-end;
   gap: 8px;
   flex-shrink: 0;
+}
+
+.rbac-table-wrap {
+  overflow-x: auto;
+  margin-top: 8px;
+}
+
+.rbac-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.rbac-table th,
+.rbac-table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--theme-border);
+  white-space: nowrap;
+}
+
+.rbac-table th {
+  font-weight: 600;
+  color: var(--theme-text-secondary);
+}
+
+.rbac-path,
+.rbac-objects {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.rbac-rule-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+}
+
+.rbac-rule-form .form-group {
+  margin: 0;
+  min-width: 120px;
+}
+
+.rbac-rule-path {
+  flex: 1;
+  min-width: 220px;
 }
 
 .passkey-info {
