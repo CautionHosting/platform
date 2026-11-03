@@ -205,17 +205,14 @@ route template (e.g. `/resources/{id}/deployments`), not a regex.
 ```sql
 CREATE TABLE rbac_roles (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    organization_id UUID REFERENCES organizations(id) ON DELETE CASCADE, -- NULL = built-in
+    organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
     description TEXT,
-    is_builtin BOOLEAN NOT NULL DEFAULT false,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (organization_id, name),
+    UNIQUE (organization_id, id)  -- FK target for rbac_member_roles
 );
-CREATE UNIQUE INDEX rbac_roles_org_name ON rbac_roles (organization_id, name)
-    WHERE organization_id IS NOT NULL;
-CREATE UNIQUE INDEX rbac_roles_builtin_name ON rbac_roles (name)
-    WHERE organization_id IS NULL;
 
 CREATE TABLE rbac_role_rules (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -233,16 +230,20 @@ CREATE TABLE rbac_role_rules (
 CREATE TABLE rbac_member_roles (
     organization_id UUID NOT NULL,
     user_id UUID NOT NULL,
-    role_id UUID NOT NULL REFERENCES rbac_roles(id) ON DELETE CASCADE,
+    role_id UUID NOT NULL,
     granted_by UUID REFERENCES users(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (organization_id, user_id, role_id),
     FOREIGN KEY (organization_id, user_id)
-        REFERENCES organization_members (organization_id, user_id) ON DELETE CASCADE
+        REFERENCES organization_members (organization_id, user_id) ON DELETE CASCADE,
+    FOREIGN KEY (organization_id, role_id)
+        REFERENCES rbac_roles (organization_id, id) ON DELETE CASCADE
 );
 ```
 
-The composite FK guarantees a role is only assigned to an actual member.
+The FKs guarantee a role is only assigned to an actual member and only within
+the organization that owns the role (roles are per-organization, no global
+built-ins).
 
 ### Proposed enforcement
 
@@ -269,7 +270,6 @@ The composite FK guarantees a role is only assigned to an actual member.
 
 ### Open decisions
 
-* Role scope: per-organization, global built-in, or both (proposal: both).
 * Roles per member: many (join table) vs exactly one (proposal: many).
 * Deny rules: support from the start vs allow-only (proposal: allow + deny,
   deny-wins).
@@ -281,6 +281,9 @@ The composite FK guarantees a role is only assigned to an actual member.
 
 Record decisions here as they are made, newest first.
 
+* **2026-11-03** — Roles are per-organization only (no global built-ins).
+  `rbac_roles.organization_id` is `NOT NULL` and a composite FK on
+  `rbac_member_roles` prevents assigning a role across organizations.
 * **2026-11-03** — Role/rule management routes are ordinary RBAC-gated routes,
   so a rule may grant them; no separate router group. Escalation is bounded:
   owner-only checks (`is_owner`) still guard granting ownership, demoting or
