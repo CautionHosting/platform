@@ -4,7 +4,8 @@ Living design + progress document for the role-based access control work on the
 platform. It is the single place to track the target model, decisions, the
 current-state inventory, and open questions. Update it as work lands.
 
-Related: `docs/rbac-owner-audit.md` (the initial owner-permission scan).
+Related: `docs/rbac-owner-audit.md` (initial owner-permission scan),
+`docs/rbac-ownership-index.md` (index of every current ownership/access check).
 
 ## How we got here
 
