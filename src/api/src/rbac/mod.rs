@@ -11,7 +11,7 @@
 //! matching rules the lowest priority wins; equal-priority conflicts deny. No
 //! match denies.
 
-pub(crate) mod routes;
+pub(crate) mod handlers;
 
 use std::sync::Arc;
 

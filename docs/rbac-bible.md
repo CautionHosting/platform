@@ -282,10 +282,11 @@ Implemented in `src/api/src/rbac.rs` and layered on the `resource_routes` group
 
 ### Management API
 
-Under `/organizations/{id}`, implemented in `src/api/src/rbac/routes.rs`. These
+Under `/organizations/{id}`, implemented in `src/api/src/rbac/handlers.rs`. These
 are ordinary RBAC-gated routes (owners bypass; a member needs a matching rule)
 and every handler also requires membership in the org in the path, so a rule
-scoped `["*"]` cannot cross tenants.
+scoped `["*"]` cannot cross tenants. Each handler owns its error type, with one
+variant per distinct failure branch.
 
 * `GET/POST /roles`
 * `GET/PATCH/DELETE /roles/{role_id}`
@@ -360,6 +361,9 @@ Record decisions here as they are made, newest first.
 
 Newest first.
 
+* **2026-11-03** — Restructured `rbac/routes.rs` into `rbac/handlers.rs`: each
+  handler now has its own error type with a variant per failure branch (via a
+  shared `impl_error_response!` macro and an `ensure_member!` access guard).
 * **2026-11-03** — Added the RBAC management API (`rbac/routes.rs`): roles CRUD,
   rules CRUD, and GET/POST/DELETE for member role assignments. Handlers verify
   org membership in the path; rule shape is validated before write. 4 route
