@@ -5974,6 +5974,12 @@ export default {
         loadInvitations();
       }
 
+      if (initialTab === "roles") {
+        loadCurrentMembership();
+        loadRoles();
+        loadRouteCatalog();
+      }
+
       if (initialTab === "billing") {
         loadBilling();
         loadCreditBalance();
