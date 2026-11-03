@@ -5967,6 +5967,34 @@ async fn main() -> Result<(), MainError> {
             "/organizations/{id}/fully-managed/waitlist",
             post(fully_managed_capacity::join_waitlist),
         )
+        .route(
+            "/organizations/{id}/roles",
+            get(rbac::routes::list_roles).post(rbac::routes::create_role),
+        )
+        .route(
+            "/organizations/{id}/roles/{role_id}",
+            get(rbac::routes::get_role)
+                .patch(rbac::routes::update_role)
+                .delete(rbac::routes::delete_role),
+        )
+        .route(
+            "/organizations/{id}/roles/{role_id}/rules",
+            get(rbac::routes::list_rules).post(rbac::routes::create_rule),
+        )
+        .route(
+            "/organizations/{id}/roles/{role_id}/rules/{rule_id}",
+            get(rbac::routes::get_rule)
+                .patch(rbac::routes::update_rule)
+                .delete(rbac::routes::delete_rule),
+        )
+        .route(
+            "/organizations/{id}/members/{user_id}/roles",
+            get(rbac::routes::list_member_roles).post(rbac::routes::attach_role),
+        )
+        .route(
+            "/organizations/{id}/members/{user_id}/roles/{role_id}",
+            delete(rbac::routes::detach_role),
+        )
         .route("/resources", post(resources::create_resource))
         .route("/resources", get(resources::list_resources))
         .route("/resources/{id}", get(resources::get_resource))

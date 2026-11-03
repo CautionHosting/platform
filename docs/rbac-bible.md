@@ -280,6 +280,26 @@ Implemented in `src/api/src/rbac.rs` and layered on the `resource_routes` group
 * Path matching starts as exact route-template equality; a trailing `/*`
   wildcard could be added later.
 
+### Management API
+
+Under `/organizations/{id}`, implemented in `src/api/src/rbac/routes.rs`. These
+are ordinary RBAC-gated routes (owners bypass; a member needs a matching rule)
+and every handler also requires membership in the org in the path, so a rule
+scoped `["*"]` cannot cross tenants.
+
+* `GET/POST /roles`
+* `GET/PATCH/DELETE /roles/{role_id}`
+* `GET/POST /roles/{role_id}/rules`
+* `GET/PATCH/DELETE /roles/{role_id}/rules/{rule_id}`
+* `GET/POST /members/{user_id}/roles`
+* `DELETE /members/{user_id}/roles/{role_id}`
+
+Rule validation (in the handler, before insert/update): `effect` is
+`allow|deny`; `method` is a known method or `*`; `path` is an absolute route
+template; when the path has parameters, `objects` is required and must cover
+exactly those parameters with arrays of strings, and is omitted otherwise;
+`priority >= 0`.
+
 ### Open decisions
 
 * (none)
@@ -340,6 +360,10 @@ Record decisions here as they are made, newest first.
 
 Newest first.
 
+* **2026-11-03** — Added the RBAC management API (`rbac/routes.rs`): roles CRUD,
+  rules CRUD, and GET/POST/DELETE for member role assignments. Handlers verify
+  org membership in the path; rule shape is validated before write. 4 route
+  unit tests plus handler SQL checked live on PostgreSQL 18.6.
 * **2026-11-03** — `objects` values must be arrays (`["*"]` or a value list);
   a bare string never matches (fails closed). Matcher test added.
 * **2026-11-03** — Implemented RBAC enforcement: `src/api/src/rbac.rs` (matcher

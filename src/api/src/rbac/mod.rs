@@ -11,6 +11,8 @@
 //! matching rules the lowest priority wins; equal-priority conflicts deny. No
 //! match denies.
 
+pub(crate) mod routes;
+
 use std::sync::Arc;
 
 use axum::{
