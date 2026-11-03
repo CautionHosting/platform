@@ -793,6 +793,7 @@ pub(crate) async fn create_rule(
     let rule = sqlx::query_as::<_, RbacRule>(
         "INSERT INTO rbac_role_rules (role_id, effect, method, path, objects, priority)
          VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (role_id, effect, method, path) DO NOTHING
          RETURNING id, role_id, effect, method, path, objects, priority, created_at, updated_at",
     )
     .bind(role_id)
@@ -801,18 +802,11 @@ pub(crate) async fn create_rule(
     .bind(&payload.path)
     .bind(&payload.objects)
     .bind(payload.priority)
-    .fetch_one(&state.db)
+    .fetch_optional(&state.db)
     .await
-    .map_err(|error| {
-        if is_unique_violation(&error) {
-            return CreateRuleError::RuleConflict {
-                location: std::panic::Location::caller(),
-            };
-        }
-        CreateRuleError::Insert {
-            location: std::panic::Location::caller(),
-            source: Box::new(error),
-        }
+    .with_context(Ctx::insert())?
+    .ok_or_else(|| CreateRuleError::RuleConflict {
+        location: std::panic::Location::caller(),
     })?;
 
     Ok((StatusCode::CREATED, Json(rule)))
@@ -957,6 +951,14 @@ pub(crate) async fn update_rule(
          SET effect = $3, method = $4, path = $5, objects = $6, priority = $7,
              updated_at = NOW()
          WHERE id = $1 AND role_id = $2
+           AND NOT EXISTS (
+               SELECT 1 FROM rbac_role_rules other
+               WHERE other.role_id = $2
+                 AND other.effect = $3
+                 AND other.method = $4
+                 AND other.path = $5
+                 AND other.id <> $1
+           )
          RETURNING id, role_id, effect, method, path, objects, priority, created_at, updated_at",
     )
     .bind(rule_id)
@@ -966,18 +968,11 @@ pub(crate) async fn update_rule(
     .bind(&path)
     .bind(&objects)
     .bind(priority)
-    .fetch_one(&state.db)
+    .fetch_optional(&state.db)
     .await
-    .map_err(|error| {
-        if is_unique_violation(&error) {
-            return UpdateRuleError::RuleConflict {
-                location: std::panic::Location::caller(),
-            };
-        }
-        UpdateRuleError::Update {
-            location: std::panic::Location::caller(),
-            source: Box::new(error),
-        }
+    .with_context(Ctx::update())?
+    .ok_or_else(|| UpdateRuleError::RuleConflict {
+        location: std::panic::Location::caller(),
     })?;
 
     Ok(Json(rule))

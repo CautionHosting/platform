@@ -363,6 +363,10 @@ Record decisions here as they are made, newest first.
 
 Newest first.
 
+* **2026-11-03** — `create_rule`/`update_rule` no longer branch on unique
+  violations: the insert uses `ON CONFLICT ... DO NOTHING` and the update
+  guards with `NOT EXISTS`, so both report a conflict as "no row returned" and
+  the queries use `with_context`. Verified live.
 * **2026-11-03** — Replaced the stringly rule validation error with a typed
   `RuleValidationError` (one variant per failure, formatted `#[error]`
   messages), carried by the `InvalidRule` variants as a boxed source; tests
