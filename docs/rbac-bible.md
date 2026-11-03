@@ -224,6 +224,8 @@ CREATE TABLE rbac_role_rules (
     method TEXT NOT NULL CHECK (method IN
         ('GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS','*')),
     path TEXT NOT NULL,
+    objects JSONB,  -- per path-param allowed values, e.g. {"id": ["*"]};
+                    -- required when `path` has parameters, omitted otherwise
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (role_id, effect, method, path)
 );
@@ -255,6 +257,13 @@ The composite FK guarantees a role is only assigned to an actual member.
   seeds every new role with an allow for `/users/me` so members can load their
   own account. Public, onboarding, organization-bootstrap, and internal route
   groups sit outside this middleware by construction rather than by exemption.
+* Object constraints are admission-only. A rule for a path with parameters must
+  carry `objects` covering every parameter (rule creation fails if absent); a
+  path without parameters (for example a list route) needs none. At request
+  time the middleware reads the actual values with
+  `axum::extract::RawPathParams` and admits only when each parameter matches
+  its list (`["*"]` means any). No resource state is read and list responses
+  are never filtered.
 * Path matching starts as exact route-template equality; a trailing `/*`
   wildcard could be added later.
 
@@ -269,13 +278,18 @@ The composite FK guarantees a role is only assigned to an actual member.
   permissions and assign it, plus a feature flag while populating, then enforce.
 * Role management endpoints are owner-only (`is_owner`), never RBAC-gated, to
   avoid a bootstrap cycle.
-* Objective scope: route-level gating cannot express per-object ownership; the
-  existing SQL joins remain the tenancy boundary within an organization.
+* Parameterized paths whose parameter is not an object the role should
+  restrict (e.g. the org id in `/organizations/{id}/members`) still need an
+  `objects` entry; `["*"]` is the escape for "any". Confirm this is desired.
 
 ## Decision log
 
 Record decisions here as they are made, newest first.
 
+* **2026-11-03** — Object scoping is admission-only. Rules for parameterized
+  paths must declare `objects` (creation fails if absent); paths without
+  parameters need none. Lists are not filtered and no resource state is
+  consulted.
 * **2026-11-03** — Route/rule drift: no special handling for now. Rules are
   plain strings and a typo simply fails closed; validation (against a route
   inventory) can be added later.
