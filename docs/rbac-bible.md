@@ -95,7 +95,6 @@ Not owner grants: `role_arn` / `Role:` matches are AWS IAM roles and deployment
 | Handler | Site |
 |---------|------|
 | `organizations::delete_organization` | `organizations.rs:530-538` (`is_owner`) |
-| `eif_download::download_eif` | `eif_download.rs:490-498` (`can_manage_org \|\| is_owner`, i.e. owner-or-admin) |
 
 **owner or admin** (`can_manage_org` / `require_billing_manager`)
 
@@ -138,7 +137,7 @@ membership test, not a role test.
 | `main.rs` | `list_cloud_credentials` 928, `create_cloud_credential` 995, `get_cloud_credential` 1058, `delete_cloud_credential` 1125, `set_default_cloud_credential` 1195, `create_managed_onprem_resource` 1423, `get_builder_config` 2152, `set_builder_config` 2236 |
 | `resources.rs` | `create_resource` 132, `list_resources` 325 |
 | `subscriptions.rs` | `get_subscription` 320 (plus the manager gates above) |
-| `eif_download.rs` | `download_eif` 486 (plus the role gate above) |
+| `eif_download.rs` | `download_eif` 486 |
 
 ### Membership enforced in SQL (joins / EXISTS)
 
@@ -220,6 +219,8 @@ Record decisions here as they are made, newest first.
 
 Newest first.
 
+* **2026-11-03** — Removed the owner/admin gate from EIF download
+  (`eif_download.rs`): any member of the org may now download.
 * **2026-11-03** — Consolidated the owner-permission scan and ownership-check
   index into this document.
 * **2026-11-03** — Completed owner-permission scan; indexed all current

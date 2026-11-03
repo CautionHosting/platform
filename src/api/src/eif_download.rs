@@ -112,9 +112,6 @@ pub(crate) enum EvictLruError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum DownloadEifError {
-    #[error("insufficient permissions [{location}]")]
-    Forbidden { location: Location },
-
     #[error("database error [{location}]")]
     Database {
         #[location]
@@ -161,9 +158,6 @@ pub(crate) enum DownloadEifError {
 impl IntoResponse for DownloadEifError {
     fn into_response(self) -> Response<Body> {
         let (status, body) = match &self {
-            DownloadEifError::Forbidden { .. } => {
-                (StatusCode::FORBIDDEN, "insufficient permissions")
-            }
             DownloadEifError::Database { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "database error")
             }
@@ -486,16 +480,6 @@ pub(crate) async fn download_eif(
     let org_id = crate::get_user_primary_org(&state.db, auth.user_id)
         .await
         .with_context(Ctx::database())?;
-
-    let role = crate::check_org_access(&state.db, auth.user_id, org_id)
-        .await
-        .with_context(Ctx::database())?;
-
-    if !crate::can_manage_org(&role) && !crate::is_owner(&role) {
-        return Err(DownloadEifError::Forbidden {
-            location: std::panic::Location::caller(),
-        });
-    }
 
     let build =
         match resolve_eif_source(&state.db, org_id, resource_id, params.deployment).await? {
