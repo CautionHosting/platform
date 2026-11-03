@@ -346,6 +346,45 @@ Record decisions here as they are made, newest first.
   by the UI with an allow for `/users/me`; everything else needs an explicit
   rule.
 
+## To fix up
+
+Backlog captured 2026-11-03. Grouped, roughly in priority order.
+
+**Functional**
+
+1. New members have no roles. Invitations default to `member` and nothing is
+   assigned on acceptance, so an invited user is denied everything (including
+   `/users/me`) until an owner assigns a role. Decide: auto-assign a baseline
+   role on acceptance, or add roles to `InviteMemberRequest`.
+2. Delegation vs UI mismatch. The role-management routes are RBAC-gated, so a
+   member with the right rules can use them, but the dashboard shows the Roles
+   tab and controls only to owners (`isOwner`). A delegated member has no UI.
+3. Enforcement has no rollout switch (feature flag or shadow/log-only mode) for
+   soak and rollback.
+
+**Deferred by decision**
+
+4. Object-level (dynamic) ownership is not supported; `objects` is a static
+   per-parameter list only.
+5. Route/rule drift: no route inventory, and a rule's `path` is not validated
+   against real routes when written.
+
+**Verification**
+
+6. No end-to-end HTTP run (auth -> RBAC middleware -> handler); the browser
+   flows have not been click-tested.
+7. No DB-backed tests for the RBAC handlers (unit tests plus manual `psql`
+   only).
+
+**Cleanup**
+
+8. `invite_member` cannot invite straight to owner, and the migration 061
+   `admin` -> `member` mapping is only implicitly accepted.
+9. The role list shows no rule counts, and the UI only does whole-role replace
+   (the per-rule endpoints are unused by the UI).
+10. No operator-facing docs for writing rules (route templates, priority,
+    `objects`).
+
 ## Open questions / blockers
 
 * `invite_member` cannot assign a non-owner role: `InviteMemberRequest` has no
