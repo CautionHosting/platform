@@ -105,8 +105,8 @@ Not owner grants: `role_arn` / `Role:` matches are AWS IAM roles and deployment
 | `organizations::invite_member` | `organizations.rs:824-832` |
 | `organizations::list_active_invitations` | `organizations.rs:1015-1023` |
 | `organizations::cancel_invitation` | `organizations.rs:1090-1098` |
-| `organizations::add_member` | `organizations.rs:1236-1244` |
-| `organizations::update_member` | `organizations.rs:1326-1334` |
+| `organizations::add_member` | `organizations.rs` (manager gate; granting `owner` additionally requires an owner caller) |
+| `organizations::update_member` | `organizations.rs` (manager gate; granting `owner` requires an owner caller; an existing owner cannot be demoted) |
 | `organizations::remove_member` | `organizations.rs:1406-1414` |
 | `subscriptions::perform_checkout` | `subscriptions.rs:541` |
 | `subscriptions::subscribe` | `subscriptions.rs:720` |
@@ -209,10 +209,12 @@ Record decisions here as they are made, newest first.
 * `invite_member` cannot assign a non-owner role: `InviteMemberRequest` has no
   role field (`validated_types.rs:142-152`). Invitations now default to
   `member`, but there is still no way to invite straight to owner.
-* Promotion to owner is enforced only in the dashboard UI
-  (`frontend/src/utils/organizations.js` `canPromoteOrganizationMemberToOwner`,
-  `Dashboard.vue`). The API's `update_member` still accepts `owner|admin` and any
-  role, so an admin can promote (or change roles) through the API.
+* Granting ownership is now owner-only and irreversible server-side:
+  `add_member` and `update_member` reject a non-owner caller promoting to
+  `owner`, and `update_member` rejects demoting an existing owner, so the
+  dashboard's "cannot be undone" promise holds at the API. `remove_member`
+  still lets an admin remove an owner, which the dashboard hides; that path is
+  not yet aligned.
 * `can_manage_org` treats `admin` identically to `owner`; the split must decide
   `admin`'s fate.
 * Last-owner invariant is frontend-only (`frontend/src/utils/organizations.js`);
@@ -223,6 +225,10 @@ Record decisions here as they are made, newest first.
 
 Newest first.
 
+* **2026-11-03** — Enforced owner-only granting of ownership
+  (`add_member`, `update_member`) and blocked demotion of an existing owner in
+  `update_member`, so the dashboard's non-reversible promotion is true at the
+  API.
 * **2026-11-03** — Invitations now default to `member` (not `owner`); added
   migration `060_invitation_default_member_role.sql`. Dashboard lets owners
   promote a user to owner, stated as permanent/non-reversible; promotion is

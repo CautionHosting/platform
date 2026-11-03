@@ -1189,6 +1189,9 @@ pub enum AddMemberError {
     #[error("you do not have permission to manage this organization [{location}]")]
     NotManager { location: Location },
 
+    #[error("only an owner can grant ownership [{location}]")]
+    NotOwner { location: Location },
+
     #[error("failed to check existing organization membership [{location}]")]
     HasOrgCheck {
         #[location]
@@ -1216,6 +1219,9 @@ impl IntoResponse for AddMemberError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
             AddMemberError::NotManager { .. } => (StatusCode::FORBIDDEN, "forbidden"),
+            AddMemberError::NotOwner { .. } => {
+                (StatusCode::FORBIDDEN, "only an owner can grant ownership")
+            }
             AddMemberError::HasOrgCheck { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
@@ -1241,6 +1247,13 @@ pub async fn add_member(
 
     if !can_manage_org(&role) {
         return Err(AddMemberError::NotManager {
+            location: std::panic::Location::caller(),
+        });
+    }
+
+    // Only an owner may grant ownership, whichever path adds the member.
+    if payload.role == "owner" && !is_owner(&role) {
+        return Err(AddMemberError::NotOwner {
             location: std::panic::Location::caller(),
         });
     }
@@ -1292,6 +1305,23 @@ pub enum UpdateMemberError {
     #[error("you do not have permission to manage this organization [{location}]")]
     NotManager { location: Location },
 
+    #[error("only an owner can grant ownership [{location}]")]
+    NotOwner { location: Location },
+
+    #[error("owners cannot be demoted [{location}]")]
+    CannotDemoteOwner { location: Location },
+
+    #[error("failed to look up organization member [{location}]")]
+    MemberQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("organization member not found [{location}]")]
+    MemberNotFound { location: Location },
+
     #[error("failed to update organization member [{location}]")]
     Update {
         #[location]
@@ -1308,6 +1338,16 @@ impl IntoResponse for UpdateMemberError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
             UpdateMemberError::NotManager { .. } => (StatusCode::FORBIDDEN, "forbidden"),
+            UpdateMemberError::NotOwner { .. } => {
+                (StatusCode::FORBIDDEN, "only an owner can grant ownership")
+            }
+            UpdateMemberError::CannotDemoteOwner { .. } => {
+                (StatusCode::CONFLICT, "owners cannot be demoted")
+            }
+            UpdateMemberError::MemberQuery { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            UpdateMemberError::MemberNotFound { .. } => (StatusCode::NOT_FOUND, "member not found"),
             UpdateMemberError::Update { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
@@ -1331,6 +1371,37 @@ pub async fn update_member(
 
     if !can_manage_org(&role) {
         return Err(UpdateMemberError::NotManager {
+            location: std::panic::Location::caller(),
+        });
+    }
+
+    // Ownership is the one role only an owner may hand out.
+    if payload.role == "owner" && !is_owner(&role) {
+        return Err(UpdateMemberError::NotOwner {
+            location: std::panic::Location::caller(),
+        });
+    }
+
+    // Promotion is one-way: an owner can never be demoted, so the dashboard's
+    // "cannot be undone" promise holds at the API too.
+    let current_role: Option<(String,)> = sqlx::query_as(
+        "SELECT role::text FROM organization_members
+         WHERE organization_id = $1 AND user_id = $2",
+    )
+    .bind(org_id)
+    .bind(member_user_id)
+    .fetch_optional(&state.db)
+    .await
+    .with_context(Ctx::member_query())?;
+
+    let Some((current_role,)) = current_role else {
+        return Err(UpdateMemberError::MemberNotFound {
+            location: std::panic::Location::caller(),
+        });
+    };
+
+    if current_role == "owner" && payload.role != "owner" {
+        return Err(UpdateMemberError::CannotDemoteOwner {
             location: std::panic::Location::caller(),
         });
     }
