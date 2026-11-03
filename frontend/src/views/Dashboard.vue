@@ -2772,8 +2772,9 @@ export default {
     const ruleParamValues = ref({});
     const ruleParamNames = computed(() => pathParameterNames(ruleForm.value.path));
 
-    // Per-member role assignments, cached per user so re-expanding does not
-    // refetch (and does not flash the loading state).
+    // Per-member role assignments, kept per user so a refetch on expand never
+    // blanks the panel (the loading state shows only before a member's first
+    // load). The fetch still runs every time the panel is opened.
     const expandedMemberRoles = ref(null);
     const memberRolesByUser = ref({});
     const memberRolesError = ref("");
@@ -3415,9 +3416,8 @@ export default {
       if (roles.value.length === 0) {
         await loadRoles();
       }
-      if (!Object.prototype.hasOwnProperty.call(memberRolesByUser.value, member.user_id)) {
-        await loadMemberRoles(member.user_id);
-      }
+      // Always refresh; the cached rows stay visible, so there is no flicker.
+      await loadMemberRoles(member.user_id);
     };
 
     const assignRole = async (member) => {
