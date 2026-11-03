@@ -193,18 +193,88 @@ regardless of role: any plain member can currently perform these operations.
 
 ## Target model
 
-_To be defined. Placeholder for the owners-vs-users design._
+RBAC adds roles to non-owner members. `owner` stays god-mode and is not an RBAC
+role; `member` stays the baseline membership (a member with no roles can do
+nothing beyond the exempt routes once enforcement is on).
 
-Open sub-questions feeding this section:
+### Proposed data model (open, not decided)
 
-* Is `owner` a distinct membership kind, or a role like any other with all
-  operations attached?
-* Is `member` the only user role, or will RBAC add more roles alongside
-  `owner`?
-* Where is authorization enforced: a router layer, per-handler guards, or a
-  declarative operation catalogue?
-* Is a role a fixed enum (compile-time) or data-driven (DB rows)?
-* Can a user hold multiple roles, or exactly one?
+Route-based rules: a rule is `effect + method + path`, where `path` is the axum
+route template (e.g. `/resources/{id}/deployments`), not a regex.
+
+```sql
+CREATE TABLE rbac_roles (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    organization_id UUID REFERENCES organizations(id) ON DELETE CASCADE, -- NULL = built-in
+    name TEXT NOT NULL,
+    description TEXT,
+    is_builtin BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX rbac_roles_org_name ON rbac_roles (organization_id, name)
+    WHERE organization_id IS NOT NULL;
+CREATE UNIQUE INDEX rbac_roles_builtin_name ON rbac_roles (name)
+    WHERE organization_id IS NULL;
+
+CREATE TABLE rbac_role_rules (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    role_id UUID NOT NULL REFERENCES rbac_roles(id) ON DELETE CASCADE,
+    effect TEXT NOT NULL DEFAULT 'allow' CHECK (effect IN ('allow','deny')),
+    method TEXT NOT NULL CHECK (method IN
+        ('GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS','*')),
+    path TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (role_id, effect, method, path)
+);
+
+CREATE TABLE rbac_member_roles (
+    organization_id UUID NOT NULL,
+    user_id UUID NOT NULL,
+    role_id UUID NOT NULL REFERENCES rbac_roles(id) ON DELETE CASCADE,
+    granted_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (organization_id, user_id, role_id),
+    FOREIGN KEY (organization_id, user_id)
+        REFERENCES organization_members (organization_id, user_id) ON DELETE CASCADE
+);
+```
+
+The composite FK guarantees a role is only assigned to an actual member.
+
+### Proposed enforcement
+
+* A middleware after auth + onboarding on the organization-scoped route group.
+* Read `Method` and `axum::extract::MatchedPath` (available by default in axum
+  0.8) from request extensions. `MatchedPath` is the route template, so rules
+  match structurally and path parameters never need parsing.
+* Owners short-circuit to allow. Everyone else: deny if any matching `deny`
+  rule exists, else allow if any matching `allow` rule exists, else `403`
+  (deny by default, fail closed). `method = '*'` matches any method.
+* Exempt routes bypass RBAC: public (`/health`, `.well-known`, onboarding
+  verify), self (`/users/me`, `/user/status`, `/legal/accept`,
+  `/onboarding/send-verification`), organization bootstrap (`GET/POST
+  /organizations`), and all internal service routes.
+* Path matching starts as exact route-template equality; a trailing `/*`
+  wildcard could be added later.
+
+### Open decisions
+
+* Role scope: per-organization, global built-in, or both (proposal: both).
+* Roles per member: many (join table) vs exactly one (proposal: many).
+* Deny rules: support from the start vs allow-only (proposal: allow + deny,
+  deny-wins).
+* Default-deny rollout: members can currently do everything, so enforcement
+  breaks them. Proposal: seed a built-in baseline role matching today's member
+  permissions and assign it, plus a feature flag while populating, then enforce.
+* Authoring/drift: rules reference route templates, so we need a canonical
+  route list or a startup coverage test that fails when a guarded route has no
+  rule and is not exempt.
+* Objective scope: route-level gating cannot express per-object ownership; the
+  existing `organization_members` SQL joins remain the tenancy boundary within
+  an organization.
+* Role management endpoints are owner-only (`is_owner`), never RBAC-gated, to
+  avoid a bootstrap cycle.
 
 ## Decision log
 
