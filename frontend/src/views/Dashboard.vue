@@ -982,7 +982,7 @@ make build-cli
         </div>
       </div>
 
-      <form v-if="roleEditorOpen" class="inline-form-panel" @submit.prevent="saveRole">
+      <form v-if="roleEditorOpen" class="inline-form-panel rbac-role-editor" @submit.prevent="saveRole">
         <h3 class="inline-form-panel-title">{{ roleEditorId ? "Edit role" : "New role" }}</h3>
         <div class="form-group">
           <label class="form-label" for="roleName">Name</label>
@@ -7923,19 +7923,22 @@ export default {
 
 .rbac-rule-form {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 12px;
-  align-items: flex-end;
+  align-items: stretch;
+}
+
+.rbac-role-editor .email-input {
+  width: 100%;
 }
 
 .rbac-rule-form .form-group {
   margin: 0;
-  min-width: 120px;
+  min-width: 0;
 }
 
 .rbac-rule-path {
-  flex: 1;
-  min-width: 220px;
+  min-width: 0;
 }
 
 .rbac-route-filter {
