@@ -197,7 +197,10 @@ RBAC adds roles to non-owner members. `owner` stays god-mode and is not an RBAC
 role; `member` stays the baseline membership (a member with no roles can do
 nothing beyond the exempt routes once enforcement is on).
 
-### Proposed data model (open, not decided)
+### Data model
+
+Implemented in `migrations/063_rbac_tables.sql` (applied and verified live on
+PostgreSQL 18.6, idempotent).
 
 Route-based rules: a rule is `effect + method + path`, where `path` is the axum
 route template (e.g. `/resources/{id}/deployments`), not a regex.
@@ -274,12 +277,13 @@ built-ins).
 
 ### Open decisions
 
-* Can a member hold multiple roles, or exactly one?
+* (none)
 
 ## Decision log
 
 Record decisions here as they are made, newest first.
 
+* **2026-11-03** — A member may hold any number of roles (join table).
 * **2026-11-03** — Allow + deny with priorities: among matching rules the
   lowest priority (closest to 0) wins; equal-priority conflicts resolve to deny
   (fail closed); no match denies. Priority is non-negative, default 0.
@@ -331,6 +335,11 @@ Record decisions here as they are made, newest first.
 
 Newest first.
 
+* **2026-11-03** — Added `migrations/063_rbac_tables.sql`: `rbac_roles`,
+  `rbac_role_rules`, `rbac_member_roles`. Verified live on PostgreSQL 18.6:
+  applies and re-runs cleanly; unique/cross-org/non-member/effect/method/
+  priority/objects/path constraints reject bad input; role deletion cascades to
+  rules and assignments; `updated_at` trigger fires.
 * **2026-11-03** — Removed the `viewer` role (it never granted anything
   different from `member`): `UserRole` and the enum are now `owner`/`member`,
   with `062_remove_viewer_role.sql` reassigning viewers to `member`. Verified
