@@ -945,7 +945,7 @@ make build-cli
       </div>
 
       <div v-if="rolesError" class="message message--error">{{ rolesError }}</div>
-      <div v-if="loadingRoles" class="list-item-empty">Loading roles...</div>
+      <div v-if="!rolesLoaded" class="list-item-empty">Loading roles...</div>
       <div v-else-if="roles.length === 0" class="list-item-empty">No roles yet.</div>
       <div v-else class="passkey-list">
         <div v-for="role in roles" :key="role.id" class="passkey-item">
@@ -2757,6 +2757,7 @@ export default {
     // RBAC roles state
     const roles = ref([]);
     const loadingRoles = ref(false);
+    const rolesLoaded = ref(false);
     const rolesError = ref("");
     const roleEditorOpen = ref(false);
     const roleEditorId = ref(null);
@@ -3188,6 +3189,7 @@ export default {
         rolesError.value = err.message || "Failed to load roles";
       } finally {
         loadingRoles.value = false;
+        rolesLoaded.value = true;
       }
     };
 
@@ -6132,6 +6134,7 @@ export default {
       removeMember,
       roles,
       loadingRoles,
+      rolesLoaded,
       rolesError,
       roleEditorOpen,
       roleEditorId,
