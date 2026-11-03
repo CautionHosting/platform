@@ -1021,7 +1021,7 @@ make build-cli
                   <td class="rbac-path">{{ rule.path }}</td>
                   <td class="rbac-objects">
                     <button
-                      v-if="rule.objects"
+                      v-if="rule.objects && !objectsAreWildcard(rule.objects)"
                       type="button"
                       class="rbac-objects-toggle"
                       :aria-expanded="isRuleObjectsExpanded(index) ? 'true' : 'false'"
@@ -1045,6 +1045,7 @@ make build-cli
                       </svg>
                       {{ isRuleObjectsExpanded(index) ? "Hide" : "Show" }}
                     </button>
+                    <template v-else-if="rule.objects">*</template>
                     <template v-else>—</template>
                   </td>
                   <td>{{ rule.priority }}</td>
@@ -2350,6 +2351,7 @@ import {
 } from "../utils/organizations.js";
 import {
   RBAC_METHODS,
+  objectsAreWildcard,
   objectsFromParamInputs,
   pathParameterNames,
   validateRule,
@@ -6297,6 +6299,7 @@ export default {
       loadRouteCatalog,
       useRoute,
       RBAC_METHODS,
+      objectsAreWildcard,
       startCreateRole,
       startEditRole,
       closeRoleEditor,

@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  objectsAreWildcard,
   objectsFromParamInputs,
   paramInputsFromObjects,
   pathParameterNames,
@@ -92,6 +93,16 @@ test('objects are built from parameter inputs', () => {
     objectsFromParamInputs('/organizations/{id}/members/{user_id}', { id: '*', user_id: 'u1' }),
     { id: ['*'], user_id: ['u1'] },
   )
+})
+
+test('wildcard objects need no expansion', () => {
+  assert.equal(objectsAreWildcard({ id: ['*'] }), true)
+  assert.equal(objectsAreWildcard({ id: ['*'], user_id: ['*'] }), true)
+  assert.equal(objectsAreWildcard({ id: ['abc'] }), false)
+  assert.equal(objectsAreWildcard({ id: ['*', 'abc'] }), false)
+  assert.equal(objectsAreWildcard({ id: [] }), false)
+  assert.equal(objectsAreWildcard({}), false)
+  assert.equal(objectsAreWildcard(null), false)
 })
 
 test('parameter inputs round-trip through objects', () => {

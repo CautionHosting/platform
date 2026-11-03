@@ -76,6 +76,20 @@ export function validateRule({ effect, method, path, objects, priority } = {}) {
 }
 
 /**
+ * Whether an `objects` map constrains nothing: present, non-empty, and every
+ * parameter's list is only wildcards (`["*"]`). Such a rule needs no detail
+ * expansion.
+ */
+export function objectsAreWildcard(objects) {
+  if (objects == null || typeof objects !== 'object' || Array.isArray(objects)) return false
+  const values = Object.values(objects)
+  if (values.length === 0) return false
+  return values.every(
+    (allowed) => Array.isArray(allowed) && allowed.length > 0 && allowed.every((v) => v === '*'),
+  )
+}
+
+/**
  * Builds a rule's `objects` from per-parameter inputs. A blank input means
  * "any" (`["*"]`); otherwise the value is a comma-separated list.
  */
