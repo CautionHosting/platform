@@ -143,13 +143,6 @@ macro_rules! ensure_member {
     }};
 }
 
-fn is_unique_violation(error: &sqlx::Error) -> bool {
-    error
-        .as_database_error()
-        .map(|database_error| database_error.is_unique_violation())
-        .unwrap_or(false)
-}
-
 async fn role_in_org(db: &sqlx::PgPool, org_id: Uuid, role_id: Uuid) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS (SELECT 1 FROM rbac_roles WHERE id = $1 AND organization_id = $2)",
@@ -389,6 +382,7 @@ pub(crate) async fn create_role(
     Path(org_id): Path<Uuid>,
     Json(payload): Json<CreateRoleRequest>,
 ) -> Result<(StatusCode, Json<RbacRole>), CreateRoleError> {
+    use CreateRoleErrorCtx as Ctx;
     ensure_member!(state, auth.user_id, org_id, CreateRoleError);
 
     let name = payload.name.trim();
@@ -401,23 +395,17 @@ pub(crate) async fn create_role(
     let role = sqlx::query_as::<_, RbacRole>(
         "INSERT INTO rbac_roles (organization_id, name, description)
          VALUES ($1, $2, $3)
+         ON CONFLICT (organization_id, name) DO NOTHING
          RETURNING id, organization_id, name, description, created_at, updated_at",
     )
     .bind(org_id)
     .bind(name)
     .bind(payload.description.as_deref().map(str::trim))
-    .fetch_one(&state.db)
+    .fetch_optional(&state.db)
     .await
-    .map_err(|error| {
-        if is_unique_violation(&error) {
-            return CreateRoleError::NameConflict {
-                location: std::panic::Location::caller(),
-            };
-        }
-        CreateRoleError::Insert {
-            location: std::panic::Location::caller(),
-            source: Box::new(error),
-        }
+    .with_context(Ctx::insert())?
+    .ok_or_else(|| CreateRoleError::NameConflict {
+        location: std::panic::Location::caller(),
     })?;
 
     Ok((StatusCode::CREATED, Json(role)))
@@ -500,6 +488,14 @@ pub(crate) enum UpdateRoleError {
     #[error("a role with that name already exists [{location}]")]
     NameConflict { location: Location },
 
+    #[error("failed to check role name [{location}]")]
+    NameQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
     #[error("role not found [{location}]")]
     NotFound { location: Location },
 
@@ -521,6 +517,7 @@ impl_error_response!(UpdateRoleError {
         format!("role name must be 1-{MAX_ROLE_NAME_LEN} characters")
     ),
     UpdateRoleError::NameConflict { .. } => (StatusCode::CONFLICT, "role name already exists".to_string()),
+    UpdateRoleError::NameQuery { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()),
     UpdateRoleError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found".to_string()),
     UpdateRoleError::Update { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()),
 });
@@ -532,6 +529,7 @@ pub(crate) async fn update_role(
     Path((org_id, role_id)): Path<(Uuid, Uuid)>,
     Json(payload): Json<UpdateRoleRequest>,
 ) -> Result<Json<RbacRole>, UpdateRoleError> {
+    use UpdateRoleErrorCtx as Ctx;
     ensure_member!(state, auth.user_id, org_id, UpdateRoleError);
 
     if payload.name.is_none() && payload.description.is_none() {
@@ -543,6 +541,26 @@ pub(crate) async fn update_role(
         let name = name.trim();
         if name.is_empty() || name.len() > MAX_ROLE_NAME_LEN {
             return Err(UpdateRoleError::InvalidName {
+                location: std::panic::Location::caller(),
+            });
+        }
+    }
+
+    // A rename must not collide with another role's name. Checking first keeps
+    // the update itself context-only (PostgreSQL UPDATE has no ON CONFLICT).
+    if let Some(name) = payload.name.as_deref().map(str::trim) {
+        let taken: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM rbac_roles
+                            WHERE organization_id = $1 AND name = $2 AND id <> $3)",
+        )
+        .bind(org_id)
+        .bind(name)
+        .bind(role_id)
+        .fetch_one(&state.db)
+        .await
+        .with_context(Ctx::name_query())?;
+        if taken {
+            return Err(UpdateRoleError::NameConflict {
                 location: std::panic::Location::caller(),
             });
         }
@@ -562,17 +580,7 @@ pub(crate) async fn update_role(
     .bind(payload.description.as_deref().map(str::trim))
     .fetch_optional(&state.db)
     .await
-    .map_err(|error| {
-        if is_unique_violation(&error) {
-            return UpdateRoleError::NameConflict {
-                location: std::panic::Location::caller(),
-            };
-        }
-        UpdateRoleError::Update {
-            location: std::panic::Location::caller(),
-            source: Box::new(error),
-        }
-    })?
+    .with_context(Ctx::update())?
     .ok_or_else(|| UpdateRoleError::NotFound {
         location: std::panic::Location::caller(),
     })?;
@@ -1202,24 +1210,18 @@ pub(crate) async fn attach_role(
     let assignment = sqlx::query_as::<_, RbacMemberRole>(
         "INSERT INTO rbac_member_roles (organization_id, user_id, role_id, granted_by)
          VALUES ($1, $2, $3, $4)
+         ON CONFLICT (organization_id, user_id, role_id) DO NOTHING
          RETURNING organization_id, user_id, role_id, granted_by, created_at, updated_at",
     )
     .bind(org_id)
     .bind(member_id)
     .bind(payload.role_id)
     .bind(auth.user_id)
-    .fetch_one(&state.db)
+    .fetch_optional(&state.db)
     .await
-    .map_err(|error| {
-        if is_unique_violation(&error) {
-            return AttachRoleError::AlreadyAttached {
-                location: std::panic::Location::caller(),
-            };
-        }
-        AttachRoleError::Insert {
-            location: std::panic::Location::caller(),
-            source: Box::new(error),
-        }
+    .with_context(Ctx::insert())?
+    .ok_or_else(|| AttachRoleError::AlreadyAttached {
+        location: std::panic::Location::caller(),
     })?;
 
     Ok((StatusCode::CREATED, Json(assignment)))

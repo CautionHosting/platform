@@ -363,10 +363,12 @@ Record decisions here as they are made, newest first.
 
 Newest first.
 
-* **2026-11-03** — `create_rule`/`update_rule` no longer branch on unique
-  violations: the insert uses `ON CONFLICT ... DO NOTHING` and the update
-  guards with `NOT EXISTS`, so both report a conflict as "no row returned" and
-  the queries use `with_context`. Verified live.
+* **2026-11-03** — The RBAC writes no longer branch on unique violations.
+  Inserts (`create_role`, `create_rule`, `attach_role`) use
+  `ON CONFLICT ... DO NOTHING`, and updates (`update_role`, `update_rule`) check
+  for a collision first (`update_rule` via `NOT EXISTS`, `update_role` via an
+  existence check), so every query uses `with_context` and a conflict is a
+  no-row result. Verified live on PostgreSQL 18.6.
 * **2026-11-03** — Replaced the stringly rule validation error with a typed
   `RuleValidationError` (one variant per failure, formatted `#[error]`
   messages), carried by the `InvalidRule` variants as a boxed source; tests
