@@ -276,13 +276,16 @@ The composite FK guarantees a role is only assigned to an actual member.
 * Default-deny rollout: members can currently do everything, so enforcement
   breaks them. Proposal: seed a built-in baseline role matching today's member
   permissions and assign it, plus a feature flag while populating, then enforce.
-* Role management endpoints are owner-only (`is_owner`), never RBAC-gated, to
-  avoid a bootstrap cycle.
 
 ## Decision log
 
 Record decisions here as they are made, newest first.
 
+* **2026-11-03** — Role/rule management routes are ordinary RBAC-gated routes,
+  so a rule may grant them; no separate router group. Escalation is bounded:
+  owner-only checks (`is_owner`) still guard granting ownership, demoting or
+  removing an owner, and deleting the organization. Assignments record
+  `granted_by` for attribution.
 * **2026-11-03** — Every parameter in a rule's path requires an `objects`
   entry; non-object params such as an org id use `["*"]` uniformly.
 * **2026-11-03** — Object scoping is admission-only. Rules for parameterized
