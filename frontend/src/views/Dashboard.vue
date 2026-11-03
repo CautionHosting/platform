@@ -831,41 +831,93 @@ make build-cli
         No users found for this organization.
       </div>
       <div v-else class="passkey-list">
-        <div v-for="member in organizationMembers" :key="member.id" class="passkey-item">
-          <div class="passkey-info">
-            <div class="passkey-header">
-              <div>
-                <div class="passkey-title">{{ member.email || member.username || member.user_id }}</div>
+        <div v-for="member in organizationMembers" :key="member.id" class="rbac-member">
+          <div class="passkey-item">
+            <div class="passkey-info">
+              <div class="passkey-header">
+                <div>
+                  <div class="passkey-title">{{ member.email || member.username || member.user_id }}</div>
+                </div>
+                <div class="passkey-badges">
+                  <span class="passkey-badge">{{ member.role }}</span>
+                </div>
               </div>
-              <div class="passkey-badges">
-                <span class="passkey-badge">{{ member.role }}</span>
+              <div class="passkey-meta">
+                <span v-if="member.username">{{ member.username }}</span>
+                <span>Joined {{ formatDate(member.joined_at) }}</span>
               </div>
             </div>
-            <div class="passkey-meta">
-              <span v-if="member.username">{{ member.username }}</span>
-              <span>Joined {{ formatDate(member.joined_at) }}</span>
+            <div class="member-row-actions">
+              <button
+                v-if="isOwner"
+                type="button"
+                class="btn-secondary"
+                @click="toggleMemberRoles(member)"
+              >
+                {{ expandedMemberRoles === member.user_id ? "Hide roles" : "Roles" }}
+              </button>
+              <button
+                v-if="canPromoteMember(member)"
+                type="button"
+                class="btn-secondary"
+                :disabled="promotingMember === member.user_id"
+                title="Promoting to owner is permanent and cannot be undone."
+                @click="promoteMember(member)"
+              >
+                {{ promotingMember === member.user_id ? "Promoting..." : "Make owner" }}
+              </button>
+              <button
+                v-if="canRemoveMember(member)"
+                type="button"
+                class="btn-danger"
+                :disabled="removingMember === member.user_id"
+                @click="removeMember(member)"
+              >
+                {{ removingMember === member.user_id ? "Removing..." : "Remove" }}
+              </button>
             </div>
           </div>
-          <div class="member-row-actions">
-            <button
-              v-if="canPromoteMember(member)"
-              type="button"
-              class="btn-secondary"
-              :disabled="promotingMember === member.user_id"
-              title="Promoting to owner is permanent and cannot be undone."
-              @click="promoteMember(member)"
-            >
-              {{ promotingMember === member.user_id ? "Promoting..." : "Make owner" }}
-            </button>
-            <button
-              v-if="canRemoveMember(member)"
-              type="button"
-              class="btn-danger"
-              :disabled="removingMember === member.user_id"
-              @click="removeMember(member)"
-            >
-              {{ removingMember === member.user_id ? "Removing..." : "Remove" }}
-            </button>
+          <div v-if="expandedMemberRoles === member.user_id" class="rbac-member-roles">
+            <div v-if="loadingMemberRoles" class="list-item-empty">Loading roles...</div>
+            <template v-else>
+              <div v-if="memberRoles.length === 0" class="list-item-empty">
+                No roles assigned.
+              </div>
+              <div v-else class="rbac-chip-row">
+                <span
+                  v-for="assignment in memberRoles"
+                  :key="assignment.role_id"
+                  class="rbac-chip"
+                >
+                  {{ roleNameFor(assignment.role_id) }}
+                  <button
+                    type="button"
+                    class="rbac-chip-remove"
+                    :disabled="savingAssignment"
+                    @click="unassignRole(member, assignment.role_id)"
+                  >
+                    ×
+                  </button>
+                </span>
+              </div>
+              <div class="rbac-assign-row">
+                <select v-model="roleToAssign" class="form-input">
+                  <option value="">Select a role...</option>
+                  <option v-for="role in assignableRoles" :key="role.id" :value="role.id">
+                    {{ role.name }}
+                  </option>
+                </select>
+                <button
+                  type="button"
+                  class="btn-secondary"
+                  :disabled="!roleToAssign || savingAssignment"
+                  @click="assignRole(member)"
+                >
+                  Add role
+                </button>
+              </div>
+              <div v-if="memberRolesError" class="message message--error">{{ memberRolesError }}</div>
+            </template>
           </div>
         </div>
       </div>
@@ -2718,6 +2770,19 @@ export default {
     const ruleForm = ref({ effect: "allow", method: "GET", path: "", priority: 0 });
     const ruleParamValues = ref({});
     const ruleParamNames = computed(() => pathParameterNames(ruleForm.value.path));
+
+    // Per-member role assignments
+    const expandedMemberRoles = ref(null);
+    const memberRoles = ref([]);
+    const loadingMemberRoles = ref(false);
+    const memberRolesError = ref("");
+    const roleToAssign = ref("");
+    const savingAssignment = ref(false);
+    const assignableRoles = computed(() =>
+      roles.value.filter(
+        (role) => !memberRoles.value.some((assignment) => assignment.role_id === role.id),
+      ),
+    );
     const inviteEmail = ref("");
     const invitingUser = ref(false);
     const inviteMessage = ref("");
@@ -3299,6 +3364,102 @@ export default {
         showToast(rolesError.value, "error");
       } finally {
         deletingRoleId.value = null;
+      }
+    };
+
+    const roleNameFor = (roleId) =>
+      roles.value.find((role) => role.id === roleId)?.name || roleId;
+
+    const loadMemberRoles = async (userId) => {
+      loadingMemberRoles.value = true;
+      memberRolesError.value = "";
+      try {
+        const orgId = await ensureCurrentOrgId();
+        if (!orgId) {
+          memberRoles.value = [];
+          return;
+        }
+        const response = await authFetch(
+          `/api/organizations/${orgId}/members/${userId}/roles`,
+          { cache: "no-store" },
+        );
+        if (!response.ok) {
+          throw new Error(await readResponseError(response, "Failed to load member roles"));
+        }
+        memberRoles.value = await response.json();
+      } catch (err) {
+        memberRolesError.value = err.message || "Failed to load member roles";
+      } finally {
+        loadingMemberRoles.value = false;
+      }
+    };
+
+    const toggleMemberRoles = async (member) => {
+      memberRolesError.value = "";
+      if (expandedMemberRoles.value === member.user_id) {
+        expandedMemberRoles.value = null;
+        return;
+      }
+      expandedMemberRoles.value = member.user_id;
+      roleToAssign.value = "";
+      memberRoles.value = [];
+      if (roles.value.length === 0) {
+        await loadRoles();
+      }
+      await loadMemberRoles(member.user_id);
+    };
+
+    const assignRole = async (member) => {
+      if (!roleToAssign.value) return;
+      savingAssignment.value = true;
+      memberRolesError.value = "";
+      try {
+        const orgId = await ensureCurrentOrgId();
+        if (!orgId) {
+          throw new Error("No organization found.");
+        }
+        const response = await authFetch(
+          `/api/organizations/${orgId}/members/${member.user_id}/roles`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ role_id: roleToAssign.value }),
+          },
+        );
+        if (!response.ok) {
+          throw new Error(await readResponseError(response, "Failed to assign role"));
+        }
+        roleToAssign.value = "";
+        await loadMemberRoles(member.user_id);
+        showToast("Role assigned");
+      } catch (err) {
+        memberRolesError.value = err.message || "Failed to assign role";
+      } finally {
+        savingAssignment.value = false;
+      }
+    };
+
+    const unassignRole = async (member, roleId) => {
+      savingAssignment.value = true;
+      memberRolesError.value = "";
+      try {
+        const orgId = await ensureCurrentOrgId();
+        if (!orgId) {
+          throw new Error("No organization found.");
+        }
+        const response = await authFetch(
+          `/api/organizations/${orgId}/members/${member.user_id}/roles/${roleId}`,
+          { method: "DELETE" },
+        );
+        if (!response.ok) {
+          throw new Error(await readResponseError(response, "Failed to remove role"));
+        }
+        await loadMemberRoles(member.user_id);
+        showToast("Role removed");
+      } catch (err) {
+        memberRolesError.value = err.message || "Failed to remove role";
+      } finally {
+        savingAssignment.value = false;
       }
     };
 
@@ -5990,6 +6151,17 @@ export default {
       removeDraftRule,
       saveRole,
       deleteRole,
+      expandedMemberRoles,
+      memberRoles,
+      loadingMemberRoles,
+      memberRolesError,
+      roleToAssign,
+      savingAssignment,
+      assignableRoles,
+      roleNameFor,
+      toggleMemberRoles,
+      assignRole,
+      unassignRole,
       inviteEmail,
       invitingUser,
       inviteMessage,
@@ -7670,6 +7842,55 @@ export default {
 .rbac-rule-path {
   flex: 1;
   min-width: 220px;
+}
+
+.rbac-member-roles {
+  margin-top: 8px;
+  padding: 12px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--theme-surface-subtle);
+  border: 1px solid var(--theme-border);
+  border-radius: 10px;
+}
+
+.rbac-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.rbac-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--theme-surface-muted);
+  color: var(--theme-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.rbac-chip-remove {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.rbac-assign-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rbac-assign-row .form-input {
+  max-width: 260px;
 }
 
 .passkey-info {

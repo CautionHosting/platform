@@ -370,6 +370,10 @@ Record decisions here as they are made, newest first.
 
 Newest first.
 
+* **2026-11-03** — Frontend: member role assignment in the Users tab (owner-only
+  `Roles` toggle per member: chips to detach, dropdown to attach). Verified with
+  the real toolchain: `npm install --allow-git=all`, `npm test` (181 pass), and
+  `npm run build` (vite, 100 modules).
 * **2026-11-03** — Frontend: added a Roles tab (`Dashboard.vue`) with a role
   list and a create/edit editor (seeds `GET /users/me`), a draft rules table and
   rule form with per-parameter object inputs, and delete. Validation is mirrored
