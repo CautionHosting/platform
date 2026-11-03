@@ -256,7 +256,7 @@ fn validate_rule(
             method: method.to_string(),
         });
     }
-    if !path.starts_with('/') || path.len() < 2 {
+    if path.is_empty() || (path != "*" && !path.starts_with('/')) {
         return Err(RuleValidationError::InvalidPath {
             path: path.to_string(),
         });

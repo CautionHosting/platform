@@ -98,7 +98,7 @@ fn rule_matches(
     if rule.method != "*" && rule.method != method {
         return false;
     }
-    if rule.path != matched_path {
+    if !path_matches(&rule.path, matched_path) {
         return false;
     }
     match &rule.objects {
@@ -109,6 +109,19 @@ fn rule_matches(
         // A non-object `objects` cannot be satisfied; fail closed.
         Some(_) => false,
     }
+}
+
+/// Matches a rule path against a request's route template. `*` matches any
+/// route; a path ending in `*` matches any route with that prefix (for example
+/// `/resources/*`); anything else is an exact template match.
+fn path_matches(rule_path: &str, matched_path: &str) -> bool {
+    if rule_path == "*" {
+        return true;
+    }
+    if let Some(prefix) = rule_path.strip_suffix('*') {
+        return matched_path.starts_with(prefix);
+    }
+    rule_path == matched_path
 }
 
 fn param_value<'a>(params: &'a [(String, String)], key: &str) -> Option<&'a str> {
@@ -384,6 +397,23 @@ mod tests {
         assert_eq!(
             decide(&Method::GET, "/billing/usage", &[], &[allow, deny]),
             Decision::Deny
+        );
+    }
+
+    #[test]
+    fn path_matching_supports_wildcards() {
+        assert!(path_matches("*", "/resources/{id}"));
+        assert!(path_matches("/resources/*", "/resources/{id}"));
+        assert!(path_matches("/resources/*", "/resources/{id}/deployments"));
+        assert!(!path_matches("/resources/*", "/resources"));
+        assert!(!path_matches("/billing/*", "/resources/{id}"));
+        assert!(path_matches("/users/me", "/users/me"));
+        assert!(!path_matches("/users/me", "/users"));
+        // A catch-all rule admits any route.
+        let wildcard = rule(RuleEffect::Allow, "*", "*");
+        assert_eq!(
+            decide(&Method::DELETE, "/organizations/{id}", &[], &[wildcard]),
+            Decision::Allow
         );
     }
 

@@ -27,6 +27,14 @@ test('a valid parameterless rule is accepted', () => {
   )
 })
 
+test('path matching accepts wildcards and root', () => {
+  assert.equal(validateRule({ effect: 'allow', method: '*', path: '*', priority: 0 }), null)
+  assert.equal(validateRule({ effect: 'allow', method: 'GET', path: '/resources/*', priority: 0 }), null)
+  assert.equal(validateRule({ effect: 'allow', method: 'GET', path: '/', priority: 0 }), null)
+  assert.match(validateRule({ effect: 'allow', method: 'GET', path: '', priority: 0 }), /path/)
+  assert.match(validateRule({ effect: 'allow', method: 'GET', path: 'resources', priority: 0 }), /path/)
+})
+
 test('rule validation mirrors the API', () => {
   assert.match(validateRule({ effect: 'maybe', method: 'GET', path: '/x', priority: 0 }), /effect/)
   assert.match(validateRule({ effect: 'allow', method: 'FETCH', path: '/x', priority: 0 }), /method/)

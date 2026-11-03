@@ -42,8 +42,8 @@ export function pathParameterNames(path) {
 export function validateRule({ effect, method, path, objects, priority } = {}) {
   if (effect !== 'allow' && effect !== 'deny') return "effect must be 'allow' or 'deny'"
   if (!RBAC_METHODS.includes(method)) return 'invalid method'
-  if (typeof path !== 'string' || !path.startsWith('/') || path.length < 2) {
-    return 'path must be an absolute route template'
+  if (typeof path !== 'string' || path.length === 0 || (path !== '*' && !path.startsWith('/'))) {
+    return 'path must be an absolute route template or *'
   }
   const numericPriority = Number(priority)
   if (!Number.isInteger(numericPriority) || numericPriority < 0) {

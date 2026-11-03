@@ -1050,7 +1050,7 @@ make build-cli
             <input
               v-model="ruleForm.path"
               class="form-input"
-              placeholder="/resources/{id}"
+              placeholder="* or /resources/{id}"
             />
           </div>
           <div class="form-group">

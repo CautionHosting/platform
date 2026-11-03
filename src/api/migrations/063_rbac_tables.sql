@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS rbac_role_rules (
     CONSTRAINT rbac_role_rules_effect_check CHECK (effect IN ('allow', 'deny')),
     CONSTRAINT rbac_role_rules_method_check CHECK (method IN
         ('GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS', '*')),
-    CONSTRAINT rbac_role_rules_path_check CHECK (path LIKE '/%'),
+    CONSTRAINT rbac_role_rules_path_check CHECK (path = '*' OR path = '/' OR path LIKE '/%'),
     CONSTRAINT rbac_role_rules_objects_check CHECK (
         objects IS NULL OR jsonb_typeof(objects) = 'object'),
     CONSTRAINT rbac_role_rules_priority_check CHECK (priority >= 0),
@@ -50,6 +50,23 @@ CREATE TABLE IF NOT EXISTS rbac_role_rules (
 -- Upgrades a table created before the column existed.
 ALTER TABLE rbac_role_rules
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+-- Allow the wildcard path `*` (and the bare root `/`) alongside route
+-- templates. Drop and re-add so the constraint is upgraded on existing tables.
+DO
+$$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'rbac_role_rules_path_check'
+          AND conrelid = 'rbac_role_rules'::regclass
+    ) THEN
+        ALTER TABLE rbac_role_rules DROP CONSTRAINT rbac_role_rules_path_check;
+    END IF;
+    ALTER TABLE rbac_role_rules ADD CONSTRAINT rbac_role_rules_path_check
+        CHECK (path = '*' OR path = '/' OR path LIKE '/%');
+END
+$$;
 
 CREATE INDEX IF NOT EXISTS idx_rbac_role_rules_role ON rbac_role_rules(role_id);
 

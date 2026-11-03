@@ -277,8 +277,10 @@ Implemented in `src/api/src/rbac.rs` and layered on the `resource_routes` group
   `axum::extract::RawPathParams` and admits only when each parameter matches
   its array (`["*"]` means any; values are arrays, a bare string never
   matches). No resource state is read and list responses are never filtered.
-* Path matching starts as exact route-template equality; a trailing `/*`
-  wildcard could be added later.
+* Path matching: exact route-template equality, plus `*` (matches any route)
+  and a trailing-`*` prefix wildcard (e.g. `/resources/*`). A single
+  `allow * on *` rule is a catch-all (a faux-owner). The DB `path` check accepts
+  `*` and `/` as well as `/`-prefixed templates.
 
 ### Management API
 
@@ -318,6 +320,8 @@ exactly those parameters with arrays of strings, and is omitted otherwise;
 
 Record decisions here as they are made, newest first.
 
+* **2026-11-03** — Rule paths support `*` (any route) and trailing-`*` prefixes
+  (`/resources/*`); the `rbac_role_rules.path` check accepts `*` and `/`.
 * **2026-11-03** — A member may hold any number of roles (join table).
 * **2026-11-03** — Allow + deny with priorities: among matching rules the
   lowest priority (closest to 0) wins; equal-priority conflicts resolve to deny
@@ -409,6 +413,9 @@ Backlog captured 2026-11-03. Grouped, roughly in priority order.
 
 Newest first.
 
+* **2026-11-03** — Added wildcard rule paths: `*` matches any route and a
+  trailing `*` is a prefix. Validation no longer rejects `/`. Verified live
+  (migration upgrade idempotent; `*`/`/` rules insert) and unit-tested.
 * **2026-11-03** — `/users/me` now returns `organization_id` and
   `organization_role`; the dashboard uses it for owner status instead of
   deriving it from the member list.
