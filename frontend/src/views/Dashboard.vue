@@ -1043,7 +1043,7 @@ make build-cli
                       >
                         <path d="m6 9 6 6 6-6" />
                       </svg>
-                      {{ JSON.stringify(rule.objects) }}
+                      {{ isRuleObjectsExpanded(index) ? "Hide" : "Show" }}
                     </button>
                     <template v-else>—</template>
                   </td>
