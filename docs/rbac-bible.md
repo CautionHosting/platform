@@ -274,10 +274,7 @@ built-ins).
 
 ### Open decisions
 
-* Roles per member: many (join table) vs exactly one (proposal: many).
-* Default-deny rollout: members can currently do everything, so enforcement
-  breaks them. Proposal: seed a built-in baseline role matching today's member
-  permissions and assign it, plus a feature flag while populating, then enforce.
+* Can a member hold multiple roles, or exactly one?
 
 ## Decision log
 
