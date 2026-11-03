@@ -5514,6 +5514,9 @@ export default {
         loadMembers();
         loadInvitations();
       } else if (newTab === "roles") {
+        // loadMembers also derives the caller's own role (isOwner), which the
+        // Roles tab needs before it can show the owner controls.
+        loadMembers();
         loadRoles();
       } else if (newTab === "credentials") {
         showAddCredentialForm.value = false;
@@ -5813,6 +5816,7 @@ export default {
         loadMembers();
         loadInvitations();
       } else if (activeTab.value === "roles") {
+        loadMembers();
         loadRoles();
       } else if (activeTab.value === "keys") {
         loadBundles();
@@ -5938,6 +5942,7 @@ export default {
           loadMembers();
           loadInvitations();
         } else if (activeTab.value === "roles") {
+          loadMembers();
           loadRoles();
         } else if (activeTab.value === "keys") {
           loadBundles();

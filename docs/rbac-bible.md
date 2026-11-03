@@ -409,6 +409,9 @@ Backlog captured 2026-11-03. Grouped, roughly in priority order.
 
 Newest first.
 
+* **2026-11-03** — Fix: the Roles tab showed no owner controls until the Users
+  tab was visited, because `isOwner` is derived from the membership that only
+  `loadMembers()` loaded. The Roles tab now loads it too.
 * **2026-11-03** — Frontend: member role assignment in the Users tab (owner-only
   `Roles` toggle per member: chips to detach, dropdown to attach). Verified with
   the real toolchain: `npm install --allow-git=all`, `npm test` (181 pass), and
