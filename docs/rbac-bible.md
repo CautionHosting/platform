@@ -288,12 +288,19 @@ and every handler also requires membership in the org in the path, so a rule
 scoped `["*"]` cannot cross tenants. Each handler owns its error type, with one
 variant per distinct failure branch.
 
-* `GET/POST /roles`
-* `GET/PATCH/DELETE /roles/{role_id}`
+* `GET/POST /roles` — POST body includes `rules`, applied in one transaction
+* `GET/PUT/DELETE /roles/{role_id}` — PUT is a full replacement (name,
+  description, and the complete rule set)
 * `GET/POST /roles/{role_id}/rules`
 * `GET/PATCH/DELETE /roles/{role_id}/rules/{rule_id}`
 * `GET/POST /members/{user_id}/roles`
 * `DELETE /members/{user_id}/roles/{role_id}`
+
+Role create/replace validates every rule in the payload (a typed
+`RuleValidationError` reported with the rule's index) and rejects duplicates
+within the set (same `(effect, method, path)` the unique constraint covers),
+then writes the role and its rules in one transaction. The per-rule endpoints
+remain for individual edits.
 
 Rule validation (in the handler, before insert/update) returns a typed
 `RuleValidationError` (one variant per failure, with formatted `#[error]`
@@ -363,6 +370,10 @@ Record decisions here as they are made, newest first.
 
 Newest first.
 
+* **2026-11-03** — Role create/replace now takes the whole role: `POST /roles`
+  and `PUT /roles/{role_id}` accept a `rules` array, validated together and
+  written in one transaction. Update switched from PATCH to PUT (full
+  replacement). Verified live: atomic create, replace, and rollback safety.
 * **2026-11-03** — The RBAC writes no longer branch on unique violations.
   Inserts (`create_role`, `create_rule`, `attach_role`) use
   `ON CONFLICT ... DO NOTHING`, and updates (`update_role`, `update_rule`) check

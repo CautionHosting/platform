@@ -5974,7 +5974,7 @@ async fn main() -> Result<(), MainError> {
         .route(
             "/organizations/{id}/roles/{role_id}",
             get(rbac::handlers::get_role)
-                .patch(rbac::handlers::update_role)
+                .put(rbac::handlers::update_role)
                 .delete(rbac::handlers::delete_role),
         )
         .route(

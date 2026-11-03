@@ -70,14 +70,19 @@ pub(crate) struct CreateRoleRequest {
     pub(crate) name: String,
     #[serde(default)]
     pub(crate) description: Option<String>,
+    #[serde(default)]
+    pub(crate) rules: Vec<RuleSpec>,
 }
 
+/// Full replacement of a role (PUT): name, description, and the complete rule
+/// set.
 #[derive(Debug, Deserialize)]
 pub(crate) struct UpdateRoleRequest {
-    #[serde(default)]
-    pub(crate) name: Option<String>,
+    pub(crate) name: String,
     #[serde(default)]
     pub(crate) description: Option<String>,
+    #[serde(default)]
+    pub(crate) rules: Vec<RuleSpec>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -285,6 +290,49 @@ fn validate_rule(
     }
 }
 
+/// One rule inside a role create/replace payload.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct RuleSpec {
+    pub(crate) effect: String,
+    pub(crate) method: String,
+    pub(crate) path: String,
+    #[serde(default)]
+    pub(crate) objects: Option<Value>,
+    #[serde(default)]
+    pub(crate) priority: i32,
+}
+
+/// Why a set of rules was rejected.
+enum RuleSetError {
+    Invalid {
+        index: usize,
+        source: RuleValidationError,
+    },
+    Duplicate {
+        index: usize,
+    },
+}
+
+/// Validates every rule and rejects duplicates within the set (the same
+/// `(effect, method, path)` the table's unique constraint covers).
+fn validate_rules(rules: &[RuleSpec]) -> Result<(), RuleSetError> {
+    let mut seen = std::collections::HashSet::new();
+    for (index, rule) in rules.iter().enumerate() {
+        validate_rule(
+            &rule.effect,
+            &rule.method,
+            &rule.path,
+            rule.objects.as_ref(),
+            rule.priority,
+        )
+        .map_err(|source| RuleSetError::Invalid { index, source })?;
+        if !seen.insert((rule.effect.clone(), rule.method.clone(), rule.path.clone())) {
+            return Err(RuleSetError::Duplicate { index });
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Roles
 // ---------------------------------------------------------------------------
@@ -352,11 +400,48 @@ pub(crate) enum CreateRoleError {
     #[error("invalid role name [{location}]")]
     InvalidName { location: Location },
 
+    #[error("rule {index} is invalid: {source} [{location}]")]
+    InvalidRule {
+        index: usize,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("rule {index} duplicates an earlier rule [{location}]")]
+    DuplicateRule { index: usize, location: Location },
+
     #[error("a role with that name already exists [{location}]")]
     NameConflict { location: Location },
 
+    #[error("failed to begin transaction [{location}]")]
+    Begin {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
     #[error("failed to create role [{location}]")]
     Insert {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to create rule {index} [{location}]")]
+    InsertRule {
+        index: usize,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to commit transaction [{location}]")]
+    Commit {
         #[location]
         location: Location,
         #[source]
@@ -371,8 +456,19 @@ impl_error_response!(CreateRoleError {
         StatusCode::BAD_REQUEST,
         format!("role name must be 1-{MAX_ROLE_NAME_LEN} characters")
     ),
+    CreateRoleError::InvalidRule { index, source, .. } => (
+        StatusCode::BAD_REQUEST,
+        format!("rule {index}: {source}")
+    ),
+    CreateRoleError::DuplicateRule { index, .. } => (
+        StatusCode::BAD_REQUEST,
+        format!("rule {index} duplicates an earlier rule")
+    ),
     CreateRoleError::NameConflict { .. } => (StatusCode::CONFLICT, "role name already exists".to_string()),
+    CreateRoleError::Begin { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()),
     CreateRoleError::Insert { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()),
+    CreateRoleError::InsertRule { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()),
+    CreateRoleError::Commit { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()),
 });
 
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
@@ -392,6 +488,20 @@ pub(crate) async fn create_role(
         });
     }
 
+    validate_rules(&payload.rules).map_err(|error| match error {
+        RuleSetError::Invalid { index, source } => CreateRoleError::InvalidRule {
+            index,
+            location: std::panic::Location::caller(),
+            source: Box::new(source),
+        },
+        RuleSetError::Duplicate { index } => CreateRoleError::DuplicateRule {
+            index,
+            location: std::panic::Location::caller(),
+        },
+    })?;
+
+    let mut tx = state.db.begin().await.with_context(Ctx::begin())?;
+
     let role = sqlx::query_as::<_, RbacRole>(
         "INSERT INTO rbac_roles (organization_id, name, description)
          VALUES ($1, $2, $3)
@@ -401,12 +511,30 @@ pub(crate) async fn create_role(
     .bind(org_id)
     .bind(name)
     .bind(payload.description.as_deref().map(str::trim))
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await
     .with_context(Ctx::insert())?
     .ok_or_else(|| CreateRoleError::NameConflict {
         location: std::panic::Location::caller(),
     })?;
+
+    for (index, rule) in payload.rules.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO rbac_role_rules (role_id, effect, method, path, objects, priority)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(role.id)
+        .bind(&rule.effect)
+        .bind(&rule.method)
+        .bind(&rule.path)
+        .bind(&rule.objects)
+        .bind(rule.priority)
+        .execute(&mut *tx)
+        .await
+        .with_context(Ctx::insert_rule(index))?;
+    }
+
+    tx.commit().await.with_context(Ctx::commit())?;
 
     Ok((StatusCode::CREATED, Json(role)))
 }
@@ -479,11 +607,20 @@ pub(crate) enum UpdateRoleError {
     #[error("organization access denied [{location}]")]
     Forbidden { location: Location },
 
-    #[error("no fields to update [{location}]")]
-    NoFields { location: Location },
-
     #[error("invalid role name [{location}]")]
     InvalidName { location: Location },
+
+    #[error("rule {index} is invalid: {source} [{location}]")]
+    InvalidRule {
+        index: usize,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("rule {index} duplicates an earlier rule [{location}]")]
+    DuplicateRule { index: usize, location: Location },
 
     #[error("a role with that name already exists [{location}]")]
     NameConflict { location: Location },
@@ -499,8 +636,41 @@ pub(crate) enum UpdateRoleError {
     #[error("role not found [{location}]")]
     NotFound { location: Location },
 
+    #[error("failed to begin transaction [{location}]")]
+    Begin {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
     #[error("failed to update role [{location}]")]
     Update {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to replace role rules [{location}]")]
+    DeleteRules {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to create rule {index} [{location}]")]
+    InsertRule {
+        index: usize,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to commit transaction [{location}]")]
+    Commit {
         #[location]
         location: Location,
         #[source]
@@ -511,15 +681,26 @@ pub(crate) enum UpdateRoleError {
 impl_error_response!(UpdateRoleError {
     UpdateRoleError::AccessQuery { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()),
     UpdateRoleError::Forbidden { .. } => (StatusCode::FORBIDDEN, "forbidden".to_string()),
-    UpdateRoleError::NoFields { .. } => (StatusCode::BAD_REQUEST, "no fields to update".to_string()),
     UpdateRoleError::InvalidName { .. } => (
         StatusCode::BAD_REQUEST,
         format!("role name must be 1-{MAX_ROLE_NAME_LEN} characters")
     ),
+    UpdateRoleError::InvalidRule { index, source, .. } => (
+        StatusCode::BAD_REQUEST,
+        format!("rule {index}: {source}")
+    ),
+    UpdateRoleError::DuplicateRule { index, .. } => (
+        StatusCode::BAD_REQUEST,
+        format!("rule {index} duplicates an earlier rule")
+    ),
     UpdateRoleError::NameConflict { .. } => (StatusCode::CONFLICT, "role name already exists".to_string()),
     UpdateRoleError::NameQuery { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()),
     UpdateRoleError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found".to_string()),
+    UpdateRoleError::Begin { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()),
     UpdateRoleError::Update { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()),
+    UpdateRoleError::DeleteRules { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()),
+    UpdateRoleError::InsertRule { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()),
+    UpdateRoleError::Commit { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()),
 });
 
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id, role_id = %role_id))]
@@ -532,58 +713,85 @@ pub(crate) async fn update_role(
     use UpdateRoleErrorCtx as Ctx;
     ensure_member!(state, auth.user_id, org_id, UpdateRoleError);
 
-    if payload.name.is_none() && payload.description.is_none() {
-        return Err(UpdateRoleError::NoFields {
+    let name = payload.name.trim();
+    if name.is_empty() || name.len() > MAX_ROLE_NAME_LEN {
+        return Err(UpdateRoleError::InvalidName {
             location: std::panic::Location::caller(),
         });
     }
-    if let Some(name) = payload.name.as_deref() {
-        let name = name.trim();
-        if name.is_empty() || name.len() > MAX_ROLE_NAME_LEN {
-            return Err(UpdateRoleError::InvalidName {
-                location: std::panic::Location::caller(),
-            });
-        }
-    }
+
+    validate_rules(&payload.rules).map_err(|error| match error {
+        RuleSetError::Invalid { index, source } => UpdateRoleError::InvalidRule {
+            index,
+            location: std::panic::Location::caller(),
+            source: Box::new(source),
+        },
+        RuleSetError::Duplicate { index } => UpdateRoleError::DuplicateRule {
+            index,
+            location: std::panic::Location::caller(),
+        },
+    })?;
 
     // A rename must not collide with another role's name. Checking first keeps
     // the update itself context-only (PostgreSQL UPDATE has no ON CONFLICT).
-    if let Some(name) = payload.name.as_deref().map(str::trim) {
-        let taken: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM rbac_roles
-                            WHERE organization_id = $1 AND name = $2 AND id <> $3)",
-        )
-        .bind(org_id)
-        .bind(name)
-        .bind(role_id)
-        .fetch_one(&state.db)
-        .await
-        .with_context(Ctx::name_query())?;
-        if taken {
-            return Err(UpdateRoleError::NameConflict {
-                location: std::panic::Location::caller(),
-            });
-        }
+    let taken: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM rbac_roles
+                        WHERE organization_id = $1 AND name = $2 AND id <> $3)",
+    )
+    .bind(org_id)
+    .bind(name)
+    .bind(role_id)
+    .fetch_one(&state.db)
+    .await
+    .with_context(Ctx::name_query())?;
+    if taken {
+        return Err(UpdateRoleError::NameConflict {
+            location: std::panic::Location::caller(),
+        });
     }
+
+    let mut tx = state.db.begin().await.with_context(Ctx::begin())?;
 
     let role = sqlx::query_as::<_, RbacRole>(
         "UPDATE rbac_roles
-         SET name = COALESCE($3, name),
-             description = COALESCE($4, description),
-             updated_at = NOW()
+         SET name = $3, description = $4, updated_at = NOW()
          WHERE id = $2 AND organization_id = $1
          RETURNING id, organization_id, name, description, created_at, updated_at",
     )
     .bind(org_id)
     .bind(role_id)
-    .bind(payload.name.as_deref().map(str::trim))
+    .bind(name)
     .bind(payload.description.as_deref().map(str::trim))
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await
     .with_context(Ctx::update())?
     .ok_or_else(|| UpdateRoleError::NotFound {
         location: std::panic::Location::caller(),
     })?;
+
+    sqlx::query("DELETE FROM rbac_role_rules WHERE role_id = $1")
+        .bind(role_id)
+        .execute(&mut *tx)
+        .await
+        .with_context(Ctx::delete_rules())?;
+
+    for (index, rule) in payload.rules.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO rbac_role_rules (role_id, effect, method, path, objects, priority)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(role_id)
+        .bind(&rule.effect)
+        .bind(&rule.method)
+        .bind(&rule.path)
+        .bind(&rule.objects)
+        .bind(rule.priority)
+        .execute(&mut *tx)
+        .await
+        .with_context(Ctx::insert_rule(index))?;
+    }
+
+    tx.commit().await.with_context(Ctx::commit())?;
 
     Ok(Json(role))
 }
@@ -1337,6 +1545,40 @@ mod tests {
         assert!(matches!(
             validate_rule("allow", "PATCH", "/resources/{id}", Some(&json!({"id": [1]})), 0),
             Err(RuleValidationError::ParameterNotStrings { parameter }) if parameter == "id"
+        ));
+    }
+
+    fn spec(effect: &str, method: &str, path: &str) -> RuleSpec {
+        RuleSpec {
+            effect: effect.to_string(),
+            method: method.to_string(),
+            path: path.to_string(),
+            objects: None,
+            priority: 0,
+        }
+    }
+
+    #[test]
+    fn rule_set_rejects_duplicates_by_index() {
+        let rules = vec![
+            spec("allow", "GET", "/users/me"),
+            spec("allow", "GET", "/users/me"),
+        ];
+        assert!(matches!(
+            validate_rules(&rules),
+            Err(RuleSetError::Duplicate { index }) if index == 1
+        ));
+    }
+
+    #[test]
+    fn rule_set_reports_the_first_invalid_rule() {
+        let rules = vec![
+            spec("allow", "GET", "/users/me"),
+            spec("maybe", "GET", "/x"),
+        ];
+        assert!(matches!(
+            validate_rules(&rules),
+            Err(RuleSetError::Invalid { index, .. }) if index == 1
         ));
     }
 
