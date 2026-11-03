@@ -392,6 +392,10 @@ Backlog captured 2026-11-03. Grouped, roughly in priority order.
    (the per-rule endpoints are unused by the UI).
 10. No operator-facing docs for writing rules (route templates, priority,
     `objects`).
+11. The RBAC inputs/selects use the `.email-input` class as a temporary
+    workaround for the global `.form-input { width: 80% }` rule. Replace with a
+    proper scoped width fix and revert to `.form-input` when the global rule is
+    cleaned up.
 
 ## Open questions / blockers
 

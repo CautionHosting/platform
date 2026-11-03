@@ -901,7 +901,7 @@ make build-cli
                 </span>
               </div>
               <div class="rbac-assign-row">
-                <select v-model="roleToAssign" class="form-input">
+                <select v-model="roleToAssign" class="email-input">
                   <option value="">Select a role...</option>
                   <option v-for="role in assignableRoles" :key="role.id" :value="role.id">
                     {{ role.name }}
@@ -986,14 +986,14 @@ make build-cli
         <h3 class="inline-form-panel-title">{{ roleEditorId ? "Edit role" : "New role" }}</h3>
         <div class="form-group">
           <label class="form-label" for="roleName">Name</label>
-          <input id="roleName" v-model="roleName" class="form-input" :disabled="savingRole" />
+          <input id="roleName" v-model="roleName" class="email-input" :disabled="savingRole" />
         </div>
         <div class="form-group">
           <label class="form-label" for="roleDescription">Description</label>
           <input
             id="roleDescription"
             v-model="roleDescription"
-            class="form-input"
+            class="email-input"
             placeholder="Optional"
             :disabled="savingRole"
           />
@@ -1034,14 +1034,14 @@ make build-cli
         <div class="rbac-rule-form">
           <div class="form-group">
             <label class="form-label">Effect</label>
-            <select v-model="ruleForm.effect" class="form-input">
+            <select v-model="ruleForm.effect" class="email-input">
               <option value="allow">allow</option>
               <option value="deny">deny</option>
             </select>
           </div>
           <div class="form-group">
             <label class="form-label">Method</label>
-            <select v-model="ruleForm.method" class="form-input">
+            <select v-model="ruleForm.method" class="email-input">
               <option v-for="method in RBAC_METHODS" :key="method" :value="method">{{ method }}</option>
             </select>
           </div>
@@ -1049,20 +1049,20 @@ make build-cli
             <label class="form-label">Path</label>
             <input
               v-model="ruleForm.path"
-              class="form-input"
+              class="email-input"
               placeholder="* or /resources/{id}"
             />
           </div>
           <div class="form-group">
             <label class="form-label">Priority</label>
-            <input v-model.number="ruleForm.priority" type="number" min="0" class="form-input" />
+            <input v-model.number="ruleForm.priority" type="number" min="0" class="email-input" />
           </div>
         </div>
         <div v-for="name in ruleParamNames" :key="name" class="form-group">
           <label class="form-label">objects["{{ name }}"]</label>
           <input
             v-model="ruleParamValues[name]"
-            class="form-input"
+            class="email-input"
             placeholder="* or comma-separated values"
           />
         </div>
@@ -1074,7 +1074,7 @@ make build-cli
         <h4 class="content-subsection-title">Available routes</h4>
         <input
           v-model="routeFilter"
-          class="form-input rbac-route-filter"
+          class="email-input rbac-route-filter"
           placeholder="Filter routes..."
         />
         <div v-if="routeCatalogError" class="message message--error">{{ routeCatalogError }}</div>
@@ -7993,7 +7993,7 @@ export default {
   gap: 8px;
 }
 
-.rbac-assign-row .form-input {
+.rbac-assign-row .email-input {
   max-width: 260px;
 }
 
