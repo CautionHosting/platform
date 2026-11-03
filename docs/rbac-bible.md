@@ -278,14 +278,13 @@ The composite FK guarantees a role is only assigned to an actual member.
   permissions and assign it, plus a feature flag while populating, then enforce.
 * Role management endpoints are owner-only (`is_owner`), never RBAC-gated, to
   avoid a bootstrap cycle.
-* Parameterized paths whose parameter is not an object the role should
-  restrict (e.g. the org id in `/organizations/{id}/members`) still need an
-  `objects` entry; `["*"]` is the escape for "any". Confirm this is desired.
 
 ## Decision log
 
 Record decisions here as they are made, newest first.
 
+* **2026-11-03** — Every parameter in a rule's path requires an `objects`
+  entry; non-object params such as an org id use `["*"]` uniformly.
 * **2026-11-03** — Object scoping is admission-only. Rules for parameterized
   paths must declare `objects` (creation fails if absent); paths without
   parameters need none. Lists are not filtered and no resource state is
