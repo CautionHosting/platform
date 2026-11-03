@@ -3,6 +3,8 @@
 Scan of the platform ahead of splitting organization users into `owner`
 (god powers) and `user` (roles that grant specific operations).
 
+See `docs/rbac-bible.md` for the living design and progress document.
+
 ## Current model
 
 There is a single role axis already in the schema:
