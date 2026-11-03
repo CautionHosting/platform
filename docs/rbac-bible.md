@@ -251,7 +251,10 @@ The FKs guarantee a role is only assigned to an actual member and only within
 the organization that owns the role (roles are per-organization, no global
 built-ins). All three tables carry `updated_at` with the standard trigger.
 
-### Proposed enforcement
+### Enforcement
+
+Implemented in `src/api/src/rbac.rs` and layered on the `resource_routes` group
+(after auth/legal/onboarding).
 
 * A middleware after auth + onboarding on the organization-scoped route group.
 * Read `Method` and `axum::extract::MatchedPath` (available by default in axum
@@ -337,6 +340,11 @@ Record decisions here as they are made, newest first.
 
 Newest first.
 
+* **2026-11-03** — Implemented RBAC enforcement: `src/api/src/rbac.rs` (matcher
+  + middleware, 7 unit tests) layered on `resource_routes` after onboarding.
+  Owner bypass; otherwise deny-by-default with lowest-priority-wins and
+  equal-priority deny-wins. Verified the membership+rules query live on
+  PostgreSQL 18.6 (owner, role-bearing member, role-less member).
 * **2026-11-03** — Added `updated_at` (with the standard trigger) to
   `rbac_role_rules` and `rbac_member_roles`, matching `rbac_roles`. Migration 063
   includes idempotent `ALTER ... ADD COLUMN IF NOT EXISTS` so already-migrated

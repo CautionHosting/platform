@@ -52,6 +52,7 @@ mod onboarding;
 mod org_quorum;
 mod organizations;
 mod provisioning;
+mod rbac;
 mod resources;
 mod service_observations;
 mod subscriptions;
@@ -6117,6 +6118,10 @@ async fn main() -> Result<(), MainError> {
             "/billing/subscription/cancel",
             post(subscriptions::cancel_subscription),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            rbac::rbac_middleware,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::onboarding_middleware,
