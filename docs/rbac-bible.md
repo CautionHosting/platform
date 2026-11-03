@@ -409,6 +409,9 @@ Backlog captured 2026-11-03. Grouped, roughly in priority order.
 
 Newest first.
 
+* **2026-11-03** — `/users/me` now returns `organization_id` and
+  `organization_role`; the dashboard uses it for owner status instead of
+  deriving it from the member list.
 * **2026-11-03** — Fix: the Roles tab showed no owner controls until the Users
   tab was visited, because `isOwner` is derived from the membership that only
   `loadMembers()` loaded. The Roles tab now loads it too.

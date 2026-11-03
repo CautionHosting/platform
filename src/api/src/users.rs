@@ -46,6 +46,33 @@ pub struct UpdateUserResponse {
     pub verification_email_sent: Option<bool>,
 }
 
+/// `/users/me` response: the user plus their (single) organization and role,
+/// so a client can tell whether the caller is an owner without loading the
+/// member list.
+#[derive(Debug, Serialize)]
+pub struct CurrentUserResponse {
+    #[serde(flatten)]
+    pub user: User,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub organization_role: Option<String>,
+}
+
+#[derive(FromRow)]
+struct CurrentUserRow {
+    id: Uuid,
+    username: String,
+    email: Option<String>,
+    pending_email: Option<String>,
+    email_verified: bool,
+    is_active: bool,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    organization_id: Option<Uuid>,
+    organization_role: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct EmailServiceResponse {
     success: bool,
@@ -77,26 +104,43 @@ impl IntoResponse for GetCurrentUserError {
 pub async fn get_current_user(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
-) -> Result<Json<User>, GetCurrentUserError> {
+) -> Result<Json<CurrentUserResponse>, GetCurrentUserError> {
     use GetCurrentUserErrorCtx as Ctx;
 
-    let user = sqlx::query_as::<_, User>(
-        "SELECT id,
-                username,
-                email,
-                pending_email,
-                email_verified_at IS NOT NULL AS email_verified,
-                is_active,
-                created_at,
-                updated_at
-         FROM users WHERE id = $1",
+    let row = sqlx::query_as::<_, CurrentUserRow>(
+        "SELECT u.id,
+                u.username,
+                u.email,
+                u.pending_email,
+                u.email_verified_at IS NOT NULL AS email_verified,
+                u.is_active,
+                u.created_at,
+                u.updated_at,
+                om.organization_id,
+                om.role::text AS organization_role
+         FROM users u
+         LEFT JOIN organization_members om ON om.user_id = u.id
+         WHERE u.id = $1",
     )
     .bind(auth.user_id)
     .fetch_one(&state.db)
     .await
     .with_context(Ctx::not_found(auth.user_id))?;
 
-    Ok(Json(user))
+    Ok(Json(CurrentUserResponse {
+        user: User {
+            id: row.id,
+            username: row.username,
+            email: row.email,
+            pending_email: row.pending_email,
+            email_verified: row.email_verified,
+            is_active: row.is_active,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        },
+        organization_id: row.organization_id,
+        organization_role: row.organization_role,
+    }))
 }
 
 /// Failure modes for [`update_current_user`].

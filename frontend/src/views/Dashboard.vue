@@ -3046,9 +3046,9 @@ export default {
       }
     };
 
-    // Removal is offered only to owners and admins, and never on their own row.
-    // Both facts come from the API: the member list carries every role, and
-    // /api/users/me carries the caller's id.
+    // Removal is offered only to owners, and never on their own row. Both
+    // facts come from the API: /api/users/me carries the caller's id, role and
+    // organization.
     const canRemoveMember = (member) =>
       canRemoveOrganizationMember({
         role: currentMemberRole.value,
@@ -3078,10 +3078,7 @@ export default {
 
         const me = await response.json();
         currentUserId.value = me.id || null;
-        const ownMembership = organizationMembers.value.find(
-          (member) => member.user_id === currentUserId.value,
-        );
-        currentMemberRole.value = ownMembership ? ownMembership.role : null;
+        currentMemberRole.value = me.organization_role || null;
       } catch {
         // Without the caller's own membership the action stays hidden rather
         // than being offered and then refused.
@@ -5514,9 +5511,9 @@ export default {
         loadMembers();
         loadInvitations();
       } else if (newTab === "roles") {
-        // loadMembers also derives the caller's own role (isOwner), which the
-        // Roles tab needs before it can show the owner controls.
-        loadMembers();
+        // /users/me carries the caller's role, so isOwner resolves without the
+        // member list.
+        loadCurrentMembership();
         loadRoles();
       } else if (newTab === "credentials") {
         showAddCredentialForm.value = false;
@@ -5816,7 +5813,7 @@ export default {
         loadMembers();
         loadInvitations();
       } else if (activeTab.value === "roles") {
-        loadMembers();
+        loadCurrentMembership();
         loadRoles();
       } else if (activeTab.value === "keys") {
         loadBundles();
@@ -5942,7 +5939,7 @@ export default {
           loadMembers();
           loadInvitations();
         } else if (activeTab.value === "roles") {
-          loadMembers();
+          loadCurrentMembership();
           loadRoles();
         } else if (activeTab.value === "keys") {
           loadBundles();
