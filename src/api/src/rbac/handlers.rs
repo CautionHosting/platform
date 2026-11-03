@@ -195,6 +195,43 @@ fn path_parameter_names(path: &str) -> Vec<&str> {
     names
 }
 
+/// Why a proposed rule was rejected. Each variant is one validation failure.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RuleValidationError {
+    #[error("effect must be 'allow' or 'deny' (got '{effect}')")]
+    InvalidEffect { effect: String },
+
+    #[error("unknown method '{method}'")]
+    InvalidMethod { method: String },
+
+    #[error("path must be an absolute route template (got '{path}')")]
+    InvalidPath { path: String },
+
+    #[error("priority must be >= 0 (got {priority})")]
+    NegativePriority { priority: i32 },
+
+    #[error("objects must be omitted for a path without parameters")]
+    ObjectsNotAllowed,
+
+    #[error("objects is required for a path with parameters")]
+    ObjectsRequired,
+
+    #[error("objects must be a JSON object")]
+    ObjectsNotAnObject,
+
+    #[error("objects must cover exactly the path's parameters")]
+    ObjectsParameterMismatch,
+
+    #[error("objects is missing parameter '{parameter}'")]
+    MissingParameter { parameter: String },
+
+    #[error("objects['{parameter}'] must be an array")]
+    ParameterNotArray { parameter: String },
+
+    #[error("objects['{parameter}'] must contain only strings")]
+    ParameterNotStrings { parameter: String },
+}
+
 /// Validates a rule's shape, including that `objects` covers every path
 /// parameter, exactly, with array values.
 fn validate_rule(
@@ -203,43 +240,55 @@ fn validate_rule(
     path: &str,
     objects: Option<&Value>,
     priority: i32,
-) -> Result<(), String> {
+) -> Result<(), RuleValidationError> {
     if effect != "allow" && effect != "deny" {
-        return Err("effect must be 'allow' or 'deny'".to_string());
+        return Err(RuleValidationError::InvalidEffect {
+            effect: effect.to_string(),
+        });
     }
     if !METHODS.contains(&method) {
-        return Err("invalid method".to_string());
+        return Err(RuleValidationError::InvalidMethod {
+            method: method.to_string(),
+        });
     }
     if !path.starts_with('/') || path.len() < 2 {
-        return Err("path must be an absolute route template".to_string());
+        return Err(RuleValidationError::InvalidPath {
+            path: path.to_string(),
+        });
     }
     if priority < 0 {
-        return Err("priority must be >= 0".to_string());
+        return Err(RuleValidationError::NegativePriority { priority });
     }
 
     let params = path_parameter_names(path);
     match (params.is_empty(), objects) {
         (true, None) => Ok(()),
-        (true, Some(_)) => Err("objects must be omitted for a path without parameters".to_string()),
-        (false, None) => Err("objects is required for a path with parameters".to_string()),
+        (true, Some(_)) => Err(RuleValidationError::ObjectsNotAllowed),
+        (false, None) => Err(RuleValidationError::ObjectsRequired),
         (false, Some(Value::Object(map))) => {
             if map.len() != params.len() {
-                return Err("objects must cover exactly the path's parameters".to_string());
+                return Err(RuleValidationError::ObjectsParameterMismatch);
             }
             for param in params {
                 let Some(allowed) = map.get(param) else {
-                    return Err(format!("objects is missing parameter '{param}'"));
+                    return Err(RuleValidationError::MissingParameter {
+                        parameter: param.to_string(),
+                    });
                 };
                 let Some(entries) = allowed.as_array() else {
-                    return Err(format!("objects['{param}'] must be an array"));
+                    return Err(RuleValidationError::ParameterNotArray {
+                        parameter: param.to_string(),
+                    });
                 };
                 if entries.iter().any(|entry| !entry.is_string()) {
-                    return Err(format!("objects['{param}'] must contain only strings"));
+                    return Err(RuleValidationError::ParameterNotStrings {
+                        parameter: param.to_string(),
+                    });
                 }
             }
             Ok(())
         }
-        (false, Some(_)) => Err("objects must be a JSON object".to_string()),
+        (false, Some(_)) => Err(RuleValidationError::ObjectsNotAnObject),
     }
 }
 
@@ -682,8 +731,13 @@ pub(crate) enum CreateRuleError {
         source: BoxError,
     },
 
-    #[error("invalid rule: {message} [{location}]")]
-    InvalidRule { message: String, location: Location },
+    #[error("invalid rule: {source} [{location}]")]
+    InvalidRule {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
     #[error("an identical rule already exists [{location}]")]
     RuleConflict { location: Location },
@@ -702,7 +756,7 @@ impl_error_response!(CreateRuleError {
     CreateRuleError::Forbidden { .. } => (StatusCode::FORBIDDEN, "forbidden".to_string()),
     CreateRuleError::RoleNotFound { .. } => (StatusCode::NOT_FOUND, "not found".to_string()),
     CreateRuleError::RoleQuery { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()),
-    CreateRuleError::InvalidRule { message, .. } => (StatusCode::BAD_REQUEST, message.clone()),
+    CreateRuleError::InvalidRule { source, .. } => (StatusCode::BAD_REQUEST, source.to_string()),
     CreateRuleError::RuleConflict { .. } => (StatusCode::CONFLICT, "identical rule already exists".to_string()),
     CreateRuleError::Insert { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()),
 });
@@ -731,9 +785,9 @@ pub(crate) async fn create_rule(
         payload.objects.as_ref(),
         payload.priority,
     )
-    .map_err(|message| CreateRuleError::InvalidRule {
-        message,
+    .map_err(|source| CreateRuleError::InvalidRule {
         location: std::panic::Location::caller(),
+        source: Box::new(source),
     })?;
 
     let rule = sqlx::query_as::<_, RbacRule>(
@@ -837,8 +891,13 @@ pub(crate) enum UpdateRuleError {
         source: BoxError,
     },
 
-    #[error("invalid rule: {message} [{location}]")]
-    InvalidRule { message: String, location: Location },
+    #[error("invalid rule: {source} [{location}]")]
+    InvalidRule {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
 
     #[error("an identical rule already exists [{location}]")]
     RuleConflict { location: Location },
@@ -857,7 +916,7 @@ impl_error_response!(UpdateRuleError {
     UpdateRuleError::Forbidden { .. } => (StatusCode::FORBIDDEN, "forbidden".to_string()),
     UpdateRuleError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found".to_string()),
     UpdateRuleError::Load { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()),
-    UpdateRuleError::InvalidRule { message, .. } => (StatusCode::BAD_REQUEST, message.clone()),
+    UpdateRuleError::InvalidRule { source, .. } => (StatusCode::BAD_REQUEST, source.to_string()),
     UpdateRuleError::RuleConflict { .. } => (StatusCode::CONFLICT, "identical rule already exists".to_string()),
     UpdateRuleError::Update { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()),
 });
@@ -886,10 +945,10 @@ pub(crate) async fn update_rule(
     // (if any) replaces the existing one.
     let objects = payload.objects.or(existing.objects);
 
-    validate_rule(&effect, &method, &path, objects.as_ref(), priority).map_err(|message| {
+    validate_rule(&effect, &method, &path, objects.as_ref(), priority).map_err(|source| {
         UpdateRuleError::InvalidRule {
-            message,
             location: std::panic::Location::caller(),
+            source: Box::new(source),
         }
     })?;
 
@@ -1248,12 +1307,18 @@ mod tests {
     #[test]
     fn parameterless_paths_accept_no_objects() {
         assert!(validate_rule("allow", "GET", "/users/me", None, 0).is_ok());
-        assert!(validate_rule("allow", "GET", "/users/me", Some(&json!({})), 0).is_err());
+        assert!(matches!(
+            validate_rule("allow", "GET", "/users/me", Some(&json!({})), 0),
+            Err(RuleValidationError::ObjectsNotAllowed)
+        ));
     }
 
     #[test]
     fn parameterized_paths_require_covering_objects() {
-        assert!(validate_rule("allow", "PATCH", "/resources/{id}", None, 0).is_err());
+        assert!(matches!(
+            validate_rule("allow", "PATCH", "/resources/{id}", None, 0),
+            Err(RuleValidationError::ObjectsRequired)
+        ));
         assert!(
             validate_rule(
                 "allow",
@@ -1264,33 +1329,37 @@ mod tests {
             )
             .is_ok()
         );
-        assert!(
-            validate_rule(
-                "allow",
-                "PATCH",
-                "/resources/{id}",
-                Some(&json!({"other": ["*"]})),
-                0
-            )
-            .is_err()
-        );
-        assert!(
-            validate_rule(
-                "allow",
-                "PATCH",
-                "/resources/{id}",
-                Some(&json!({"id": "*"})),
-                0
-            )
-            .is_err()
-        );
+        assert!(matches!(
+            validate_rule("allow", "PATCH", "/resources/{id}", Some(&json!({"other": ["*"]})), 0),
+            Err(RuleValidationError::MissingParameter { parameter }) if parameter == "id"
+        ));
+        assert!(matches!(
+            validate_rule("allow", "PATCH", "/resources/{id}", Some(&json!({"id": "*"})), 0),
+            Err(RuleValidationError::ParameterNotArray { parameter }) if parameter == "id"
+        ));
+        assert!(matches!(
+            validate_rule("allow", "PATCH", "/resources/{id}", Some(&json!({"id": [1]})), 0),
+            Err(RuleValidationError::ParameterNotStrings { parameter }) if parameter == "id"
+        ));
     }
 
     #[test]
     fn invalid_rule_fields_are_rejected() {
-        assert!(validate_rule("maybe", "GET", "/x", None, 0).is_err());
-        assert!(validate_rule("allow", "FETCH", "/x", None, 0).is_err());
-        assert!(validate_rule("allow", "GET", "x", None, 0).is_err());
-        assert!(validate_rule("allow", "GET", "/x", None, -1).is_err());
+        assert!(matches!(
+            validate_rule("maybe", "GET", "/x", None, 0),
+            Err(RuleValidationError::InvalidEffect { effect }) if effect == "maybe"
+        ));
+        assert!(matches!(
+            validate_rule("allow", "FETCH", "/x", None, 0),
+            Err(RuleValidationError::InvalidMethod { method }) if method == "FETCH"
+        ));
+        assert!(matches!(
+            validate_rule("allow", "GET", "x", None, 0),
+            Err(RuleValidationError::InvalidPath { path }) if path == "x"
+        ));
+        assert!(matches!(
+            validate_rule("allow", "GET", "/x", None, -1),
+            Err(RuleValidationError::NegativePriority { priority }) if priority == -1
+        ));
     }
 }

@@ -295,7 +295,9 @@ variant per distinct failure branch.
 * `GET/POST /members/{user_id}/roles`
 * `DELETE /members/{user_id}/roles/{role_id}`
 
-Rule validation (in the handler, before insert/update): `effect` is
+Rule validation (in the handler, before insert/update) returns a typed
+`RuleValidationError` (one variant per failure, with formatted `#[error]`
+messages) which the `InvalidRule` variants carry as a boxed source: `effect` is
 `allow|deny`; `method` is a known method or `*`; `path` is an absolute route
 template; when the path has parameters, `objects` is required and must cover
 exactly those parameters with arrays of strings, and is omitted otherwise;
@@ -361,6 +363,10 @@ Record decisions here as they are made, newest first.
 
 Newest first.
 
+* **2026-11-03** — Replaced the stringly rule validation error with a typed
+  `RuleValidationError` (one variant per failure, formatted `#[error]`
+  messages), carried by the `InvalidRule` variants as a boxed source; tests
+  assert the specific variants.
 * **2026-11-03** — Restructured `rbac/routes.rs` into `rbac/handlers.rs`: each
   handler now has its own error type with a variant per failure branch (via a
   shared `impl_error_response!` macro and an `ensure_member!` access guard).
