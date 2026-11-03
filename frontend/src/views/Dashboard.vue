@@ -878,7 +878,7 @@ make build-cli
             </div>
           </div>
           <div v-if="expandedMemberRoles === member.user_id" class="rbac-member-roles">
-            <div v-if="loadingMemberRoles" class="list-item-empty">Loading roles...</div>
+            <div v-if="!memberRolesLoaded" class="list-item-empty">Loading roles...</div>
             <template v-else>
               <div v-if="memberRoles.length === 0" class="list-item-empty">
                 No roles assigned.
@@ -2772,13 +2772,21 @@ export default {
     const ruleParamValues = ref({});
     const ruleParamNames = computed(() => pathParameterNames(ruleForm.value.path));
 
-    // Per-member role assignments
+    // Per-member role assignments, cached per user so re-expanding does not
+    // refetch (and does not flash the loading state).
     const expandedMemberRoles = ref(null);
-    const memberRoles = ref([]);
-    const loadingMemberRoles = ref(false);
+    const memberRolesByUser = ref({});
     const memberRolesError = ref("");
     const roleToAssign = ref("");
     const savingAssignment = ref(false);
+    const memberRoles = computed(() =>
+      expandedMemberRoles.value ? memberRolesByUser.value[expandedMemberRoles.value] ?? [] : [],
+    );
+    const memberRolesLoaded = computed(
+      () =>
+        expandedMemberRoles.value != null &&
+        Object.prototype.hasOwnProperty.call(memberRolesByUser.value, expandedMemberRoles.value),
+    );
     const assignableRoles = computed(() =>
       roles.value.filter(
         (role) => !memberRoles.value.some((assignment) => assignment.role_id === role.id),
@@ -3370,26 +3378,29 @@ export default {
       roles.value.find((role) => role.id === roleId)?.name || roleId;
 
     const loadMemberRoles = async (userId) => {
-      loadingMemberRoles.value = true;
       memberRolesError.value = "";
       try {
         const orgId = await ensureCurrentOrgId();
-        if (!orgId) {
-          memberRoles.value = [];
-          return;
+        let data = [];
+        if (orgId) {
+          const response = await authFetch(
+            `/api/organizations/${orgId}/members/${userId}/roles`,
+            { cache: "no-store" },
+          );
+          if (!response.ok) {
+            throw new Error(await readResponseError(response, "Failed to load member roles"));
+          }
+          data = await response.json();
         }
-        const response = await authFetch(
-          `/api/organizations/${orgId}/members/${userId}/roles`,
-          { cache: "no-store" },
-        );
-        if (!response.ok) {
-          throw new Error(await readResponseError(response, "Failed to load member roles"));
-        }
-        memberRoles.value = await response.json();
+        memberRolesByUser.value = { ...memberRolesByUser.value, [userId]: data };
       } catch (err) {
         memberRolesError.value = err.message || "Failed to load member roles";
       } finally {
-        loadingMemberRoles.value = false;
+        // Mark the member as loaded (even on error) so the loading state does
+        // not persist and does not reappear on re-expand.
+        if (!Object.prototype.hasOwnProperty.call(memberRolesByUser.value, userId)) {
+          memberRolesByUser.value = { ...memberRolesByUser.value, [userId]: [] };
+        }
       }
     };
 
@@ -3401,11 +3412,12 @@ export default {
       }
       expandedMemberRoles.value = member.user_id;
       roleToAssign.value = "";
-      memberRoles.value = [];
       if (roles.value.length === 0) {
         await loadRoles();
       }
-      await loadMemberRoles(member.user_id);
+      if (!Object.prototype.hasOwnProperty.call(memberRolesByUser.value, member.user_id)) {
+        await loadMemberRoles(member.user_id);
+      }
     };
 
     const assignRole = async (member) => {
@@ -6158,7 +6170,7 @@ export default {
       deleteRole,
       expandedMemberRoles,
       memberRoles,
-      loadingMemberRoles,
+      memberRolesLoaded,
       memberRolesError,
       roleToAssign,
       savingAssignment,
