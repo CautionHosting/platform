@@ -1028,10 +1028,21 @@ make build-cli
                       :title="isRuleObjectsExpanded(index) ? 'Hide objects' : 'Show objects'"
                       @click="toggleRuleObjects(index)"
                     >
-                      <span
+                      <svg
                         class="rbac-chevron"
                         :class="{ 'rbac-chevron--open': isRuleObjectsExpanded(index) }"
-                      >▸</span>
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="m6 9 6 6 6-6" />
+                      </svg>
                       {{ JSON.stringify(rule.objects) }}
                     </button>
                     <template v-else>—</template>
@@ -7982,12 +7993,12 @@ export default {
 }
 
 .rbac-chevron {
-  display: inline-block;
+  flex-shrink: 0;
   transition: transform 0.15s ease;
 }
 
 .rbac-chevron--open {
-  transform: rotate(90deg);
+  transform: rotate(180deg);
 }
 
 .rbac-objects-row td {
