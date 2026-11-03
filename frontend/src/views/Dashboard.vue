@@ -1014,18 +1014,46 @@ make build-cli
               </tr>
             </thead>
             <tbody>
-              <tr v-for="(rule, index) in draftRules" :key="index">
-                <td>{{ rule.effect }}</td>
-                <td>{{ rule.method }}</td>
-                <td class="rbac-path">{{ rule.path }}</td>
-                <td class="rbac-objects">{{ rule.objects ? JSON.stringify(rule.objects) : "\u2014" }}</td>
-                <td>{{ rule.priority }}</td>
-                <td>
-                  <button type="button" class="btn-danger" @click="removeDraftRule(index)">
-                    Remove
-                  </button>
-                </td>
-              </tr>
+              <template v-for="(rule, index) in draftRules" :key="index">
+                <tr>
+                  <td>{{ rule.effect }}</td>
+                  <td>{{ rule.method }}</td>
+                  <td class="rbac-path">{{ rule.path }}</td>
+                  <td class="rbac-objects">
+                    <button
+                      v-if="rule.objects"
+                      type="button"
+                      class="rbac-objects-toggle"
+                      :aria-expanded="isRuleObjectsExpanded(index) ? 'true' : 'false'"
+                      :title="isRuleObjectsExpanded(index) ? 'Hide objects' : 'Show objects'"
+                      @click="toggleRuleObjects(index)"
+                    >
+                      <span
+                        class="rbac-chevron"
+                        :class="{ 'rbac-chevron--open': isRuleObjectsExpanded(index) }"
+                      >▸</span>
+                      {{ JSON.stringify(rule.objects) }}
+                    </button>
+                    <template v-else>—</template>
+                  </td>
+                  <td>{{ rule.priority }}</td>
+                  <td>
+                    <button type="button" class="btn-danger" @click="removeDraftRule(index)">
+                      Remove
+                    </button>
+                  </td>
+                </tr>
+                <tr v-if="rule.objects && isRuleObjectsExpanded(index)" class="rbac-objects-row">
+                  <td colspan="6">
+                    <ul class="rbac-objects-list">
+                      <li v-for="(values, param) in rule.objects" :key="param">
+                        <code>{{ param }}</code>
+                        <span>{{ values.join(", ") }}</span>
+                      </li>
+                    </ul>
+                  </td>
+                </tr>
+              </template>
             </tbody>
           </table>
         </div>
@@ -2808,6 +2836,7 @@ export default {
     const savingRole = ref(false);
     const roleFormError = ref("");
     const draftRules = ref([]);
+    const expandedRuleObjects = ref({});
     const deletingRoleId = ref(null);
     const ruleFormError = ref("");
     const ruleForm = ref({ effect: "allow", method: "GET", path: "", priority: 0 });
@@ -3279,6 +3308,7 @@ export default {
       draftRules.value = [
         { effect: "allow", method: "GET", path: "/users/me", objects: null, priority: 0, error: null },
       ];
+      expandedRuleObjects.value = {};
       resetRuleForm();
       roleEditorOpen.value = true;
     };
@@ -3308,6 +3338,7 @@ export default {
           priority: rule.priority,
           error: null,
         }));
+        expandedRuleObjects.value = {};
         resetRuleForm();
         roleEditorOpen.value = true;
       } catch (err) {
@@ -3341,11 +3372,25 @@ export default {
         return;
       }
       draftRules.value = [...draftRules.value, { ...candidate, error: null }];
+      expandedRuleObjects.value = {};
       resetRuleForm();
     };
 
     const removeDraftRule = (index) => {
       draftRules.value = draftRules.value.filter((_, i) => i !== index);
+      expandedRuleObjects.value = {};
+    };
+
+    const isRuleObjectsExpanded = (index) => Boolean(expandedRuleObjects.value[index]);
+
+    const toggleRuleObjects = (index) => {
+      const next = { ...expandedRuleObjects.value };
+      if (next[index]) {
+        delete next[index];
+      } else {
+        next[index] = true;
+      }
+      expandedRuleObjects.value = next;
     };
 
     const saveRole = async () => {
@@ -6226,6 +6271,9 @@ export default {
       savingRole,
       roleFormError,
       draftRules,
+      expandedRuleObjects,
+      isRuleObjectsExpanded,
+      toggleRuleObjects,
       deletingRoleId,
       ruleForm,
       ruleParamNames,
@@ -7918,6 +7966,48 @@ export default {
 
 .rbac-path,
 .rbac-objects {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.rbac-objects-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+
+.rbac-chevron {
+  display: inline-block;
+  transition: transform 0.15s ease;
+}
+
+.rbac-chevron--open {
+  transform: rotate(90deg);
+}
+
+.rbac-objects-row td {
+  background: var(--theme-surface-subtle);
+}
+
+.rbac-objects-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rbac-objects-list li {
+  display: flex;
+  gap: 8px;
+}
+
+.rbac-objects-list code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
