@@ -223,6 +223,7 @@ CREATE TABLE rbac_role_rules (
     path TEXT NOT NULL,
     objects JSONB,  -- per path-param allowed values, e.g. {"id": ["*"]};
                     -- required when `path` has parameters, omitted otherwise
+    priority INTEGER NOT NULL DEFAULT 0 CHECK (priority >= 0),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (role_id, effect, method, path)
 );
@@ -251,13 +252,16 @@ built-ins).
 * Read `Method` and `axum::extract::MatchedPath` (available by default in axum
   0.8) from request extensions. `MatchedPath` is the route template, so rules
   match structurally and path parameters never need parsing.
-* Owners short-circuit to allow. Everyone else: deny if any matching `deny`
-  rule exists, else allow if any matching `allow` rule exists, else `403`
-  (deny by default, fail closed). `method = '*'` matches any method.
-* No exempt routes. Everything not matched by an allow rule is denied. The UI
-  seeds every new role with an allow for `/users/me` so members can load their
-  own account. Public, onboarding, organization-bootstrap, and internal route
-  groups sit outside this middleware by construction rather than by exemption.
+* Owners short-circuit to allow. Everyone else: collect every rule matching
+  `method + path + objects` across the member's roles. No match denies.
+  Otherwise the matching rule with the lowest `priority` (closest to 0)
+  decides; if several equal-lowest rules match, a `deny` wins so conflicts
+  fail closed. `method = '*'` matches any method.
+* No exempt routes. Anything the evaluation above does not admit is denied. The
+  UI seeds every new role with an allow for `/users/me` so members can load
+  their own account. Public, onboarding, organization-bootstrap, and internal
+  route groups sit outside this middleware by construction rather than by
+  exemption.
 * Object constraints are admission-only. A rule for a path with parameters must
   carry `objects` covering every parameter (rule creation fails if absent); a
   path without parameters (for example a list route) needs none. At request
@@ -271,8 +275,6 @@ built-ins).
 ### Open decisions
 
 * Roles per member: many (join table) vs exactly one (proposal: many).
-* Deny rules: support from the start vs allow-only (proposal: allow + deny,
-  deny-wins).
 * Default-deny rollout: members can currently do everything, so enforcement
   breaks them. Proposal: seed a built-in baseline role matching today's member
   permissions and assign it, plus a feature flag while populating, then enforce.
@@ -281,6 +283,9 @@ built-ins).
 
 Record decisions here as they are made, newest first.
 
+* **2026-11-03** — Allow + deny with priorities: among matching rules the
+  lowest priority (closest to 0) wins; equal-priority conflicts resolve to deny
+  (fail closed); no match denies. Priority is non-negative, default 0.
 * **2026-11-03** — Roles are per-organization only (no global built-ins).
   `rbac_roles.organization_id` is `NOT NULL` and a composite FK on
   `rbac_member_roles` prevents assigning a role across organizations.
