@@ -1444,6 +1444,23 @@ pub enum RemoveMemberError {
     #[error("you do not have permission to manage this organization [{location}]")]
     NotManager { location: Location },
 
+    #[error("only an owner can remove an owner [{location}]")]
+    NotOwner { location: Location },
+
+    #[error("the last owner cannot be removed [{location}]")]
+    LastOwner { location: Location },
+
+    #[error("failed to look up organization member [{location}]")]
+    MemberQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("organization member not found [{location}]")]
+    MemberNotFound { location: Location },
+
     #[error("failed to remove organization member [{location}]")]
     Delete {
         #[location]
@@ -1460,6 +1477,16 @@ impl IntoResponse for RemoveMemberError {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
             RemoveMemberError::NotManager { .. } => (StatusCode::FORBIDDEN, "forbidden"),
+            RemoveMemberError::NotOwner { .. } => {
+                (StatusCode::FORBIDDEN, "only an owner can remove an owner")
+            }
+            RemoveMemberError::LastOwner { .. } => {
+                (StatusCode::CONFLICT, "the last owner cannot be removed")
+            }
+            RemoveMemberError::MemberQuery { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+            RemoveMemberError::MemberNotFound { .. } => (StatusCode::NOT_FOUND, "member not found"),
             RemoveMemberError::Delete { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
@@ -1484,6 +1511,48 @@ pub async fn remove_member(
         return Err(RemoveMemberError::NotManager {
             location: std::panic::Location::caller(),
         });
+    }
+
+    let target: Option<(String,)> = sqlx::query_as(
+        "SELECT role::text FROM organization_members
+         WHERE organization_id = $1 AND user_id = $2",
+    )
+    .bind(org_id)
+    .bind(member_user_id)
+    .fetch_optional(&state.db)
+    .await
+    .with_context(Ctx::member_query())?;
+
+    let Some((target_role,)) = target else {
+        return Err(RemoveMemberError::MemberNotFound {
+            location: std::panic::Location::caller(),
+        });
+    };
+
+    // The dashboard only offers owner removal to owners; enforce it here so an
+    // admin cannot remove an owner through the API.
+    if target_role == "owner" && !is_owner(&role) {
+        return Err(RemoveMemberError::NotOwner {
+            location: std::panic::Location::caller(),
+        });
+    }
+
+    // Never leave the organization without an owner.
+    if target_role == "owner" {
+        let owner_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM organization_members
+             WHERE organization_id = $1 AND role = 'owner'",
+        )
+        .bind(org_id)
+        .fetch_one(&state.db)
+        .await
+        .with_context(Ctx::member_query())?;
+
+        if owner_count <= 1 {
+            return Err(RemoveMemberError::LastOwner {
+                location: std::panic::Location::caller(),
+            });
+        }
     }
 
     // Removing a user's last membership does leave them with no organization,

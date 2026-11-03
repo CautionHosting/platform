@@ -107,7 +107,7 @@ Not owner grants: `role_arn` / `Role:` matches are AWS IAM roles and deployment
 | `organizations::cancel_invitation` | `organizations.rs:1090-1098` |
 | `organizations::add_member` | `organizations.rs` (manager gate; granting `owner` additionally requires an owner caller) |
 | `organizations::update_member` | `organizations.rs` (manager gate; granting `owner` requires an owner caller; an existing owner cannot be demoted) |
-| `organizations::remove_member` | `organizations.rs:1406-1414` |
+| `organizations::remove_member` | `organizations.rs` (manager gate; removing an owner requires an owner caller; the last owner cannot be removed) |
 | `subscriptions::perform_checkout` | `subscriptions.rs:541` |
 | `subscriptions::subscribe` | `subscriptions.rs:720` |
 | `subscriptions::change_subscription_tier` | `subscriptions.rs:1059` |
@@ -209,22 +209,24 @@ Record decisions here as they are made, newest first.
 * `invite_member` cannot assign a non-owner role: `InviteMemberRequest` has no
   role field (`validated_types.rs:142-152`). Invitations now default to
   `member`, but there is still no way to invite straight to owner.
-* Granting ownership is now owner-only and irreversible server-side:
-  `add_member` and `update_member` reject a non-owner caller promoting to
-  `owner`, and `update_member` rejects demoting an existing owner, so the
-  dashboard's "cannot be undone" promise holds at the API. `remove_member`
-  still lets an admin remove an owner, which the dashboard hides; that path is
-  not yet aligned.
+* Granting and removing ownership are owner-only and irreversible
+  server-side: `add_member`/`update_member` reject a non-owner caller granting
+  `owner`; `update_member` rejects demoting an owner; `remove_member` rejects an
+  admin removing an owner and refuses to remove the last owner. The dashboard's
+  "cannot be undone" and owner-only rules now hold at the API.
 * `can_manage_org` treats `admin` identically to `owner`; the split must decide
   `admin`'s fate.
-* Last-owner invariant is frontend-only (`frontend/src/utils/organizations.js`);
-  the API allows an admin to remove an owner and allows removing the last owner.
+* Last-owner invariant is enforced server-side for removal (`remove_member`)
+  and demotion (`update_member`); the dashboard rule
+  (`frontend/src/utils/organizations.js`) mirrors it.
 * No route currently distinguishes `member` from `viewer`.
 
 ## Progress log
 
 Newest first.
 
+* **2026-11-03** — Aligned `remove_member` with the dashboard: only an owner
+  may remove an owner, and the last owner cannot be removed.
 * **2026-11-03** — Enforced owner-only granting of ownership
   (`add_member`, `update_member`) and blocked demotion of an existing owner in
   `update_member`, so the dashboard's non-reversible promotion is true at the
