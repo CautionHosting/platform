@@ -585,9 +585,9 @@ dependencies = [
 
 [[package]]
 name = "aws-credential-types"
-version = "1.3.0"
+version = "1.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e93964ffdaf57857f544be3666a5f57570bb699e934700f11b49708f61bb556e"
+checksum = "576e8da35751dc85409ec1cd15999f692c277a1fbe9336780fe6f15e49dd637d"
 dependencies = [
  "aws-smithy-async",
  "aws-smithy-runtime-api",
@@ -888,9 +888,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sigv4"
-version = "1.5.1"
+version = "1.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "723c2234ad7511ceef63eab016b7ba6ff7c55590fefb96fa8467af014a07309f"
+checksum = "f385da9b7757ed4c8214797ad663ff534fb622006143530aa80e21f8e06ff85c"
 dependencies = [
  "aws-credential-types",
  "aws-smithy-eventstream",
@@ -898,13 +898,14 @@ dependencies = [
  "aws-smithy-runtime-api",
  "aws-smithy-types",
  "bytes",
- "crypto-bigint 0.5.5",
+ "crypto-bigint 0.7.10",
+ "ecdsa 0.17.0",
  "form_urlencoded",
  "hex",
  "hmac 0.13.0",
  "http 0.2.12",
  "http 1.5.0",
- "p256 0.13.2",
+ "p256 0.14.0",
  "percent-encoding",
  "sha2 0.11.0",
  "subtle",
@@ -915,9 +916,9 @@ dependencies = [
 
 [[package]]
 name = "aws-smithy-async"
-version = "1.3.0"
+version = "1.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f02e407fb3b54891734224b9ffac8a71fdd35f542500fa1af95754a6b2beb316"
+checksum = "de681a9df7ff79823b759ee17061076ec049cd61a8fa28ece4293d89c9f6964e"
 dependencies = [
  "futures-util",
  "pin-project-lite",
@@ -978,9 +979,9 @@ dependencies = [
 
 [[package]]
 name = "aws-smithy-eventstream"
-version = "0.61.2"
+version = "0.61.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6de526c7b567420a31bc283657a7921b45c4cafe0827fdf2490713dcc770c28f"
+checksum = "14c8a643d0e114cae39e45415e3225793a6396698b7779a0c9e3ede731d8fc71"
 dependencies = [
  "aws-smithy-types",
  "bytes",
@@ -989,9 +990,9 @@ dependencies = [
 
 [[package]]
 name = "aws-smithy-http"
-version = "0.64.0"
+version = "0.64.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37843d9add67c3aff5856f409c6dc315d3cdff60f9c0cb5b670dab1e9920306d"
+checksum = "19af609dd5edf8b056cd0bb001c706c8b3b1458055328b334ec13d7f46f6aaa8"
 dependencies = [
  "aws-smithy-eventstream",
  "aws-smithy-runtime-api",
@@ -1005,7 +1006,6 @@ dependencies = [
  "http-body-util",
  "percent-encoding",
  "pin-project-lite",
- "pin-utils",
  "tracing",
 ]
 
@@ -1094,9 +1094,9 @@ dependencies = [
 
 [[package]]
 name = "aws-smithy-runtime-api"
-version = "1.15.0"
+version = "1.19.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "954c563ce84507722d2679f07a35d21b9c6466b3872d513020d0281fc8112ac9"
+checksum = "8c4e85cffe9944b10d576b075432bd8f98dbc081e8681cb37d5b2d87dc27bc84"
 dependencies = [
  "aws-smithy-async",
  "aws-smithy-runtime-api-macros",
@@ -1112,9 +1112,9 @@ dependencies = [
 
 [[package]]
 name = "aws-smithy-runtime-api-macros"
-version = "1.1.0"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "221eaa237ddf1ca79b60d1372aad77e47f9c0ea5b3ce5099da8c61d027dc77b3"
+checksum = "ce237f890a2283c9b328955c3b0918d2d5bf66a1cb6ceccd36a0047246fbc6e6"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1134,9 +1134,9 @@ dependencies = [
 
 [[package]]
 name = "aws-smithy-types"
-version = "1.6.2"
+version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fce83ce9abbb198d25bc7131e468d0f9fe1257125e58c39f3f9fc9f5098c9647"
+checksum = "cf183d70774ea2cfcc101ca74a8884e4c76be8b9df65cd303f6a1175c88e8f80"
 dependencies = [
  "base64-simd",
  "bytes",
@@ -1150,7 +1150,6 @@ dependencies = [
  "itoa",
  "num-integer",
  "pin-project-lite",
- "pin-utils",
  "ryu",
  "serde",
  "time",
@@ -3499,7 +3498,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
- "ssh-key 0.6.7",
+ "ssh-key",
  "subtle",
  "tempfile",
  "thiserror 1.0.69",
@@ -6796,7 +6795,6 @@ dependencies = [
  "pkcs1 0.7.5",
  "pkcs8 0.10.2",
  "rand_core 0.6.4",
- "sha2 0.10.9",
  "signature 2.2.0",
  "spki 0.7.3",
  "subtle",
@@ -6899,8 +6897,8 @@ dependencies = [
  "sha3 0.12.0",
  "signature 3.0.0",
  "spki 0.8.0",
- "ssh-encoding 0.3.0",
- "ssh-key 0.7.0-rc.11",
+ "ssh-encoding",
+ "ssh-key",
  "subtle",
  "thiserror 2.0.20",
  "tokio",
@@ -6917,7 +6915,7 @@ checksum = "3aec6cb630dbe85d72ffd7bcd95f07e1bd69f9f270ee8adfa1afe443a6331438"
 dependencies = [
  "log",
  "nix 0.31.3",
- "ssh-encoding 0.3.0",
+ "ssh-encoding",
  "windows-sys 0.61.2",
 ]
 
@@ -7983,16 +7981,6 @@ dependencies = [
 
 [[package]]
 name = "ssh-cipher"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "caac132742f0d33c3af65bfcde7f6aa8f62f0e991d80db99149eb9d44708784f"
-dependencies = [
- "cipher 0.4.4",
- "ssh-encoding 0.2.0",
-]
-
-[[package]]
-name = "ssh-cipher"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d801accda99469cde6d73da741422610fdf6508a72d9a69d1b55cb241c720597"
@@ -8005,19 +7993,8 @@ dependencies = [
  "ctutils",
  "des 0.9.0",
  "poly1305",
- "ssh-encoding 0.3.0",
+ "ssh-encoding",
  "zeroize",
-]
-
-[[package]]
-name = "ssh-encoding"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb9242b9ef4108a78e8cd1a2c98e193ef372437f8c22be363075233321dd4a15"
-dependencies = [
- "base64ct",
- "pem-rfc7468 0.7.0",
- "sha2 0.10.9",
 ]
 
 [[package]]
@@ -8032,28 +8009,6 @@ dependencies = [
  "ctutils",
  "digest 0.11.3",
  "pem-rfc7468 1.0.0",
- "zeroize",
-]
-
-[[package]]
-name = "ssh-key"
-version = "0.6.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b86f5297f0f04d08cabaa0f6bff7cb6aec4d9c3b49d87990d63da9d9156a8c3"
-dependencies = [
- "ed25519-dalek 2.2.0",
- "num-bigint-dig",
- "p256 0.13.2",
- "p384 0.13.1",
- "p521 0.13.3",
- "rand_core 0.6.4",
- "rsa 0.9.10",
- "sec1 0.7.3",
- "sha2 0.10.9",
- "signature 2.2.0",
- "ssh-cipher 0.2.0",
- "ssh-encoding 0.2.0",
- "subtle",
  "zeroize",
 ]
 
@@ -8078,8 +8033,8 @@ dependencies = [
  "sha1 0.11.0",
  "sha2 0.11.0",
  "signature 3.0.0",
- "ssh-cipher 0.3.0",
- "ssh-encoding 0.3.0",
+ "ssh-cipher",
+ "ssh-encoding",
  "zeroize",
 ]
 
