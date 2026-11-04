@@ -7,7 +7,6 @@
 //! (`typ=dbsc+jwt`, `alg=ES256`) signed by the device-bound key. Registration
 //! proofs carry the public key in the header `jwk`; refresh proofs must not.
 
-#![allow(dead_code, reason = "consumed by the DBSC handlers in the next change")]
 // The `CtxError` derive generates a `{Error}Ctx` mirror type whose struct
 // initialisations trip `redundant_field_names`.
 #![allow(

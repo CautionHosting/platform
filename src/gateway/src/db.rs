@@ -1065,10 +1065,16 @@ pub fn hash_bound_token(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
 
-/// Resolve a presented credential to a live session. `token` is either the raw
-/// `session_id` of an unbound session or the current DBSC bound token. Once a
-/// session is bound, its raw `session_id` no longer resolves. The returned
-/// `session_id` is canonical; callers derive CSRF from it.
+/// How long the credential replaced by a DBSC bind (the raw `session_id`) or
+/// rotation (the old bound token) keeps resolving, so requests already in
+/// flight with it do not get a 401.
+const CREDENTIAL_GRACE_SECS: i64 = 60;
+
+/// Resolve a presented credential to a live session. `token` is the raw
+/// `session_id` of an unbound session, the current DBSC bound token, or the
+/// credential that a bind or rotation replaced, within its grace. Once a
+/// session is bound, its raw `session_id` stops resolving after that grace.
+/// The returned `session_id` is canonical; callers derive CSRF from it.
 #[tracing::instrument(skip_all)]
 pub async fn validate_auth_session(
     pool: &PgPool,
@@ -1079,7 +1085,8 @@ pub async fn validate_auth_session(
          FROM auth_sessions
          WHERE expires_at > NOW() AND (
                (session_id = $1 AND dbsc_public_key IS NULL)
-            OR (bound_token_hash = $2 AND bound_token_expires_at > NOW()))",
+            OR (bound_token_hash = $2 AND bound_token_expires_at > NOW())
+            OR (prev_credential_hash = $2 AND prev_credential_expires_at > NOW()))",
     )
     .bind(token)
     .bind(hash_bound_token(token))
@@ -1107,12 +1114,15 @@ pub async fn validate_auth_session(
 }
 
 /// Delete the session identified by its bound token (live or expired, so an
-/// expired token cannot be refreshed back), or by its raw `session_id` only
-/// while unbound: a stale raw id must not log out a bound session.
+/// expired token cannot be refreshed back), by its raw `session_id` while
+/// unbound, or by the credential a bind or rotation replaced while still in
+/// its grace (a logout sent just before the swap). A stale raw id or old token
+/// past its grace must not log out a bound session.
 pub async fn delete_auth_session(pool: &PgPool, token: &str) -> Result<(), DbError> {
     sqlx::query(
         "DELETE FROM auth_sessions
-         WHERE (session_id = $1 AND dbsc_public_key IS NULL) OR bound_token_hash = $2",
+         WHERE (session_id = $1 AND dbsc_public_key IS NULL) OR bound_token_hash = $2
+            OR (prev_credential_hash = $2 AND prev_credential_expires_at > NOW())",
     )
     .bind(token)
     .bind(hash_bound_token(token))
@@ -1124,6 +1134,27 @@ pub async fn delete_auth_session(pool: &PgPool, token: &str) -> Result<(), DbErr
     ))?;
 
     Ok(())
+}
+
+/// Delete the **bound** session that `token` identifies: its bound token (live
+/// or expired, so it cannot be refreshed back) or the credential a bind or
+/// rotation replaced, within its grace. Unbound sessions never match. Returns
+/// whether a session was deleted.
+pub async fn delete_bound_session_by_token(pool: &PgPool, token: &str) -> Result<bool, DbError> {
+    let result = sqlx::query(
+        "DELETE FROM auth_sessions
+         WHERE dbsc_public_key IS NOT NULL AND (bound_token_hash = $1
+            OR (prev_credential_hash = $1 AND prev_credential_expires_at > NOW()))",
+    )
+    .bind(hash_bound_token(token))
+    .execute(pool)
+    .await
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "delete_bound_session_by_token",
+    ))?;
+
+    Ok(result.rows_affected() > 0)
 }
 
 #[tracing::instrument(skip_all)]
@@ -1897,7 +1928,6 @@ pub async fn get_auth_session(
 
 /// Store the session's single outstanding DBSC challenge, replacing any
 /// previous one.
-#[cfg_attr(not(test), allow(dead_code, reason = "consumed by the DBSC endpoints"))]
 pub async fn set_dbsc_challenge(
     pool: &PgPool,
     session_id: &str,
@@ -1921,7 +1951,6 @@ pub async fn set_dbsc_challenge(
     Ok(())
 }
 
-#[cfg_attr(not(test), allow(dead_code, reason = "consumed by the DBSC endpoints"))]
 pub async fn get_dbsc_session_by_session_id(
     pool: &PgPool,
     session_id: &str,
@@ -1940,7 +1969,6 @@ pub async fn get_dbsc_session_by_session_id(
     ))
 }
 
-#[cfg_attr(not(test), allow(dead_code, reason = "consumed by the DBSC endpoints"))]
 pub async fn get_dbsc_session_by_dbsc_id(
     pool: &PgPool,
     dbsc_id: &str,
@@ -1961,8 +1989,8 @@ pub async fn get_dbsc_session_by_dbsc_id(
 
 /// Bind an unbound, live session to a DBSC key, consuming `expected_challenge`.
 /// Returns `false` when the session is already bound, expired, or the
-/// challenge does not match or has expired. One binding per session.
-#[cfg_attr(not(test), allow(dead_code, reason = "consumed by the DBSC endpoints"))]
+/// challenge does not match or has expired. One binding per session. The raw
+/// `session_id` keeps resolving for `CREDENTIAL_GRACE_SECS`.
 pub async fn bind_dbsc_session(
     pool: &PgPool,
     session_id: &str,
@@ -1976,7 +2004,8 @@ pub async fn bind_dbsc_session(
         "UPDATE auth_sessions
          SET dbsc_id = $3, dbsc_public_key = $4,
              bound_token_hash = $5, bound_token_expires_at = $6,
-             dbsc_challenge = NULL, dbsc_challenge_expires_at = NULL
+             dbsc_challenge = NULL, dbsc_challenge_expires_at = NULL,
+             prev_credential_hash = $7, prev_credential_expires_at = NOW() + $8
          WHERE session_id = $1 AND dbsc_public_key IS NULL
            AND dbsc_challenge = $2 AND dbsc_challenge_expires_at > NOW()
            AND expires_at > NOW()",
@@ -1987,6 +2016,8 @@ pub async fn bind_dbsc_session(
     .bind(public_key)
     .bind(bound_token_hash)
     .bind(bound_token_expires_at)
+    .bind(hash_bound_token(session_id))
+    .bind(time::Duration::seconds(CREDENTIAL_GRACE_SECS))
     .execute(pool)
     .await
     .with_context(DbErrorCtx::new(
@@ -1999,8 +2030,9 @@ pub async fn bind_dbsc_session(
 
 /// Replace a bound session's token, consuming `expected_challenge`. Returns
 /// `false` when the session is unknown, expired, or the challenge does not
-/// match or has expired. The previous token stops resolving.
-#[cfg_attr(not(test), allow(dead_code, reason = "consumed by the DBSC endpoints"))]
+/// match or has expired. The previous token keeps resolving for
+/// `CREDENTIAL_GRACE_SECS`, but never past its own expiry, so a rotation cannot
+/// revive an expired token. Its slot replaces any earlier previous credential.
 pub async fn rotate_bound_token(
     pool: &PgPool,
     dbsc_id: &str,
@@ -2011,7 +2043,9 @@ pub async fn rotate_bound_token(
     let result = sqlx::query(
         "UPDATE auth_sessions
          SET bound_token_hash = $3, bound_token_expires_at = $4,
-             dbsc_challenge = NULL, dbsc_challenge_expires_at = NULL
+             dbsc_challenge = NULL, dbsc_challenge_expires_at = NULL,
+             prev_credential_hash = bound_token_hash,
+             prev_credential_expires_at = LEAST(NOW() + $5, bound_token_expires_at)
          WHERE dbsc_id = $1 AND dbsc_public_key IS NOT NULL
            AND dbsc_challenge = $2 AND dbsc_challenge_expires_at > NOW()
            AND expires_at > NOW()",
@@ -2020,6 +2054,7 @@ pub async fn rotate_bound_token(
     .bind(expected_challenge)
     .bind(bound_token_hash)
     .bind(bound_token_expires_at)
+    .bind(time::Duration::seconds(CREDENTIAL_GRACE_SECS))
     .execute(pool)
     .await
     .with_context(DbErrorCtx::new(

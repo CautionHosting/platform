@@ -54,6 +54,7 @@ pub struct Config {
     pub session_timeout_hours: i64,
     pub data_dir: String,
     pub csrf_secret: String,
+    pub dbsc_enabled: bool,
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
@@ -180,6 +181,9 @@ impl Config {
 
         let csrf_secret = env::var("CSRF_SECRET").with_context(Ctx::csrf_secret_missing())?;
 
+        // Device Bound Session Credentials: off unless explicitly turned on.
+        let dbsc_enabled = matches!(env::var("DBSC_ENABLED").as_deref(), Ok("true" | "1"));
+
         Ok(Config {
             database_url,
             api_service_url,
@@ -193,6 +197,7 @@ impl Config {
             session_timeout_hours,
             data_dir,
             csrf_secret,
+            dbsc_enabled,
         })
     }
 }

@@ -620,6 +620,21 @@ pub(crate) fn build_auth_cookies(
     (session_cookie.to_string(), csrf_cookie.to_string())
 }
 
+/// Build the DBSC bound session cookie: `caution_session` with the session
+/// cookie's attributes from [`build_auth_cookies`], holding a short-lived bound
+/// token instead of the session id.
+#[tracing::instrument(skip_all)]
+pub(crate) fn build_bound_session_cookie(token: &str, max_age_secs: i64, secure: bool) -> String {
+    Cookie::build(("caution_session", token.to_string()))
+        .path("/")
+        .http_only(true)
+        .secure(secure)
+        .same_site(SameSite::Strict)
+        .max_age(cookie::time::Duration::seconds(max_age_secs))
+        .build()
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

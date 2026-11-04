@@ -331,6 +331,7 @@ async fn main() -> Result<(), MainError> {
         .map(|v| v != "false" && v != "0")
         .unwrap_or(true);
     tracing::info!("login_allow_broadcast = {}", login_allow_broadcast);
+    tracing::info!("dbsc_enabled = {}", config.dbsc_enabled);
 
     let internal_service_secret = std::env::var("INTERNAL_SERVICE_SECRET").ok();
     if internal_service_secret.is_some() {
@@ -389,6 +390,7 @@ async fn main() -> Result<(), MainError> {
         login_allow_broadcast,
         scoped_begin_limiter: scoped_begin_limiter.clone(),
         username_begin_limiter: username_begin_limiter.clone(),
+        dbsc_enabled: config.dbsc_enabled,
     };
 
     let rate_limiter_cleanup = rate_limiter.clone();
@@ -455,6 +457,11 @@ async fn main() -> Result<(), MainError> {
         .route("/auth/login/begin", post(handlers::begin_login_handler))
         .route("/auth/login/finish", post(handlers::finish_login_handler))
         .route("/auth/logout", post(handlers::logout_handler))
+        // Chrome DBSC. No CSRF: register needs the SameSite=Strict session
+        // cookie plus a proof signed by the device key, refresh a proof from
+        // the already-registered key.
+        .route("/auth/dbsc/register", post(handlers::dbsc_register_handler))
+        .route("/auth/dbsc/refresh", post(handlers::dbsc_refresh_handler))
         .route(
             "/auth/qr-login/begin",
             post(handlers::qr_login_begin_handler),

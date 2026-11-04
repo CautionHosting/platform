@@ -161,6 +161,11 @@ pub struct AppState {
     /// single-replica; see `rate_limit.rs`. Exceeding it forces a decoy
     /// response rather than a 429 (see `handlers::scoped_or_decoy_challenge`).
     pub username_begin_limiter: crate::rate_limit::RateLimiter,
+    /// Offer Chrome Device Bound Session Credentials at login (`DBSC_ENABLED`,
+    /// default off). Gates only the `Secure-Session-Registration` header: the
+    /// DBSC endpoints and the bound-session resolver stay live, so turning it
+    /// off stops new bindings while bound sessions keep working.
+    pub dbsc_enabled: bool,
 }
 
 #[allow(dead_code)]
@@ -208,7 +213,6 @@ pub struct ValidatedSession {
 }
 
 /// DBSC state of an auth session. `dbsc_public_key` set means bound.
-#[cfg_attr(not(test), allow(dead_code, reason = "consumed by the DBSC endpoints"))]
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct DbscSession {
     pub session_id: String,

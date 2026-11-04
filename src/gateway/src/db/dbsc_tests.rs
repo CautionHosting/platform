@@ -60,6 +60,58 @@ async fn resolve(pool: &PgPool, token: &str) -> Option<ValidatedSession> {
     validate_auth_session(pool, token).await.unwrap()
 }
 
+/// Issue `challenge` on `RAW`, then rotate the bound token to `token`.
+async fn rotate(pool: &PgPool, challenge: &str, token: &str) -> bool {
+    set_dbsc_challenge(pool, RAW, challenge, in_minutes(5))
+        .await
+        .unwrap();
+    rotate_bound_token(
+        pool,
+        DBSC_ID,
+        challenge,
+        &hash_bound_token(token),
+        in_minutes(10),
+    )
+    .await
+    .unwrap()
+}
+
+/// End the previous credential's grace, as if it had elapsed.
+async fn end_grace(pool: &PgPool) {
+    sqlx::query(
+        "UPDATE auth_sessions SET prev_credential_expires_at = NOW() - INTERVAL '1 second'",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// The previous-credential slot of `RAW`'s row.
+async fn prev_credential(pool: &PgPool) -> (Option<Vec<u8>>, Option<OffsetDateTime>) {
+    sqlx::query_as(
+        "SELECT prev_credential_hash, prev_credential_expires_at
+         FROM auth_sessions WHERE session_id = $1",
+    )
+    .bind(RAW)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// `expires_at` is the 60 s grace from about now (the DB clock sets it).
+fn assert_grace(expires_at: OffsetDateTime) {
+    let slack = time::Duration::seconds(5);
+    assert!(expires_at > in_minutes(1) - slack, "{expires_at}");
+    assert!(expires_at < in_minutes(1) + slack, "{expires_at}");
+}
+
+async fn row_exists(pool: &PgPool) -> bool {
+    get_dbsc_session_by_session_id(pool, RAW)
+        .await
+        .unwrap()
+        .is_some()
+}
+
 #[test]
 fn bound_token_hash_is_sha256_of_token_bytes() {
     assert_eq!(
@@ -88,7 +140,57 @@ async fn unbound_session_id_resolves(pool: PgPool) {
 async fn bound_session_rejects_raw_session_id(pool: PgPool) {
     fixture(&pool).await;
     assert!(bind(&pool, TOKEN, in_minutes(10)).await);
+    end_grace(&pool).await;
     assert!(resolve(&pool, RAW).await.is_none());
+}
+
+#[sqlx::test(migrations = false)]
+#[ignore = "requires DATABASE_URL pointing to disposable Postgres"]
+async fn raw_id_resolves_only_within_grace_after_bind(pool: PgPool) {
+    fixture(&pool).await;
+    assert!(bind(&pool, TOKEN, in_minutes(10)).await);
+    // Requests already in flight with the raw cookie keep working briefly.
+    assert_eq!(resolve(&pool, RAW).await.unwrap().session_id, RAW);
+    assert_eq!(resolve(&pool, TOKEN).await.unwrap().session_id, RAW);
+    let (hash, expires_at) = prev_credential(&pool).await;
+    assert_eq!(hash, Some(hash_bound_token(RAW)));
+    assert_grace(expires_at.unwrap());
+
+    end_grace(&pool).await;
+    assert!(resolve(&pool, RAW).await.is_none());
+    assert_eq!(resolve(&pool, TOKEN).await.unwrap().session_id, RAW);
+}
+
+#[sqlx::test(migrations = false)]
+#[ignore = "requires DATABASE_URL pointing to disposable Postgres"]
+async fn old_token_resolves_only_within_grace_after_rotate(pool: PgPool) {
+    fixture(&pool).await;
+    assert!(bind(&pool, TOKEN, in_minutes(10)).await);
+    assert!(rotate(&pool, "challenge-2", "token-2").await);
+    // Requests already in flight with the old token keep working briefly.
+    assert_eq!(resolve(&pool, TOKEN).await.unwrap().session_id, RAW);
+    assert_eq!(resolve(&pool, "token-2").await.unwrap().session_id, RAW);
+    let (hash, expires_at) = prev_credential(&pool).await;
+    assert_eq!(hash, Some(hash_bound_token(TOKEN)));
+    assert_grace(expires_at.unwrap());
+    // One slot: the rotation replaced the raw id's grace from the bind.
+    assert!(resolve(&pool, RAW).await.is_none());
+
+    end_grace(&pool).await;
+    assert!(resolve(&pool, TOKEN).await.is_none());
+    assert_eq!(resolve(&pool, "token-2").await.unwrap().session_id, RAW);
+}
+
+#[sqlx::test(migrations = false)]
+#[ignore = "requires DATABASE_URL pointing to disposable Postgres"]
+async fn rotate_does_not_revive_expired_token(pool: PgPool) {
+    fixture(&pool).await;
+    // Chrome refreshes after the cookie (and token) expired, e.g. after idle.
+    assert!(bind(&pool, TOKEN, in_minutes(-1)).await);
+    assert!(rotate(&pool, "challenge-2", "token-2").await);
+    // The grace never outlives the old token's own expiry.
+    assert!(resolve(&pool, TOKEN).await.is_none());
+    assert_eq!(resolve(&pool, "token-2").await.unwrap().session_id, RAW);
 }
 
 #[sqlx::test(migrations = false)]
@@ -121,6 +223,7 @@ async fn expired_bound_token_rejected(pool: PgPool) {
     fixture(&pool).await;
     assert!(bind(&pool, TOKEN, in_minutes(-1)).await);
     assert!(resolve(&pool, TOKEN).await.is_none());
+    end_grace(&pool).await;
     assert!(resolve(&pool, RAW).await.is_none());
 }
 
@@ -222,6 +325,23 @@ async fn bind_rejects_wrong_or_expired_challenge(pool: PgPool) {
 
 #[sqlx::test(migrations = false)]
 #[ignore = "requires DATABASE_URL pointing to disposable Postgres"]
+async fn bind_rejects_expired_session(pool: PgPool) {
+    fixture(&pool).await;
+    sqlx::query("UPDATE auth_sessions SET expires_at = NOW() - INTERVAL '1 second'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(!bind(&pool, TOKEN, in_minutes(10)).await);
+    let stored = get_dbsc_session_by_session_id(&pool, RAW)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.dbsc_public_key, None);
+    assert_eq!(prev_credential(&pool).await, (None, None));
+}
+
+#[sqlx::test(migrations = false)]
+#[ignore = "requires DATABASE_URL pointing to disposable Postgres"]
 async fn rotate_requires_current_challenge(pool: PgPool) {
     fixture(&pool).await;
     assert!(bind(&pool, TOKEN, in_minutes(10)).await);
@@ -242,8 +362,9 @@ async fn rotate_requires_current_challenge(pool: PgPool) {
             .await
             .unwrap()
     );
-    assert!(resolve(&pool, TOKEN).await.is_none());
     assert_eq!(resolve(&pool, "token-2").await.unwrap().session_id, RAW);
+    end_grace(&pool).await;
+    assert!(resolve(&pool, TOKEN).await.is_none());
 
     let rotated = get_dbsc_session_by_dbsc_id(&pool, DBSC_ID)
         .await
@@ -261,6 +382,58 @@ async fn rotate_requires_current_challenge(pool: PgPool) {
     )
     .await
     .unwrap());
+}
+
+#[sqlx::test(migrations = false)]
+#[ignore = "requires DATABASE_URL pointing to disposable Postgres"]
+async fn rotate_rejects_expired_challenge(pool: PgPool) {
+    fixture(&pool).await;
+    assert!(bind(&pool, TOKEN, in_minutes(10)).await);
+    set_dbsc_challenge(&pool, RAW, "challenge-2", in_minutes(-1))
+        .await
+        .unwrap();
+    assert!(!rotate_bound_token(
+        &pool,
+        DBSC_ID,
+        "challenge-2",
+        &hash_bound_token("token-2"),
+        in_minutes(10)
+    )
+    .await
+    .unwrap());
+    assert!(resolve(&pool, "token-2").await.is_none());
+    assert_eq!(resolve(&pool, TOKEN).await.unwrap().session_id, RAW);
+    // The bind's grace slot is untouched.
+    assert_eq!(prev_credential(&pool).await.0, Some(hash_bound_token(RAW)));
+}
+
+#[sqlx::test(migrations = false)]
+#[ignore = "requires DATABASE_URL pointing to disposable Postgres"]
+async fn rotate_rejects_expired_session(pool: PgPool) {
+    fixture(&pool).await;
+    assert!(bind(&pool, TOKEN, in_minutes(10)).await);
+    set_dbsc_challenge(&pool, RAW, "challenge-2", in_minutes(5))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE auth_sessions SET expires_at = NOW() - INTERVAL '1 second'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(!rotate_bound_token(
+        &pool,
+        DBSC_ID,
+        "challenge-2",
+        &hash_bound_token("token-2"),
+        in_minutes(10)
+    )
+    .await
+    .unwrap());
+    let stored = get_dbsc_session_by_dbsc_id(&pool, DBSC_ID)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.dbsc_challenge.as_deref(), Some("challenge-2"));
+    assert_eq!(prev_credential(&pool).await.0, Some(hash_bound_token(RAW)));
 }
 
 #[sqlx::test(migrations = false)]
@@ -285,13 +458,38 @@ async fn delete_by_bound_token_removes_session(pool: PgPool) {
 async fn delete_by_raw_id_spares_bound_session(pool: PgPool) {
     fixture(&pool).await;
     assert!(bind(&pool, TOKEN, in_minutes(10)).await);
-    // A stale raw id (public /auth/logout) must not log out a bound session.
+    // Past its grace, a stale raw id (public /auth/logout) must not log out a
+    // bound session.
+    end_grace(&pool).await;
     delete_auth_session(&pool, RAW).await.unwrap();
-    assert!(get_dbsc_session_by_session_id(&pool, RAW)
-        .await
-        .unwrap()
-        .is_some());
+    assert!(row_exists(&pool).await);
     assert_eq!(resolve(&pool, TOKEN).await.unwrap().session_id, RAW);
+
+    // Same for an old bound token whose grace has ended.
+    assert!(rotate(&pool, "challenge-2", "token-2").await);
+    end_grace(&pool).await;
+    delete_auth_session(&pool, TOKEN).await.unwrap();
+    assert!(row_exists(&pool).await);
+    assert_eq!(resolve(&pool, "token-2").await.unwrap().session_id, RAW);
+}
+
+#[sqlx::test(migrations = false)]
+#[ignore = "requires DATABASE_URL pointing to disposable Postgres"]
+async fn delete_by_in_grace_prev_credential_removes_session(pool: PgPool) {
+    let user = fixture(&pool).await;
+    // A logout sent with the raw cookie just before the bind landed.
+    assert!(bind(&pool, TOKEN, in_minutes(10)).await);
+    delete_auth_session(&pool, RAW).await.unwrap();
+    assert!(!row_exists(&pool).await);
+
+    // A logout sent with the old token just before a rotation landed.
+    create_auth_session(&pool, RAW, b"cred", user, in_minutes(60))
+        .await
+        .unwrap();
+    assert!(bind(&pool, TOKEN, in_minutes(10)).await);
+    assert!(rotate(&pool, "challenge-2", "token-2").await);
+    delete_auth_session(&pool, TOKEN).await.unwrap();
+    assert!(!row_exists(&pool).await);
 }
 
 #[sqlx::test(migrations = false)]
@@ -305,4 +503,57 @@ async fn delete_by_expired_bound_token_removes_session(pool: PgPool) {
         .await
         .unwrap()
         .is_none());
+}
+
+#[sqlx::test(migrations = false)]
+#[ignore = "requires DATABASE_URL pointing to disposable Postgres"]
+async fn delete_bound_session_by_token_spares_unbound_session(pool: PgPool) {
+    fixture(&pool).await;
+    // Re-login with a raw (unbound) cookie: non-DBSC behaviour is unchanged.
+    set_dbsc_challenge(&pool, RAW, CHALLENGE, in_minutes(5))
+        .await
+        .unwrap();
+    assert!(!delete_bound_session_by_token(&pool, RAW).await.unwrap());
+    assert_eq!(resolve(&pool, RAW).await.unwrap().session_id, RAW);
+}
+
+#[sqlx::test(migrations = false)]
+#[ignore = "requires DATABASE_URL pointing to disposable Postgres"]
+async fn delete_bound_session_by_token_matches_bound_credentials(pool: PgPool) {
+    let user = fixture(&pool).await;
+    let recreate = || async {
+        create_auth_session(&pool, RAW, b"cred", user, in_minutes(60))
+            .await
+            .unwrap();
+    };
+
+    // The live bound token.
+    assert!(bind(&pool, TOKEN, in_minutes(10)).await);
+    assert!(delete_bound_session_by_token(&pool, TOKEN).await.unwrap());
+    assert!(!row_exists(&pool).await);
+
+    // An expired bound token: its session could still be refreshed.
+    recreate().await;
+    assert!(bind(&pool, TOKEN, in_minutes(-1)).await);
+    end_grace(&pool).await;
+    assert!(delete_bound_session_by_token(&pool, TOKEN).await.unwrap());
+    assert!(!row_exists(&pool).await);
+
+    // The raw id within its grace after the bind.
+    recreate().await;
+    assert!(bind(&pool, TOKEN, in_minutes(10)).await);
+    assert!(delete_bound_session_by_token(&pool, RAW).await.unwrap());
+    assert!(!row_exists(&pool).await);
+
+    // Past its grace, the raw id no longer identifies the session.
+    recreate().await;
+    assert!(bind(&pool, TOKEN, in_minutes(10)).await);
+    end_grace(&pool).await;
+    assert!(!delete_bound_session_by_token(&pool, RAW).await.unwrap());
+    assert!(row_exists(&pool).await);
+
+    // The old token within its grace after a rotation.
+    assert!(rotate(&pool, "challenge-2", "token-2").await);
+    assert!(delete_bound_session_by_token(&pool, TOKEN).await.unwrap());
+    assert!(!row_exists(&pool).await);
 }
