@@ -474,7 +474,7 @@ pub(crate) async fn authenticate_session(
         });
     };
 
-    let (credential_id, user_id) = db::validate_auth_session(&state.db, &session_id)
+    let session = db::validate_auth_session(&state.db, &session_id)
         .await
         .with_context(Ctx::internal())?
         .ok_or_else(|| SignRequestError::InvalidSession {
@@ -483,7 +483,9 @@ pub(crate) async fn authenticate_session(
         })?;
 
     if !using_header_auth {
-        let expected_csrf = crate::csrf::derive_csrf_token(&session_id, &state.csrf_secret);
+        // CSRF is derived from the canonical session_id, not the presented
+        // (possibly DBSC-bound) token.
+        let expected_csrf = crate::csrf::derive_csrf_token(&session.session_id, &state.csrf_secret);
         let csrf_header = headers
             .get("X-CSRF-Token")
             .and_then(|h| h.to_str().ok())
@@ -499,7 +501,7 @@ pub(crate) async fn authenticate_session(
         }
     }
 
-    Ok((credential_id, user_id))
+    Ok((session.credential_id, session.user_id))
 }
 
 #[tracing::instrument(skip_all)]

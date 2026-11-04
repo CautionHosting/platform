@@ -585,16 +585,24 @@ pub async fn fido2_auth_middleware(
     };
 
     // Validate session FIRST to ensure the auth method claim is legitimate
-    let (_credential_id, user_id) = db::validate_auth_session(&state.db, &session_id)
+    let session = db::validate_auth_session(&state.db, &session_id)
         .await
         .with_context(Ctx::session_validation())?
         .ok_or_else(|| SessionAuthError::InvalidSession {
             location: std::panic::Location::caller(),
         })?;
+    let user_id = session.user_id;
 
-    // Now that session is validated, check CSRF for cookie-based auth
-    validate_csrf(&req, &session_id, using_header_auth, &state.csrf_secret)
-        .with_context(Ctx::csrf())?;
+    // Now that session is validated, check CSRF for cookie-based auth. CSRF is
+    // derived from the canonical session_id, not the presented (possibly
+    // DBSC-bound) token.
+    validate_csrf(
+        &req,
+        &session.session_id,
+        using_header_auth,
+        &state.csrf_secret,
+    )
+    .with_context(Ctx::csrf())?;
 
     req.headers_mut().insert(
         "X-Authenticated-User-ID",

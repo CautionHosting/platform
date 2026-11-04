@@ -26,6 +26,11 @@ async fn fixture(pool: &PgPool) -> Uuid {
     .execute(pool)
     .await
     .unwrap();
+    // Session resolution reads the DBSC columns.
+    sqlx::raw_sql(include_str!("../../../api/migrations/060_dbsc.sql"))
+        .execute(pool)
+        .await
+        .unwrap();
     let user = Uuid::new_v4();
     for credential in [b"first".as_slice(), b"second"] {
         sqlx::query("INSERT INTO fido2_credentials (user_id, credential_id) VALUES ($1, $2)")
@@ -101,12 +106,18 @@ async fn verification_survives_sessions_and_only_updates_its_credential(pool: Pg
     )
     .await
     .unwrap();
-    validate_auth_session(&pool, "active").await.unwrap();
+    assert!(validate_auth_session(&pool, "active")
+        .await
+        .unwrap()
+        .is_some());
     assert_eq!(usage(&pool, user, b"first").await, None);
     record_credential_use(&pool, user, b"first").await.unwrap();
     let recorded = usage(&pool, user, b"first").await;
     assert!(recorded.is_some());
-    validate_auth_session(&pool, "active").await.unwrap();
+    assert!(validate_auth_session(&pool, "active")
+        .await
+        .unwrap()
+        .is_some());
     assert_eq!(usage(&pool, user, b"first").await, recorded);
     delete_auth_session(&pool, "active").await.unwrap();
     create_auth_session(

@@ -17,7 +17,7 @@ use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::types::DbSession;
+use crate::types::{DbscSession, ValidatedSession};
 
 // ---------------------------------------------------------------------------
 // Shared error type for all database operations in this module
@@ -1060,17 +1060,29 @@ where
     Ok(())
 }
 
+/// SHA-256 of a DBSC bound token; only this hash is stored.
+pub fn hash_bound_token(token: &str) -> Vec<u8> {
+    Sha256::digest(token.as_bytes()).to_vec()
+}
+
+/// Resolve a presented credential to a live session. `token` is either the raw
+/// `session_id` of an unbound session or the current DBSC bound token. Once a
+/// session is bound, its raw `session_id` no longer resolves. The returned
+/// `session_id` is canonical; callers derive CSRF from it.
 #[tracing::instrument(skip_all)]
 pub async fn validate_auth_session(
     pool: &PgPool,
-    session_id: &str,
-) -> Result<Option<(Vec<u8>, Uuid)>, DbError> {
-    let session: Option<DbSession> = sqlx::query_as(
-        "SELECT session_id, credential_id, user_id, expires_at, created_at, last_used_at
+    token: &str,
+) -> Result<Option<ValidatedSession>, DbError> {
+    let session: Option<ValidatedSession> = sqlx::query_as(
+        "SELECT session_id, credential_id, user_id
          FROM auth_sessions
-         WHERE session_id = $1",
+         WHERE expires_at > NOW() AND (
+               (session_id = $1 AND dbsc_public_key IS NULL)
+            OR (bound_token_hash = $2 AND bound_token_expires_at > NOW()))",
     )
-    .bind(session_id)
+    .bind(token)
+    .bind(hash_bound_token(token))
     .fetch_optional(pool)
     .await
     .with_context(DbErrorCtx::new(
@@ -1082,31 +1094,34 @@ pub async fn validate_auth_session(
         return Ok(None);
     };
 
-    if OffsetDateTime::now_utc() > session.expires_at {
-        return Ok(None);
-    }
-
     if let Err(e) =
         sqlx::query("UPDATE auth_sessions SET last_used_at = NOW() WHERE session_id = $1")
-            .bind(session_id)
+            .bind(&session.session_id)
             .execute(pool)
             .await
     {
         tracing::warn!("Failed to update last_used_at for session: {}", e);
     }
 
-    Ok(Some((session.credential_id, session.user_id)))
+    Ok(Some(session))
 }
 
-pub async fn delete_auth_session(pool: &PgPool, session_id: &str) -> Result<(), DbError> {
-    sqlx::query("DELETE FROM auth_sessions WHERE session_id = $1")
-        .bind(session_id)
-        .execute(pool)
-        .await
-        .with_context(DbErrorCtx::new(
-            DbErrorKind::QueryFailed,
-            "delete_auth_session",
-        ))?;
+/// Delete the session identified by its bound token (live or expired, so an
+/// expired token cannot be refreshed back), or by its raw `session_id` only
+/// while unbound: a stale raw id must not log out a bound session.
+pub async fn delete_auth_session(pool: &PgPool, token: &str) -> Result<(), DbError> {
+    sqlx::query(
+        "DELETE FROM auth_sessions
+         WHERE (session_id = $1 AND dbsc_public_key IS NULL) OR bound_token_hash = $2",
+    )
+    .bind(token)
+    .bind(hash_bound_token(token))
+    .execute(pool)
+    .await
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "delete_auth_session",
+    ))?;
 
     Ok(())
 }
@@ -1878,6 +1893,143 @@ pub async fn get_auth_session(
     Ok(session)
 }
 
+// DBSC (Device Bound Session Credentials) state on auth_sessions.
+
+/// Store the session's single outstanding DBSC challenge, replacing any
+/// previous one.
+#[cfg_attr(not(test), allow(dead_code, reason = "consumed by the DBSC endpoints"))]
+pub async fn set_dbsc_challenge(
+    pool: &PgPool,
+    session_id: &str,
+    challenge: &str,
+    expires_at: OffsetDateTime,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "UPDATE auth_sessions SET dbsc_challenge = $2, dbsc_challenge_expires_at = $3
+         WHERE session_id = $1",
+    )
+    .bind(session_id)
+    .bind(challenge)
+    .bind(expires_at)
+    .execute(pool)
+    .await
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "set_dbsc_challenge",
+    ))?;
+
+    Ok(())
+}
+
+#[cfg_attr(not(test), allow(dead_code, reason = "consumed by the DBSC endpoints"))]
+pub async fn get_dbsc_session_by_session_id(
+    pool: &PgPool,
+    session_id: &str,
+) -> Result<Option<DbscSession>, DbError> {
+    sqlx::query_as(
+        "SELECT session_id, dbsc_id, dbsc_public_key, dbsc_challenge,
+                dbsc_challenge_expires_at, expires_at
+         FROM auth_sessions WHERE session_id = $1",
+    )
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "get_dbsc_session_by_session_id",
+    ))
+}
+
+#[cfg_attr(not(test), allow(dead_code, reason = "consumed by the DBSC endpoints"))]
+pub async fn get_dbsc_session_by_dbsc_id(
+    pool: &PgPool,
+    dbsc_id: &str,
+) -> Result<Option<DbscSession>, DbError> {
+    sqlx::query_as(
+        "SELECT session_id, dbsc_id, dbsc_public_key, dbsc_challenge,
+                dbsc_challenge_expires_at, expires_at
+         FROM auth_sessions WHERE dbsc_id = $1",
+    )
+    .bind(dbsc_id)
+    .fetch_optional(pool)
+    .await
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "get_dbsc_session_by_dbsc_id",
+    ))
+}
+
+/// Bind an unbound, live session to a DBSC key, consuming `expected_challenge`.
+/// Returns `false` when the session is already bound, expired, or the
+/// challenge does not match or has expired. One binding per session.
+#[cfg_attr(not(test), allow(dead_code, reason = "consumed by the DBSC endpoints"))]
+pub async fn bind_dbsc_session(
+    pool: &PgPool,
+    session_id: &str,
+    expected_challenge: &str,
+    dbsc_id: &str,
+    public_key: &[u8],
+    bound_token_hash: &[u8],
+    bound_token_expires_at: OffsetDateTime,
+) -> Result<bool, DbError> {
+    let result = sqlx::query(
+        "UPDATE auth_sessions
+         SET dbsc_id = $3, dbsc_public_key = $4,
+             bound_token_hash = $5, bound_token_expires_at = $6,
+             dbsc_challenge = NULL, dbsc_challenge_expires_at = NULL
+         WHERE session_id = $1 AND dbsc_public_key IS NULL
+           AND dbsc_challenge = $2 AND dbsc_challenge_expires_at > NOW()
+           AND expires_at > NOW()",
+    )
+    .bind(session_id)
+    .bind(expected_challenge)
+    .bind(dbsc_id)
+    .bind(public_key)
+    .bind(bound_token_hash)
+    .bind(bound_token_expires_at)
+    .execute(pool)
+    .await
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "bind_dbsc_session",
+    ))?;
+
+    Ok(result.rows_affected() == 1)
+}
+
+/// Replace a bound session's token, consuming `expected_challenge`. Returns
+/// `false` when the session is unknown, expired, or the challenge does not
+/// match or has expired. The previous token stops resolving.
+#[cfg_attr(not(test), allow(dead_code, reason = "consumed by the DBSC endpoints"))]
+pub async fn rotate_bound_token(
+    pool: &PgPool,
+    dbsc_id: &str,
+    expected_challenge: &str,
+    bound_token_hash: &[u8],
+    bound_token_expires_at: OffsetDateTime,
+) -> Result<bool, DbError> {
+    let result = sqlx::query(
+        "UPDATE auth_sessions
+         SET bound_token_hash = $3, bound_token_expires_at = $4,
+             dbsc_challenge = NULL, dbsc_challenge_expires_at = NULL
+         WHERE dbsc_id = $1 AND dbsc_public_key IS NOT NULL
+           AND dbsc_challenge = $2 AND dbsc_challenge_expires_at > NOW()
+           AND expires_at > NOW()",
+    )
+    .bind(dbsc_id)
+    .bind(expected_challenge)
+    .bind(bound_token_hash)
+    .bind(bound_token_expires_at)
+    .execute(pool)
+    .await
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "rotate_bound_token",
+    ))?;
+
+    Ok(result.rows_affected() == 1)
+}
+
 // ---------------------------------------------------------------------------
 // E2E testing (feature-gated)
 // ---------------------------------------------------------------------------
@@ -2105,6 +2257,10 @@ mod credential_uv_tests {
 #[cfg(test)]
 #[path = "db/passkey_usage_tests.rs"]
 mod passkey_usage_tests;
+
+#[cfg(test)]
+#[path = "db/dbsc_tests.rs"]
+mod dbsc_tests;
 
 #[cfg(test)]
 #[path = "db/organization_tests.rs"]

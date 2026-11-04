@@ -197,6 +197,28 @@ pub struct DbSession {
     pub last_used_at: time::OffsetDateTime,
 }
 
+/// A live session resolved from a presented credential (raw `session_id` or
+/// DBSC bound token). `session_id` is always the canonical id: derive CSRF
+/// from it, never from the presented value.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ValidatedSession {
+    pub session_id: String,
+    pub credential_id: Vec<u8>,
+    pub user_id: Uuid,
+}
+
+/// DBSC state of an auth session. `dbsc_public_key` set means bound.
+#[cfg_attr(not(test), allow(dead_code, reason = "consumed by the DBSC endpoints"))]
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct DbscSession {
+    pub session_id: String,
+    pub dbsc_id: Option<String>,
+    pub dbsc_public_key: Option<Vec<u8>>,
+    pub dbsc_challenge: Option<String>,
+    pub dbsc_challenge_expires_at: Option<time::OffsetDateTime>,
+    pub expires_at: time::OffsetDateTime,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RegisterFinishResponse {
     pub status: String,

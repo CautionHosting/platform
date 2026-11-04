@@ -242,7 +242,7 @@ pub async fn list_passkeys_handler(
         db::validate_auth_session(&state.db, &session_id)
             .await
             .with_context(Ctx::internal())?
-            .map(|(cred, _)| cred)
+            .map(|session| session.credential_id)
     } else {
         None
     };
