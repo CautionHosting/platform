@@ -29,6 +29,7 @@ mod auth_middleware;
 mod config;
 mod csrf;
 mod db;
+mod dbsc;
 mod decoy;
 mod handlers;
 mod pgp;
