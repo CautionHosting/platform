@@ -301,6 +301,14 @@ pub(crate) async fn dbsc_register_handler(
 async fn register(state: &AppState, headers: &HeaderMap) -> Result<Response, DbscError> {
     use DbscErrorCtx as Ctx;
 
+    // Flag off: no new bindings, even from a challenge issued before the
+    // switch. Refresh stays open so already-bound sessions keep working.
+    if !state.dbsc_enabled {
+        return Err(DbscError::NoSession {
+            location: std::panic::Location::caller(),
+        });
+    }
+
     // Only the raw id of a live session can register. A bound token never
     // matches a `session_id`.
     let session_id =
@@ -981,6 +989,30 @@ mod tests {
             reply.json(),
             json!({"session_identifier": dbsc_id, "continue": false})
         );
+    }
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires DATABASE_URL pointing to disposable Postgres"]
+    async fn flag_off_refuses_registration_but_keeps_refresh(pool: PgPool) {
+        fixture(&pool).await;
+        let on = app_state(pool.clone(), true);
+        let on_app = router(on.clone());
+        let off_app = router(app_state(pool.clone(), false));
+        let key = new_key();
+
+        // A challenge issued before the flag went off cannot bind.
+        let challenge = login(&on).await;
+        let reply = register(&off_app, RAW, Some(&proof(&key, &challenge, true))).await;
+        assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(dbsc_state(&pool).await.dbsc_public_key, None);
+
+        // A session bound while on still refreshes once off.
+        let (_, dbsc_id) = bind(&on, &on_app, &key).await;
+        let next = refresh(&off_app, &dbsc_id, None).await.challenge();
+        let reply = refresh(&off_app, &dbsc_id, Some(&proof(&key, &next, false))).await;
+        assert_eq!(reply.status, StatusCode::OK);
+        let token = reply.session_cookie();
+        assert_eq!(probe_cookie(&off_app, &token).await, StatusCode::OK);
     }
 
     #[sqlx::test(migrations = false)]
