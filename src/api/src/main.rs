@@ -243,7 +243,7 @@ pub(crate) enum CheckOrgAccessError {
 
 #[tracing::instrument(skip_all)]
 pub(crate) async fn check_org_access(
-    db: &PgPool,
+    db: impl sqlx::PgExecutor<'_>,
     user_id: Uuid,
     org_id: Uuid,
 ) -> Result<types::UserRole, CheckOrgAccessError> {
