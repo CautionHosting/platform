@@ -502,6 +502,7 @@ mod tests {
     };
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     use p256::ecdsa::{signature::Signer, Signature, SigningKey};
+    use p256::elliptic_curve::Generate;
     use serde_json::{json, Value};
     use sqlx::PgPool;
     use time::Duration;
@@ -843,15 +844,20 @@ mod tests {
     }
 
     fn new_key() -> SigningKey {
-        SigningKey::random(&mut rand::thread_rng())
+        SigningKey::generate()
     }
 
     /// A DBSC proof as Chrome signs it. Registration proofs carry the `jwk`.
     fn proof(key: &SigningKey, jti: &str, with_jwk: bool) -> String {
         let mut header = json!({"typ": "dbsc+jwt", "alg": "ES256"});
         if with_jwk {
-            let public = p256::PublicKey::from(key.verifying_key());
-            header["jwk"] = serde_json::from_str(&public.to_jwk_string()).unwrap();
+            let public = key.verifying_key().to_sec1_point(false);
+            header["jwk"] = json!({
+                "kty": "EC",
+                "crv": "P-256",
+                "x": URL_SAFE_NO_PAD.encode(public.x().unwrap()),
+                "y": URL_SAFE_NO_PAD.encode(public.y().unwrap()),
+            });
         }
         let payload = json!({"jti": jti, "iat": OffsetDateTime::now_utc().unix_timestamp()});
         let signing_input = format!(

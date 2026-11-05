@@ -17,7 +17,6 @@
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use p256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
-use p256::elliptic_curve::JwkEcKey;
 
 use crate::csrf::constant_time_compare;
 
@@ -73,6 +72,7 @@ impl DbscProofError {
 
 /// Verify a registration proof: the public key comes from the header `jwk`.
 /// Returns that key once the signature and `jti == expected_challenge` check out.
+#[tracing::instrument(skip_all, err)]
 pub(crate) fn verify_registration_proof(
     jwt: &str,
     expected_challenge: &str,
@@ -86,11 +86,36 @@ pub(crate) fn verify_registration_proof(
         }
         Some(jwk) => jwk,
     };
-    let jwk: JwkEcKey = serde_json::from_value(jwk.clone())
+    let invalid_key = || DbscProofError::new_kind(DbscProofErrorKind::InvalidKey);
+    let jwk = jwk.as_object().ok_or_else(invalid_key)?;
+    if jwk.get("kty").and_then(|v| v.as_str()) != Some("EC")
+        || jwk.get("crv").and_then(|v| v.as_str()) != Some("P-256")
+        || jwk
+            .keys()
+            .any(|name| !matches!(name.as_str(), "kty" | "crv" | "x" | "y" | "d"))
+        || jwk.get("d").is_some_and(|d| !d.is_null() && !d.is_string())
+    {
+        return Err(invalid_key());
+    }
+    let mut public_key = [0; 65];
+    public_key[0] = 0x04;
+    for (name, coordinate) in ["x", "y"]
+        .into_iter()
+        .zip(public_key[1..].chunks_exact_mut(32))
+    {
+        let encoded = jwk
+            .get(name)
+            .and_then(|v| v.as_str())
+            .ok_or_else(invalid_key)?;
+        let length = URL_SAFE_NO_PAD
+            .decode_slice(encoded, coordinate)
+            .with_context(Ctx::new(DbscProofErrorKind::InvalidKey))?;
+        if length != coordinate.len() {
+            return Err(invalid_key());
+        }
+    }
+    let key = VerifyingKey::from_sec1_bytes(&public_key)
         .with_context(Ctx::new(DbscProofErrorKind::InvalidKey))?;
-    let public_key =
-        p256::PublicKey::from_jwk(&jwk).with_context(Ctx::new(DbscProofErrorKind::InvalidKey))?;
-    let key = VerifyingKey::from(&public_key);
     proof.verify(&key, expected_challenge)?;
     Ok(key)
 }
@@ -109,8 +134,9 @@ pub(crate) fn verify_refresh_proof(
 }
 
 /// SEC1 uncompressed encoding of a P-256 public key.
+#[tracing::instrument(skip_all)]
 pub(crate) fn encode_public_key(key: &VerifyingKey) -> Vec<u8> {
-    key.to_encoded_point(false).as_bytes().to_vec()
+    key.to_sec1_point(false).as_bytes().to_vec()
 }
 
 /// Inverse of [`encode_public_key`].
@@ -196,6 +222,7 @@ impl<'a> Proof<'a> {
 mod tests {
     use super::*;
     use p256::ecdsa::{signature::Signer, SigningKey};
+    use p256::elliptic_curve::Generate;
     use serde_json::{json, Value};
 
     const CHALLENGE: &str = "challenge-abc";
@@ -215,8 +242,13 @@ mod tests {
     }
 
     fn jwk_of(sk: &SigningKey) -> Value {
-        let public = p256::PublicKey::from(sk.verifying_key());
-        serde_json::from_str(&public.to_jwk_string()).unwrap()
+        let public = sk.verifying_key().to_sec1_point(false);
+        json!({
+            "kty": "EC",
+            "crv": "P-256",
+            "x": b64(public.x().unwrap()),
+            "y": b64(public.y().unwrap()),
+        })
     }
 
     fn reg_header(sk: &SigningKey) -> Value {
@@ -232,7 +264,7 @@ mod tests {
     }
 
     fn key() -> SigningKey {
-        SigningKey::random(&mut rand::thread_rng())
+        SigningKey::generate()
     }
 
     fn kind<T: std::fmt::Debug>(r: Result<T, DbscProofError>) -> DbscProofErrorKind {
@@ -241,10 +273,28 @@ mod tests {
 
     #[test]
     fn registration_valid_returns_key() {
-        let sk = key();
-        let t = jwt(&sk, reg_header(&sk), payload());
-        let vk = verify_registration_proof(&t, CHALLENGE).unwrap();
-        assert_eq!(&vk, sk.verifying_key());
+        use sha2::{Digest, Sha256};
+
+        let mut scalar = [0; 32];
+        scalar[31] = 1;
+        let sk = SigningKey::from_slice(&scalar).unwrap();
+        for d in [
+            None,
+            Some(Value::Null),
+            Some(json!("unused-private-component")),
+        ] {
+            let mut h = reg_header(&sk);
+            if let Some(d) = d {
+                h["jwk"]["d"] = d;
+            }
+            let t = jwt(&sk, h, payload());
+            let vk = verify_registration_proof(&t, CHALLENGE).unwrap();
+            assert_eq!(&vk, sk.verifying_key());
+            assert_eq!(
+                hex::encode(Sha256::digest(encode_public_key(&vk))),
+                "698bea63dc44a344663ff1429aea10842df27b6b991ef25866b2c6c02cdcc5be"
+            );
+        }
     }
 
     #[test]
@@ -309,22 +359,70 @@ mod tests {
             kind(verify_registration_proof(&t, CHALLENGE)),
             DbscProofErrorKind::InvalidKey
         );
-        // A different curve.
-        let mut h = reg_header(&sk);
-        h["jwk"]["crv"] = json!("P-384");
-        let t = jwt(&sk, h, payload());
-        assert_eq!(
-            kind(verify_registration_proof(&t, CHALLENGE)),
-            DbscProofErrorKind::InvalidKey
-        );
-        // A point that is not on the curve.
-        let mut h = reg_header(&sk);
-        h["jwk"]["y"] = h["jwk"]["x"].clone();
-        let t = jwt(&sk, h, payload());
-        assert_eq!(
-            kind(verify_registration_proof(&t, CHALLENGE)),
-            DbscProofErrorKind::InvalidKey
-        );
+        for (field, value) in [
+            ("kty", json!("RSA")),
+            ("crv", json!("P-384")),
+            ("crv", json!("secp256k1")),
+            ("x", Value::Null),
+            ("y", json!(42)),
+            ("x", json!("!")),
+            ("y", json!("")),
+            ("x", json!(format!("{}=", b64(&[0; 32])))),
+            ("y", json!(format!("{}B", "A".repeat(42)))),
+            ("d", json!(false)),
+            ("unknown", json!(true)),
+        ] {
+            let mut h = reg_header(&sk);
+            h["jwk"][field] = value;
+            let t = jwt(&sk, h, payload());
+            assert_eq!(
+                kind(verify_registration_proof(&t, CHALLENGE)),
+                DbscProofErrorKind::InvalidKey,
+                "field {field}"
+            );
+        }
+        for coordinate in ["x", "y"] {
+            for length in [31, 33] {
+                let mut h = reg_header(&sk);
+                h["jwk"][coordinate] = json!(b64(&vec![0; length]));
+                let t = jwt(&sk, h, payload());
+                assert_eq!(
+                    kind(verify_registration_proof(&t, CHALLENGE)),
+                    DbscProofErrorKind::InvalidKey,
+                    "{coordinate} length {length}"
+                );
+            }
+        }
+        for (coordinate, scalar) in [("x", 273u16), ("y", 104u16)] {
+            let mut bytes = [0; 32];
+            bytes[30..].copy_from_slice(&scalar.to_be_bytes());
+            let sk = SigningKey::from_slice(&bytes).unwrap();
+            let mut h = reg_header(&sk);
+            let bytes = URL_SAFE_NO_PAD
+                .decode(h["jwk"][coordinate].as_str().unwrap())
+                .unwrap();
+            assert_eq!(bytes[31], 0);
+            h["jwk"][coordinate] = json!(b64(&bytes[..31]));
+            let t = jwt(&sk, h, payload());
+            assert!(
+                matches!(
+                    verify_registration_proof(&t, CHALLENGE),
+                    Err(error) if error.kind() == DbscProofErrorKind::InvalidKey
+                ),
+                "truncated {coordinate} must not be zero-padded"
+            );
+        }
+        // Neither the origin nor out-of-field coordinates are curve points.
+        for coordinate in [[0; 32], [0xff; 32]] {
+            let mut h = reg_header(&sk);
+            h["jwk"]["x"] = json!(b64(&coordinate));
+            h["jwk"]["y"] = json!(b64(&coordinate));
+            let t = jwt(&sk, h, payload());
+            assert_eq!(
+                kind(verify_registration_proof(&t, CHALLENGE)),
+                DbscProofErrorKind::InvalidKey
+            );
+        }
     }
 
     #[test]
