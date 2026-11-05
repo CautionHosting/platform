@@ -28,7 +28,7 @@ use crate::{ApiClient, App, CheckoutLink, CreateAppResponse, GetProtectedJsonErr
 /// parses the last path segment and validates it as a UUID so that callers can
 /// attempt to re-link an app when only the git remote is set (no local
 /// `.caution/deployment.json`).
-fn extract_resource_id_from_git_url(url: &str) -> Option<String> {
+pub(super) fn extract_resource_id_from_git_url(url: &str) -> Option<String> {
     if url.starts_with("ssh://") {
         let parsed = url::Url::parse(url).ok()?;
         if parsed.scheme() != "ssh" || parsed.username() != "git" || parsed.password().is_some() {
