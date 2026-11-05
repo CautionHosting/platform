@@ -1,3 +1,12 @@
 [advisories]
 # Unscored vulnerabilities also fail, as cargo-audit cannot establish their severity.
 severity_threshold = "high"
+ignore = [
+    # crypto-bigint 0.5.5 timing side channels; no 0.5.x fix (0.7.x is already 0.7.10).
+    # 0.5.5 is only pulled by elliptic-curve 0.13 and cx448, i.e. rpgp (pgp 0.19, openpgp-card-rpgp:
+    # NIST, secp256k1 and X448 keys) and keyfork-derive-util (k256). No server-side secret-key
+    # operation uses them: the API's GPG key goes through sequoia/nettle.
+    # Residual: client-side rpgp/keyfork operations with NIST, secp256k1 or X448 secret keys.
+    # Drop once rpgp and keyfork move off elliptic-curve 0.13.
+    "RUSTSEC-2026-0387",
+]

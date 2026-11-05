@@ -42,9 +42,12 @@ impl Handler for DelayedDeploy {
     async fn channel_open_session(
         &mut self,
         channel: Channel<Msg>,
+        reply: ChannelOpenHandle,
         session: &mut Session,
-    ) -> Result<bool, Self::Error> {
-        self.gateway.channel_open_session(channel, session).await
+    ) -> Result<(), Self::Error> {
+        self.gateway
+            .channel_open_session(channel, reply, session)
+            .await
     }
 
     async fn data(
@@ -104,7 +107,10 @@ struct LocalClient {
 impl russh::client::Handler for LocalClient {
     type Error = russh::Error;
 
-    async fn check_server_key(&mut self, _key: &PublicKey) -> Result<bool, Self::Error> {
+    async fn check_server_key(
+        &mut self,
+        _key: &russh::keys::PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
         Ok(true)
     }
 
@@ -321,6 +327,9 @@ async fn peer_channel_close_during_deploy_does_not_close_transport() {
         assert!(!connection.server.is_finished());
         let another_channel = connection.client.channel_open_session().await.unwrap();
         another_channel.close().await.unwrap();
+        // Complete a round trip before disconnecting, so the server can flush
+        // its channel-close reply while the client's transport is still open.
+        connection.client.send_ping().await.unwrap();
         connection
             .client
             .disconnect(russh::Disconnect::ByApplication, "done", "")
