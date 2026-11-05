@@ -32,7 +32,7 @@ PORT=$(docker port "$CONTAINER" 5432/tcp | sed 's/.*://')
 cd "$ROOT"
 export APP_DEPLOYMENTS_TEST_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$PORT/caution_app_deployments_test"
 # A syntactically valid framework commit lets /deploy reach its later gates.
-PLATFORM_GIT_SHA=0000000000000000000000000000000000000000 \
+COMPONENT_BUILD_MODE=source PLATFORM_GIT_SHA=0000000000000000000000000000000000000000 \
     cargo test -p api app_deployments::lifecycle::db_tests --locked \
     -- --ignored --test-threads=1 --nocapture
 # The API middleware requires an existing organization per user; run against the same schema.
