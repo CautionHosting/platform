@@ -153,6 +153,23 @@ pub(crate) async fn finish_register_handler(
 
     state.reg_states.write().await.remove(&session_key);
 
+    // Reject a conflicting credential before the user, organization, alpha
+    // code or invitation is committed: failing after that left an account with
+    // no passkey, a taken username and a spent single-use code.
+    let passkey_json = serde_json::to_vec(&seckey).with_context(Ctx::internal())?;
+    if db::credential_conflicts_with_other_user(&state.db, &credential_id, &passkey_json)
+        .await
+        .with_context(Ctx::internal())?
+    {
+        tracing::warn!(
+            credential_id = %hex::encode(&credential_id),
+            "Registration rejected: credential ID already registered to another user with a different key"
+        );
+        return Err(RegisterError::CredentialAlreadyRegistered {
+            location: std::panic::Location::caller(),
+        });
+    }
+
     let user_unique_id = Uuid::parse_str(&session_key).with_context(Ctx::internal())?;
 
     let legal = db::SignupLegalContext {
@@ -240,21 +257,7 @@ pub(crate) async fn finish_register_handler(
         }
     };
 
-    let passkey_json = serde_json::to_vec(&seckey).with_context(Ctx::internal())?;
     let resident = read_credprops_rk(&reg_response);
-
-    if db::credential_conflicts_with_other_user(&state.db, &credential_id, &passkey_json)
-        .await
-        .with_context(Ctx::internal())?
-    {
-        tracing::warn!(
-            credential_id = %hex::encode(&credential_id),
-            "Registration rejected: credential ID already registered to another user with a different key"
-        );
-        return Err(RegisterError::CredentialAlreadyRegistered {
-            location: std::panic::Location::caller(),
-        });
-    }
 
     db::save_fido2_credential(
         &state.db,
