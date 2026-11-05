@@ -134,6 +134,10 @@ fn generate_client_response(
                 Some(R::Credentials { source, .. }) => {
                     use CredentialSnapshotError as C;
                     match source.downcast_ref::<C>() {
+                        Some(C::TooMany { .. }) => (
+                            StatusCode::BAD_REQUEST,
+                            "Caution-backed holder has more than 64 credentials; reduce the credential count before generation",
+                        ),
                         Some(C::Encode { .. }) => {
                             (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
                         }
