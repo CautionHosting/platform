@@ -54,7 +54,12 @@ async fn serve(dir: &Path, status: StatusCode, body: Value) -> (String, Arc<Atom
         async move { (status, Json(body)) }
     });
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    let config = dir.join("config/caution-cli");
+    // `dirs::config_dir()` ignores XDG_CONFIG_HOME on macOS.
+    let config = if cfg!(target_os = "macos") {
+        dir.join("Library/Application Support/caution-cli")
+    } else {
+        dir.join("config/caution-cli")
+    };
     fs::create_dir_all(&config).unwrap();
     fs::write(config.join("config.json"), json!({
         "session_id": "synthetic-session", "expires_at": "2099-01-01T00:00:00Z", "server_url": url,
@@ -139,12 +144,21 @@ async fn sync_creates_and_repairs_the_link_without_touching_other_local_data() {
                 ],
             );
         }
-        let output = run(dir.path(), &url, &[APP]).await;
+        let output = run(dir.path(), &url, &["--app-id", APP]).await;
         assert!(
             output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        for old in [
+            "git@old.example.test:old.git",
+            "git@other.example.test:old.git",
+            "git@old.example.test:wrong.git",
+            "git@other.example.test:wrong.git",
+        ] {
+            assert_eq!(stderr.contains(old), attempt == 1, "{stderr}");
+        }
         assert_eq!(
             serde_json::from_slice::<Value>(
                 &fs::read(repo.join(".caution/deployment.json")).unwrap()
@@ -159,6 +173,15 @@ async fn sync_creates_and_repairs_the_link_without_touching_other_local_data() {
         assert_eq!(
             git(&repo, &["remote", "get-url", "--push", "--all", "caution"]),
             GIT_URL
+        );
+        assert!(
+            !Command::new("git")
+                .current_dir(&repo)
+                .args(["config", "--local", "--get-all", "remote.caution.pushurl"])
+                .status()
+                .unwrap()
+                .success(),
+            "sync must not pin a separate push URL"
         );
         assert_eq!(
             git(&repo, &["remote", "get-url", "origin"]),
@@ -180,6 +203,21 @@ async fn sync_creates_and_repairs_the_link_without_touching_other_local_data() {
         }
     }
     assert_eq!(requests.load(Ordering::SeqCst), 3);
+
+    // A later relink that only rewrites the fetch URL must move pushes too.
+    git(
+        &repo,
+        &[
+            "remote",
+            "set-url",
+            "caution",
+            "git@relinked.example.test:new.git",
+        ],
+    );
+    assert_eq!(
+        git(&repo, &["remote", "get-url", "--push", "caution"]),
+        "git@relinked.example.test:new.git"
+    );
 }
 
 #[tokio::test]
@@ -212,7 +250,7 @@ async fn sync_rejects_unverified_app_data_without_changing_the_existing_link() {
         );
         let config = fs::read(repo.join(".git/config")).unwrap();
         let (url, requests) = serve(dir.path(), status, body).await;
-        let output = run(dir.path(), &url, &[APP]).await;
+        let output = run(dir.path(), &url, &["--app-id", APP]).await;
         assert!(!output.status.success());
         assert_eq!(requests.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -236,7 +274,7 @@ async fn sync_reports_git_failure_without_replacing_local_metadata() {
     );
     fs::write(repo.join(".git/config.lock"), "existing lock").unwrap();
     let (url, _) = serve(dir.path(), StatusCode::OK, app()).await;
-    let output = run(dir.path(), &url, &[APP]).await;
+    let output = run(dir.path(), &url, &["--app-id", APP]).await;
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("git"));
     assert_eq!(
@@ -255,13 +293,18 @@ async fn sync_requires_an_explicit_app_uuid_and_a_git_worktree() {
     let repo = dir.path().join("repo");
     fs::create_dir(&repo).unwrap();
     let (url, requests) = serve(dir.path(), StatusCode::OK, app()).await;
-    for args in [vec![], vec!["not-an-app-id"], vec![APP]] {
+    for args in [
+        vec![],
+        vec![APP],
+        vec!["--app-id", "not-an-app-id"],
+        vec!["--app-id", APP],
+    ] {
         let output = run(dir.path(), &url, &args).await;
         assert!(!output.status.success());
         assert!(!repo.join(".caution/deployment.json").exists());
     }
     git(&repo, &["init", "--bare", "-q"]);
-    let output = run(dir.path(), &url, &[APP]).await;
+    let output = run(dir.path(), &url, &["--app-id", APP]).await;
     assert!(!output.status.success());
     assert!(!repo.join(".caution/deployment.json").exists());
     assert_eq!(requests.load(Ordering::SeqCst), 0);

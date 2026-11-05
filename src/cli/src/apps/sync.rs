@@ -17,8 +17,12 @@ pub(crate) enum SyncGitErrorKind {
     ListRemotes,
     /// Create the canonical remote.
     AddRemote,
-    /// Repair the fetch and push URLs.
+    /// Read the existing remote URLs.
+    ReadRemote,
+    /// Repair the fetch URL.
     ConfigureRemote,
+    /// Drop explicit push URLs so pushes follow the fetch URL.
+    ClearPushUrl,
 }
 
 impl std::fmt::Display for SyncGitErrorKind {
@@ -27,7 +31,9 @@ impl std::fmt::Display for SyncGitErrorKind {
             Self::VerifyWorktree => "git rev-parse --show-toplevel",
             Self::ListRemotes => "git remote",
             Self::AddRemote => "git remote add caution <url>",
-            Self::ConfigureRemote => "git config --local --replace-all <key> <url>",
+            Self::ReadRemote => "git config --local --get-regexp ^remote\\.caution\\.(push)?url$",
+            Self::ConfigureRemote => "git config --local --replace-all remote.caution.url <url>",
+            Self::ClearPushUrl => "git config --local --unset-all remote.caution.pushurl",
         };
         f.write_str(command)
     }
@@ -115,21 +121,58 @@ pub(crate) async fn run(client: &ApiClient, id: uuid::Uuid) -> Result<(), SyncEr
     }
 
     let remotes = git(SyncGitErrorKind::ListRemotes, &["remote"])?;
-    if !String::from_utf8_lossy(&remotes.stdout)
+    if String::from_utf8_lossy(&remotes.stdout)
         .lines()
         .any(|name| name == "caution")
     {
+        // Exit 1: no URL keys set.
+        let existing = git_allowing(
+            SyncGitErrorKind::ReadRemote,
+            &[
+                "config",
+                "--local",
+                "--get-regexp",
+                r"^remote\.caution\.(push)?url$",
+            ],
+            &[1],
+        )?;
+        let existing = String::from_utf8_lossy(&existing.stdout);
+        let mut replaced: Vec<&str> = existing
+            .lines()
+            .filter_map(|line| line.split_once(' ').map(|(_, url)| url))
+            .filter(|url| *url != app.git_url)
+            .collect();
+        replaced.sort_unstable();
+        replaced.dedup();
+        for url in replaced {
+            output::warning(format!(
+                "Replacing git remote 'caution' URL {url} with {}",
+                app.git_url
+            ));
+        }
+    } else {
         git(
             SyncGitErrorKind::AddRemote,
             &["remote", "add", "caution", &app.git_url],
         )?;
     }
-    for key in ["remote.caution.url", "remote.caution.pushurl"] {
-        git(
-            SyncGitErrorKind::ConfigureRemote,
-            &["config", "--local", "--replace-all", key, &app.git_url],
-        )?;
-    }
+    git(
+        SyncGitErrorKind::ConfigureRemote,
+        &[
+            "config",
+            "--local",
+            "--replace-all",
+            "remote.caution.url",
+            &app.git_url,
+        ],
+    )?;
+    // A pinned pushurl would survive later `git remote set-url caution` relinks and keep
+    // pushing to the old app. Exit 5: no pushurl was set.
+    git_allowing(
+        SyncGitErrorKind::ClearPushUrl,
+        &["config", "--local", "--unset-all", "remote.caution.pushurl"],
+        &[5],
+    )?;
     client
         .save_deployment(&id)
         .with_context(Ctx::save_deployment())?;
@@ -138,15 +181,29 @@ pub(crate) async fn run(client: &ApiClient, id: uuid::Uuid) -> Result<(), SyncEr
     Ok(())
 }
 
-#[tracing::instrument(skip_all, err)]
 fn git(kind: SyncGitErrorKind, args: &[&str]) -> Result<Output, SyncError> {
+    git_allowing(kind, args, &[])
+}
+
+/// Run `git`, also treating the listed exit codes as success.
+#[tracing::instrument(skip_all, err)]
+fn git_allowing(
+    kind: SyncGitErrorKind,
+    args: &[&str],
+    allowed_codes: &[i32],
+) -> Result<Output, SyncError> {
     use SyncErrorCtx as Ctx;
 
     let output = Command::new("git")
         .args(args)
         .output()
         .with_context(Ctx::run_git(kind))?;
-    if !output.status.success() {
+    if !output.status.success()
+        && !output
+            .status
+            .code()
+            .is_some_and(|code| allowed_codes.contains(&code))
+    {
         return Err(SyncError::GitFailed {
             kind,
             message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
