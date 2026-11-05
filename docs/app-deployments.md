@@ -65,6 +65,12 @@ Set these in `~/.config/caution/.env`, then restart the API (`env.example` lists
   shows one deployment: its instance, its cleanup state (`done` or `pending`, for a
   failed or destroyed deployment) and its address, which is `unavailable` for a
   live deployment lost to `runtime_lost` (AWS has released the stable IP).
+- **Rename.** `caution apps rename <name> [APP]` changes the app's display name;
+  the app ID, managed hostname, `caution` remote, and deployments are unchanged.
+  Pass the app ID explicitly, or run from a linked checkout to rename the linked
+  app. Names are 3 to 63 characters, start and end with a letter or digit, and
+  contain only letters, digits, hyphens, and underscores; a name already used by
+  another active app in the organization is refused (409).
 - **Debug mode.** The deployment view carries `debug_mode` (`true`, `false`, or `null`
   until the configuration is recorded when the deployment goes Running). A debug
   deployment is marked in `apps get` (state `Running (debug)`; `-d` prints
@@ -81,13 +87,15 @@ Set these in `~/.config/caution/.env`, then restart the API (`env.example` lists
   linked checkout; a full ID works anywhere. Anything shorter than 8 characters is
   refused before any request ("use the full ID or at least its first 8 characters").
 - **Dashboard.** The app header is compact, with an App details disclosure for the
-  rest. Deployments list the live one first, one row each; selecting one opens a side
-  panel with its verification command, **Switch live** (a passkey prompt; offered for a
-  running non-live deployment) and **Destroy deployment** (not offered for the live one,
-  one still building, or for Legacy apps). Settings shows the retained instances and
-  their estimated cost. History is a timeline below the deployments. A Legacy app
-  shows its **Deployment** section (single deployment, with its commit) directly, and no
-  deployment actions.
+  rest. **Rename** sits next to the title and opens a name dialog with the same
+  rules as the CLI. Deployments list the live one first, one row each; selecting
+  one opens a side panel with its verification command, **Switch live** (a
+  passkey prompt; offered for a running non-live deployment) and **Destroy
+  deployment** (not offered for the live one, one still building, or for Legacy
+  apps). Settings shows the retained instances and their estimated cost. History
+  is a timeline below the deployments. A Legacy app shows its **Deployment**
+  section (single deployment, with its commit) directly, and no deployment
+  actions.
 - **Known limits.** A candidate is metered only from its health check on, as Legacy
   is. Rolling back keeps the configuration keys the newer deployment added (the
   `project_live` merge): they are not removed again.
