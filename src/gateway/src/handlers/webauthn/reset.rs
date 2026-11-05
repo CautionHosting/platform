@@ -19,7 +19,7 @@ use crate::types::*;
 use sha2::Digest as _;
 
 use crate::handlers::{
-    build_auth_cookies, read_credprops_rk, relax_registration_extensions, DomainError,
+    build_auth_cookies, dbsc, read_credprops_rk, relax_registration_extensions, DomainError,
     RegisterBeginResponse, MAX_PENDING_CHALLENGES,
 };
 
@@ -241,6 +241,7 @@ pub async fn begin_reset_register_handler(
 #[tracing::instrument(skip_all, err(Debug))]
 pub async fn finish_reset_register_handler(
     State(state): State<AppState>,
+    request_headers: HeaderMap,
     Json(req): Json<serde_json::Value>,
 ) -> Result<Response, ResetRegisterError> {
     use ResetRegisterErrorCtx as Ctx;
@@ -388,6 +389,11 @@ pub async fn finish_reset_register_handler(
         header::SET_COOKIE,
         HeaderValue::from_str(&csrf_cookie).unwrap(),
     );
+    if let Some(registration) =
+        dbsc::registration_header(&state, &session_id, secure, &request_headers).await
+    {
+        headers.insert(dbsc::SECURE_SESSION_REGISTRATION, registration);
+    }
 
     let body = serde_json::to_string(&response_body).with_context(Ctx::internal())?;
 

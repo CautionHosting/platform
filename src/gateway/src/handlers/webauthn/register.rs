@@ -16,8 +16,8 @@ use crate::db::{self, DbErrorKind};
 use crate::types::*;
 
 use super::super::{
-    build_auth_cookies, read_credprops_rk, relax_registration_extensions, RegisterBeginResponse,
-    RegisterError, RegisterErrorCtx as Ctx, MAX_PENDING_CHALLENGES,
+    build_auth_cookies, dbsc, read_credprops_rk, relax_registration_extensions,
+    RegisterBeginResponse, RegisterError, RegisterErrorCtx as Ctx, MAX_PENDING_CHALLENGES,
 };
 use dterror::ResultExt;
 
@@ -112,7 +112,7 @@ pub(crate) async fn begin_registration_challenge(
 pub(crate) async fn finish_register_handler(
     State(state): State<AppState>,
     connect_info: ConnectInfo<std::net::SocketAddr>,
-    headers: HeaderMap,
+    request_headers: HeaderMap,
     Json(req): Json<serde_json::Value>,
 ) -> Result<Response, RegisterError> {
     let session_key = req
@@ -174,7 +174,7 @@ pub(crate) async fn finish_register_handler(
 
     let legal = db::SignupLegalContext {
         ip_address: Some(connect_info.0.ip().to_string()),
-        user_agent: headers
+        user_agent: request_headers
             .get(header::USER_AGENT)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string()),
@@ -324,6 +324,11 @@ pub(crate) async fn finish_register_handler(
         header::SET_COOKIE,
         HeaderValue::from_str(&csrf_cookie).unwrap(),
     );
+    if let Some(registration) =
+        dbsc::registration_header(&state, &session_id, secure, &request_headers).await
+    {
+        headers.insert(dbsc::SECURE_SESSION_REGISTRATION, registration);
+    }
 
     Ok((StatusCode::OK, headers, body).into_response())
 }

@@ -210,7 +210,8 @@ pub async fn validate_session(db: &PgPool, session_id: &str) -> Result<Uuid, Val
     let result: Option<(Uuid,)> = sqlx::query_as(
         "SELECT s.user_id
          FROM auth_sessions s
-         WHERE s.session_id = $1 AND s.expires_at > NOW()",
+         WHERE s.session_id = $1 AND s.expires_at > NOW()
+           AND s.dbsc_public_key IS NULL",
     )
     .bind(session_id)
     .fetch_optional(db)

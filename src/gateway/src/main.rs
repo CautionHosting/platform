@@ -29,6 +29,7 @@ mod auth_middleware;
 mod config;
 mod csrf;
 mod db;
+mod dbsc;
 mod decoy;
 mod handlers;
 mod pgp;
@@ -330,6 +331,7 @@ async fn main() -> Result<(), MainError> {
         .map(|v| v != "false" && v != "0")
         .unwrap_or(true);
     tracing::info!("login_allow_broadcast = {}", login_allow_broadcast);
+    tracing::info!("dbsc_enabled = {}", config.dbsc_enabled);
 
     let internal_service_secret = std::env::var("INTERNAL_SERVICE_SECRET").ok();
     if internal_service_secret.is_some() {
@@ -388,6 +390,7 @@ async fn main() -> Result<(), MainError> {
         login_allow_broadcast,
         scoped_begin_limiter: scoped_begin_limiter.clone(),
         username_begin_limiter: username_begin_limiter.clone(),
+        dbsc_enabled: config.dbsc_enabled,
     };
 
     let rate_limiter_cleanup = rate_limiter.clone();
@@ -528,9 +531,20 @@ async fn main() -> Result<(), MainError> {
         ))
         .with_state(state.clone());
 
+    // Chrome DBSC. No CSRF: register needs the SameSite=Strict session cookie
+    // plus a proof signed by the device key, refresh a proof from the
+    // already-registered key. Kept out of the per-IP auth limiter: behind a
+    // proxy every user shares that bucket, and a 429 on refresh makes Chrome
+    // drop the cookie, logging a bound user out.
+    let dbsc_routes = Router::new()
+        .route("/auth/dbsc/register", post(handlers::dbsc_register_handler))
+        .route("/auth/dbsc/refresh", post(handlers::dbsc_refresh_handler))
+        .with_state(state.clone());
+
     let app = Router::new()
         .route("/health", get(handlers::health_handler))
         .merge(auth_routes)
+        .merge(dbsc_routes)
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .layer(cors.clone());
 

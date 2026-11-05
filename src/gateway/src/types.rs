@@ -161,6 +161,11 @@ pub struct AppState {
     /// single-replica; see `rate_limit.rs`. Exceeding it forces a decoy
     /// response rather than a 429 (see `handlers::scoped_or_decoy_challenge`).
     pub username_begin_limiter: crate::rate_limit::RateLimiter,
+    /// Offer Chrome Device Bound Session Credentials at login (`DBSC_ENABLED`,
+    /// default off). Gates only the `Secure-Session-Registration` header: the
+    /// DBSC endpoints and the bound-session resolver stay live, so turning it
+    /// off stops new bindings while bound sessions keep working.
+    pub dbsc_enabled: bool,
 }
 
 #[allow(dead_code)]
@@ -195,6 +200,27 @@ pub struct DbSession {
     pub expires_at: time::OffsetDateTime,
     pub created_at: time::OffsetDateTime,
     pub last_used_at: time::OffsetDateTime,
+}
+
+/// A live session resolved from a presented credential (raw `session_id` or
+/// DBSC bound token). `session_id` is always the canonical id: derive CSRF
+/// from it, never from the presented value.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ValidatedSession {
+    pub session_id: String,
+    pub credential_id: Vec<u8>,
+    pub user_id: Uuid,
+}
+
+/// DBSC state of an auth session. `dbsc_public_key` set means bound.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct DbscSession {
+    pub session_id: String,
+    pub dbsc_id: Option<String>,
+    pub dbsc_public_key: Option<Vec<u8>>,
+    pub dbsc_challenge: Option<String>,
+    pub dbsc_challenge_expires_at: Option<time::OffsetDateTime>,
+    pub expires_at: time::OffsetDateTime,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

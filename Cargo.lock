@@ -3486,6 +3486,7 @@ dependencies = [
  "hmac 0.12.1",
  "keymaker-models",
  "locksmith",
+ "p256 0.13.2",
  "percent-encoding",
  "rand 0.10.2",
  "rand 0.8.7",

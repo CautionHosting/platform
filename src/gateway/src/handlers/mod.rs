@@ -5,6 +5,7 @@ use axum::{response::IntoResponse, Json};
 
 mod common;
 mod credentials;
+mod dbsc;
 #[cfg(feature = "e2e-testing-unsafe")]
 mod e2e;
 pub(crate) mod frontend;
@@ -20,6 +21,8 @@ pub(crate) use webauthn::reset as reset_webauthn;
 pub(crate) use e2e::e2e_login_handler;
 
 pub(crate) use user_profile::{claim_username_handler, get_username_status_handler};
+
+pub(crate) use dbsc::{dbsc_refresh_handler, dbsc_register_handler};
 
 pub(crate) use credentials::{
     add_pgp_key_handler, add_ssh_key_handler, begin_add_passkey_handler,

@@ -25,7 +25,9 @@ use crate::db;
 use crate::decoy;
 use crate::types::*;
 
-use super::super::{build_auth_cookies, LoginError, LoginErrorCtx as Ctx, MAX_PENDING_CHALLENGES};
+use super::super::{
+    build_auth_cookies, dbsc, LoginError, LoginErrorCtx as Ctx, MAX_PENDING_CHALLENGES,
+};
 use dterror::{BoxError, CtxError, Location, ResultExt};
 
 /// Error type for [`begin_login_handler`]. All variants produce a generic 500
@@ -719,6 +721,7 @@ fn public_key_lookup_error(error: db::DbError, user_id: Uuid) -> LoginError {
 #[tracing::instrument(skip_all, err(Debug))]
 pub async fn finish_login_handler(
     State(state): State<AppState>,
+    request_headers: HeaderMap,
     Json(req): Json<serde_json::Value>,
 ) -> Result<Response, LoginError> {
     let session_key = req
@@ -1036,6 +1039,11 @@ pub async fn finish_login_handler(
         header::SET_COOKIE,
         HeaderValue::from_str(&csrf_cookie).unwrap(),
     );
+    if let Some(registration) =
+        dbsc::registration_header(&state, &session_id, secure, &request_headers).await
+    {
+        headers.insert(dbsc::SECURE_SESSION_REGISTRATION, registration);
+    }
 
     Ok((StatusCode::OK, headers, body).into_response())
 }
@@ -1550,6 +1558,7 @@ mod tests {
             login_allow_broadcast: true,
             scoped_begin_limiter: crate::rate_limit::RateLimiter::new(1000, 60),
             username_begin_limiter: crate::rate_limit::RateLimiter::new(username_limiter_max, 60),
+            dbsc_enabled: false,
         }
     }
 
