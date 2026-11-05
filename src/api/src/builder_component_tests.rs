@@ -111,6 +111,7 @@ fn builder_rejects_source_pin_drift_before_generating_userdata() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore = "needs GNU coreutils (stat -c)")]
 fn download_script_checks_hash_and_size_before_helper_execution() {
     for (steve, locksmith, egress, fault) in [
         (false, false, false, "none"),
