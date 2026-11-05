@@ -31,7 +31,9 @@ use crate::validated_types::{
     AddMemberRequest, CreateOrganizationRequest, InviteMemberRequest, UpdateMemberRequest,
     UpdateOrgSettingsRequest, UpdateOrganizationRequest,
 };
-use crate::{AppState, AuthContext, can_manage_org, check_org_access, is_owner};
+use crate::{
+    AppState, AuthContext, access_query_status, can_manage_org, check_org_access, is_owner,
+};
 
 const INVITATION_EXPIRY_HOURS: i64 = 72;
 const LEGACY_DEFAULT_ORG_PREFIX: &str = "Organization for user ";
@@ -359,9 +361,7 @@ pub enum GetOrganizationError {
 impl IntoResponse for GetOrganizationError {
     fn into_response(self) -> Response {
         let (status, body) = match &self {
-            GetOrganizationError::AccessQuery { .. } => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
-            }
+            GetOrganizationError::AccessQuery { source, .. } => access_query_status(source),
             GetOrganizationError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found"),
         };
         sentry_middleware::error_response(status, body, self)
@@ -422,9 +422,7 @@ pub enum UpdateOrganizationError {
 impl IntoResponse for UpdateOrganizationError {
     fn into_response(self) -> Response {
         let (status, body) = match &self {
-            UpdateOrganizationError::AccessQuery { .. } => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
-            }
+            UpdateOrganizationError::AccessQuery { source, .. } => access_query_status(source),
             UpdateOrganizationError::NotManager { .. } => (StatusCode::FORBIDDEN, "forbidden"),
             UpdateOrganizationError::BadRequest { .. } => (StatusCode::BAD_REQUEST, "bad request"),
             UpdateOrganizationError::Update { .. } => {
@@ -507,9 +505,7 @@ pub enum DeleteOrganizationError {
 impl IntoResponse for DeleteOrganizationError {
     fn into_response(self) -> Response {
         let (status, body) = match &self {
-            DeleteOrganizationError::AccessQuery { .. } => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
-            }
+            DeleteOrganizationError::AccessQuery { source, .. } => access_query_status(source),
             DeleteOrganizationError::NotOwner { .. } => (StatusCode::FORBIDDEN, "forbidden"),
             DeleteOrganizationError::Update { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
@@ -569,9 +565,7 @@ pub enum GetOrgSettingsError {
 impl IntoResponse for GetOrgSettingsError {
     fn into_response(self) -> Response {
         let (status, body) = match &self {
-            GetOrgSettingsError::AccessQuery { .. } => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
-            }
+            GetOrgSettingsError::AccessQuery { source, .. } => access_query_status(source),
             GetOrgSettingsError::Query { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
             }
@@ -643,9 +637,7 @@ pub enum UpdateOrgSettingsError {
 impl IntoResponse for UpdateOrgSettingsError {
     fn into_response(self) -> Response {
         let (status, body) = match &self {
-            UpdateOrgSettingsError::AccessQuery { .. } => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
-            }
+            UpdateOrgSettingsError::AccessQuery { source, .. } => access_query_status(source),
             UpdateOrgSettingsError::NotManager { .. } => (StatusCode::FORBIDDEN, "forbidden"),
             UpdateOrgSettingsError::Update { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
@@ -725,9 +717,7 @@ pub enum ListMembersError {
 impl IntoResponse for ListMembersError {
     fn into_response(self) -> Response {
         let (status, body) = match &self {
-            ListMembersError::AccessQuery { .. } => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
-            }
+            ListMembersError::AccessQuery { source, .. } => access_query_status(source),
             ListMembersError::Query { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
         };
         sentry_middleware::error_response(status, body, self)
@@ -772,6 +762,14 @@ pub async fn list_members(
 /// Failure modes for [`invite_member`].
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum InviteMemberError {
+    #[error("failed to check organization access [{location}]")]
+    AccessQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
     #[error("you do not have permission to manage this organization [{location}]")]
     Forbidden { location: Location },
 
@@ -799,6 +797,7 @@ pub enum InviteMemberError {
 impl IntoResponse for InviteMemberError {
     fn into_response(self) -> Response {
         let (status, body) = match &self {
+            InviteMemberError::AccessQuery { source, .. } => access_query_status(source),
             InviteMemberError::Forbidden { .. } => (StatusCode::FORBIDDEN, "forbidden"),
             InviteMemberError::AlreadyMember { .. } => (StatusCode::CONFLICT, "conflict"),
             InviteMemberError::AlreadyInvited { .. } => (StatusCode::CONFLICT, "conflict"),
@@ -823,7 +822,7 @@ pub async fn invite_member(
 
     let role = check_org_access(&state.db, auth.user_id, org_id)
         .await
-        .with_context(Ctx::database())?;
+        .with_context(Ctx::access_query())?;
 
     if !can_manage_org(&role) {
         return Err(InviteMemberError::Forbidden {
@@ -980,6 +979,14 @@ pub async fn invite_member(
 /// Failure modes for [`list_active_invitations`].
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum ListActiveInvitationsError {
+    #[error("failed to check organization access [{location}]")]
+    AccessQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
     #[error("you do not have permission to manage this organization [{location}]")]
     Forbidden { location: Location },
 
@@ -995,6 +1002,7 @@ pub enum ListActiveInvitationsError {
 impl IntoResponse for ListActiveInvitationsError {
     fn into_response(self) -> Response {
         let (status, body) = match &self {
+            ListActiveInvitationsError::AccessQuery { source, .. } => access_query_status(source),
             ListActiveInvitationsError::Forbidden { .. } => (StatusCode::FORBIDDEN, "forbidden"),
             ListActiveInvitationsError::Query { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
@@ -1014,7 +1022,7 @@ pub async fn list_active_invitations(
 
     let role = check_org_access(&state.db, auth.user_id, org_id)
         .await
-        .with_context(Ctx::query())?;
+        .with_context(Ctx::access_query())?;
 
     if !can_manage_org(&role) {
         return Err(ListActiveInvitationsError::Forbidden {
@@ -1051,6 +1059,14 @@ pub async fn list_active_invitations(
 /// Failure modes for [`cancel_invitation`].
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum CancelInvitationError {
+    #[error("failed to check organization access [{location}]")]
+    AccessQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
     #[error("you do not have permission to manage this organization [{location}]")]
     Forbidden { location: Location },
 
@@ -1069,6 +1085,7 @@ pub enum CancelInvitationError {
 impl IntoResponse for CancelInvitationError {
     fn into_response(self) -> Response {
         let (status, body) = match &self {
+            CancelInvitationError::AccessQuery { source, .. } => access_query_status(source),
             CancelInvitationError::Forbidden { .. } => (StatusCode::FORBIDDEN, "forbidden"),
             CancelInvitationError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found"),
             CancelInvitationError::Database { .. } => {
@@ -1089,7 +1106,7 @@ pub async fn cancel_invitation(
 
     let role = check_org_access(&state.db, auth.user_id, org_id)
         .await
-        .with_context(Ctx::database())?;
+        .with_context(Ctx::access_query())?;
 
     if !can_manage_org(&role) {
         return Err(CancelInvitationError::Forbidden {
@@ -1210,9 +1227,7 @@ pub enum AddMemberError {
 impl IntoResponse for AddMemberError {
     fn into_response(self) -> Response {
         let (status, body) = match &self {
-            AddMemberError::AccessQuery { .. } => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
-            }
+            AddMemberError::AccessQuery { source, .. } => access_query_status(source),
             AddMemberError::NotManager { .. } => (StatusCode::FORBIDDEN, "forbidden"),
             AddMemberError::HasOrgCheck { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
@@ -1302,9 +1317,7 @@ pub enum UpdateMemberError {
 impl IntoResponse for UpdateMemberError {
     fn into_response(self) -> Response {
         let (status, body) = match &self {
-            UpdateMemberError::AccessQuery { .. } => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
-            }
+            UpdateMemberError::AccessQuery { source, .. } => access_query_status(source),
             UpdateMemberError::NotManager { .. } => (StatusCode::FORBIDDEN, "forbidden"),
             UpdateMemberError::Update { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
@@ -1383,9 +1396,7 @@ pub enum RemoveMemberError {
 impl IntoResponse for RemoveMemberError {
     fn into_response(self) -> Response {
         let (status, body) = match &self {
-            RemoveMemberError::AccessQuery { .. } => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
-            }
+            RemoveMemberError::AccessQuery { source, .. } => access_query_status(source),
             RemoveMemberError::NotManager { .. } => (StatusCode::FORBIDDEN, "forbidden"),
             RemoveMemberError::Delete { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
@@ -1433,3 +1444,52 @@ pub async fn remove_member(
 
 #[cfg(test)]
 mod db_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_member_access_is_forbidden_not_internal() {
+        let forbidden: BoxError = Box::new(crate::CheckOrgAccessError::Forbidden {
+            location: std::panic::Location::caller(),
+        });
+        assert_eq!(access_query_status(&forbidden).0, StatusCode::FORBIDDEN);
+
+        let query_failed: BoxError = Box::new(crate::CheckOrgAccessError::Query {
+            location: std::panic::Location::caller(),
+            source: Box::new(std::io::Error::other("database unavailable")),
+        });
+        assert_eq!(
+            access_query_status(&query_failed).0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    /// Same check through the path handlers use: `with_context` boxes the
+    /// `CheckOrgAccessError` into the handler error, whose response must still
+    /// be a 403 for a non-member.
+    #[test]
+    fn non_member_handler_response_is_forbidden() {
+        use GetOrganizationErrorCtx as Ctx;
+
+        let forbidden: Result<(), crate::CheckOrgAccessError> =
+            Err(crate::CheckOrgAccessError::Forbidden {
+                location: std::panic::Location::caller(),
+            });
+        let error: GetOrganizationError = forbidden.with_context(Ctx::access_query()).unwrap_err();
+        assert_eq!(error.into_response().status(), StatusCode::FORBIDDEN);
+
+        let query_failed: Result<(), crate::CheckOrgAccessError> =
+            Err(crate::CheckOrgAccessError::Query {
+                location: std::panic::Location::caller(),
+                source: Box::new(std::io::Error::other("database unavailable")),
+            });
+        let error: GetOrganizationError =
+            query_failed.with_context(Ctx::access_query()).unwrap_err();
+        assert_eq!(
+            error.into_response().status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+}

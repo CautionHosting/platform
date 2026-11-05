@@ -274,6 +274,16 @@ pub(crate) fn is_owner(role: &types::UserRole) -> bool {
     role.is_owner()
 }
 
+/// Response for a [`check_org_access`] failure carried as an error source: 403
+/// when the caller is not a member of the organization, 500 only when the
+/// membership lookup itself failed.
+pub(crate) fn access_query_status(source: &BoxError) -> (StatusCode, &'static str) {
+    match source.downcast_ref::<CheckOrgAccessError>() {
+        Some(CheckOrgAccessError::Forbidden { .. }) => (StatusCode::FORBIDDEN, "forbidden"),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+    }
+}
+
 /// Failure modes for [`get_user_primary_org`] (leaf error: no underlying source).
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum GetUserPrimaryOrgError {
