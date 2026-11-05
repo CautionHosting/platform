@@ -1145,6 +1145,21 @@ pub enum Fido2SignError {
         source: Box<dyn Error + Send + Sync + 'static>,
     },
 
+    #[error("could not find PIN verification info for user {user_id} [{location}]")]
+    PinRequirementLookup {
+        user_id: Uuid,
+        #[location]
+        location: &'static Location<'static>,
+        #[source]
+        source: Box<dyn Error + Send + Sync + 'static>,
+    },
+
+    #[error("organization requires user verification but the signature lacks it [{location}]")]
+    PinRequired {
+        #[location]
+        location: &'static Location<'static>,
+    },
+
     #[error("failed to serialize authentication state [{location}]")]
     SerializeAuthState {
         #[location]
@@ -1259,6 +1274,25 @@ impl IntoResponse for Fido2SignError {
                 sentry_middleware::error_response(
                     StatusCode::UNAUTHORIZED,
                     "Invalid signature",
+                    self,
+                )
+            }
+            Self::PinRequired { .. } => {
+                tracing::warn!(
+                    ?self,
+                    "Signed request: org requires PIN, signature lacks UV"
+                );
+                sentry_middleware::error_response(
+                    StatusCode::FORBIDDEN,
+                    "Your organization requires user verification for your passkey. Unlock it with your PIN, password, or biometrics.",
+                    self,
+                )
+            }
+            Self::PinRequirementLookup { .. } => {
+                tracing::error!(?self, "Signed request: PIN requirement lookup failed");
+                sentry_middleware::error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to verify signature",
                     self,
                 )
             }
@@ -1455,10 +1489,22 @@ async fn fido2_sign_flow(
     let _seckey: SecurityKey =
         serde_json::from_slice(&cred_bytes).with_context(Ctx::credential_parse())?;
 
-    state
+    let auth_result = state
         .webauthn
         .finish_securitykey_authentication(&auth_response, &pending.auth_state)
         .with_context(Ctx::signature_invalid())?;
+
+    // The challenge asks for UV=Required when the org requires a PIN, but the
+    // server-side state keeps the library's default policy, so the flag must
+    // be checked here (as login does).
+    let requires_pin = db::user_requires_pin(&state.db, pending.user_id)
+        .await
+        .with_context(Ctx::pin_requirement_lookup(pending.user_id))?;
+    if requires_pin && !auth_result.user_verified() {
+        return Err(E::PinRequired {
+            location: std::panic::Location::caller(),
+        });
+    }
 
     let authentication_state =
         serde_json::to_vec(&pending.auth_state).with_context(Ctx::serialize_auth_state())?;
