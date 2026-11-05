@@ -68,12 +68,17 @@ async fn serve(dir: &Path, status: StatusCode, body: Value) -> (String, Arc<Atom
 }
 
 async fn run(dir: &Path, url: &str, args: &[&str]) -> Output {
+    run_in(dir, &dir.join("repo"), url, args).await
+}
+
+/// Run `caution apps sync` from `cwd`, with `dir/global.gitconfig` as the global Git config.
+async fn run_in(dir: &Path, cwd: &Path, url: &str, args: &[&str]) -> Output {
     let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_caution"));
     command
-        .current_dir(dir.join("repo"))
+        .current_dir(cwd)
         .env("HOME", dir)
         .env("XDG_CONFIG_HOME", dir.join("config"))
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_GLOBAL", dir.join("global.gitconfig"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args(["--url", url, "apps", "sync"])
         .args(args)
@@ -308,4 +313,72 @@ async fn sync_requires_an_explicit_app_uuid_and_a_git_worktree() {
     assert!(!output.status.success());
     assert!(!repo.join(".caution/deployment.json").exists());
     assert_eq!(requests.load(Ordering::SeqCst), 0);
+}
+
+/// A repo linked to an old app, with metadata and config snapshots to compare after a refusal.
+fn linked_repo(dir: &Path) -> (std::path::PathBuf, Vec<u8>) {
+    let repo = dir.join("repo");
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::create_dir_all(repo.join(".caution")).unwrap();
+    fs::write(repo.join(".caution/deployment.json"), "existing metadata").unwrap();
+    git(&repo, &["init", "-q"]);
+    git(
+        &repo,
+        &["remote", "add", "caution", "git@old.example.test:old.git"],
+    );
+    let config = fs::read(repo.join(".git/config")).unwrap();
+    (repo, config)
+}
+
+fn assert_unchanged(repo: &Path, config: &[u8]) {
+    assert_eq!(
+        fs::read_to_string(repo.join(".caution/deployment.json")).unwrap(),
+        "existing metadata"
+    );
+    assert_eq!(fs::read(repo.join(".git/config")).unwrap(), config);
+}
+
+#[tokio::test]
+async fn sync_from_a_subdirectory_is_rejected_before_any_change() {
+    let dir = tempdir().unwrap();
+    let (repo, config) = linked_repo(dir.path());
+    let (url, requests) = serve(dir.path(), StatusCode::OK, app()).await;
+    let output = run_in(dir.path(), &repo.join("src"), &url, &["--app-id", APP]).await;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("repository root"), "{stderr}");
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
+    assert!(!repo.join("src/.caution/deployment.json").exists());
+    assert_unchanged(&repo, &config);
+}
+
+#[tokio::test]
+async fn sync_rejects_caution_urls_outside_the_local_config() {
+    const INHERITED: &str = "git@inherited.example.test:old.git";
+    // Even a URL matching the app is refused: sync could not remove it on a later relink.
+    for (source, key, value) in [
+        ("global", "pushurl", INHERITED),
+        ("global", "url", INHERITED),
+        ("global", "pushurl", GIT_URL),
+        ("include", "pushurl", INHERITED),
+        ("include", "url", INHERITED),
+    ] {
+        let dir = tempdir().unwrap();
+        let (repo, _) = linked_repo(dir.path());
+        let section = format!("[remote \"caution\"]\n\t{key} = {value}\n");
+        if source == "global" {
+            fs::write(dir.path().join("global.gitconfig"), section).unwrap();
+        } else {
+            fs::write(repo.join(".git/inherited.config"), section).unwrap();
+            git(&repo, &["config", "include.path", "inherited.config"]);
+        }
+        let config = fs::read(repo.join(".git/config")).unwrap();
+        let (url, requests) = serve(dir.path(), StatusCode::OK, app()).await;
+        let output = run(dir.path(), &url, &["--app-id", APP]).await;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{source} {key}: {stderr}");
+        assert!(stderr.contains(value), "{source} {key}: {stderr}");
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        assert_unchanged(&repo, &config);
+    }
 }
