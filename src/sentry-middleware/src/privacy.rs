@@ -158,14 +158,34 @@ fn scrub_urls(mut text: &str) -> String {
             .rev()
             .find(|(_, c)| !c.is_ascii_alphanumeric() && !matches!(c, '+' | '-' | '.'))
             .map_or(0, |(index, c)| index + c.len_utf8());
-        // Quotes can occur inside userinfo or query values. Splitting there
-        // would scrub only the URL prefix and leave the secret suffix intact.
-        let end = text[separator + 3..]
-            .find(char::is_whitespace)
-            .map_or(text.len(), |index| separator + 3 + index);
-        let end = text[..end]
-            .trim_end_matches([')', ',', ';', '\"', '\'', '>'])
-            .len();
+        // Quotes can occur inside userinfo or query values. Splitting there would
+        // scrub only the URL prefix and leave the secret suffix intact. ASCII
+        // whitespace always ends the URL: a raw space inside a secret is out of scope.
+        let (_, wide_end) = url_span_end(text, separator + 3, |c| c.is_ascii_whitespace());
+        let (narrow_raw, narrow_end) = url_span_end(text, separator + 3, char::is_whitespace);
+        // The parser also accepts non-ASCII whitespace (e.g. U+00A0). It ends the URL
+        // unless it falls inside userinfo (scrub the wide span) or a query or
+        // fragment (drop the rest of the wide span).
+        let (end, resume) = if narrow_end == wide_end {
+            (wide_end, wide_end)
+        } else {
+            match (
+                Url::parse(&text[start..narrow_end]),
+                Url::parse(&text[start..wide_end]),
+            ) {
+                (Ok(narrow), Ok(wide))
+                    if (narrow.username(), narrow.password())
+                        == (wide.username(), wide.password()) =>
+                {
+                    if (narrow.query(), narrow.fragment()) == (wide.query(), wide.fragment()) {
+                        (narrow_end, narrow_end)
+                    } else {
+                        (narrow_end, wide_end)
+                    }
+                }
+                _ => (wide_end, wide_end),
+            }
+        };
         clean.push_str(&text[..start]);
         match Url::parse(&text[start..end]) {
             Ok(mut url) if !text[separator + 3..end].contains("://") => {
@@ -174,10 +194,25 @@ fn scrub_urls(mut text: &str) -> String {
             }
             _ => clean.push_str(REDACTED),
         }
-        text = &text[end..];
+        if resume > end {
+            // Keep closing punctuation trimmed off the URL.
+            clean.push_str(&text[end..narrow_raw]);
+        }
+        text = &text[resume..];
     }
     clean.push_str(text);
     clean
+}
+
+/// End of the URL span from `from` to the first `is_end` char: (raw, closing punctuation trimmed).
+fn url_span_end(text: &str, from: usize, is_end: impl Fn(char) -> bool) -> (usize, usize) {
+    let raw = text[from..]
+        .find(is_end)
+        .map_or(text.len(), |index| from + index);
+    let trimmed = text[..raw]
+        .trim_end_matches([')', ',', ';', '\"', '\'', '>'])
+        .len();
+    (raw, trimmed)
 }
 
 #[cfg(test)]
@@ -396,6 +431,38 @@ mod tests {
             (
                 "bad https://user:password@?token=query-secret [x.rs:1:2]",
                 "bad [Filtered] [x.rs:1:2]",
+            ),
+            (
+                "https://host.invalid/v1?token=prefix\u{00A0}SYNTHETIC_SECRET",
+                "https://host.invalid/v1",
+            ),
+            (
+                "failed https://host.invalid/v1?key=a\u{3000}SYNTHETIC_SECRET [x.rs:1:2]",
+                "failed https://host.invalid/v1 [x.rs:1:2]",
+            ),
+            (
+                "failed https://host.invalid/v1\u{2028}x?token=SYNTHETIC_SECRET [x.rs:1:2]",
+                "failed https://host.invalid/v1 [x.rs:1:2]",
+            ),
+            (
+                "GET https://host.invalid/v1\u{00A0}failed with 502 [x.rs:1:2]",
+                "GET https://host.invalid/v1\u{00A0}failed with 502 [x.rs:1:2]",
+            ),
+            (
+                "GET (https://host.invalid/v1?token=SYNTHETIC_SECRET)\u{00A0}next step",
+                "GET (https://host.invalid/v1) step",
+            ),
+            (
+                "https://host.invalid/v1\u{00A0}see#SYNTHETIC_SECRET [x.rs:1:2]",
+                "https://host.invalid/v1 [x.rs:1:2]",
+            ),
+            (
+                "https://user:pre\u{00A0}SYNTHETIC_PASSWORD@host.invalid/v1 next",
+                "https://host.invalid/v1 next",
+            ),
+            (
+                "https://SYNTHETIC\u{00A0}_SECRET:SYNTHETIC_PASSWORD@host.invalid/v1",
+                "https://host.invalid/v1",
             ),
         ];
         for (input, _) in cases {
