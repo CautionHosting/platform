@@ -24,6 +24,15 @@ type StoppedResourceRow = (
 /// Failure modes for [`call_internal_unsuspend`] (leaf error; callers discard the result).
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum CallInternalUnsuspendError {
+    #[error("could not read the dunning stage of org {org_id} [{location}]")]
+    DunningLookup {
+        org_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
     #[error("could not call internal unsuspend endpoint [{location}]")]
     Send {
         #[location]
@@ -43,6 +52,22 @@ pub async fn call_internal_unsuspend(
     org_id: Uuid,
 ) -> Result<(), CallInternalUnsuspendError> {
     use CallInternalUnsuspendErrorCtx as Ctx;
+
+    // A credit deposit only lifts credit suspension. Apps that dunning stopped
+    // stay stopped until the unpaid invoice is settled; dunning restarts them.
+    let dunning_suspended: bool =
+        sqlx::query_scalar("SELECT dunning_stage = 'suspended' FROM organizations WHERE id = $1")
+            .bind(org_id)
+            .fetch_one(&state.db)
+            .await
+            .with_context(Ctx::dunning_lookup(org_id))?;
+    if dunning_suspended {
+        tracing::info!(
+            "Not unsuspending org {} after credit deposit: suspended for an unpaid invoice",
+            org_id
+        );
+        return Ok(());
+    }
 
     let secret = state.internal_service_secret.as_deref().unwrap_or_default();
     let client = reqwest::Client::new();
@@ -334,8 +359,11 @@ impl IntoResponse for UnsuspendOrgResourcesError {
     }
 }
 
-/// Internal endpoint: unsuspend org — restart stopped resources and clear dunning state.
-/// Called when payment is resolved (credit deposit, new payment method, etc).
+/// Internal endpoint: unsuspend org — restart its stopped resources. It does
+/// not clear dunning state: metering's dunning cycle calls it once the payment
+/// is resolved and clears that state itself. Credit deposits also call it to
+/// lift a credit suspension, but not while the org is dunning-suspended (see
+/// [`call_internal_unsuspend`]).
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn unsuspend_org_resources(
     State(state): State<Arc<AppState>>,
@@ -617,16 +645,9 @@ pub async fn unsuspend_org_resources(
         started += 1;
     }
 
-    // Clear dunning state
-    if let Err(e) = sqlx::query(
-        "UPDATE organizations SET payment_failed_at = NULL, dunning_stage = 'none' WHERE id = $1",
-    )
-    .bind(org_id)
-    .execute(&state.db)
-    .await
-    {
-        tracing::error!("Failed to clear dunning state for org {}: {}", org_id, e);
-    }
+    // Dunning state is not cleared here: a credit deposit also calls this
+    // endpoint and must not reset an unpaid invoice's dunning cycle. Metering
+    // clears it once the payment is resolved (metering `run_dunning_cycle`).
 
     Ok(Json(serde_json::json!({
         "started": started,
