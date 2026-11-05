@@ -1635,6 +1635,7 @@ mod tests {
             login_allow_broadcast: true,
             scoped_begin_limiter: crate::rate_limit::RateLimiter::new(1000, 60),
             username_begin_limiter: crate::rate_limit::RateLimiter::new(1000, 60),
+            dbsc_enabled: false,
         };
         let mut log_file = tempfile::tempfile().unwrap();
         let subscriber = tracing_subscriber::fmt()
