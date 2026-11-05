@@ -204,6 +204,12 @@ fn bound_response(token: &str, max_age_secs: i64, dbsc_id: &str) -> Response {
 /// logged.
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum DbscError {
+    #[error("DBSC is disabled (DBSC_ENABLED is off) [{location}]")]
+    Disabled {
+        #[location]
+        location: Location,
+    },
+
     #[error("no live, unbound session for the presented cookie [{location}]")]
     NoSession {
         #[location]
@@ -262,7 +268,10 @@ pub(crate) enum DbscError {
 impl IntoResponse for DbscError {
     fn into_response(self) -> Response {
         let (status, body) = match &self {
-            Self::NoSession { .. } | Self::NoChallenge { .. } | Self::MissingProof { .. } => {
+            Self::Disabled { .. }
+            | Self::NoSession { .. }
+            | Self::NoChallenge { .. }
+            | Self::MissingProof { .. } => {
                 tracing::debug!(?self, "DBSC request rejected");
                 (StatusCode::UNAUTHORIZED, "authentication required")
             }
@@ -304,7 +313,7 @@ async fn register(state: &AppState, headers: &HeaderMap) -> Result<Response, Dbs
     // Flag off: no new bindings, even from a challenge issued before the
     // switch. Refresh stays open so already-bound sessions keep working.
     if !state.dbsc_enabled {
-        return Err(DbscError::NoSession {
+        return Err(DbscError::Disabled {
             location: std::panic::Location::caller(),
         });
     }
@@ -683,6 +692,14 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn register_refused_when_disabled() {
+        // Refused before any DB access, so the offline pool is never touched.
+        let app = router(offline_state(false));
+        let reply = register(&app, RAW, Some("any-proof")).await;
+        assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+    }
+
     // --- Flow tests against a disposable Postgres ------------------------
 
     const MIGRATION: &str = include_str!("../../../api/migrations/060_dbsc.sql");
@@ -1000,14 +1017,22 @@ mod tests {
         let off_app = router(app_state(pool.clone(), false));
         let key = new_key();
 
-        // A challenge issued before the flag went off cannot bind.
+        // A challenge issued before the flag went off cannot bind...
         let challenge = login(&on).await;
-        let reply = register(&off_app, RAW, Some(&proof(&key, &challenge, true))).await;
+        let signed = proof(&key, &challenge, true);
+        let reply = register(&off_app, RAW, Some(&signed)).await;
         assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
         assert_eq!(dbsc_state(&pool).await.dbsc_public_key, None);
 
+        // ...though the very same proof binds with the flag on.
+        let reply = register(&on_app, RAW, Some(&signed)).await;
+        assert_eq!(reply.status, StatusCode::OK);
+        let dbsc_id = reply.json()["session_identifier"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
         // A session bound while on still refreshes once off.
-        let (_, dbsc_id) = bind(&on, &on_app, &key).await;
         let next = refresh(&off_app, &dbsc_id, None).await.challenge();
         let reply = refresh(&off_app, &dbsc_id, Some(&proof(&key, &next, false))).await;
         assert_eq!(reply.status, StatusCode::OK);
