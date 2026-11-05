@@ -457,11 +457,6 @@ async fn main() -> Result<(), MainError> {
         .route("/auth/login/begin", post(handlers::begin_login_handler))
         .route("/auth/login/finish", post(handlers::finish_login_handler))
         .route("/auth/logout", post(handlers::logout_handler))
-        // Chrome DBSC. No CSRF: register needs the SameSite=Strict session
-        // cookie plus a proof signed by the device key, refresh a proof from
-        // the already-registered key.
-        .route("/auth/dbsc/register", post(handlers::dbsc_register_handler))
-        .route("/auth/dbsc/refresh", post(handlers::dbsc_refresh_handler))
         .route(
             "/auth/qr-login/begin",
             post(handlers::qr_login_begin_handler),
@@ -536,9 +531,20 @@ async fn main() -> Result<(), MainError> {
         ))
         .with_state(state.clone());
 
+    // Chrome DBSC. No CSRF: register needs the SameSite=Strict session cookie
+    // plus a proof signed by the device key, refresh a proof from the
+    // already-registered key. Kept out of the per-IP auth limiter: behind a
+    // proxy every user shares that bucket, and a 429 on refresh makes Chrome
+    // drop the cookie, logging a bound user out.
+    let dbsc_routes = Router::new()
+        .route("/auth/dbsc/register", post(handlers::dbsc_register_handler))
+        .route("/auth/dbsc/refresh", post(handlers::dbsc_refresh_handler))
+        .with_state(state.clone());
+
     let app = Router::new()
         .route("/health", get(handlers::health_handler))
         .merge(auth_routes)
+        .merge(dbsc_routes)
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .layer(cors.clone());
 

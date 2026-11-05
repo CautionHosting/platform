@@ -393,14 +393,14 @@ async fn refresh(state: &AppState, headers: &HeaderMap) -> Result<Response, Dbsc
         return Ok(end_session(presented_id));
     };
 
-    let (Some(proof), Some(challenge)) = (proof_header(headers)?, live_challenge(&session, now))
-    else {
-        return reissue_challenge(state, &session.session_id, dbsc_id).await;
+    let live = live_challenge(&session, now);
+    let (Some(proof), Some(challenge)) = (proof_header(headers)?, live) else {
+        return send_challenge(state, &session.session_id, dbsc_id, live).await;
     };
     let key = decode_public_key(public_key).with_context(Ctx::stored_key())?;
     if let Err(error) = verify_refresh_proof(proof, challenge, &key) {
         if error.kind() == DbscProofErrorKind::ChallengeMismatch {
-            return reissue_challenge(state, &session.session_id, dbsc_id).await;
+            return send_challenge(state, &session.session_id, dbsc_id, live).await;
         }
         return Err(error).with_context(Ctx::invalid_proof());
     }
@@ -417,7 +417,8 @@ async fn refresh(state: &AppState, headers: &HeaderMap) -> Result<Response, Dbsc
     .await
     .with_context(Ctx::database())?;
     if !rotated {
-        return reissue_challenge(state, &session.session_id, dbsc_id).await;
+        // A concurrent refresh consumed the challenge first: mint a new one.
+        return send_challenge(state, &session.session_id, dbsc_id, None).await;
     }
 
     Ok(bound_response(&token, max_age_secs, dbsc_id))
@@ -434,23 +435,33 @@ fn end_session(presented_id: Option<&str>) -> Response {
     Json(body).into_response()
 }
 
-/// Store a fresh challenge and send it with a 403, replacing any earlier one.
-async fn reissue_challenge(
+/// Send the challenge with a 403. A still-live challenge is resent as is, so
+/// proof-less refreshes (anyone holding the `dbsc_id`) cannot keep replacing
+/// the one Chrome is about to sign; a new one is minted and stored only when
+/// none is live.
+async fn send_challenge(
     state: &AppState,
     session_id: &str,
     dbsc_id: &str,
+    live: Option<&str>,
 ) -> Result<Response, DbscError> {
     use DbscErrorCtx as Ctx;
 
-    let challenge = db::generate_session_id();
-    db::set_dbsc_challenge(
-        &state.db,
-        session_id,
-        &challenge,
-        OffsetDateTime::now_utc() + CHALLENGE_TTL,
-    )
-    .await
-    .with_context(Ctx::database())?;
+    let challenge = match live {
+        Some(challenge) => challenge.to_string(),
+        None => {
+            let challenge = db::generate_session_id();
+            db::set_dbsc_challenge(
+                &state.db,
+                session_id,
+                &challenge,
+                OffsetDateTime::now_utc() + CHALLENGE_TTL,
+            )
+            .await
+            .with_context(Ctx::database())?;
+            challenge
+        }
+    };
     tracing::debug!("DBSC refresh challenged");
     Ok((
         StatusCode::FORBIDDEN,
@@ -938,11 +949,11 @@ mod tests {
             format!(r#""{first}";id="{dbsc_id}""#)
         );
 
-        // A stale jti is challenged again, not rejected.
+        // A stale jti is challenged again with the live challenge, not rejected.
         let reply = refresh(&app, &dbsc_id, Some(&proof(&key, &challenge, false))).await;
         assert_eq!(reply.status, StatusCode::FORBIDDEN);
         let second = reply.challenge();
-        assert_ne!(second, first);
+        assert_eq!(second, first);
 
         let reply = refresh(&app, &dbsc_id, Some(&proof(&key, &second, false))).await;
         assert_eq!(reply.status, StatusCode::OK);
@@ -970,6 +981,41 @@ mod tests {
             reply.json(),
             json!({"session_identifier": dbsc_id, "continue": false})
         );
+    }
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires DATABASE_URL pointing to disposable Postgres"]
+    async fn proofless_refreshes_reuse_the_live_challenge(pool: PgPool) {
+        fixture(&pool).await;
+        let state = app_state(pool.clone(), true);
+        let app = router(state.clone());
+        let key = new_key();
+        let (_, dbsc_id) = bind(&state, &app, &key).await;
+
+        // Anyone holding the dbsc_id can spam refresh, but the challenge
+        // Chrome is about to sign stays put.
+        let first = refresh(&app, &dbsc_id, None).await.challenge();
+        for _ in 0..3 {
+            assert_eq!(refresh(&app, &dbsc_id, None).await.challenge(), first);
+        }
+        let reply = refresh(&app, &dbsc_id, Some(&proof(&key, &first, false))).await;
+        assert_eq!(reply.status, StatusCode::OK);
+
+        // Consumed by the rotation: the next challenge is new.
+        let second = refresh(&app, &dbsc_id, None).await.challenge();
+        assert_ne!(second, first);
+
+        // Expired: a new one is minted instead of resending it.
+        sqlx::query(
+            "UPDATE auth_sessions SET dbsc_challenge_expires_at = NOW() - INTERVAL '1 second'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let third = refresh(&app, &dbsc_id, None).await.challenge();
+        assert_ne!(third, second);
+        let reply = refresh(&app, &dbsc_id, Some(&proof(&key, &third, false))).await;
+        assert_eq!(reply.status, StatusCode::OK);
     }
 
     #[sqlx::test(migrations = false)]
