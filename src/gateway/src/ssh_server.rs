@@ -1121,6 +1121,11 @@ async fn handle_git_push(
     use HandleGitPushErrorCtx as Ctx;
 
     let app_uuid = Uuid::parse_str(app_id).with_context(Ctx::invalid_app_id())?;
+    // `parse_str` also accepts uppercase, simple, braced and urn forms. Use the
+    // canonical form from here on so the push lands in the repo deploys read
+    // (`git-repos/<lowercase-hyphenated-id>.git`).
+    let canonical_app_id = app_uuid.to_string();
+    let app_id = canonical_app_id.as_str();
 
     let existing: Option<(String, String, bool)> = sqlx::query_as(
         "SELECT state::text, lifecycle, live_deployment_id IS NULL FROM compute_resources
