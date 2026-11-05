@@ -768,26 +768,9 @@ pub async fn rename_resource(
     .await
     .with_context(Ctx::update(resource_id))?;
 
-    // Rename the git repository if it exists
-    let old_repo_path = format!("{}/git-repos/{}.git", state.data_dir, old_name);
-    let new_repo_path = format!("{}/git-repos/{}.git", state.data_dir, payload.name);
-
-    if tokio::fs::metadata(&old_repo_path).await.is_ok() {
-        if let Err(e) = tokio::fs::rename(&old_repo_path, &new_repo_path).await {
-            tracing::warn!(
-                "Failed to rename git repo from {} to {}: {} (resource renamed in DB)",
-                old_repo_path,
-                new_repo_path,
-                e
-            );
-        } else {
-            tracing::info!(
-                "Renamed git repo from {} to {}",
-                old_repo_path,
-                new_repo_path
-            );
-        }
-    }
+    // Git repos are keyed by resource id (`git-repos/<id>.git`), so a rename
+    // never touches the filesystem. Moving `git-repos/<name>.git` here let a
+    // name equal to another app's UUID move that app's repo.
 
     tracing::info!(
         "Resource {} renamed from '{}' to '{}' by user {}",

@@ -2114,6 +2114,48 @@ fn attached_to_active_org(tags: &HashMap<String, String>, active_orgs: &HashSet<
         .is_some_and(|org_id| active_orgs.contains(&org_id))
 }
 
+/// Whether a builder that the scan's start-of-scan snapshot saw as
+/// unattributed now belongs to an active organization or an in-flight build.
+///
+/// A build row is inserted as `pending` before its builder is launched, so a
+/// fresh read always sees a live build. A database error counts as attributed:
+/// the builder is left for the next scan instead of being terminated on stale
+/// data.
+async fn attributed_since_scan_start(
+    db: &PgPool,
+    instance_id: &str,
+    tags: &HashMap<String, String>,
+) -> bool {
+    let org_id = tags
+        .get(ORG_ID_TAG)
+        .and_then(|value| Uuid::parse_str(value).ok());
+    let build_id = tags
+        .get(BUILD_ID_TAG)
+        .and_then(|value| Uuid::parse_str(value).ok());
+    match sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM organizations WHERE id = $1 AND is_active = true)
+             OR EXISTS (SELECT 1 FROM eif_builds
+                        WHERE status IN ('pending', 'building')
+                          AND (id = $2 OR builder_instance_id = $3))",
+    )
+    .bind(org_id)
+    .bind(build_id)
+    .bind(instance_id)
+    .fetch_one(db)
+    .await
+    {
+        Ok(attributed) => attributed,
+        Err(e) => {
+            tracing::error!(
+                "Failed to re-check builder {} before reaping; keeping it: {}",
+                instance_id,
+                e
+            );
+            true
+        }
+    }
+}
+
 /// Terminate build machines running with no organization attached.
 ///
 /// Build runners are tagged with their owning organization (`org_id`) at
@@ -2253,6 +2295,17 @@ pub async fn reap_unattributed_builders(db: &PgPool, ec2: &Ec2Client) {
                     "Skipping unattributed builder {} (build {:?} is in flight)",
                     instance.instance_id,
                     build_id.map(|id| id.to_string())
+                );
+                continue;
+            }
+            // The org and in-flight sets above were read when the scan
+            // started, and sweeping every region takes a while. A build that
+            // started meanwhile (often for an org created meanwhile) is not in
+            // them, so re-read the database before terminating.
+            if attributed_since_scan_start(db, &instance.instance_id, &instance.tags).await {
+                tracing::warn!(
+                    "Skipping builder {} (attributed since the scan started)",
+                    instance.instance_id
                 );
                 continue;
             }
@@ -2856,6 +2909,122 @@ mod tests {
         assert!(!attached_to_active_org(&missing, &active));
         assert!(!attached_to_active_org(&unparseable, &active));
         assert!(!attached_to_active_org(&stale, &active));
+    }
+
+    async fn unattributed_reaper_db() -> PgPool {
+        let url = std::env::var("APP_DEPLOYMENTS_TEST_DATABASE_URL").expect(
+            "APP_DEPLOYMENTS_TEST_DATABASE_URL must point at a disposable migrated database",
+        );
+        PgPool::connect(&url).await.unwrap()
+    }
+
+    async fn insert_org(db: &PgPool, is_active: bool) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO organizations (name, is_active) VALUES ('reaper test', $1) RETURNING id",
+        )
+        .bind(is_active)
+        .fetch_one(db)
+        .await
+        .unwrap()
+    }
+
+    async fn insert_build(
+        db: &PgPool,
+        org_id: Uuid,
+        status: &str,
+        instance_id: Option<&str>,
+    ) -> Uuid {
+        sqlx::query_scalar(
+            "INSERT INTO eif_builds (organization_id, commit_sha, procfile_hash, cache_key, status, builder_instance_id)
+             VALUES ($1, 'c', 'p', 'k', $2, $3) RETURNING id",
+        )
+        .bind(org_id)
+        .bind(status)
+        .bind(instance_id)
+        .fetch_one(db)
+        .await
+        .unwrap()
+    }
+
+    fn builder_tags(org_id: Uuid, build_id: Uuid) -> HashMap<String, String> {
+        tags(&[
+            (
+                "Name",
+                &format!("caution-builder-{}", &build_id.to_string()[..8]),
+            ),
+            ("ManagedBy", "caution-builder"),
+            ("org_id", &org_id.to_string()),
+            ("BuildId", &build_id.to_string()),
+        ])
+    }
+
+    /// Replays the race: the scan reads its sets, then a build starts for an
+    /// org created after that read, then the sweep reaches the new builder.
+    #[tokio::test]
+    #[ignore = "requires disposable APP_DEPLOYMENTS_TEST_DATABASE_URL"]
+    async fn unattributed_reaper_keeps_builder_launched_after_scan_start() {
+        let db = unattributed_reaper_db().await;
+
+        // Same reads as the start of `reap_unattributed_builders`.
+        let active_orgs: HashSet<Uuid> =
+            sqlx::query_scalar("SELECT id FROM organizations WHERE is_active = true")
+                .fetch_all(&db)
+                .await
+                .unwrap()
+                .into_iter()
+                .collect();
+        let in_flight: HashSet<Uuid> =
+            sqlx::query_scalar("SELECT id FROM eif_builds WHERE status IN ('pending', 'building')")
+                .fetch_all(&db)
+                .await
+                .unwrap()
+                .into_iter()
+                .collect();
+
+        // Signup and deploy happen while the regions are being swept.
+        let org_id = insert_org(&db, true).await;
+        let build_id = insert_build(&db, org_id, "pending", None).await;
+        let builder = builder_tags(org_id, build_id);
+
+        // The scan-start sets call it unattributed and not in flight: before
+        // the re-check, the reaper terminated this builder.
+        assert!(is_caution_builder(&builder));
+        assert!(!attached_to_active_org(&builder, &active_orgs));
+        assert!(!in_flight.contains(&build_id));
+
+        assert!(attributed_since_scan_start(&db, "i-launched-mid-scan", &builder).await);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable APP_DEPLOYMENTS_TEST_DATABASE_URL"]
+    async fn unattributed_reaper_still_reaps_real_leaks() {
+        let db = unattributed_reaper_db().await;
+
+        // No org row and no build row: a manually launched or stranded builder.
+        let unknown = builder_tags(Uuid::new_v4(), Uuid::new_v4());
+        assert!(!attributed_since_scan_start(&db, "i-unknown", &unknown).await);
+
+        // Deactivated org whose build already finished.
+        let inactive_org = insert_org(&db, false).await;
+        let done = insert_build(&db, inactive_org, "completed", Some("i-done")).await;
+        assert!(
+            !attributed_since_scan_start(&db, "i-done", &builder_tags(inactive_org, done)).await
+        );
+
+        // Untagged builder whose instance id backs an in-flight build is kept.
+        let building = insert_build(&db, inactive_org, "building", Some("i-untagged")).await;
+        assert_ne!(building, done);
+        let untagged = tags(&[("ManagedBy", "caution-builder")]);
+        assert!(attributed_since_scan_start(&db, "i-untagged", &untagged).await);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable APP_DEPLOYMENTS_TEST_DATABASE_URL"]
+    async fn unattributed_reaper_keeps_builder_when_recheck_fails() {
+        let db = unattributed_reaper_db().await;
+        db.close().await;
+        let unknown = builder_tags(Uuid::new_v4(), Uuid::new_v4());
+        assert!(attributed_since_scan_start(&db, "i-unknown", &unknown).await);
     }
 
     // --- compute_cache_key ---

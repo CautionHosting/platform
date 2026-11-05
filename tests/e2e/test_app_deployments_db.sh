@@ -32,7 +32,7 @@ PORT=$(docker port "$CONTAINER" 5432/tcp | sed 's/.*://')
 cd "$ROOT"
 export APP_DEPLOYMENTS_TEST_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$PORT/caution_app_deployments_test"
 # A syntactically valid framework commit lets /deploy reach its later gates.
-PLATFORM_GIT_SHA=0000000000000000000000000000000000000000 \
+COMPONENT_BUILD_MODE=source PLATFORM_GIT_SHA=0000000000000000000000000000000000000000 \
     cargo test -p api app_deployments::lifecycle::db_tests --locked \
     -- --ignored --test-threads=1 --nocapture
 # The API middleware requires an existing organization per user; run against the same schema.
@@ -41,6 +41,8 @@ cargo test -p api middleware::db_tests --locked \
 # A user without an organization must be able to create one, which is what makes
 # being removed from a last organization recoverable.
 cargo test -p api organizations::db_tests --locked \
+    -- --ignored --test-threads=1 --nocapture
+cargo test -p api builder::tests::unattributed_reaper --locked \
     -- --ignored --test-threads=1 --nocapture
 # Provider accounts are provisioned lazily on first use; the insert must be idempotent.
 AWS_ACCOUNT_ID=900896541515 \

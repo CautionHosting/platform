@@ -126,3 +126,112 @@ async fn a_user_who_already_belongs_to_an_organization_is_refused() {
 
     pool.close().await;
 }
+
+/// Adds a new user to `org_id` with `role`, returning the user's id.
+async fn add_member_with_role(pool: &PgPool, org_id: Uuid, role: &str) -> Uuid {
+    let user = create_org_less_user(pool).await;
+    sqlx::query(
+        "INSERT INTO organization_members (organization_id, user_id, role)
+         VALUES ($1, $2, $3::user_role)",
+    )
+    .bind(org_id)
+    .bind(user)
+    .bind(role)
+    .execute(pool)
+    .await
+    .unwrap();
+    user
+}
+
+/// Runs [`guard_member_change`] in its own transaction and rolls it back, so
+/// the organization lock is released and nothing is written.
+async fn guard(
+    pool: &PgPool,
+    org_id: Uuid,
+    caller: Uuid,
+    target: Uuid,
+    new_role: Option<types::UserRole>,
+) -> Option<MemberRefusal> {
+    let mut tx = pool.begin().await.unwrap();
+    let refusal = guard_member_change(&mut tx, org_id, caller, target, new_role)
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+    refusal
+}
+
+#[tokio::test]
+#[ignore = "run bash tests/e2e/test_app_deployments_db.sh (isolated PostgreSQL)"]
+async fn the_last_owner_can_neither_be_demoted_nor_removed() {
+    use types::UserRole::Admin;
+
+    let pool = test_pool().await;
+    let owner = create_org_less_user(&pool).await;
+    let org = create_organization_for_user(&pool, owner, &organization_name("Sole Owner"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        guard(&pool, org.id, owner, owner, Some(Admin)).await,
+        Some(MemberRefusal::LastOwner)
+    );
+    assert_eq!(
+        guard(&pool, org.id, owner, owner, None).await,
+        Some(MemberRefusal::LastOwner)
+    );
+
+    // With a second owner, either owner may step down.
+    let second_owner = add_member_with_role(&pool, org.id, "owner").await;
+    assert_eq!(guard(&pool, org.id, owner, owner, Some(Admin)).await, None);
+    assert_eq!(guard(&pool, org.id, owner, second_owner, None).await, None);
+
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "run bash tests/e2e/test_app_deployments_db.sh (isolated PostgreSQL)"]
+async fn an_admin_cannot_create_change_or_remove_owners() {
+    use types::UserRole::{Member, Owner, Viewer};
+
+    let pool = test_pool().await;
+    let owner = create_org_less_user(&pool).await;
+    let org = create_organization_for_user(&pool, owner, &organization_name("Admin Limits"))
+        .await
+        .unwrap();
+    let admin = add_member_with_role(&pool, org.id, "admin").await;
+    let member = add_member_with_role(&pool, org.id, "member").await;
+
+    // Self-promotion, demoting the owner and removing the owner are refused.
+    assert_eq!(
+        guard(&pool, org.id, admin, admin, Some(Owner)).await,
+        Some(MemberRefusal::OwnerOnly)
+    );
+    assert_eq!(
+        guard(&pool, org.id, admin, owner, Some(Member)).await,
+        Some(MemberRefusal::OwnerOnly)
+    );
+    assert_eq!(
+        guard(&pool, org.id, admin, owner, None).await,
+        Some(MemberRefusal::OwnerOnly)
+    );
+
+    // Managing non-owners still works.
+    assert_eq!(
+        guard(&pool, org.id, admin, member, Some(Viewer)).await,
+        None
+    );
+    assert_eq!(guard(&pool, org.id, admin, member, None).await, None);
+
+    // A plain member is not a manager, and a stranger is not a member.
+    assert_eq!(
+        guard(&pool, org.id, member, admin, None).await,
+        Some(MemberRefusal::NotManager)
+    );
+    let stranger = create_org_less_user(&pool).await;
+    assert_eq!(
+        guard(&pool, org.id, owner, stranger, None).await,
+        Some(MemberRefusal::NotMember)
+    );
+
+    pool.close().await;
+}

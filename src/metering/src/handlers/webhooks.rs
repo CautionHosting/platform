@@ -654,6 +654,22 @@ async fn clear_credit_suspension_if_needed(
         .await
         .with_context(Ctx::database())?;
 
+    // A credit deposit only lifts credit suspension. Apps that dunning stopped
+    // stay stopped until the unpaid invoice is settled; dunning restarts them.
+    let dunning_suspended: bool =
+        sqlx::query_scalar("SELECT dunning_stage = 'suspended' FROM organizations WHERE id = $1")
+            .bind(org_id)
+            .fetch_one(&state.pool)
+            .await
+            .with_context(Ctx::database())?;
+    if dunning_suspended {
+        tracing::info!(
+            "Not unsuspending org {} after credit transaction: suspended for an unpaid invoice",
+            org_id
+        );
+        return Ok(());
+    }
+
     let unsuspend_user_id: Option<uuid::Uuid> = sqlx::query_scalar(
         "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1",
     )

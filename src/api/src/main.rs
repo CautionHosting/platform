@@ -243,7 +243,7 @@ pub(crate) enum CheckOrgAccessError {
 
 #[tracing::instrument(skip_all)]
 pub(crate) async fn check_org_access(
-    db: &PgPool,
+    db: impl sqlx::PgExecutor<'_>,
     user_id: Uuid,
     org_id: Uuid,
 ) -> Result<types::UserRole, CheckOrgAccessError> {
@@ -272,6 +272,16 @@ pub(crate) fn can_manage_org(role: &types::UserRole) -> bool {
 
 pub(crate) fn is_owner(role: &types::UserRole) -> bool {
     role.is_owner()
+}
+
+/// Response for a [`check_org_access`] failure carried as an error source: 403
+/// when the caller is not a member of the organization, 500 only when the
+/// membership lookup itself failed.
+pub(crate) fn access_query_status(source: &BoxError) -> (StatusCode, &'static str) {
+    match source.downcast_ref::<CheckOrgAccessError>() {
+        Some(CheckOrgAccessError::Forbidden { .. }) => (StatusCode::FORBIDDEN, "forbidden"),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+    }
 }
 
 /// Failure modes for [`get_user_primary_org`] (leaf error: no underlying source).

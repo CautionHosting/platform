@@ -112,6 +112,14 @@ pub(crate) enum EvictLruError {
 
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum DownloadEifError {
+    #[error("failed to check organization access [{location}]")]
+    AccessQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
     #[error("insufficient permissions [{location}]")]
     Forbidden { location: Location },
 
@@ -161,6 +169,7 @@ pub(crate) enum DownloadEifError {
 impl IntoResponse for DownloadEifError {
     fn into_response(self) -> Response<Body> {
         let (status, body) = match &self {
+            DownloadEifError::AccessQuery { source, .. } => crate::access_query_status(source),
             DownloadEifError::Forbidden { .. } => {
                 (StatusCode::FORBIDDEN, "insufficient permissions")
             }
@@ -489,7 +498,7 @@ pub(crate) async fn download_eif(
 
     let role = crate::check_org_access(&state.db, auth.user_id, org_id)
         .await
-        .with_context(Ctx::database())?;
+        .with_context(Ctx::access_query())?;
 
     if !crate::can_manage_org(&role) && !crate::is_owner(&role) {
         return Err(DownloadEifError::Forbidden {
