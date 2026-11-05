@@ -5,7 +5,7 @@ use bytes::Bytes;
 use dterror::{BoxError, CtxError, Location, ResultExt};
 use futures::StreamExt;
 use russh::keys::{PrivateKey, PublicKey, PublicKeyBase64};
-use russh::server::{Auth, Msg, Server, Session};
+use russh::server::{Auth, ChannelOpenHandle, Msg, Server, Session, VerifiedPublicKey};
 use russh::{Channel, ChannelId};
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -511,22 +511,24 @@ impl russh::server::Handler for SshSession {
     async fn channel_open_session(
         &mut self,
         _channel: Channel<Msg>,
+        reply: ChannelOpenHandle,
         _session: &mut Session,
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<(), Self::Error> {
         tracing::debug!("Channel opened");
-        Ok(true)
+        reply.accept().await;
+        Ok(())
     }
 
     #[tracing::instrument(skip_all, fields(user = %user))]
     async fn auth_publickey(
         &mut self,
         user: &str,
-        public_key: &PublicKey,
+        key: VerifiedPublicKey<'_>,
     ) -> Result<Auth, Self::Error> {
         tracing::info!("SSH public key auth attempt for user: {}", user);
 
         // Convert public key to OpenSSH "<type> <base64>" form for fingerprinting.
-        let full_key = public_key_line(public_key);
+        let full_key = public_key_line(key.public_key);
 
         let fingerprint = match crate::db::generate_ssh_fingerprint(&full_key) {
             Ok(fp) => fp,

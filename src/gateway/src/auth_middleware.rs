@@ -805,6 +805,21 @@ fn canonical_ssh_request(
     )
 }
 
+fn verify_ssh_http_signature(
+    public_key: &SshPublicKey,
+    payload: &[u8],
+    signature: &SshSig,
+) -> ssh_key::Result<()> {
+    // russh enables SHA-1 on the shared ssh-key crate. Preserve the HTTP
+    // signature policy from ssh-key 0.6: RSA signatures must use SHA-2.
+    if signature.algorithm() == (ssh_key::Algorithm::Rsa { hash: None }) {
+        return Err(ssh_key::Error::AlgorithmUnsupported {
+            algorithm: signature.algorithm(),
+        });
+    }
+    public_key.verify(SSH_SIGNING_NAMESPACE, payload, signature)
+}
+
 #[tracing::instrument(skip_all)]
 fn ssh_signed_request_error_response(error: VerifySshSignedRequestError) -> Response {
     if error.status.is_server_error() {
@@ -909,18 +924,16 @@ async fn verify_ssh_signed_request(
         )
         .with_source(source)
     })?;
-    public_key
-        .verify(SSH_SIGNING_NAMESPACE, payload.as_bytes(), &signature)
-        .map_err(|source| {
-            VerifySshSignedRequestError::new(
-                VerifySshSignedRequestErrorKind::VerifySignature {
-                    fingerprint: fingerprint.clone(),
-                },
-                StatusCode::UNAUTHORIZED,
-                "Invalid SSH signature",
-            )
-            .with_source(source)
-        })?;
+    verify_ssh_http_signature(&public_key, payload.as_bytes(), &signature).map_err(|source| {
+        VerifySshSignedRequestError::new(
+            VerifySshSignedRequestErrorKind::VerifySignature {
+                fingerprint: fingerprint.clone(),
+            },
+            StatusCode::UNAUTHORIZED,
+            "Invalid SSH signature",
+        )
+        .with_source(source)
+    })?;
 
     let (user_id, _org_id) =
         db::get_user_for_app_by_ssh_key(&state.db, &fingerprint, &resource_id.to_string())
