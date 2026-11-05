@@ -1698,12 +1698,10 @@ mod tests {
             session.session_id, SESSION,
             "polling must not alter the auth session"
         );
-        assert!(
-            crate::db::consume_qr_login_session_id(&pool, TOKEN)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(crate::db::consume_qr_login_session_id(&pool, TOKEN)
+            .await
+            .unwrap()
+            .is_none());
 
         use std::io::{Read, Seek};
         log_file.rewind().unwrap();

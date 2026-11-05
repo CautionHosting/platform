@@ -137,7 +137,7 @@ pub async fn metering_proxy_handler(
     let path = req.uri().path();
     let target_url = format!("{}{}", state.metering_service_url, path);
 
-    tracing::debug!("Proxying webhook to metering: {}", target_url);
+    tracing::debug!(path = %path, "Proxying webhook to metering");
 
     // Only forward headers needed for webhook signature verification
     const ALLOWED_WEBHOOK_HEADERS: &[&str] =
@@ -169,6 +169,7 @@ pub async fn metering_proxy_handler(
     }
 
     let proxy_response = proxy_req.send().await.map_err(|e| {
+        let e = e.without_url();
         tracing::error!("Metering proxy request failed: {:?}", e);
         backend_unavailable_response(
             BackendUnreachable::Send {
@@ -182,6 +183,7 @@ pub async fn metering_proxy_handler(
     let status = proxy_response.status();
     let resp_headers = proxy_response.headers().clone();
     let resp_body = proxy_response.bytes().await.map_err(|e| {
+        let e = e.without_url();
         tracing::error!("Failed to read metering response: {:?}", e);
         backend_unavailable_response(
             BackendUnreachable::ReadResponse {
@@ -639,12 +641,10 @@ mod tests {
             response.headers()["content-type"],
             "application/octet-stream"
         );
-        assert!(
-            response
-                .extensions()
-                .get::<sentry_middleware::SentryReportable>()
-                .is_none()
-        );
+        assert!(response
+            .extensions()
+            .get::<sentry_middleware::SentryReportable>()
+            .is_none());
         assert_eq!(
             axum::body::to_bytes(response.into_body(), super::MAX_BODY_SIZE)
                 .await

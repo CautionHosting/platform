@@ -100,6 +100,7 @@ fn sensitive_field(name: &str) -> bool {
         "apikey",
         "privatekey",
         "credential",
+        "sessionid",
     ]
     .iter()
     .any(|part| name.contains(part))
@@ -231,9 +232,9 @@ mod tests {
             "tags": {"http.status_code": "502", "api_key": "tag-secret", "endpoint": "https://host.invalid/v1?token=tag-token"},
             "extra": {"status": 502, "body_bytes": 99, "nested": [{"Access-Token": "extra-secret", "credentials": {"username": "credential-secret"}, "request_body": "body-secret", "endpoint": "https://host.invalid/v1?token=extra-token"}]},
             "contexts": {"upstream": {"type": "unknown", "status_code": 502, "response_body": "context-secret"}},
-            "request": {"method": "POST", "url": "https://request-user:request-pass@host.invalid/v1?token=request-token#request-fragment", "query_string": "token=query-data-secret", "data": "request-data-secret", "cookies": "session=cookie-secret", "headers": {"Authorization": "Bearer auth-secret", "Proxy-Authorization": "proxy-secret", "Cookie": "header-cookie-secret", "X-API-Key": "header-key-secret", "Content-Type": "application/json"}, "env": {"PASSWORD": "env-secret"}},
+            "request": {"method": "POST", "url": "https://request-user:request-pass@host.invalid/v1?token=request-token#request-fragment", "query_string": "token=query-data-secret", "data": "request-data-secret", "cookies": "session=cookie-secret", "headers": {"Authorization": "Bearer auth-secret", "Proxy-Authorization": "proxy-secret", "Cookie": "header-cookie-secret", "X-API-Key": "header-key-secret", "X-Session-ID": "header-session-secret", "Content-Type": "application/json"}, "env": {"PASSWORD": "env-secret"}},
             "user": {"email": "personal-secret@example.invalid"},
-            "breadcrumbs": {"values": [{"category": "billing::request", "type": "http", "message": "request failed", "data": {"status_code": 502, "body_bytes": 99, "Authorization": "breadcrumb-auth-secret", "headers": "opaque-headers-secret", "body": "breadcrumb-body-secret", "payload": "payload-secret", "refreshToken": "refresh-secret", "url": "https://host.invalid/v1?token=breadcrumb-url-secret"}}]}
+            "breadcrumbs": {"values": [{"category": "billing::request", "type": "http", "message": "request failed", "data": {"status_code": 502, "body_bytes": 99, "Authorization": "breadcrumb-auth-secret", "headers": "opaque-headers-secret", "body": "breadcrumb-body-secret", "payload": "payload-secret", "refreshToken": "refresh-secret", "session_id": "breadcrumb-session-secret", "url": "https://host.invalid/v1?token=breadcrumb-url-secret"}}]}
         }"#.parse::<Value>().unwrap()).unwrap();
         hub.capture_event(event);
         let (events, wire) = captured(&transport);
@@ -263,6 +264,8 @@ mod tests {
             "auth-secret",
             "proxy-secret",
             "header-key-secret",
+            "header-session-secret",
+            "breadcrumb-session-secret",
             "env-secret",
             "personal-secret",
             "opaque-headers-secret",

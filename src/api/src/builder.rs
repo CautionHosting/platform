@@ -1157,6 +1157,10 @@ pub async fn execute_remote_build(
             Ok(build_result)
         }
         Err(e) => {
+            if matches!(&e, PollBuildStatusError::BuildFailed { message, .. } if message == APP_BUILD_FAILED)
+            {
+                stream_app_build_log_tail(s3, &config.eif_s3_bucket, build_id, tx).await;
+            }
             mark_build_failed(db, build_id, &e.to_string()).await;
             Err(ExecuteRemoteBuildError::PollStatus {
                 message: e.to_string(),
@@ -1331,6 +1335,89 @@ pub(crate) enum PollBuildStatusError {
     BuildFailed { message: String, location: Location },
 }
 
+/// The userdata's fixed summary for a failed `docker build` of the user's app.
+const APP_BUILD_FAILED: &str = "Application Docker build failed";
+/// How much of the user's Docker build output to show when that build fails.
+const APP_BUILD_LOG_TAIL_LINES: usize = 40;
+const APP_BUILD_LOG_TAIL_BYTES: usize = 4096;
+/// Suffix range fetched from S3, so a huge log is never read whole.
+const APP_BUILD_LOG_FETCH_BYTES: usize = 16 * 1024;
+
+/// Builder failure summaries that carry no workload output, so they may be forwarded verbatim.
+fn is_fixed_builder_failure(message: &str) -> bool {
+    matches!(
+        message,
+        APP_BUILD_FAILED | "EIF build helper failed" | "EIF file not found after build"
+    ) || is_builder_command_failure(message)
+}
+
+/// Send the tail of the user's Docker build log to their deploy stream, and nowhere else.
+///
+/// The output is the user's own build, so it may hold their secrets: it never goes into
+/// errors, the database, tracing or Sentry. Best effort; a missing log is skipped.
+async fn stream_app_build_log_tail(
+    s3: &aws_sdk_s3::Client,
+    bucket: &str,
+    build_id: Uuid,
+    tx: &tokio::sync::mpsc::Sender<Result<bytes::Bytes, std::io::Error>>,
+) {
+    let key = format!("builds/{build_id}/app-build.log");
+    let Ok(object) = s3
+        .get_object()
+        .bucket(bucket)
+        .key(&key)
+        .range(format!("bytes=-{APP_BUILD_LOG_FETCH_BYTES}"))
+        .send()
+        .await
+    else {
+        return;
+    };
+    let Ok(body) = object.body.collect().await else {
+        return;
+    };
+    let tail = app_build_log_tail(&body.into_bytes());
+    if tail.is_empty() {
+        return;
+    }
+    let _ = tx
+        .send(Ok(bytes::Bytes::from(format!(
+            "Docker build output (last {APP_BUILD_LOG_TAIL_LINES} lines):\n{tail}\n"
+        ))))
+        .await;
+}
+
+/// Last lines of a build log, without control characters (no terminal escapes) and capped in size.
+fn app_build_log_tail(log: &[u8]) -> String {
+    let mut log = String::from_utf8_lossy(log);
+    // A full suffix range likely starts mid-line; drop the partial first line.
+    if log.len() >= APP_BUILD_LOG_FETCH_BYTES
+        && let Some((_, rest)) = log.split_once('\n')
+    {
+        log = rest.to_string().into();
+    }
+    let lines: Vec<&str> = log.lines().collect();
+    let mut tail = lines[lines.len().saturating_sub(APP_BUILD_LOG_TAIL_LINES)..].join("\n");
+    tail.retain(|c| c == '\n' || c == '\t' || !c.is_control());
+    if tail.len() > APP_BUILD_LOG_TAIL_BYTES {
+        let mut cut = tail.len() - APP_BUILD_LOG_TAIL_BYTES;
+        while !tail.is_char_boundary(cut) {
+            cut += 1;
+        }
+        tail.drain(..cut);
+    }
+    tail.trim().to_string()
+}
+
+/// Matches the userdata ERR trap's `Builder command failed at line N (exit RC)`.
+fn is_builder_command_failure(message: &str) -> bool {
+    let is_number = |s: &str| (1..=10).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit());
+    message
+        .strip_prefix("Builder command failed at line ")
+        .and_then(|rest| rest.strip_suffix(')'))
+        .and_then(|rest| rest.split_once(" (exit "))
+        .is_some_and(|(line, rc)| is_number(line) && is_number(rc))
+}
+
 /// Poll S3 for status.json until the build completes or times out.
 #[allow(clippy::result_large_err)]
 #[tracing::instrument(skip_all)]
@@ -1412,14 +1499,7 @@ async fn poll_build_status(
                         let message = status
                             .error
                             .as_deref()
-                            .filter(|message| {
-                                matches!(
-                                    *message,
-                                    "Application Docker build failed"
-                                        | "EIF build helper failed"
-                                        | "EIF file not found after build"
-                                )
-                            })
+                            .filter(|message| is_fixed_builder_failure(message))
                             .unwrap_or("Build failed; consult restricted builder logs for details")
                             .to_string();
                         return Err(PollBuildStatusError::BuildFailed {
@@ -2275,6 +2355,155 @@ mod tests {
         assert!(matches!(error, PollBuildStatusError::BuildFailed { .. }));
         assert!(!format!("{error:?}\n{error}\n{logs}").contains(marker));
         assert!(logs.contains("Received build status"));
+    }
+
+    #[tokio::test]
+    async fn build_status_forwards_builder_command_failure_summary() {
+        let summary = "Builder command failed at line 42 (exit 127)";
+        let (result, _logs) = poll_diagnostic_fixture(
+            serde_json::json!({
+                "phase": "failed", "timestamp": Utc::now().timestamp(), "error": summary
+            })
+            .to_string(),
+        )
+        .await;
+        let PollBuildStatusError::BuildFailed { message, .. } = result.unwrap_err() else {
+            panic!("expected BuildFailed");
+        };
+        assert_eq!(message, summary);
+    }
+
+    #[test]
+    fn app_build_log_tail_keeps_last_lines_without_control_characters() {
+        let log: String = (1..=50).map(|n| format!("step {n}\n")).collect();
+        let tail = app_build_log_tail(log.as_bytes());
+        assert!(tail.starts_with("step 11\n"), "{tail}");
+        assert!(tail.ends_with("step 50"), "{tail}");
+        assert_eq!(tail.lines().count(), APP_BUILD_LOG_TAIL_LINES);
+
+        let tail = app_build_log_tail("\x1b[31mred\x1b[0m\tok\r\n\u{9b}2Jnext\n".as_bytes());
+        assert_eq!(tail, "[31mred[0m\tok\n2Jnext");
+
+        let long = "é".repeat(APP_BUILD_LOG_TAIL_BYTES);
+        let tail = app_build_log_tail(long.as_bytes());
+        assert!(tail.len() <= APP_BUILD_LOG_TAIL_BYTES);
+        assert!(tail.chars().all(|c| c == 'é'));
+
+        let mut ranged = "partial first line\n".to_string();
+        ranged.push_str(&"x".repeat(APP_BUILD_LOG_FETCH_BYTES));
+        assert!(!app_build_log_tail(ranged.as_bytes()).contains("partial"));
+        assert_eq!(app_build_log_tail(b""), "");
+    }
+
+    #[tokio::test]
+    async fn app_build_failure_streams_log_tail_only_to_the_deploy_stream() {
+        use tracing::instrument::WithSubscriber;
+
+        let marker = "synthetic-user-build-secret";
+        let log: String = (1..=45).map(|n| format!("line {n} {marker}\n")).collect();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let app = axum::Router::new().fallback(move |request: axum::extract::Request| {
+            let log = log.clone();
+            let seen = seen.clone();
+            async move {
+                seen.lock().unwrap().push((
+                    request.uri().path().to_string(),
+                    request.headers().get("range").cloned(),
+                ));
+                log
+            }
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = aws_sdk_s3::Config::builder()
+            .behavior_version_latest()
+            .region(aws_sdk_s3::config::Region::new("us-west-2"))
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "fixture", "fixture", None, None, "test",
+            ))
+            .endpoint_url(endpoint)
+            .force_path_style(true)
+            .build();
+        let client = aws_sdk_s3::Client::from_conf(config);
+        let log_file = tempfile::NamedTempFile::new().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(std::sync::Mutex::new(log_file.reopen().unwrap()))
+            .finish();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let build_id = Uuid::new_v4();
+        stream_app_build_log_tail(&client, "fixture", build_id, &tx)
+            .with_subscriber(subscriber)
+            .await;
+        server.abort();
+
+        let streamed = String::from_utf8(rx.try_recv().unwrap().unwrap().to_vec()).unwrap();
+        assert!(streamed.starts_with("Docker build output (last 40 lines):\nline 6 "));
+        assert!(streamed.ends_with(&format!("line 45 {marker}\n")));
+        assert!(rx.try_recv().is_err());
+        assert!(
+            !std::fs::read_to_string(log_file.path())
+                .unwrap()
+                .contains(marker)
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].0,
+            format!("/fixture/builds/{build_id}/app-build.log")
+        );
+        assert_eq!(
+            requests[0].1.as_ref().unwrap(),
+            &format!("bytes=-{APP_BUILD_LOG_FETCH_BYTES}")
+        );
+    }
+
+    #[tokio::test]
+    async fn app_build_log_tail_is_skipped_when_the_log_is_missing() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let app = axum::Router::new().fallback(|| async {
+            (
+                axum::http::StatusCode::NOT_FOUND,
+                "<Error><Code>NoSuchKey</Code></Error>",
+            )
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let config = aws_sdk_s3::Config::builder()
+            .behavior_version_latest()
+            .region(aws_sdk_s3::config::Region::new("us-west-2"))
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "fixture", "fixture", None, None, "test",
+            ))
+            .endpoint_url(endpoint)
+            .force_path_style(true)
+            .build();
+        let client = aws_sdk_s3::Client::from_conf(config);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        stream_app_build_log_tail(&client, "fixture", Uuid::new_v4(), &tx).await;
+        server.abort();
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn builder_command_failure_summary_accepts_only_the_trap_shape() {
+        assert!(is_fixed_builder_failure(
+            "Builder command failed at line 42 (exit 127)"
+        ));
+        for message in [
+            "Builder command failed at line 42 (exit 127) secret",
+            "Builder command failed at line  (exit 1)",
+            "Builder command failed at line 4x (exit 1)",
+            "Builder command failed at line 42 (exit 1); secret (exit 2)",
+            "Builder command failed at line 42 (exit -1)",
+            "Builder command failed at line 12345678901 (exit 1)",
+        ] {
+            assert!(!is_fixed_builder_failure(message), "{message}");
+        }
     }
 
     #[tokio::test]
