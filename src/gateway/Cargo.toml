@@ -48,7 +48,7 @@ bytes = "1.11.1"
 rand010 = { package = "rand", version = "0.10", features = ["thread_rng"] }
 futures = "0.3"
 cookie = "0.18"
-p256 = { version = "0.13", features = ["ecdsa", "jwk"] }
+p256 = { version = "0.14", features = ["ecdsa"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
 
 [features]
