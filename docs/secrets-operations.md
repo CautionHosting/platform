@@ -116,7 +116,7 @@ token and is part of that trust boundary.
 Rebuild/redeploy API, gateway, CLI and application images at the aligned revisions;
 review any `LOCKSMITH_COMMIT` override. Existing environment files take precedence
 over the builder default and are not updated when `env.example` changes. Update
-the override to `eee2a8a3673c92b668b0a82d0da2e06c131df6e2`, or remove it to use the
+the override to `ab0d2160017dc22860ef0968aa7883cd2c509d11`, or remove it to use the
 default, before rebuilding. The old `2db332a` daemon only loads raw V0 bundles and
 cannot load current V1 or ImportedV0 artifacts. Configure:
 

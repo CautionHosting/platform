@@ -91,15 +91,15 @@ sentry = { version = "0.49.3", features = ["tracing"] }
 # Shared quorum contracts, verification and explicit ImportedV0 recovery.
 [workspace.dependencies.locksmith]
 git = "https://git.caution.co/public/locksmith.git"
-rev = "eee2a8a3673c92b668b0a82d0da2e06c131df6e2"
+rev = "ab0d2160017dc22860ef0968aa7883cd2c509d11"
 
 [workspace.dependencies.keymaker-models]
 git = "https://git.caution.co/public/locksmith.git"
-rev = "eee2a8a3673c92b668b0a82d0da2e06c131df6e2"
+rev = "ab0d2160017dc22860ef0968aa7883cd2c509d11"
 
 [workspace.dependencies.public-certificate-models]
 git = "https://git.caution.co/public/locksmith.git"
-rev = "eee2a8a3673c92b668b0a82d0da2e06c131df6e2"
+rev = "ab0d2160017dc22860ef0968aa7883cd2c509d11"
 
 # The generated EC2 SDK exhausts LLVM memory when release-optimized as one
 # codegen unit. The drift detector is network-bound, so optimize its code but
