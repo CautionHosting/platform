@@ -239,11 +239,32 @@ async fn credentials(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid) {
     let error = generate_org_quorum_bundle(pool, org, user, r.clone())
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("64"));
+    let GenerateOrgQuorumBundleError::ResolveHolders { source, .. } = &error else {
+        panic!("{error:?}");
+    };
+    let ResolveHoldersError::Credentials { source, .. } = source.downcast_ref().unwrap() else {
+        panic!("{source:?}");
+    };
+    assert!(matches!(
+        source.downcast_ref(),
+        Some(CredentialSnapshotError::TooMany { count: 65, .. })
+    ));
     assert_eq!(
         request_log().len(),
         before,
         "oversized snapshot reached a key service"
+    );
+    let response = crate::org_quorum::handlers::CreateOrgUserQuorumBundleError::Generate {
+        org_id: org,
+        user_id: user,
+        location: std::panic::Location::caller(),
+        source: Box::new(error),
+    }
+    .into_response();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        axum::body::to_bytes(response.into_body(), 1024).await.unwrap().as_ref(),
+        b"Caution-backed holder has more than 64 credentials; reduce the credential count before generation"
     );
     for id in 3u8..=65 {
         sqlx::query("DELETE FROM fido2_credentials WHERE user_id = $1 AND credential_id = $2")
@@ -300,9 +321,16 @@ async fn credentials(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid) {
     let error = generate_org_quorum_bundle(pool, org, user, r.clone())
         .await
         .unwrap_err();
+    let GenerateOrgQuorumBundleError::Derive { source, .. } = error else {
+        panic!("{error:?}");
+    };
+    let certificates::DeriveError::ServiceUrl { source, .. } = source.downcast_ref().unwrap()
+    else {
+        panic!("{source:?}");
+    };
     assert!(matches!(
-        error,
-        GenerateOrgQuorumBundleError::KeymakerUrl { .. }
+        source.downcast_ref(),
+        Some(ConfiguredError::Missing { name, .. }) if name == "PUBLIC_CERTIFICATE_SERVICE_URL"
     ));
     assert_eq!(
         request_log().len(),
