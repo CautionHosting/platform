@@ -981,26 +981,16 @@ async fn handle_payment_failed(
         customer_id
     );
 
-    let user_row =
-        sqlx::query("SELECT organization_id FROM billing_config WHERE paddle_customer_id = $1")
+    let user_row: Option<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT organization_id FROM billing_config WHERE paddle_customer_id = $1")
             .bind(customer_id)
             .fetch_optional(&state.pool)
             .await
             .with_context(Ctx::database())?;
 
-    let Some(user_row) = user_row else {
+    let Some((_org_id,)) = user_row else {
         return Ok(());
     };
-
-    let org_id: uuid::Uuid = user_row.get("organization_id");
-
-    let user_id: uuid::Uuid = sqlx::query_scalar(
-        "SELECT user_id FROM organization_members WHERE organization_id = $1 LIMIT 1",
-    )
-    .bind(org_id)
-    .fetch_one(&state.pool)
-    .await
-    .unwrap_or(org_id);
 
     sqlx::query(
         r#"UPDATE invoices SET payment_status = 'failed' WHERE paddle_transaction_id = $1"#,
@@ -1051,10 +1041,6 @@ async fn handle_payment_failed(
             e
         );
     }
-
-    send_payment_failure_email(state, user_id, transaction_id)
-        .await
-        .with_context(Ctx::database())?;
 
     Ok(())
 }
@@ -1243,69 +1229,6 @@ async fn send_payment_confirmation_email(
         "template": "payment_confirmation",
         "data": {
             "transaction_id": transaction_id,
-        }
-    });
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-    let _ = client
-        .post(format!("{}/send", email_service_url))
-        .json(&email_request)
-        .send()
-        .await;
-
-    Ok(())
-}
-
-#[derive(Debug, thiserror::Error, CtxError)]
-pub(crate) enum SendPaymentFailureEmailError {
-    #[error("could not query user for payment failure email [{location}]")]
-    Database {
-        #[location]
-        location: Location,
-        #[source]
-        source: BoxError,
-    },
-}
-
-#[tracing::instrument(skip_all)]
-async fn send_payment_failure_email(
-    state: &AppState,
-    user_id: uuid::Uuid,
-    transaction_id: &str,
-) -> Result<(), SendPaymentFailureEmailError> {
-    use SendPaymentFailureEmailErrorCtx as Ctx;
-
-    let user = sqlx::query(r#"SELECT email FROM users WHERE id = $1"#)
-        .bind(user_id)
-        .fetch_optional(&state.pool)
-        .await
-        .with_context(Ctx::database())?;
-
-    let Some(user) = user else {
-        return Ok(());
-    };
-
-    let email: Option<String> = user.get("email");
-    let Some(email) = email else {
-        tracing::warn!(
-            "User {} has no email, skipping payment failure email",
-            user_id
-        );
-        return Ok(());
-    };
-
-    let email_service_url =
-        std::env::var("EMAIL_SERVICE_URL").unwrap_or_else(|_| "http://email:8082".to_string());
-
-    let email_request = serde_json::json!({
-        "to": email,
-        "template": "payment_failure",
-        "data": {
-            "transaction_id": transaction_id,
-            "update_payment_url": "https://caution.co/billing",
         }
     });
 
