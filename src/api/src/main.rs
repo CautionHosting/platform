@@ -4616,16 +4616,30 @@ async fn deploy_logic(
             // Archive source and upload to S3
             let git_dir = format!("{}/git-repos/{}.git", state.data_dir, app_id_str);
 
-            // Pre-build balance check: refuse if org can't cover minimum build cost (~$0.30 for 1 min)
+            // Pre-build balance check: refuse if org can't cover minimum build cost (~$0.30 for 1 min).
+            // Enterprise orgs are invoice-billed, not credit-based; their derived balance is
+            // meaningless here and must never block a build.
             let min_build_cost_cents: i64 = 50; // $0.50 minimum balance required
-            let balance = crate::billing::get_ledger_balance_cents(&state.db, req.org_id)
-                .await
-                .with_context(Ctx::balance_query())?;
+            let billing_source: Option<String> = sqlx::query_scalar(
+                "SELECT billing_source FROM subscriptions
+                 WHERE organization_id = $1 AND status <> 'canceled'
+                 LIMIT 1",
+            )
+            .bind(req.org_id)
+            .fetch_optional(&state.db)
+            .await
+            .with_context(Ctx::balance_query())?;
 
-            if balance < min_build_cost_cents {
-                return Err(DeployLogicError::BuilderCredits {
-                    location: std::panic::Location::caller(),
-                });
+            if billing_source.as_deref() != Some("enterprise") {
+                let balance = crate::billing::get_ledger_balance_cents(&state.db, req.org_id)
+                    .await
+                    .with_context(Ctx::balance_query())?;
+
+                if balance < min_build_cost_cents {
+                    return Err(DeployLogicError::BuilderCredits {
+                        location: std::panic::Location::caller(),
+                    });
+                }
             }
 
             if let Some(selected) = &selected_components {
