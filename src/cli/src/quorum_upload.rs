@@ -192,6 +192,7 @@ mod tests {
             deployment_path: None,
             verbose: false,
             qr: false,
+            access_token: None,
             workdir: None,
         };
         let fixture: Value =
@@ -277,6 +278,7 @@ mod tests {
                 deployment_path: None,
                 verbose: false,
                 qr: true,
+                access_token: None,
                 workdir: None,
             };
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });

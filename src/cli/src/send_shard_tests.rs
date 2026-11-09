@@ -95,6 +95,7 @@ async fn deployment_release_resolves_exact_target_trust_and_bundle() {
         deployment_path: None,
         verbose: false,
         qr: false,
+        access_token: None,
         workdir: Some(work.clone()),
     };
     let app = uuid::Uuid::new_v4();

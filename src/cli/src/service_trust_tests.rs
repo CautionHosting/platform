@@ -9,6 +9,7 @@ fn client(root: &Path, platform: &str) -> ApiClient {
         deployment_path: None,
         verbose: false,
         qr: false,
+        access_token: None,
         workdir: None,
     }
 }

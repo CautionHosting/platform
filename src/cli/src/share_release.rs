@@ -1073,6 +1073,7 @@ mod holder_selection_tests {
             deployment_path: None,
             verbose: false,
             qr: false,
+            access_token: None,
             workdir: None,
         };
         assert_eq!(
@@ -1131,6 +1132,7 @@ mod holder_selection_tests {
             deployment_path: None,
             verbose: false,
             qr: false,
+            access_token: None,
             workdir: None,
         };
         std::fs::write(&client.config_path, json!({"session_id":"secret", "expires_at":"2099-01-01T00:00:00Z", "server_url":base_url}).to_string()).unwrap();
@@ -1173,6 +1175,7 @@ mod holder_selection_tests {
             deployment_path: None,
             verbose: false,
             qr: false,
+            access_token: None,
             workdir: None,
         };
         assert!(holder_names(&client, &json!({})).await.is_empty());

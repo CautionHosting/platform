@@ -440,6 +440,13 @@ The CLI needs a token credential path: accept a token (flag or env such as
 requirements, and resolve org/identity from the token identity endpoint. Existing
 session and SSH-signed paths stay.
 
+Implemented: `CAUTION_ACCESS_TOKEN` sets a client-wide `Authorization: Bearer`
+header, bypasses interactive login (`ensure_authenticated` /
+`require_existing_authenticated_config` return a synthetic config), drops the
+empty session header, and resolves the organization via `GET /access-tokens/me`
+in `primary_organization_id`. The CLI's token-capable commands are therefore the
+org routes the API now accepts tokens on.
+
 ## Data model sketch (not final)
 
 Illustrative only; principal plumbing per D5.

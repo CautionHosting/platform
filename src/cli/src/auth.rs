@@ -1212,6 +1212,25 @@ pub(crate) async fn primary_organization_id(
     session_id: &str,
 ) -> Result<String, PrimaryOrganizationIdError> {
     use PrimaryOrganizationIdErrorCtx as Ctx;
+
+    // A token authenticates as exactly one organization; read it from the token
+    // identity endpoint rather than the (user-scoped) organization list.
+    if client.access_token().is_some() {
+        #[derive(serde::Deserialize)]
+        struct TokenIdentity {
+            organization_id: String,
+        }
+        let identity: TokenIdentity = client
+            .get_protected_json(
+                session_id,
+                "/api/access-tokens/me",
+                "Failed to get token identity",
+            )
+            .await
+            .with_context(Ctx::get_organizations())?;
+        return Ok(identity.organization_id);
+    }
+
     let orgs: Vec<Organization> = client
         .get_protected_json(
             session_id,

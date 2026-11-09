@@ -3154,6 +3154,7 @@ mod tests {
             deployment_path,
             verbose: false,
             qr: false,
+            access_token: None,
             workdir: None,
         }
     }

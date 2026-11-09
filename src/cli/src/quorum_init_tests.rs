@@ -608,6 +608,7 @@ async fn downloaded_bundles_require_explicit_noninteractive_holder() {
         deployment_path: None,
         verbose: false,
         qr: false,
+        access_token: None,
         workdir: Some(work.clone()),
     };
     for name in ["webauthn.json", "mixed.json"] {

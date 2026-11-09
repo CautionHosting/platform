@@ -1423,6 +1423,10 @@ struct ApiClient {
     deployment_path: Option<PathBuf>,
     verbose: bool,
     qr: bool,
+    /// Organization access token from `CAUTION_ACCESS_TOKEN`, presented as
+    /// `Authorization: Bearer`. When set, the CLI authenticates as the token's
+    /// organization and skips interactive login (docs/access-tokens-bible.md).
+    access_token: Option<String>,
     workdir: Option<PathBuf>,
 }
 
@@ -1435,6 +1439,9 @@ pub(crate) enum ApiClientNewError {
         #[source]
         source: BoxError,
     },
+
+    #[error("CAUTION_ACCESS_TOKEN is not a valid header value [{location}]")]
+    InvalidAccessToken { location: Location },
 }
 
 #[derive(Debug, thiserror::Error, CtxError)]
@@ -2210,22 +2217,54 @@ impl ApiClient {
         }
         output::verbose(verbose, "API client initialized");
 
+        // An organization access token, if provided, rides on every request as
+        // a bearer credential and replaces interactive login.
+        let access_token = std::env::var("CAUTION_ACCESS_TOKEN")
+            .ok()
+            .map(|token| token.trim().to_string())
+            .filter(|token| !token.is_empty());
+
+        let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(30));
+        if let Some(token) = &access_token {
+            let mut default_headers = reqwest::header::HeaderMap::new();
+            let value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+                .map_err(|_source| ApiClientNewError::InvalidAccessToken {
+                    location: std::panic::Location::caller(),
+                })?;
+            default_headers.insert(reqwest::header::AUTHORIZATION, value);
+            builder = builder.default_headers(default_headers);
+        }
+
         Ok(Self {
             base_url: base_url.to_string(),
             // A connect timeout bounds the TCP+TLS handshake for every request so
             // an unresponsive host (e.g. an enclave IP that accepts the connection
             // but never replies) can't hang the CLI forever. It does not cap body
             // transfer, so large downloads are unaffected.
-            client: reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(30))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
+            client: builder.build().unwrap_or_else(|_| reqwest::Client::new()),
             config_path,
             deployment_path,
             verbose,
             qr,
+            access_token,
             workdir,
         })
+    }
+
+    /// A synthetic, non-expiring config used when an access token supplies the
+    /// credential, so callers that expect a `Config` keep working without a
+    /// login session.
+    fn ephemeral_config(&self) -> Config {
+        Config {
+            session_id: String::new(),
+            expires_at: "2999-12-31 23:59:59".to_string(),
+            server_url: Some(self.base_url.clone()),
+        }
+    }
+
+    /// The configured organization access token, if any.
+    fn access_token(&self) -> Option<&str> {
+        self.access_token.as_deref()
     }
 
     fn http_client(&self) -> &reqwest::Client {
@@ -2367,10 +2406,13 @@ impl ApiClient {
         let mut gate_claimed = false;
 
         loop {
-            let response = self
-                .client
-                .get(format!("{}{}", self.base_url, path))
-                .header("X-Session-ID", session_id)
+            let mut request = self.client.get(format!("{}{}", self.base_url, path));
+            // When a token supplies the credential the session id is empty; the
+            // bearer header (set on the client) authenticates instead.
+            if !session_id.is_empty() {
+                request = request.header("X-Session-ID", session_id);
+            }
+            let response = request
                 .send()
                 .await
                 .with_context(Ctx::send_request(failure_context))?;
@@ -2462,6 +2504,11 @@ impl ApiClient {
     async fn ensure_authenticated(&self) -> Result<Config, EnsureAuthenticatedError> {
         use EnsureAuthenticatedErrorCtx as Ctx;
 
+        // A configured access token replaces interactive login entirely.
+        if self.access_token().is_some() {
+            return Ok(self.ephemeral_config());
+        }
+
         match self.load_config() {
             Ok(config) if !self.is_session_expired(&config) && self.is_same_server(&config) => {
                 Ok(config)
@@ -2483,6 +2530,11 @@ impl ApiClient {
         &self,
     ) -> Result<Config, RequireExistingAuthenticatedConfigError> {
         use RequireExistingAuthenticatedConfigErrorCtx as Ctx;
+
+        // A configured access token replaces interactive login entirely.
+        if self.access_token().is_some() {
+            return Ok(self.ephemeral_config());
+        }
 
         let config = self.load_config().with_context(Ctx::load_config())?;
         if self.is_session_expired(&config) {
@@ -4889,6 +4941,7 @@ enclave "main" {{
             deployment_path: None,
             verbose: false,
             qr: false,
+            access_token: None,
             workdir: None,
         }
     }

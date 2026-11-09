@@ -1753,6 +1753,7 @@ mod tests {
             deployment_path: None,
             verbose: false,
             qr: false,
+            access_token: None,
             workdir: None,
         }
     }
