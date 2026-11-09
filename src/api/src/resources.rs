@@ -120,12 +120,15 @@ impl IntoResponse for CreateResourceError {
 #[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn create_resource(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
     validated_types::Validated(payload): validated_types::Validated<CreateResourceRequest>,
 ) -> Result<Json<CreateResourceResponse>, CreateResourceError> {
     use CreateResourceErrorCtx as Ctx;
 
-    tracing::info!("Creating resource for user_id: {}", auth.user_id());
+    tracing::info!(
+        "Creating resource for principal user_id: {:?}",
+        auth.user_id()
+    );
     tracing::debug!("Resource payload: {:?}", payload);
 
     let org_id = get_user_primary_org(&state.db, &auth)
@@ -219,6 +222,8 @@ pub async fn create_resource(
     .bind(&resource_slug)
     .bind(types::ResourceState::Initialized)
     .bind(&configuration)
+    // NULL for a token principal: actor columns stay users-only until the
+    // principals table lands (docs/access-tokens-bible.md D10).
     .bind(auth.user_id())
     .bind(lifecycle)
     .fetch_one(&state.db)
@@ -400,6 +405,14 @@ mod tests {
 /// Failure modes for [`get_resource`].
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum GetResourceError {
+    #[error("failed to resolve the caller's organization [{location}]")]
+    AccessQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
     #[error("resource {resource_id} not found [{location}]")]
     NotFound {
         resource_id: Uuid,
@@ -422,6 +435,9 @@ pub enum GetResourceError {
 impl IntoResponse for GetResourceError {
     fn into_response(self) -> Response {
         let (status, body) = match &self {
+            GetResourceError::AccessQuery { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
             GetResourceError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found"),
             GetResourceError::Summaries { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
@@ -434,10 +450,19 @@ impl IntoResponse for GetResourceError {
 #[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 pub async fn get_resource(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
     Path(resource_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, GetResourceError> {
     use GetResourceErrorCtx as Ctx;
+
+    // Authorization is org-scoped so both users and tokens are scoped to the
+    // caller's organization (docs/access-tokens-bible.md D6).
+    let org_id = get_user_primary_org(&state.db, &auth)
+        .await
+        .map_err(|source| GetResourceError::AccessQuery {
+            location: std::panic::Location::caller(),
+            source: Box::new(source),
+        })?;
 
     let resource = sqlx::query_as::<_, ComputeResource>(
         "SELECT cr.id, cr.organization_id, cr.provider_account_id, cr.resource_type_id,
@@ -446,11 +471,10 @@ pub async fn get_resource(
                 cr.dns_status, cr.dns_error, cr.billing_tag, cr.configuration,
                 cr.lifecycle, cr.live_deployment_id, cr.created_at, cr.updated_at
          FROM compute_resources cr
-         INNER JOIN organization_members om ON cr.organization_id = om.organization_id
-         WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL",
+         WHERE cr.id = $1 AND cr.organization_id = $2 AND cr.destroyed_at IS NULL",
     )
     .bind(resource_id)
-    .bind(auth.user_id())
+    .bind(org_id)
     .fetch_one(&state.db)
     .await
     .with_context(Ctx::not_found(resource_id))?;
@@ -691,28 +715,35 @@ impl IntoResponse for RenameResourceError {
 #[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 pub async fn rename_resource(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
     Path(resource_id): Path<Uuid>,
     validated_types::Validated(payload): validated_types::Validated<RenameResourceRequest>,
 ) -> Result<Json<ComputeResource>, RenameResourceError> {
     use RenameResourceErrorCtx as Ctx;
 
     tracing::info!(
-        "rename_resource: resource_id={}, user_id={}, new_name={}",
+        "rename_resource: resource_id={}, new_name={}",
         resource_id,
-        auth.user_id(),
         payload.name
     );
 
-    // Verify user has access to this resource via organization membership
+    // Authorization is org-scoped so both users and tokens are scoped to the
+    // caller's organization.
+    let caller_org = get_user_primary_org(&state.db, &auth)
+        .await
+        .map_err(|source| RenameResourceError::Lookup {
+            resource_id,
+            location: std::panic::Location::caller(),
+            source: Box::new(source),
+        })?;
+
     let resource: Option<(Uuid, String)> = sqlx::query_as(
         "SELECT cr.organization_id, cr.resource_name
          FROM compute_resources cr
-         INNER JOIN organization_members om ON cr.organization_id = om.organization_id
-         WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL",
+         WHERE cr.id = $1 AND cr.organization_id = $2 AND cr.destroyed_at IS NULL",
     )
     .bind(resource_id)
-    .bind(auth.user_id())
+    .bind(caller_org)
     .fetch_optional(&state.db)
     .await
     .with_context(Ctx::lookup(resource_id))?;
@@ -785,7 +816,7 @@ pub async fn rename_resource(
     }
 
     tracing::info!(
-        "Resource {} renamed from '{}' to '{}' by user {}",
+        "Resource {} renamed from '{}' to '{}' by user {:?}",
         resource_id,
         old_name,
         payload.name,
@@ -875,41 +906,44 @@ impl IntoResponse for DeleteResourceError {
 #[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 pub async fn delete_resource(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
     Path(resource_id): Path<Uuid>,
     query: axum::extract::Query<DeleteResourceQuery>,
 ) -> Result<StatusCode, DeleteResourceError> {
     use DeleteResourceErrorCtx as Ctx;
 
     tracing::info!(
-        "delete_resource called: resource_id={}, user_id={}, force={}",
+        "delete_resource called: resource_id={}, force={}",
         resource_id,
-        auth.user_id(),
         query.force
     );
 
-    tracing::debug!(
-        "Querying resource access for user {} on resource {}",
-        auth.user_id(),
-        resource_id
-    );
+    // Authorization is org-scoped so both users and tokens are scoped to the
+    // caller's organization.
+    let caller_org = get_user_primary_org(&state.db, &auth)
+        .await
+        .map_err(|source| DeleteResourceError::AccessQuery {
+            resource_id,
+            location: std::panic::Location::caller(),
+            source: Box::new(source),
+        })?;
+
+    tracing::debug!("Querying resource access for resource {}", resource_id);
     let resource: Option<(Uuid, bool, Uuid, String)> = sqlx::query_as(
         "SELECT cr.id, cr.destroyed_at IS NOT NULL, cr.organization_id, cr.lifecycle
          FROM compute_resources cr
-         INNER JOIN organization_members om ON cr.organization_id = om.organization_id
-         WHERE cr.id = $1 AND om.user_id = $2",
+         WHERE cr.id = $1 AND cr.organization_id = $2",
     )
     .bind(resource_id)
-    .bind(auth.user_id())
+    .bind(caller_org)
     .fetch_optional(&state.db)
     .await
     .with_context(Ctx::access_query(resource_id))?;
 
     let Some((resource_id, destroyed, org_id, lifecycle)) = resource else {
         tracing::warn!(
-            "Resource {} not found or user {} has no access",
-            resource_id,
-            auth.user_id()
+            "Resource {} not found or not in the caller's organization",
+            resource_id
         );
         return Err(DeleteResourceError::NotFound {
             resource_id,
@@ -952,8 +986,8 @@ pub async fn delete_resource(
             )
             .await?;
             let result = destroy_resource_by_id(&task_state, resource_id, force).await;
-            let completed = result.is_ok()
-                || app_destroyed(&task_state.db, resource_id, actor.expect_user_id()).await;
+            let completed =
+                result.is_ok() || app_destroyed(&task_state.db, resource_id, &actor).await;
             let (outcome, error) = match &result {
                 _ if completed => (Outcome::Succeeded, None),
                 Err(error) if matches!(error.kind, DestroyResourceByIdErrorKind::Deploying) => (
@@ -977,8 +1011,7 @@ pub async fn delete_resource(
         .with_context(Ctx::destroy_failed(resource_id))?
     } else {
         let result = destroy_resource_by_id(&state, resource_id, query.force).await;
-        let completed =
-            result.is_ok() || app_destroyed(&state.db, resource_id, auth.user_id()).await;
+        let completed = result.is_ok() || app_destroyed(&state.db, resource_id, &auth).await;
         (result, completed)
     };
     if let Err(ref error) = destroy_result {
@@ -1011,25 +1044,26 @@ pub async fn delete_resource(
     }
 
     tracing::info!(
-        "Resource {} terminated by user {} (git repo preserved for redeployment)",
+        "Resource {} terminated (git repo preserved for redeployment)",
         resource_id,
-        auth.user_id()
     );
 
     Ok(StatusCode::NO_CONTENT)
 }
 
 /// A failed request can still find the app destroyed by a concurrent teardown.
-async fn app_destroyed(db: &sqlx::PgPool, resource_id: Uuid, user_id: Uuid) -> bool {
+async fn app_destroyed(db: &sqlx::PgPool, resource_id: Uuid, auth: &crate::AuthContext) -> bool {
+    let Ok(org_id) = crate::get_user_primary_org(db, auth).await else {
+        return false;
+    };
     sqlx::query_scalar(
         "SELECT EXISTS(
              SELECT 1 FROM compute_resources cr
-             INNER JOIN organization_members om ON cr.organization_id = om.organization_id
-             WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NOT NULL
+             WHERE cr.id = $1 AND cr.organization_id = $2 AND cr.destroyed_at IS NOT NULL
          )",
     )
     .bind(resource_id)
-    .bind(user_id)
+    .bind(org_id)
     .fetch_one(db)
     .await
     .unwrap_or(false)
