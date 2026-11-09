@@ -551,6 +551,7 @@ mod tests {
         assert_eq!(parse_auth_method("passkey"), Some("passkey"));
         assert_eq!(parse_auth_method("session"), Some("session"));
         assert_eq!(parse_auth_method("ssh_signed"), Some("ssh_signed"));
+        assert_eq!(parse_auth_method("token"), Some("token"));
         assert_eq!(parse_auth_method("admin"), None);
         assert_eq!(parse_auth_method(""), None);
     }

@@ -360,6 +360,34 @@ where
 
 use validated_types::{DeployRequest, DeployResponse};
 
+#[cfg(test)]
+mod auth_context_tests {
+    use super::AuthContext;
+    use uuid::Uuid;
+
+    #[test]
+    fn session_principal_is_a_user() {
+        let id = Uuid::new_v4();
+        let auth = AuthContext::session(id);
+        assert_eq!(auth.user_id(), Some(id));
+        assert_eq!(auth.token_id(), None);
+        assert_eq!(auth.token_organization_id(), None);
+        assert_eq!(auth.auth_method(), Some("session"));
+        assert_eq!(auth.expect_user_id(), id);
+    }
+
+    #[test]
+    fn token_principal_has_no_user() {
+        let token = Uuid::new_v4();
+        let org = Uuid::new_v4();
+        let auth = AuthContext::token(token, org);
+        assert_eq!(auth.user_id(), None);
+        assert_eq!(auth.token_id(), Some(token));
+        assert_eq!(auth.token_organization_id(), Some(org));
+        assert_eq!(auth.auth_method(), Some("token"));
+    }
+}
+
 /// Failure modes for [`check_org_access`] (leaf error: no underlying source).
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum CheckOrgAccessError {
