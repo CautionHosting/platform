@@ -639,3 +639,30 @@ pub(crate) async fn token_identity(
             .collect(),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_token_has_prefix_and_32_random_bytes() {
+        let token = generate_access_token();
+        let encoded = token.strip_prefix(TOKEN_PREFIX).expect("token prefix");
+        let bytes = URL_SAFE_NO_PAD.decode(encoded).expect("base64url payload");
+        assert_eq!(bytes.len(), 32);
+    }
+
+    #[test]
+    fn two_tokens_differ() {
+        assert_ne!(generate_access_token(), generate_access_token());
+    }
+
+    #[test]
+    fn hash_is_sha256_hex() {
+        // Fixed known-answer vector: sha256("abc").
+        assert_eq!(
+            hash_access_token("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+}

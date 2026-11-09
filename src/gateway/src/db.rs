@@ -2368,3 +2368,18 @@ mod credential_owner_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod access_token_hash_tests {
+    use super::hash_access_token;
+
+    #[test]
+    fn hash_matches_api_sha256_hex() {
+        // Must stay identical to the API's `hash_access_token` (both sha256 of
+        // the presented token string, lowercase hex).
+        assert_eq!(
+            hash_access_token("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+}
