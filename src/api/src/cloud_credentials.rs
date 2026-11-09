@@ -421,7 +421,7 @@ pub async fn create_credential(
     pool: &PgPool,
     encryptor: &Encryptor,
     org_id: Uuid,
-    user_id: Uuid,
+    created_by: Option<Uuid>,
     req: CreateCredentialRequest,
 ) -> Result<CloudCredential, CreateCredentialError> {
     use CreateCredentialErrorCtx as Ctx;
@@ -528,7 +528,9 @@ pub async fn create_credential(
     .bind(&secrets_encrypted)
     .bind(req.config())
     .bind(req.is_default)
-    .bind(user_id)
+    // NULL for a token principal (actor columns are users-only pending the
+    // principals table; docs/access-tokens-bible.md D10).
+    .bind(created_by)
     .fetch_one(pool)
     .await
     .inspect_err(|source| {

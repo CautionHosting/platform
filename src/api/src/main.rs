@@ -12,7 +12,7 @@
 use axum::{
     Json, Router,
     body::Body,
-    extract::{FromRequestParts, Path, State},
+    extract::{Extension, FromRequestParts, Path, State},
     http::{StatusCode, request::Parts},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
@@ -1076,7 +1076,7 @@ impl IntoResponse for ListCloudCredentialsError {
 #[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 async fn list_cloud_credentials(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<AuthContext>,
 ) -> Result<Json<Vec<cloud_credentials::CloudCredential>>, ListCloudCredentialsError> {
     use ListCloudCredentialsErrorCtx as Ctx;
 
@@ -1135,7 +1135,7 @@ impl IntoResponse for CreateCloudCredentialError {
 #[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 async fn create_cloud_credential(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<AuthContext>,
     Json(req): Json<cloud_credentials::CreateCredentialRequest>,
 ) -> Result<Json<cloud_credentials::CloudCredential>, CreateCloudCredentialError> {
     use CreateCloudCredentialErrorCtx as Ctx;
@@ -1205,7 +1205,7 @@ impl IntoResponse for GetCloudCredentialError {
 #[tracing::instrument(skip_all, err(Debug), fields(credential_id = %credential_id))]
 async fn get_cloud_credential(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<AuthContext>,
     Path(credential_id): Path<Uuid>,
 ) -> Result<Json<cloud_credentials::CloudCredential>, GetCloudCredentialError> {
     use GetCloudCredentialErrorCtx as Ctx;
@@ -1272,7 +1272,7 @@ impl IntoResponse for DeleteCloudCredentialError {
 #[tracing::instrument(skip_all, err(Debug), fields(credential_id = %credential_id))]
 async fn delete_cloud_credential(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<AuthContext>,
     Path(credential_id): Path<Uuid>,
 ) -> Result<StatusCode, DeleteCloudCredentialError> {
     use DeleteCloudCredentialErrorCtx as Ctx;
@@ -1342,7 +1342,7 @@ impl IntoResponse for SetDefaultCloudCredentialError {
 #[tracing::instrument(skip_all, err(Debug), fields(credential_id = %credential_id))]
 async fn set_default_cloud_credential(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<AuthContext>,
     Path(credential_id): Path<Uuid>,
 ) -> Result<StatusCode, SetDefaultCloudCredentialError> {
     use SetDefaultCloudCredentialErrorCtx as Ctx;
@@ -1540,7 +1540,7 @@ impl IntoResponse for CreateManagedOnpremResourceError {
 #[tracing::instrument(skip_all, err(Debug))]
 async fn create_managed_onprem_resource(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<AuthContext>,
     body: String,
 ) -> Result<Json<serde_json::Value>, CreateManagedOnpremResourceError> {
     use CreateManagedOnpremResourceErrorCtx as Ctx;

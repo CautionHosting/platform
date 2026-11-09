@@ -205,7 +205,7 @@ async fn relink(
     .to_string();
     crate::create_managed_onprem_resource(
         State(state.clone()),
-        crate::UserPrincipal(crate::AuthContext::session(user)),
+        Extension(crate::AuthContext::session(user)),
         body,
     )
     .await
@@ -381,7 +381,7 @@ async fn an_invalid_first_link_keeps_the_lifecycle(state: &Arc<AppState>) {
     .to_string();
     let error = crate::create_managed_onprem_resource(
         State(state.clone()),
-        crate::UserPrincipal(crate::AuthContext::session(user)),
+        Extension(crate::AuthContext::session(user)),
         body,
     )
     .await
