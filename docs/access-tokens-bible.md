@@ -114,7 +114,7 @@ Defaults we will assume unless a decision below changes them.
 
 ## Significant decisions
 
-Each needs a call before implementation. D1-D4 are settled; the rest carry a
+Each needs a call before implementation. D1-D6 are settled; the rest carry a
 recommendation and remain open.
 
 ### D1. Token principal: user-bound vs org-owned - DECIDED (org-owned)
@@ -208,39 +208,44 @@ value, base64url, prefixed `caut_oat_`; only `sha256(plaintext)` is stored.
 slow KDF). A public, non-secret token-id prefix for UI/admin lookup is optional
 and can be added later.
 
-### D5. Principal propagation across the trust boundary
+### D5. Principal propagation across the trust boundary - DECIDED (explicit principal)
 
-Once a token is a non-user principal, the gateway `->` API contract must carry
-it, and the API's user-keyed helpers must accept it.
+Decided 2026-11-09: propagate an **explicit token principal**. No synthetic
+service-user rows.
 
-* **A. Explicit `Principal::Token` (recommended).** New headers
+* **A. Explicit `Principal::Token`. CHOSEN.** New headers
   (`X-Caution-Token-ID`, `X-Caution-Organization-ID`) plus `AuthMethod::Token`;
-  `AuthContext` becomes an enum/tagged struct; `rbac_middleware`,
+  `AuthContext` becomes a principal (user or token); `rbac_middleware`,
   `check_org_access`, and the org-in-path guards take a `Principal` and branch on
-  it. Clean semantics; touches the auth, onboarding, and RBAC layers.
-* **B. Synthetic service user.** Mint a hidden `users` row per token (or per
-  org) so the entire stack keeps working unchanged, then assign it roles as a
-  member. Smallest diff, but it pollutes the user space, fakes membership, and
-  will leak into user listings, notifications, and billing contact queries
-  unless carefully filtered.
+  it.
+* **B. Synthetic service user. REJECTED.** Minting hidden `users` rows would leak
+  into user listings, notifications, and billing-contact queries.
 
-**Recommendation: A**, with **B explicitly rejected** as a long-term model. A is
-more work but the fake-user path accretes special cases indefinitely.
+Key point: a token principal carries **no user id**. The gateway sends no
+`X-Authenticated-User-ID` for token requests, and the API must not fabricate one.
+`AuthContext` is therefore a tagged value (`Principal::User { user_id, .. }` or
+`Principal::Token { token_id, organization_id, .. }`). Helpers that need a user
+id (`check_org_access`, `rbac_middleware`, `get_user_primary_org`, the
+org-in-path guards) take the principal and treat "no user id" as their natural
+failure. See D6.
 
-### D6. Org scoping and which routes a token may reach
+### D6. Org scoping and which routes a token may reach - DECIDED (no allowlist)
 
-* Token is bound to one org, and the org in any path must equal the token's org
-  (`/organizations/{id}/...`); mismatch is rejected before RBAC.
-* Person-scoped and account-lifecycle routes are **not** token-reachable:
-  `/users/me`, passkey/credential management, `/auth/*`, legal acceptance, and
-  onboarding. A token is not a person and must not manage passkeys, accept
-  terms, or register accounts.
-* A minimal token identity route (e.g. `GET /access-tokens/me` returning org,
-  name, roles) replaces `/users/me` for tokens; the RBAC seeding UI's
-  `/users/me` allow rule does not apply to tokens.
+Decided 2026-11-09: **no per-route safeguards or exemption lists.** A token
+principal simply has **no user id**, so any route or helper that requires a user
+id fails on its own: `/users/me`, passkey/credential management, `/auth/*`, legal
+acceptance, onboarding, and every membership check keyed on `user_id`. There is
+deliberately no curated deny-list to keep in sync.
 
-**Recommendation: adopt as stated.** Open sub-question: whether any CLI flows
-that today call `/users/me` should get a token-scoped equivalent.
+* Token is bound to one org; the org in any path must equal the token's org
+  (`/organizations/{id}/...`) and mismatch is rejected before RBAC. This is the
+  one scoping rule, because the token must not cross tenants.
+* Everything else falls out of "no user id". A route works for a token only if
+  it does not need one (or has a token variant, below).
+* Where a CLI flow genuinely needs a person-scoped route, add an **access-token
+  variant** of that route rather than special-casing the original. Example: a
+  token identity endpoint (`GET /access-tokens/me` returning org, name, roles)
+  replaces `/users/me` for tokens.
 
 ### D7. Lifecycle, limits, and rotation
 
@@ -348,12 +353,11 @@ This needs `organization_access_tokens` to carry a `UNIQUE (organization_id, id)
 
 ## Open questions / blockers
 
-* D1-D4 are settled (org-owned principal; RBAC roles chosen at mint,
-  association immutable, roles themselves live, no subset requirement; gateway
-  validation; opaque hash-at-rest). D5 is the next keystone; D8 (mint gate) is
-  the escalation control and follows.
-* Does any existing CLI flow assume user auth in a way that blocks token use
-  (e.g. `/users/me`, quorum approval, passkey-signed deploys)? Not yet surveyed.
+* D1-D6 are settled. D8 (mint gate) is the escalation control and the next
+  keystone; D7, D9-D12 still carry recommendations.
+* CLI survey (needed for D6): identify every CLI flow that today calls a
+  person-scoped route (`/users/me`, quorum approval, passkey-signed deploys,
+  etc.) and decide which needs an access-token route variant. Not yet surveyed.
 * Whether the RBAC editor UI is the right place to manage token roles, or
   tokens get their own page.
 * Naming: "access token" vs "API token" vs "service account" in user-facing
@@ -362,6 +366,12 @@ This needs `organization_access_tokens` to carry a `UNIQUE (organization_id, id)
 ## Decision log
 
 Record decisions here as they are made, newest first.
+
+* **2026-11-09** - D5 and D6 locked in. The gateway forwards an **explicit token
+  principal** (token id + org id, no user id; no synthetic service users), and
+  D6 adds **no route allowlist**: person-scoped routes fail naturally because a
+  token has no user id. CLI flows that need such a route get an access-token
+  route variant instead.
 
 * **2026-11-09** - D3 and D4 confirmed. Tokens are validated at the **gateway**
   (not the API), and are **opaque, hash-at-rest** (`sha256`, `caut_oat_` prefix),
@@ -385,6 +395,10 @@ Record decisions here as they are made, newest first.
 ## Progress log
 
 Newest first.
+
+* **2026-11-09** - Locked in D5 (explicit token principal across the gateway->API
+  boundary) and D6 (no allowlist; fail via missing user id; add token route
+  variants where CLI needs them).
 
 * **2026-11-09** - Confirmed D3 (gateway validation) and D4 (opaque,
   hash-at-rest). Recorded consequences for the gateway auth path and lookup.
