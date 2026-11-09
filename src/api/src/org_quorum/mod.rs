@@ -1052,7 +1052,7 @@ pub async fn generate_org_quorum_bundle(
     crate::cryptographic_bundles::create_quorum_bundle(
         pool,
         org_id,
-        created_by,
+        Some(created_by),
         crate::cryptographic_bundles::CreateBundleRequest {
             allow_legacy: false,
             data,

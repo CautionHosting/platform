@@ -8,7 +8,7 @@ use super::{CreateBundleRequest, QuorumBundle, SecretsBundle, UpdateBundleReques
 use crate::{AppState, get_user_primary_org, org_quorum};
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -54,7 +54,7 @@ impl IntoResponse for ListQuorumBundlesError {
 #[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub(crate) async fn list_quorum_bundles(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
 ) -> Result<Json<Vec<QuorumBundle>>, ListQuorumBundlesError> {
     use ListQuorumBundlesErrorCtx as Ctx;
 
@@ -141,7 +141,7 @@ fn verify_upload_response(
 #[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub(crate) async fn create_quorum_bundle(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
     Json(req): Json<CreateBundleRequest>,
 ) -> Result<Json<QuorumBundle>, CreateQuorumBundleError> {
     use CreateQuorumBundleErrorCtx as Ctx;
@@ -201,7 +201,7 @@ impl IntoResponse for GetQuorumBundleError {
 #[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 pub(crate) async fn get_quorum_bundle(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<QuorumBundle>, GetQuorumBundleError> {
     use GetQuorumBundleErrorCtx as Ctx;
@@ -277,7 +277,7 @@ impl IntoResponse for UpdateQuorumBundleError {
 #[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 pub(crate) async fn update_quorum_bundle(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateBundleRequest>,
 ) -> Result<Json<QuorumBundle>, UpdateQuorumBundleError> {
@@ -345,7 +345,7 @@ impl IntoResponse for DeleteQuorumBundleError {
 #[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 pub(crate) async fn delete_quorum_bundle(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, DeleteQuorumBundleError> {
     use DeleteQuorumBundleErrorCtx as Ctx;
@@ -406,7 +406,7 @@ impl IntoResponse for ListSecretsBundlesError {
 #[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub(crate) async fn list_secrets_bundles(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
 ) -> Result<Json<Vec<SecretsBundle>>, ListSecretsBundlesError> {
     use ListSecretsBundlesErrorCtx as Ctx;
 
@@ -458,7 +458,7 @@ impl IntoResponse for CreateSecretsBundleError {
 #[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub(crate) async fn create_secrets_bundle(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
     Json(req): Json<CreateBundleRequest>,
 ) -> Result<Json<SecretsBundle>, CreateSecretsBundleError> {
     use CreateSecretsBundleErrorCtx as Ctx;
@@ -517,7 +517,7 @@ impl IntoResponse for GetSecretsBundleError {
 #[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 pub(crate) async fn get_secrets_bundle(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<SecretsBundle>, GetSecretsBundleError> {
     use GetSecretsBundleErrorCtx as Ctx;
@@ -581,7 +581,7 @@ impl IntoResponse for UpdateSecretsBundleError {
 #[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 pub(crate) async fn update_secrets_bundle(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateBundleRequest>,
 ) -> Result<Json<SecretsBundle>, UpdateSecretsBundleError> {
@@ -646,7 +646,7 @@ impl IntoResponse for DeleteSecretsBundleError {
 #[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 pub(crate) async fn delete_secrets_bundle(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, DeleteSecretsBundleError> {
     use DeleteSecretsBundleErrorCtx as Ctx;

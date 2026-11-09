@@ -174,7 +174,7 @@ pub enum CreateQuorumBundleError {
 pub async fn create_quorum_bundle(
     pool: &PgPool,
     org_id: Uuid,
-    user_id: Uuid,
+    created_by: Option<Uuid>,
     req: CreateBundleRequest,
 ) -> Result<QuorumBundle, CreateQuorumBundleError> {
     use CreateQuorumBundleErrorCtx as Ctx;
@@ -189,7 +189,8 @@ pub async fn create_quorum_bundle(
     .bind(&req.data)
     .bind(&req.name)
     .bind(&labels)
-    .bind(user_id)
+    // NULL for a token principal (docs/access-tokens-bible.md D10).
+    .bind(created_by)
     .fetch_one(pool)
     .await
     .with_context(Ctx::database(org_id))?;
@@ -362,7 +363,7 @@ pub enum CreateSecretsBundleError {
 pub async fn create_secrets_bundle(
     pool: &PgPool,
     org_id: Uuid,
-    user_id: Uuid,
+    created_by: Option<Uuid>,
     req: CreateBundleRequest,
 ) -> Result<SecretsBundle, CreateSecretsBundleError> {
     use CreateSecretsBundleErrorCtx as Ctx;
@@ -374,7 +375,8 @@ pub async fn create_secrets_bundle(
     )
     .bind(org_id)
     .bind(&req.data)
-    .bind(user_id)
+    // NULL for a token principal (docs/access-tokens-bible.md D10).
+    .bind(created_by)
     .fetch_one(pool)
     .await
     .with_context(Ctx::database(org_id))?;

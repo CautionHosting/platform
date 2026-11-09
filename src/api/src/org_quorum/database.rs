@@ -347,7 +347,7 @@ async fn storage_roundtrip(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid
     let created = storage::create_quorum_bundle(
         pool,
         org,
-        user,
+        Some(user),
         storage::CreateBundleRequest {
             allow_legacy: false,
             data: envelope.clone(),
@@ -558,7 +558,7 @@ async fn holder_display_metadata(pool: &PgPool) {
     let saved = storage::create_quorum_bundle(
         pool,
         org,
-        alice,
+        Some(alice),
         storage::CreateBundleRequest {
             allow_legacy: false,
             data: data.clone(),
