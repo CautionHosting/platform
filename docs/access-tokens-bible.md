@@ -114,7 +114,7 @@ Defaults we will assume unless a decision below changes them.
 
 ## Significant decisions
 
-Each needs a call before implementation. D1-D6 are settled; the rest carry a
+Each needs a call before implementation. D1-D7 are settled; the rest carry a
 recommendation and remain open.
 
 ### D1. Token principal: user-bound vs org-owned - DECIDED (org-owned)
@@ -247,17 +247,23 @@ deliberately no curated deny-list to keep in sync.
   token identity endpoint (`GET /access-tokens/me` returning org, name, roles)
   replaces `/users/me` for tokens.
 
-### D7. Lifecycle, limits, and rotation
+### D7. Lifecycle, limits, and rotation - DECIDED
 
-* **Expiry.** Optional vs required. Recommendation: optional expiry, default 90
-  days, tenant-configurable cap (e.g. 1 year); non-expiring allowed only for
-  owners. (Alternative: always required. Pick one.)
-* **Rotation.** Recommend a "create new + revoke old" flow now; an overlapping
-  rotation window can come later.
-* **Limits.** Per-org token count cap and per-token name/description.
+Decided 2026-11-09:
+
+* **Expiry.** Tokens expire. Set at mint, **default 90 days**. The proposed
+  tenant-configurable maximum-lifetime cap is dropped. Open micro-point: whether a
+  non-expiring token may be requested (default expiry implies every token has
+  one); assume not unless told otherwise.
+* **Rotation.** **Recreate, no overlap.** Rotating means minting a replacement
+  and revoking the old token; there is no overlapping-validity window. Because
+  revocation is immediate, the old token stops working at once, so callers must
+  swap in the new value.
+* **Limits.** **No per-org token count cap.** Each token carries a name and
+  optional description for operators.
 * **Last used.** Track `last_used_at`, updated best-effort like sessions
   (`auth_sessions.last_used_at`), so operators can find stale tokens.
-* **Revocation.** Hard delete; no soft-delete/recycle in v1.
+* **Revocation.** Hard delete; no soft-delete/recycle.
 
 ### D8. Who may mint a token
 
@@ -324,7 +330,7 @@ CREATE TABLE organization_access_tokens (
     name TEXT NOT NULL,
     description TEXT,
     created_by UUID REFERENCES users(id) ON DELETE SET NULL,
-    expires_at TIMESTAMPTZ,                   -- NULL = no expiry (see D7)
+    expires_at TIMESTAMPTZ NOT NULL,          -- mint default now()+90d (see D7)
     last_used_at TIMESTAMPTZ,
     revoked_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -353,8 +359,10 @@ This needs `organization_access_tokens` to carry a `UNIQUE (organization_id, id)
 
 ## Open questions / blockers
 
-* D1-D6 are settled. D8 (mint gate) is the escalation control and the next
-  keystone; D7, D9-D12 still carry recommendations.
+* D1-D7 are settled. D8 (mint gate) is the escalation control and the next
+  keystone; D9-D12 still carry recommendations.
+* Expiry micro-point (D7): confirm non-expiring tokens are not offered, and
+  whether the 90-day default is changeable per token at mint.
 * CLI survey (needed for D6): identify every CLI flow that today calls a
   person-scoped route (`/users/me`, quorum approval, passkey-signed deploys,
   etc.) and decide which needs an access-token route variant. Not yet surveyed.
@@ -366,6 +374,10 @@ This needs `organization_access_tokens` to carry a `UNIQUE (organization_id, id)
 ## Decision log
 
 Record decisions here as they are made, newest first.
+
+* **2026-11-09** - D7 confirmed. Tokens expire (default 90 days, set at mint).
+  Rotation is **recreate with no overlap** (mint new + revoke old). **No per-org
+  token cap.** Track `last_used_at`. Hard delete on revocation.
 
 * **2026-11-09** - D5 and D6 locked in. The gateway forwards an **explicit token
   principal** (token id + org id, no user id; no synthetic service users), and
@@ -395,6 +407,10 @@ Record decisions here as they are made, newest first.
 ## Progress log
 
 Newest first.
+
+* **2026-11-09** - Confirmed D7: default 90-day expiry, recreate-with-no-overlap
+  rotation, no per-org token cap, `last_used_at` tracking, hard-delete
+  revocation.
 
 * **2026-11-09** - Locked in D5 (explicit token principal across the gateway->API
   boundary) and D6 (no allowlist; fail via missing user id; add token route
