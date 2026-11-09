@@ -114,8 +114,8 @@ Defaults we will assume unless a decision below changes them.
 
 ## Significant decisions
 
-Each needs a call before implementation. D1 and D2 are settled; D2a/D2b and the
-rest carry a recommendation and remain open.
+Each needs a call before implementation. D1 and D2 (including D2a/D2b) are
+settled; the rest carry a recommendation and remain open.
 
 ### D1. Token principal: user-bound vs org-owned - DECIDED (org-owned)
 
@@ -158,26 +158,23 @@ separate assignment table for tokens (for example
 `organization_access_token_roles (organization_id, token_id, role_id)`), not a
 row in `rbac_member_roles`.
 
-**Immutability.** The role set is fixed when the token is minted. There is no
-"edit token roles" endpoint; changing a token's authority means minting a new
-token and revoking the old one (the rotation flow in D7). Enforcement: no
-`UPDATE` path on the assignment rows; the only writes are the inserts performed
-by the mint transaction, and cascade deletes from token/role removal.
+**Immutability (D2a).** Decided 2026-11-09: immutability applies **only to the
+token-to-role association**, not to the roles themselves. The set of roles
+attached to a token is fixed at mint: there is no "edit token roles" endpoint,
+and changing that set means minting a new token and revoking the old one (the
+rotation flow in D7). The roles stay live and mutable: editing a held role's
+rules or deleting the role **does** change the token's effective permissions,
+exactly as it changes them for a user holding the same role. Enforcement: no
+`UPDATE` path on the association rows; writes are the inserts performed by the
+mint transaction plus cascade deletes from token/role removal.
 
-**Open sub-decision (D2a): what "immutable" freezes.** Whether immutability
-covers only the token's *role list* (the roles stay live and mutable, so editing
-or deleting a held role changes the token's effective permissions), or also
-*snapshots the rules* onto the token at mint time (the token keeps the exact
-rules it was granted even if the role is later edited). Recommendation: freeze
-the role list only (simpler, keeps one source of truth per rule), and document
-that editing a role changes every principal holding it, tokens included. If
-exact reproducibility is required instead, a snapshot is the alternative.
-
-**Escalation bound (D2b, join with D8).** If a token's roles must be a subset of
-the minting user's effective roles, a low-privilege member cannot mint a token
-more powerful than themselves. This is the single most important safety rule;
-the alternative (any creator may grant any role) turns token creation into
-privilege escalation. Still open.
+**No subset requirement (D2b).** Decided 2026-11-09: a token's roles do **not**
+need to be a subset of the creator's effective roles. Whoever may mint may attach
+any role in the organization. Consequence: minting is itself a role-granting
+operation, so the mint authorization gate (D8) is the sole control against
+privilege escalation. If minting is not owner-only, the rule that permits
+`POST /organizations/{id}/access-tokens` effectively grants the ability to hold
+any role, and must be treated and labelled as such.
 
 ### D3. Where tokens are validated
 
@@ -253,16 +250,24 @@ that today call `/users/me` should get a token-scoped equivalent.
   (`auth_sessions.last_used_at`), so operators can find stale tokens.
 * **Revocation.** Hard delete; no soft-delete/recycle in v1.
 
-### D8. Who may mint a token, and the escalation bound
+### D8. Who may mint a token
+
+D2b decided there is **no subset requirement**: whoever may mint may attach any
+role. Minting is therefore a role-granting operation, and the mint gate is the
+only control against escalation.
 
 * **A. Owner-only (recommended for v1).** Fewest sharp edges; `is_owner` gate.
-* **B. RBAC-gated.** Any member with a matching rule may mint, but only roles
-  that are a **subset of their own effective rules** (D2 escalation bound). More
-  capable, more invariants to enforce and test.
+  An owner already has god powers, so letting them mint any role grants nothing
+  new.
+* **B. RBAC-gated.** Any member with a matching rule may mint, attaching any
+  role. Capable and consistent with the rest of RBAC, but the rule permitting
+  `POST /organizations/{id}/access-tokens` must be understood as granting
+  "create a principal with arbitrary roles", i.e. near-owner escalation.
 
-**Recommendation: A for v1, then B** once the subset check is implemented and
-tested. Ties directly to [To-fix #2 in the RBAC bible](rbac-bible.md) (delegated
-members have no UI).
+**Recommendation: A for v1.** B remains possible, but if chosen the mint rule
+should be treated with the same care as ownership grants and documented as such.
+Ties directly to [To-fix #2 in the RBAC bible](rbac-bible.md) (delegated members
+have no UI).
 
 ### D9. Transport details and precedence
 
@@ -339,8 +344,9 @@ This needs `organization_access_tokens` to carry a `UNIQUE (organization_id, id)
 
 ## Open questions / blockers
 
-* D1 and D2 are settled (org-owned principal; immutable RBAC roles chosen at
-  mint). D5 is the next keystone; D2a (live roles vs snapshot) and D8/D12 follow.
+* D1, D2, D2a, and D2b are settled (org-owned principal; RBAC roles chosen at
+  mint, association immutable, roles themselves live, no subset requirement). D5
+  is the next keystone; D8 (mint gate) is the escalation control and follows.
 * Does any existing CLI flow assume user auth in a way that blocks token use
   (e.g. `/users/me`, quorum approval, passkey-signed deploys)? Not yet surveyed.
 * Whether the RBAC editor UI is the right place to manage token roles, or
@@ -352,11 +358,16 @@ This needs `organization_access_tokens` to carry a `UNIQUE (organization_id, id)
 
 Record decisions here as they are made, newest first.
 
+* **2026-11-09** - D2a and D2b clarified. Immutability applies only to the
+  token-to-role **association**; a role's rules can be edited after and the
+  change applies to every holder, tokens included. A token's roles need **not**
+  be a subset of the creator's, so minting grants arbitrary roles and the mint
+  gate (D8) is the sole escalation control.
+
 * **2026-11-09** - A token's **RBAC roles are chosen at creation and are
   immutable** (D2). Authority is the same `rbac_roles` model as users, via a
   separate token-role assignment table; changing a token means mint + revoke,
-  not edit. Open sub-decisions: D2a (do held roles stay live or is the rule set
-  snapshotted) and D2b (must a token's roles be a subset of the creator's).
+  not edit. Sub-decisions D2a/D2b recorded below.
 
 * **2026-11-09** - Tokens are **org-scoped, not user-scoped** (D1). A token
   authenticates as a service principal of its organization; the creator is
@@ -366,8 +377,10 @@ Record decisions here as they are made, newest first.
 
 Newest first.
 
+* **2026-11-09** - Resolved D2a (association immutable only; roles stay live) and
+  D2b (no creator-subset requirement). Reworked D8 to match.
 * **2026-11-09** - Decided D2: token RBAC roles chosen at creation, immutable.
-  Added the token-role assignment table to the data-model sketch (D2a/D2b open).
+  Added the token-role assignment table to the data-model sketch.
 * **2026-11-09** - Decided D1: org-owned service principal (org-scoped, not
   user-scoped). Dependent sections updated.
 * **2026-11-09** - Created this document: auth/RBAC current-state inventory,
