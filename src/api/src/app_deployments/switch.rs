@@ -11,7 +11,7 @@ use super::lifecycle::{AppAddressMover, project_live};
 use super::{LIFECYCLE_DEPLOYMENTS, lock_app_operations};
 use crate::{AppState, AuthContext, ec2};
 use axum::{
-    Extension, Json,
+    Json,
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -327,7 +327,7 @@ pub(crate) async fn signed_switch_request(
     let unsigned = || SwitchError::Unsigned {
         location: std::panic::Location::caller(),
     };
-    let id = auth.signed_request_id.ok_or_else(unsigned)?;
+    let id = auth.signed_request_id().ok_or_else(unsigned)?;
     let bound: bool = sqlx::query_scalar(
         "SELECT EXISTS (
              SELECT 1 FROM signed_request_audit
@@ -335,7 +335,7 @@ pub(crate) async fn signed_switch_request(
                AND lower(request_path) = lower($3) AND completed_at IS NULL)",
     )
     .bind(id)
-    .bind(auth.user_id)
+    .bind(auth.user_id())
     .bind(format!(
         "/resources/{app_id}/deployments/{deployment_id}/switch"
     ))
@@ -347,7 +347,7 @@ pub(crate) async fn signed_switch_request(
 
 pub(crate) async fn switch_handler(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path((app_id, deployment_id)): Path<(Uuid, Uuid)>,
     Json(request): Json<SwitchRequest>,
 ) -> Result<Json<SwitchResponse>, SwitchError> {
@@ -373,7 +373,7 @@ async fn switch(
     let row: Option<SwitchRow> = sqlx::query_as(switch_row_sql(""))
         .bind(app_id)
         .bind(deployment_id)
-        .bind(auth.user_id)
+        .bind(auth.user_id())
         .bind(LIFECYCLE_DEPLOYMENTS)
         .fetch_optional(&state.db)
         .await
@@ -462,7 +462,7 @@ async fn execute(
         &state.db,
         state.managed_dns.is_some(),
         &ec2,
-        auth.user_id,
+        auth.expect_user_id(),
         app_id,
         deployment_id,
         request,

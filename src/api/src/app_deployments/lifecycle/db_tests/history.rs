@@ -45,11 +45,7 @@ async fn signed_request(pool: &PgPool, user: Uuid, method: &str, path: &str) -> 
 }
 
 fn signed(user: Uuid, signed_request_id: Option<Uuid>) -> crate::AuthContext {
-    crate::AuthContext {
-        user_id: user,
-        auth_method: Some("passkey"),
-        signed_request_id,
-    }
+    crate::AuthContext::user(user, Some("passkey"), signed_request_id)
 }
 
 async fn latest_outcome(pool: &PgPool, operation_id: Uuid) -> String {

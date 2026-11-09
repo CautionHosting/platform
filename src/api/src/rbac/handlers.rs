@@ -14,7 +14,7 @@
 
 use axum::{
     Json,
-    extract::{Extension, Path, State},
+    extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -25,7 +25,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::{AppState, AuthContext, CheckOrgAccessError};
+use crate::{AppState, CheckOrgAccessError};
 
 const MAX_ROLE_NAME_LEN: usize = 100;
 const METHODS: [&str; 8] = [
@@ -375,11 +375,11 @@ impl_error_response!(ListRolesError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub(crate) async fn list_roles(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(org_id): Path<Uuid>,
 ) -> Result<Json<Vec<RbacRole>>, ListRolesError> {
     use ListRolesErrorCtx as Ctx;
-    ensure_member!(state, auth.user_id, org_id, ListRolesError);
+    ensure_member!(state, &auth, org_id, ListRolesError);
     let roles = sqlx::query_as::<_, RbacRole>(
         "SELECT id, organization_id, name, description, created_at, updated_at
          FROM rbac_roles WHERE organization_id = $1 ORDER BY name, id",
@@ -481,12 +481,12 @@ impl_error_response!(CreateRoleError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub(crate) async fn create_role(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(org_id): Path<Uuid>,
     Json(payload): Json<CreateRoleRequest>,
 ) -> Result<(StatusCode, Json<RbacRole>), CreateRoleError> {
     use CreateRoleErrorCtx as Ctx;
-    ensure_member!(state, auth.user_id, org_id, CreateRoleError);
+    ensure_member!(state, &auth, org_id, CreateRoleError);
 
     let name = payload.name.trim();
     if name.is_empty() || name.len() > MAX_ROLE_NAME_LEN {
@@ -590,11 +590,11 @@ impl_error_response!(GetRoleError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id, role_id = %role_id))]
 pub(crate) async fn get_role(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path((org_id, role_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<RbacRoleDetail>, GetRoleError> {
     use GetRoleErrorCtx as Ctx;
-    ensure_member!(state, auth.user_id, org_id, GetRoleError);
+    ensure_member!(state, &auth, org_id, GetRoleError);
     let role = sqlx::query_as::<_, RbacRole>(
         "SELECT id, organization_id, name, description, created_at, updated_at
          FROM rbac_roles WHERE id = $1 AND organization_id = $2",
@@ -730,12 +730,12 @@ impl_error_response!(UpdateRoleError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id, role_id = %role_id))]
 pub(crate) async fn update_role(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path((org_id, role_id)): Path<(Uuid, Uuid)>,
     Json(payload): Json<UpdateRoleRequest>,
 ) -> Result<Json<RbacRole>, UpdateRoleError> {
     use UpdateRoleErrorCtx as Ctx;
-    ensure_member!(state, auth.user_id, org_id, UpdateRoleError);
+    ensure_member!(state, &auth, org_id, UpdateRoleError);
 
     let name = payload.name.trim();
     if name.is_empty() || name.len() > MAX_ROLE_NAME_LEN {
@@ -855,11 +855,11 @@ impl_error_response!(DeleteRoleError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id, role_id = %role_id))]
 pub(crate) async fn delete_role(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path((org_id, role_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, DeleteRoleError> {
     use DeleteRoleErrorCtx as Ctx;
-    ensure_member!(state, auth.user_id, org_id, DeleteRoleError);
+    ensure_member!(state, &auth, org_id, DeleteRoleError);
     let deleted = sqlx::query("DELETE FROM rbac_roles WHERE id = $1 AND organization_id = $2")
         .bind(role_id)
         .bind(org_id)
@@ -923,11 +923,11 @@ impl_error_response!(ListRulesError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id, role_id = %role_id))]
 pub(crate) async fn list_rules(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path((org_id, role_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<Vec<RbacRule>>, ListRulesError> {
     use ListRulesErrorCtx as Ctx;
-    ensure_member!(state, auth.user_id, org_id, ListRulesError);
+    ensure_member!(state, &auth, org_id, ListRulesError);
     if !role_in_org(&state.db, org_id, role_id)
         .await
         .with_context(Ctx::role_query())?
@@ -1004,12 +1004,12 @@ impl_error_response!(CreateRuleError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id, role_id = %role_id))]
 pub(crate) async fn create_rule(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path((org_id, role_id)): Path<(Uuid, Uuid)>,
     Json(payload): Json<CreateRuleRequest>,
 ) -> Result<(StatusCode, Json<RbacRule>), CreateRuleError> {
     use CreateRuleErrorCtx as Ctx;
-    ensure_member!(state, auth.user_id, org_id, CreateRuleError);
+    ensure_member!(state, &auth, org_id, CreateRuleError);
     if !role_in_org(&state.db, org_id, role_id)
         .await
         .with_context(Ctx::role_query())?
@@ -1087,11 +1087,11 @@ impl_error_response!(GetRuleError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id, role_id = %role_id, rule_id = %rule_id))]
 pub(crate) async fn get_rule(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path((org_id, role_id, rule_id)): Path<(Uuid, Uuid, Uuid)>,
 ) -> Result<Json<RbacRule>, GetRuleError> {
     use GetRuleErrorCtx as Ctx;
-    ensure_member!(state, auth.user_id, org_id, GetRuleError);
+    ensure_member!(state, &auth, org_id, GetRuleError);
     let rule = load_rule(&state.db, org_id, role_id, rule_id)
         .await
         .with_context(Ctx::query())?
@@ -1158,12 +1158,12 @@ impl_error_response!(UpdateRuleError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id, role_id = %role_id, rule_id = %rule_id))]
 pub(crate) async fn update_rule(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path((org_id, role_id, rule_id)): Path<(Uuid, Uuid, Uuid)>,
     Json(payload): Json<UpdateRuleRequest>,
 ) -> Result<Json<RbacRule>, UpdateRuleError> {
     use UpdateRuleErrorCtx as Ctx;
-    ensure_member!(state, auth.user_id, org_id, UpdateRuleError);
+    ensure_member!(state, &auth, org_id, UpdateRuleError);
     let existing = load_rule(&state.db, org_id, role_id, rule_id)
         .await
         .with_context(Ctx::load())?
@@ -1266,11 +1266,11 @@ impl_error_response!(DeleteRuleError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id, role_id = %role_id, rule_id = %rule_id))]
 pub(crate) async fn delete_rule(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path((org_id, role_id, rule_id)): Path<(Uuid, Uuid, Uuid)>,
 ) -> Result<StatusCode, DeleteRuleError> {
     use DeleteRuleErrorCtx as Ctx;
-    ensure_member!(state, auth.user_id, org_id, DeleteRuleError);
+    ensure_member!(state, &auth, org_id, DeleteRuleError);
     if !role_in_org(&state.db, org_id, role_id)
         .await
         .with_context(Ctx::role_query())?
@@ -1329,11 +1329,11 @@ impl_error_response!(ListMemberRolesError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id, member_id = %member_id))]
 pub(crate) async fn list_member_roles(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path((org_id, member_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<Vec<RbacMemberRole>>, ListMemberRolesError> {
     use ListMemberRolesErrorCtx as Ctx;
-    ensure_member!(state, auth.user_id, org_id, ListMemberRolesError);
+    ensure_member!(state, &auth, org_id, ListMemberRolesError);
     let roles = sqlx::query_as::<_, RbacMemberRole>(
         "SELECT organization_id, user_id, role_id, granted_by, created_at, updated_at
          FROM rbac_member_roles WHERE organization_id = $1 AND user_id = $2
@@ -1408,12 +1408,12 @@ impl_error_response!(AttachRoleError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id, member_id = %member_id))]
 pub(crate) async fn attach_role(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path((org_id, member_id)): Path<(Uuid, Uuid)>,
     Json(payload): Json<AttachRoleRequest>,
 ) -> Result<(StatusCode, Json<RbacMemberRole>), AttachRoleError> {
     use AttachRoleErrorCtx as Ctx;
-    ensure_member!(state, auth.user_id, org_id, AttachRoleError);
+    ensure_member!(state, &auth, org_id, AttachRoleError);
 
     if !role_in_org(&state.db, org_id, payload.role_id)
         .await
@@ -1448,7 +1448,7 @@ pub(crate) async fn attach_role(
     .bind(org_id)
     .bind(member_id)
     .bind(payload.role_id)
-    .bind(auth.user_id)
+    .bind(auth.user_id())
     .fetch_optional(&state.db)
     .await
     .with_context(Ctx::insert())?
@@ -1494,11 +1494,11 @@ impl_error_response!(DetachRoleError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id, member_id = %member_id, role_id = %role_id))]
 pub(crate) async fn detach_role(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path((org_id, member_id, role_id)): Path<(Uuid, Uuid, Uuid)>,
 ) -> Result<StatusCode, DetachRoleError> {
     use DetachRoleErrorCtx as Ctx;
-    ensure_member!(state, auth.user_id, org_id, DetachRoleError);
+    ensure_member!(state, &auth, org_id, DetachRoleError);
     let deleted = sqlx::query(
         "DELETE FROM rbac_member_roles
          WHERE organization_id = $1 AND user_id = $2 AND role_id = $3",

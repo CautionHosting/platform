@@ -11,7 +11,7 @@
 
 use axum::{
     Json,
-    extract::{Extension, Path, State},
+    extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -31,7 +31,7 @@ use crate::validated_types::{
     AddMemberRequest, CreateOrganizationRequest, InviteMemberRequest, UpdateMemberRequest,
     UpdateOrgSettingsRequest, UpdateOrganizationRequest,
 };
-use crate::{AppState, AuthContext, can_manage_org, check_org_access, is_owner};
+use crate::{AppState, can_manage_org, check_org_access, is_owner};
 
 const INVITATION_EXPIRY_HOURS: i64 = 72;
 const LEGACY_DEFAULT_ORG_PREFIX: &str = "Organization for user ";
@@ -153,14 +153,14 @@ impl IntoResponse for ListOrganizationsError {
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn list_organizations(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
 ) -> Result<Json<Vec<Organization>>, ListOrganizationsError> {
     use ListOrganizationsErrorCtx as Ctx;
 
-    tracing::debug!("list_organizations called for user {}", auth.user_id);
+    tracing::debug!("list_organizations called for user {}", auth.user_id());
     let orgs = sqlx::query_as::<_, Organization>(
         "SELECT o.id, o.name, o.is_active, o.created_at, o.updated_at
          FROM organizations o
@@ -168,7 +168,7 @@ pub async fn list_organizations(
          WHERE om.user_id = $1
          ORDER BY om.created_at ASC, om.id ASC",
     )
-    .bind(auth.user_id)
+    .bind(auth.user_id())
     .fetch_all(&state.db)
     .await
     .with_context(Ctx::query())?;
@@ -257,13 +257,13 @@ impl IntoResponse for CreateOrganizationError {
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn create_organization(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     validated_types::Validated(payload): validated_types::Validated<CreateOrganizationRequest>,
 ) -> Result<Json<Organization>, CreateOrganizationError> {
-    create_organization_for_user(&state.db, auth.user_id, &payload.name)
+    create_organization_for_user(&state.db, auth.user_id(), &payload.name)
         .await
         .map(Json)
 }
@@ -371,12 +371,12 @@ impl IntoResponse for GetOrganizationError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn get_organization(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(org_id): Path<Uuid>,
 ) -> Result<Json<Organization>, GetOrganizationError> {
     use GetOrganizationErrorCtx as Ctx;
 
-    check_org_access(&state.db, auth.user_id, org_id)
+    check_org_access(&state.db, &auth, org_id)
         .await
         .with_context(Ctx::access_query())?;
 
@@ -438,13 +438,13 @@ impl IntoResponse for UpdateOrganizationError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn update_organization(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(org_id): Path<Uuid>,
     validated_types::Validated(payload): validated_types::Validated<UpdateOrganizationRequest>,
 ) -> Result<Json<Organization>, UpdateOrganizationError> {
     use UpdateOrganizationErrorCtx as Ctx;
 
-    let role = check_org_access(&state.db, auth.user_id, org_id)
+    let role = check_org_access(&state.db, &auth, org_id)
         .await
         .with_context(Ctx::access_query())?;
 
@@ -522,12 +522,12 @@ impl IntoResponse for DeleteOrganizationError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn delete_organization(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(org_id): Path<Uuid>,
 ) -> Result<StatusCode, DeleteOrganizationError> {
     use DeleteOrganizationErrorCtx as Ctx;
 
-    let role = check_org_access(&state.db, auth.user_id, org_id)
+    let role = check_org_access(&state.db, &auth, org_id)
         .await
         .with_context(Ctx::access_query())?;
 
@@ -583,13 +583,13 @@ impl IntoResponse for GetOrgSettingsError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn get_org_settings(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(org_id): Path<Uuid>,
 ) -> Result<Json<OrgSettings>, GetOrgSettingsError> {
     use GetOrgSettingsErrorCtx as Ctx;
 
     tracing::debug!("get_org_settings called for org {}", org_id);
-    check_org_access(&state.db, auth.user_id, org_id)
+    check_org_access(&state.db, &auth, org_id)
         .await
         .with_context(Ctx::access_query())?;
 
@@ -661,13 +661,13 @@ impl IntoResponse for UpdateOrgSettingsError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn update_org_settings(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(org_id): Path<Uuid>,
     validated_types::Validated(payload): validated_types::Validated<UpdateOrgSettingsRequest>,
 ) -> Result<Json<OrgSettings>, UpdateOrgSettingsError> {
     use UpdateOrgSettingsErrorCtx as Ctx;
 
-    let role = check_org_access(&state.db, auth.user_id, org_id)
+    let role = check_org_access(&state.db, &auth, org_id)
         .await
         .with_context(Ctx::access_query())?;
 
@@ -737,12 +737,12 @@ impl IntoResponse for ListMembersError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn list_members(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(org_id): Path<Uuid>,
 ) -> Result<Json<Vec<OrganizationMember>>, ListMembersError> {
     use ListMembersErrorCtx as Ctx;
 
-    check_org_access(&state.db, auth.user_id, org_id)
+    check_org_access(&state.db, &auth, org_id)
         .await
         .with_context(Ctx::access_query())?;
 
@@ -815,13 +815,13 @@ impl IntoResponse for InviteMemberError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn invite_member(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(org_id): Path<Uuid>,
     validated_types::Validated(payload): validated_types::Validated<InviteMemberRequest>,
 ) -> Result<Json<InviteMemberResponse>, InviteMemberError> {
     use InviteMemberErrorCtx as Ctx;
 
-    let role = check_org_access(&state.db, auth.user_id, org_id)
+    let role = check_org_access(&state.db, &auth, org_id)
         .await
         .with_context(Ctx::database())?;
 
@@ -915,7 +915,7 @@ pub async fn invite_member(
         })?;
 
     let inviter_email: Option<String> = sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
-        .bind(auth.user_id)
+        .bind(auth.user_id())
         .fetch_optional(&state.db)
         .await
         .with_context(Ctx::database())?
@@ -945,7 +945,7 @@ pub async fn invite_member(
     // handed out by an existing owner through `update_member`.
     .bind(types::UserRole::Member)
     .bind(&token_hash)
-    .bind(auth.user_id)
+    .bind(auth.user_id())
     .bind(expires_at)
     .fetch_one(&state.db)
     .await
@@ -1009,12 +1009,12 @@ impl IntoResponse for ListActiveInvitationsError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn list_active_invitations(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(org_id): Path<Uuid>,
 ) -> Result<Json<Vec<OrganizationInvitation>>, ListActiveInvitationsError> {
     use ListActiveInvitationsErrorCtx as Ctx;
 
-    let role = check_org_access(&state.db, auth.user_id, org_id)
+    let role = check_org_access(&state.db, &auth, org_id)
         .await
         .with_context(Ctx::query())?;
 
@@ -1084,12 +1084,12 @@ impl IntoResponse for CancelInvitationError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn cancel_invitation(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path((org_id, invitation_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, CancelInvitationError> {
     use CancelInvitationErrorCtx as Ctx;
 
-    let role = check_org_access(&state.db, auth.user_id, org_id)
+    let role = check_org_access(&state.db, &auth, org_id)
         .await
         .with_context(Ctx::database())?;
 
@@ -1235,13 +1235,13 @@ impl IntoResponse for AddMemberError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn add_member(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(org_id): Path<Uuid>,
     validated_types::Validated(payload): validated_types::Validated<AddMemberRequest>,
 ) -> Result<Json<OrganizationMember>, AddMemberError> {
     use AddMemberErrorCtx as Ctx;
 
-    let role = check_org_access(&state.db, auth.user_id, org_id)
+    let role = check_org_access(&state.db, &auth, org_id)
         .await
         .with_context(Ctx::access_query())?;
 
@@ -1283,7 +1283,7 @@ pub async fn add_member(
     .bind(org_id)
     .bind(payload.user_id)
     .bind(&payload.role)
-    .bind(auth.user_id)
+    .bind(auth.user_id())
     .fetch_one(&state.db)
     .await
     .with_context(Ctx::insert())?;
@@ -1359,13 +1359,13 @@ impl IntoResponse for UpdateMemberError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn update_member(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path((org_id, member_user_id)): Path<(Uuid, Uuid)>,
     validated_types::Validated(payload): validated_types::Validated<UpdateMemberRequest>,
 ) -> Result<Json<OrganizationMember>, UpdateMemberError> {
     use UpdateMemberErrorCtx as Ctx;
 
-    let role = check_org_access(&state.db, auth.user_id, org_id)
+    let role = check_org_access(&state.db, &auth, org_id)
         .await
         .with_context(Ctx::access_query())?;
 
@@ -1498,12 +1498,12 @@ impl IntoResponse for RemoveMemberError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn remove_member(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path((org_id, member_user_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, RemoveMemberError> {
     use RemoveMemberErrorCtx as Ctx;
 
-    let role = check_org_access(&state.db, auth.user_id, org_id)
+    let role = check_org_access(&state.db, &auth, org_id)
         .await
         .with_context(Ctx::access_query())?;
 

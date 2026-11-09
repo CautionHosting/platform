@@ -570,14 +570,19 @@ Newest first.
   handler support on `switch`/quorum routes. (d) CLI token path. (e) frontend.
   (f) tests.
 
-  The API principal refactor was started and parked in a git stash
-  (`WIP: api principal refactor (AuthContext enum)`): it introduces
-  `AuthContext::{User,Token}`, principal-aware `check_org_access` /
-  `get_user_primary_org`, and rewrites ~250 `auth.user_id` field reads. It does
-  not compile yet; the remaining errors are user-id-dependent handlers, best
-  resolved with a user-only extractor (`UserPrincipal`) that rejects token
-  principals with 403 while leaving org routes on `AuthContext`. The tree is
-  green without the stash.
+  The API principal refactor is now **landed**: `AuthContext` is
+  `User`/`Token`, `check_org_access` / `get_user_primary_org` /
+  `rbac_middleware` are principal-aware (tokens are member-equivalents of their
+  org, never owners), `auth_middleware` accepts `X-Caution-Token-ID` +
+  `X-Caution-Organization-ID`, and person-scoped handlers use a `UserPrincipal`
+  extractor that rejects tokens with 403. `GET /access-tokens/me` reports the
+  token's org/name/expiry/roles and is reachable by tokens. `api` and `gateway`
+  compile.
+
+  Interim limitation: most org routes still extract `UserPrincipal`, so a token
+  currently reaches only `/access-tokens/me`; enabling tokens on specific org
+  routes (resources, quorum, switch, credentials, deploy) is the next step, per
+  the D6 survey. The earlier stashed WIP was popped and is no longer needed.
 
 * **2026-11-09** - Decided D13: tokens authorize the passkey-required routes
   (`apps switch`, quorum bundles). Updated the CLI survey and server-work list

@@ -5,9 +5,9 @@
 //! `/secrets-bundles`.
 
 use super::{CreateBundleRequest, QuorumBundle, SecretsBundle, UpdateBundleRequest};
-use crate::{AppState, AuthContext, get_user_primary_org, org_quorum};
+use crate::{AppState, get_user_primary_org, org_quorum};
 use axum::{
-    Extension, Json,
+    Json,
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -51,14 +51,14 @@ impl IntoResponse for ListQuorumBundlesError {
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub(crate) async fn list_quorum_bundles(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
 ) -> Result<Json<Vec<QuorumBundle>>, ListQuorumBundlesError> {
     use ListQuorumBundlesErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::primary_org_lookup())?;
 
@@ -138,20 +138,20 @@ fn verify_upload_response(
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub(crate) async fn create_quorum_bundle(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Json(req): Json<CreateBundleRequest>,
 ) -> Result<Json<QuorumBundle>, CreateQuorumBundleError> {
     use CreateQuorumBundleErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::primary_org_lookup())?;
 
     org_quorum::verify_upload(&req.data, req.allow_legacy).with_context(Ctx::verify_upload())?;
-    let bundle = super::create_quorum_bundle(&state.db, org_id, auth.user_id, req)
+    let bundle = super::create_quorum_bundle(&state.db, org_id, auth.user_id(), req)
         .await
         .with_context(Ctx::store())?;
     Ok(Json(bundle))
@@ -201,12 +201,12 @@ impl IntoResponse for GetQuorumBundleError {
 #[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 pub(crate) async fn get_quorum_bundle(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(id): Path<Uuid>,
 ) -> Result<Json<QuorumBundle>, GetQuorumBundleError> {
     use GetQuorumBundleErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::primary_org_lookup())?;
 
@@ -277,13 +277,13 @@ impl IntoResponse for UpdateQuorumBundleError {
 #[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 pub(crate) async fn update_quorum_bundle(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateBundleRequest>,
 ) -> Result<Json<QuorumBundle>, UpdateQuorumBundleError> {
     use UpdateQuorumBundleErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::primary_org_lookup())?;
 
@@ -345,12 +345,12 @@ impl IntoResponse for DeleteQuorumBundleError {
 #[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 pub(crate) async fn delete_quorum_bundle(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, DeleteQuorumBundleError> {
     use DeleteQuorumBundleErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::primary_org_lookup())?;
 
@@ -403,14 +403,14 @@ impl IntoResponse for ListSecretsBundlesError {
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub(crate) async fn list_secrets_bundles(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
 ) -> Result<Json<Vec<SecretsBundle>>, ListSecretsBundlesError> {
     use ListSecretsBundlesErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::primary_org_lookup())?;
 
@@ -455,19 +455,19 @@ impl IntoResponse for CreateSecretsBundleError {
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub(crate) async fn create_secrets_bundle(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Json(req): Json<CreateBundleRequest>,
 ) -> Result<Json<SecretsBundle>, CreateSecretsBundleError> {
     use CreateSecretsBundleErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::primary_org_lookup())?;
 
-    let bundle = super::create_secrets_bundle(&state.db, org_id, auth.user_id, req)
+    let bundle = super::create_secrets_bundle(&state.db, org_id, auth.user_id(), req)
         .await
         .with_context(Ctx::create())?;
     Ok(Json(bundle))
@@ -517,12 +517,12 @@ impl IntoResponse for GetSecretsBundleError {
 #[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 pub(crate) async fn get_secrets_bundle(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(id): Path<Uuid>,
 ) -> Result<Json<SecretsBundle>, GetSecretsBundleError> {
     use GetSecretsBundleErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::primary_org_lookup())?;
 
@@ -581,13 +581,13 @@ impl IntoResponse for UpdateSecretsBundleError {
 #[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 pub(crate) async fn update_secrets_bundle(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateBundleRequest>,
 ) -> Result<Json<SecretsBundle>, UpdateSecretsBundleError> {
     use UpdateSecretsBundleErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::primary_org_lookup())?;
 
@@ -646,12 +646,12 @@ impl IntoResponse for DeleteSecretsBundleError {
 #[tracing::instrument(skip_all, err(Debug), fields(bundle_id = %id))]
 pub(crate) async fn delete_secrets_bundle(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, DeleteSecretsBundleError> {
     use DeleteSecretsBundleErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::primary_org_lookup())?;
 

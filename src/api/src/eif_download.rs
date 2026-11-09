@@ -8,7 +8,7 @@
 
 use axum::{
     body::Body,
-    extract::{Extension, Path, Query, State},
+    extract::{Path, Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -19,7 +19,7 @@ use tower::Service;
 use tower_http::services::fs::ServeFile;
 use uuid::Uuid;
 
-use crate::{AppState, AuthContext, cloud_credentials, deployment};
+use crate::{AppState, cloud_credentials, deployment};
 
 const SUBDIR: &str = "eif-cache";
 
@@ -470,14 +470,14 @@ pub(crate) async fn build_for_key(
 #[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 pub(crate) async fn download_eif(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(resource_id): Path<Uuid>,
     Query(params): Query<DownloadEifParams>,
     req: axum::extract::Request,
 ) -> Result<Response<Body>, DownloadEifError> {
     use DownloadEifErrorCtx as Ctx;
 
-    let org_id = crate::get_user_primary_org(&state.db, auth.user_id)
+    let org_id = crate::get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::database())?;
 

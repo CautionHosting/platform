@@ -11,7 +11,7 @@ use super::lifecycle::stop_meter;
 use super::{LIFECYCLE_DEPLOYMENTS, PROCESS_ID, admission, lock_app_operations};
 use crate::{AppState, AuthContext, deployment, ec2};
 use axum::{
-    Extension, Json,
+    Json,
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -589,7 +589,7 @@ struct DestroyRow {
 
 pub(crate) async fn destroy_handler(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path((app_id, deployment_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, DestroyError> {
     use DestroyErrorCtx as Ctx;
@@ -688,7 +688,7 @@ pub(super) async fn begin_destroy(
     )
     .bind(app_id)
     .bind(deployment_id)
-    .bind(actor.user_id)
+    .bind(actor.expect_user_id())
     .bind(LIFECYCLE_DEPLOYMENTS)
     .fetch_optional(&mut *tx)
     .await

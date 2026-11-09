@@ -8,7 +8,7 @@
 
 use axum::{
     Json,
-    extract::{Extension, Path, State},
+    extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -24,8 +24,7 @@ use crate::validated_types::{
     CreateResourceRequest, CreateResourceResponse, RenameResourceRequest,
 };
 use crate::{
-    AppState, AuthContext, get_or_create_provider_account, get_or_create_resource_type,
-    get_user_primary_org,
+    AppState, get_or_create_provider_account, get_or_create_resource_type, get_user_primary_org,
 };
 use crate::{cloud_credentials, deployment, types};
 
@@ -118,18 +117,18 @@ impl IntoResponse for CreateResourceError {
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn create_resource(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     validated_types::Validated(payload): validated_types::Validated<CreateResourceRequest>,
 ) -> Result<Json<CreateResourceResponse>, CreateResourceError> {
     use CreateResourceErrorCtx as Ctx;
 
-    tracing::info!("Creating resource for user_id: {}", auth.user_id);
+    tracing::info!("Creating resource for user_id: {}", auth.user_id());
     tracing::debug!("Resource payload: {:?}", payload);
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::primary_org_lookup())?;
 
@@ -220,7 +219,7 @@ pub async fn create_resource(
     .bind(&resource_slug)
     .bind(types::ResourceState::Initialized)
     .bind(&configuration)
-    .bind(auth.user_id)
+    .bind(auth.user_id())
     .bind(lifecycle)
     .fetch_one(&state.db)
     .await
@@ -315,20 +314,20 @@ impl IntoResponse for ListResourcesError {
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn list_resources(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
 ) -> Result<Json<Vec<serde_json::Value>>, ListResourcesError> {
     use ListResourcesErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::primary_org_lookup())?;
 
     tracing::info!(
         "Listing resources for user {} in org {}",
-        auth.user_id,
+        auth.user_id(),
         org_id
     );
 
@@ -439,7 +438,7 @@ impl IntoResponse for GetResourceError {
 #[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 pub async fn get_resource(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(resource_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, GetResourceError> {
     use GetResourceErrorCtx as Ctx;
@@ -455,7 +454,7 @@ pub async fn get_resource(
          WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL",
     )
     .bind(resource_id)
-    .bind(auth.user_id)
+    .bind(auth.user_id())
     .fetch_one(&state.db)
     .await
     .with_context(Ctx::not_found(resource_id))?;
@@ -572,7 +571,7 @@ impl IntoResponse for ProxyAttestationError {
 #[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 pub async fn proxy_attestation(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(resource_id): Path<Uuid>,
     body: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, ProxyAttestationError> {
@@ -586,7 +585,7 @@ pub async fn proxy_attestation(
          WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL",
     )
     .bind(resource_id)
-    .bind(auth.user_id)
+    .bind(auth.user_id())
     .fetch_one(&state.db)
     .await
     .with_context(Ctx::resource_not_found(resource_id))?;
@@ -696,7 +695,7 @@ impl IntoResponse for RenameResourceError {
 #[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 pub async fn rename_resource(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(resource_id): Path<Uuid>,
     validated_types::Validated(payload): validated_types::Validated<RenameResourceRequest>,
 ) -> Result<Json<ComputeResource>, RenameResourceError> {
@@ -705,7 +704,7 @@ pub async fn rename_resource(
     tracing::info!(
         "rename_resource: resource_id={}, user_id={}, new_name={}",
         resource_id,
-        auth.user_id,
+        auth.user_id(),
         payload.name
     );
 
@@ -717,7 +716,7 @@ pub async fn rename_resource(
          WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL",
     )
     .bind(resource_id)
-    .bind(auth.user_id)
+    .bind(auth.user_id())
     .fetch_optional(&state.db)
     .await
     .with_context(Ctx::lookup(resource_id))?;
@@ -794,7 +793,7 @@ pub async fn rename_resource(
         resource_id,
         old_name,
         payload.name,
-        auth.user_id
+        auth.user_id()
     );
 
     Ok(Json(updated_resource))
@@ -880,7 +879,7 @@ impl IntoResponse for DeleteResourceError {
 #[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 pub async fn delete_resource(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(resource_id): Path<Uuid>,
     query: axum::extract::Query<DeleteResourceQuery>,
 ) -> Result<StatusCode, DeleteResourceError> {
@@ -889,13 +888,13 @@ pub async fn delete_resource(
     tracing::info!(
         "delete_resource called: resource_id={}, user_id={}, force={}",
         resource_id,
-        auth.user_id,
+        auth.user_id(),
         query.force
     );
 
     tracing::debug!(
         "Querying resource access for user {} on resource {}",
-        auth.user_id,
+        auth.user_id(),
         resource_id
     );
     let resource: Option<(Uuid, bool, Uuid, String)> = sqlx::query_as(
@@ -905,7 +904,7 @@ pub async fn delete_resource(
          WHERE cr.id = $1 AND om.user_id = $2",
     )
     .bind(resource_id)
-    .bind(auth.user_id)
+    .bind(auth.user_id())
     .fetch_optional(&state.db)
     .await
     .with_context(Ctx::access_query(resource_id))?;
@@ -914,7 +913,7 @@ pub async fn delete_resource(
         tracing::warn!(
             "Resource {} not found or user {} has no access",
             resource_id,
-            auth.user_id
+            auth.user_id()
         );
         return Err(DeleteResourceError::NotFound {
             resource_id,
@@ -957,8 +956,8 @@ pub async fn delete_resource(
             )
             .await?;
             let result = destroy_resource_by_id(&task_state, resource_id, force).await;
-            let completed =
-                result.is_ok() || app_destroyed(&task_state.db, resource_id, actor.user_id).await;
+            let completed = result.is_ok()
+                || app_destroyed(&task_state.db, resource_id, actor.expect_user_id()).await;
             let (outcome, error) = match &result {
                 _ if completed => (Outcome::Succeeded, None),
                 Err(error) if matches!(error.kind, DestroyResourceByIdErrorKind::Deploying) => (
@@ -982,7 +981,8 @@ pub async fn delete_resource(
         .with_context(Ctx::destroy_failed(resource_id))?
     } else {
         let result = destroy_resource_by_id(&state, resource_id, query.force).await;
-        let completed = result.is_ok() || app_destroyed(&state.db, resource_id, auth.user_id).await;
+        let completed =
+            result.is_ok() || app_destroyed(&state.db, resource_id, auth.user_id()).await;
         (result, completed)
     };
     if let Err(ref error) = destroy_result {
@@ -1017,7 +1017,7 @@ pub async fn delete_resource(
     tracing::info!(
         "Resource {} terminated by user {} (git repo preserved for redeployment)",
         resource_id,
-        auth.user_id
+        auth.user_id()
     );
 
     Ok(StatusCode::NO_CONTENT)

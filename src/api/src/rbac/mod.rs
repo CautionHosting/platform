@@ -181,7 +181,7 @@ struct MembershipRuleRow {
     priority: Option<i32>,
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub(crate) async fn rbac_middleware(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -201,19 +201,35 @@ pub(crate) async fn rbac_middleware(
         .map(|(name, value)| (name.to_owned(), value.to_owned()))
         .collect();
 
-    let rows: Vec<MembershipRuleRow> = sqlx::query_as(
-        "SELECT om.role::text AS member_role,
-                r.effect, r.method, r.path, r.objects, r.priority
-         FROM organization_members om
-         LEFT JOIN rbac_member_roles mr
-                ON mr.organization_id = om.organization_id AND mr.user_id = om.user_id
-         LEFT JOIN rbac_role_rules r ON r.role_id = mr.role_id
-         WHERE om.user_id = $1",
-    )
-    .bind(auth.user_id)
-    .fetch_all(&state.db)
-    .await
-    .with_context(Ctx::database())?;
+    // Users are evaluated against their membership roles; a token against the
+    // (immutable) roles attached to it. Either way a token is never an owner
+    // (D12), so the owner short-circuit below only ever fires for users.
+    let rows: Vec<MembershipRuleRow> = match &auth {
+        AuthContext::Token(token) => sqlx::query_as(
+            "SELECT 'member'::text AS member_role,
+                    r.effect, r.method, r.path, r.objects, r.priority
+             FROM organization_access_token_roles tr
+             LEFT JOIN rbac_role_rules r ON r.role_id = tr.role_id
+             WHERE tr.token_id = $1",
+        )
+        .bind(token.token_id)
+        .fetch_all(&state.db)
+        .await
+        .with_context(Ctx::database())?,
+        AuthContext::User(_) => sqlx::query_as(
+            "SELECT om.role::text AS member_role,
+                    r.effect, r.method, r.path, r.objects, r.priority
+             FROM organization_members om
+             LEFT JOIN rbac_member_roles mr
+                    ON mr.organization_id = om.organization_id AND mr.user_id = om.user_id
+             LEFT JOIN rbac_role_rules r ON r.role_id = mr.role_id
+             WHERE om.user_id = $1",
+        )
+        .bind(auth.user_id())
+        .fetch_all(&state.db)
+        .await
+        .with_context(Ctx::database())?,
+    };
 
     // Owners hold god powers and are not RBAC-gated.
     if rows.iter().any(|row| row.member_role == "owner") {

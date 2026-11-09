@@ -177,11 +177,11 @@ impl_error_response!(ListAccessTokensError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub(crate) async fn list_access_tokens(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(org_id): Path<Uuid>,
 ) -> Result<Json<Vec<AccessTokenView>>, ListAccessTokensError> {
     use ListAccessTokensErrorCtx as Ctx;
-    ensure_owner!(state, auth.user_id, org_id, ListAccessTokensError);
+    ensure_owner!(state, &auth, org_id, ListAccessTokensError);
 
     let tokens = sqlx::query_as::<_, AccessTokenRow>(
         "SELECT id, organization_id, name, description, created_by,
@@ -285,13 +285,13 @@ impl_error_response!(CreateAccessTokenError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub(crate) async fn create_access_token(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(org_id): Path<Uuid>,
     Json(payload): Json<CreateAccessTokenRequest>,
 ) -> Result<Json<CreatedAccessToken>, CreateAccessTokenError> {
     use CreateAccessTokenError as E;
     use CreateAccessTokenErrorCtx as Ctx;
-    ensure_owner!(state, auth.user_id, org_id, CreateAccessTokenError);
+    ensure_owner!(state, &auth, org_id, CreateAccessTokenError);
 
     let name = payload.name.trim();
     if name.is_empty() || name.len() > MAX_NAME_LEN {
@@ -358,7 +358,7 @@ pub(crate) async fn create_access_token(
     .bind(&token_hash)
     .bind(name)
     .bind(description)
-    .bind(auth.user_id)
+    .bind(auth.user_id())
     .bind(expires_at)
     .fetch_one(&mut *tx)
     .await
@@ -428,12 +428,12 @@ impl_error_response!(GetAccessTokenError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub(crate) async fn get_access_token(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path((org_id, token_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<AccessTokenView>, GetAccessTokenError> {
     use GetAccessTokenError as E;
     use GetAccessTokenErrorCtx as Ctx;
-    ensure_owner!(state, auth.user_id, org_id, GetAccessTokenError);
+    ensure_owner!(state, &auth, org_id, GetAccessTokenError);
 
     let token = sqlx::query_as::<_, AccessTokenRow>(
         "SELECT id, organization_id, name, description, created_by,
@@ -515,12 +515,12 @@ impl_error_response!(DeleteAccessTokenError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub(crate) async fn delete_access_token(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path((org_id, token_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, DeleteAccessTokenError> {
     use DeleteAccessTokenError as E;
     use DeleteAccessTokenErrorCtx as Ctx;
-    ensure_owner!(state, auth.user_id, org_id, DeleteAccessTokenError);
+    ensure_owner!(state, &auth, org_id, DeleteAccessTokenError);
 
     let result = sqlx::query(
         "DELETE FROM organization_access_tokens WHERE id = $1 AND organization_id = $2",
@@ -538,4 +538,104 @@ pub(crate) async fn delete_access_token(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Token identity (GET /access-tokens/me)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub(crate) struct TokenIdentity {
+    pub(crate) token_id: Uuid,
+    pub(crate) organization_id: Uuid,
+    pub(crate) name: String,
+    pub(crate) expires_at: Option<DateTime<Utc>>,
+    pub(crate) roles: Vec<AccessTokenRoleRef>,
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+pub(crate) enum TokenIdentityError {
+    #[error("this endpoint requires an access token [{location}]")]
+    NotAToken { location: Location },
+
+    #[error("access token no longer exists [{location}]")]
+    NotFound { location: Location },
+
+    #[error("failed to load the access token [{location}]")]
+    Query {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl_error_response!(TokenIdentityError {
+    TokenIdentityError::NotAToken { .. } => (StatusCode::UNAUTHORIZED, "an access token is required".to_string()),
+    TokenIdentityError::NotFound { .. } => (StatusCode::UNAUTHORIZED, "invalid access token".to_string()),
+    TokenIdentityError::Query { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()),
+});
+
+/// Reports the principal behind an access token: its org, name, expiry, and
+/// (immutable) roles. The token equivalent of `/users/me`, reachable by tokens.
+pub(crate) async fn token_identity(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+) -> Result<Json<TokenIdentity>, TokenIdentityError> {
+    use TokenIdentityError as E;
+    use TokenIdentityErrorCtx as Ctx;
+
+    let Some(token_id) = auth.token_id() else {
+        return Err(E::NotAToken {
+            location: std::panic::Location::caller(),
+        });
+    };
+    let Some(organization_id) = auth.token_organization_id() else {
+        return Err(E::NotAToken {
+            location: std::panic::Location::caller(),
+        });
+    };
+
+    let row: Option<(String, Option<DateTime<Utc>>)> = sqlx::query_as(
+        "SELECT name, expires_at FROM organization_access_tokens
+         WHERE id = $1 AND organization_id = $2 AND revoked_at IS NULL",
+    )
+    .bind(token_id)
+    .bind(organization_id)
+    .fetch_optional(&state.db)
+    .await
+    .with_context(Ctx::query())?;
+
+    let Some((name, expires_at)) = row else {
+        return Err(E::NotFound {
+            location: std::panic::Location::caller(),
+        });
+    };
+
+    let roles = sqlx::query_as::<_, AccessTokenRoleRow>(
+        "SELECT tr.token_id, r.id AS role_id, r.name AS role_name
+         FROM organization_access_token_roles tr
+         JOIN rbac_roles r ON r.id = tr.role_id
+         WHERE tr.token_id = $1 AND tr.organization_id = $2
+         ORDER BY r.name, r.id",
+    )
+    .bind(token_id)
+    .bind(organization_id)
+    .fetch_all(&state.db)
+    .await
+    .with_context(Ctx::query())?;
+
+    Ok(Json(TokenIdentity {
+        token_id,
+        organization_id,
+        name,
+        expires_at,
+        roles: roles
+            .into_iter()
+            .map(|row| AccessTokenRoleRef {
+                id: row.role_id,
+                name: row.role_name,
+            })
+            .collect(),
+    }))
 }

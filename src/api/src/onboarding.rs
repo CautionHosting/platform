@@ -11,7 +11,7 @@
 
 use axum::{
     Json,
-    extract::{Extension, Query, State},
+    extract::{Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -23,8 +23,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
+use crate::AppState;
 use crate::validation::validate_email;
-use crate::{AppState, AuthContext};
 
 pub(crate) const EMAIL_VERIFICATION_RESEND_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 
@@ -134,10 +134,10 @@ impl IntoResponse for GetUserStatusError {
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn get_user_status(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
 ) -> Result<Json<UserStatus>, GetUserStatusError> {
     use GetUserStatusErrorCtx as Ctx;
 
@@ -153,7 +153,7 @@ pub async fn get_user_status(
          FROM users u
          WHERE u.id = $1",
     )
-    .bind(auth.user_id)
+    .bind(auth.user_id())
     .fetch_optional(&state.db)
     .await
     .inspect_err(|e| tracing::error!("Failed to get user status: {:?}", e))
@@ -161,7 +161,7 @@ pub async fn get_user_status(
 
     let (email_verified_at, payment_method_added_at, alpha_code_id, has_organization) = result
         .ok_or_else(|| GetUserStatusError::NotFound {
-            user_id: auth.user_id,
+            user_id: auth.user_id(),
             location: std::panic::Location::caller(),
         })?;
 
@@ -174,7 +174,7 @@ pub async fn get_user_status(
 
     // Legal status is best-effort in the status endpoint — if the legal_documents
     // table doesn't exist yet (migration not run), return None rather than failing auth checks.
-    let legal = match crate::legal::get_user_legal_status(&state.db, auth.user_id).await {
+    let legal = match crate::legal::get_user_legal_status(&state.db, auth.user_id()).await {
         Ok(status) => Some(status),
         Err(e) => {
             tracing::warn!("Failed to fetch legal status: {:?}", e);
@@ -233,10 +233,10 @@ impl IntoResponse for SendVerificationEmailError {
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn send_verification_email(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Json(payload): Json<SendVerificationRequest>,
 ) -> Result<Json<SendVerificationResponse>, SendVerificationEmailError> {
     use SendVerificationEmailErrorCtx as Ctx;
@@ -264,7 +264,7 @@ pub async fn send_verification_email(
     .bind(&payload.email)
     .bind(&token)
     .bind(expires_at)
-    .bind(auth.user_id)
+    .bind(auth.user_id())
     .execute(&state.db)
     .await
     .inspect_err(|e| {
@@ -278,7 +278,7 @@ pub async fn send_verification_email(
              FROM users
              WHERE id = $1",
         )
-        .bind(auth.user_id)
+        .bind(auth.user_id())
         .fetch_optional(&state.db)
         .await
         .inspect_err(|e| {
@@ -298,10 +298,10 @@ pub async fn send_verification_email(
 
         tracing::error!(
             "Failed to update verification email token for authenticated user {}",
-            auth.user_id
+            auth.user_id()
         );
         return Err(SendVerificationEmailError::TokenNotUpdated {
-            user_id: auth.user_id,
+            user_id: auth.user_id(),
             location: std::panic::Location::caller(),
         });
     }
@@ -313,7 +313,7 @@ pub async fn send_verification_email(
     let email_request = serde_json::json!({
         "email": payload.email,
         "token": token,
-        "user_id": auth.user_id,
+        "user_id": auth.user_id(),
     });
 
     match client

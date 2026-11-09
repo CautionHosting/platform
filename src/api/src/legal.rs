@@ -11,7 +11,7 @@
 
 use axum::{
     Json,
-    extract::{Extension, State},
+    extract::State,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::{AppState, AuthContext, validation::validate_email};
+use crate::{AppState, validation::validate_email};
 
 #[derive(Debug, Clone, FromRow)]
 struct LegalDocumentIdentity {
@@ -693,7 +693,7 @@ impl IntoResponse for AcceptLegalDocumentError {
 #[tracing::instrument(skip_all, err(Debug), fields(document_type = %payload.document_type))]
 pub async fn accept_legal_document(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     headers: HeaderMap,
     Json(payload): Json<AcceptLegalRequest>,
 ) -> Result<Json<AcceptLegalResponse>, AcceptLegalDocumentError> {
@@ -727,7 +727,7 @@ pub async fn accept_legal_document(
             event_type, event_source, occurred_at, session_id
         ) VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7)",
     )
-    .bind(auth.user_id)
+    .bind(auth.user_id())
     .bind(active_document.id)
     .bind(&payload.document_type)
     .bind(&version)
@@ -741,13 +741,13 @@ pub async fn accept_legal_document(
 
     tracing::info!(
         "User {} {} {} version {}",
-        auth.user_id,
+        auth.user_id(),
         event_type,
         payload.document_type,
         version
     );
 
-    let legal = get_user_legal_status(&state.db, auth.user_id)
+    let legal = get_user_legal_status(&state.db, auth.user_id())
         .await
         .inspect_err(|e| tracing::error!("Failed to fetch updated legal status: {:?}", e))
         .with_context(Ctx::fetch_status())?;

@@ -12,8 +12,8 @@
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Extension, Path, State},
-    http::StatusCode,
+    extract::{FromRequestParts, Path, State},
+    http::{StatusCode, request::Parts},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
 };
@@ -206,8 +206,16 @@ pub(crate) struct AppState {
     pub(crate) managed_dns: Option<managed_dns::ManagedDns>,
 }
 
+/// The authenticated principal of a request: either a user or an organization
+/// access token (docs/access-tokens-bible.md D1/D5). A token carries no user id.
 #[derive(Clone)]
-pub(crate) struct AuthContext {
+pub(crate) enum AuthContext {
+    User(UserAuthContext),
+    Token(TokenAuthContext),
+}
+
+#[derive(Clone)]
+pub(crate) struct UserAuthContext {
     pub(crate) user_id: Uuid,
     /// How the gateway authenticated the caller; `None` when not reported
     /// (an older gateway, internal routes).
@@ -216,12 +224,136 @@ pub(crate) struct AuthContext {
     pub(crate) signed_request_id: Option<Uuid>,
 }
 
+/// An organization-owned principal authenticated by an access token.
+#[derive(Clone, Copy)]
+pub(crate) struct TokenAuthContext {
+    pub(crate) token_id: Uuid,
+    pub(crate) organization_id: Uuid,
+}
+
 impl AuthContext {
     pub(crate) fn session(user_id: Uuid) -> Self {
-        Self {
+        Self::User(UserAuthContext {
             user_id,
             auth_method: Some("session"),
             signed_request_id: None,
+        })
+    }
+
+    pub(crate) fn user(
+        user_id: Uuid,
+        auth_method: Option<&'static str>,
+        signed_request_id: Option<Uuid>,
+    ) -> Self {
+        Self::User(UserAuthContext {
+            user_id,
+            auth_method,
+            signed_request_id,
+        })
+    }
+
+    pub(crate) fn token(token_id: Uuid, organization_id: Uuid) -> Self {
+        Self::Token(TokenAuthContext {
+            token_id,
+            organization_id,
+        })
+    }
+
+    pub(crate) fn user_ref(&self) -> Option<&UserAuthContext> {
+        match self {
+            Self::User(user) => Some(user),
+            Self::Token(_) => None,
+        }
+    }
+
+    /// The authenticated user's id, or `None` for a token principal.
+    pub(crate) fn user_id(&self) -> Option<Uuid> {
+        self.user_ref().map(|user| user.user_id)
+    }
+
+    /// The organization carried by a token principal, or `None` for a user.
+    pub(crate) fn token_organization_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Token(token) => Some(token.organization_id),
+            Self::User(_) => None,
+        }
+    }
+
+    /// The token id, or `None` for a user principal.
+    pub(crate) fn token_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Token(token) => Some(token.token_id),
+            Self::User(_) => None,
+        }
+    }
+
+    pub(crate) fn auth_method(&self) -> Option<&'static str> {
+        match self {
+            Self::User(user) => user.auth_method,
+            Self::Token(_) => Some("token"),
+        }
+    }
+
+    pub(crate) fn signed_request_id(&self) -> Option<Uuid> {
+        self.user_ref().and_then(|user| user.signed_request_id)
+    }
+
+    /// The user id, panicking for a token principal. Only call from paths that
+    /// are guarded by [`UserPrincipal`], which rejects tokens, or that are
+    /// reached exclusively by user principals.
+    pub(crate) fn expect_user_id(&self) -> Uuid {
+        match self {
+            Self::User(user) => user.user_id,
+            Self::Token(_) => {
+                unreachable!("token principal reached a user-only code path")
+            }
+        }
+    }
+}
+
+/// Extractor for handlers that require a user account.
+///
+/// A token principal is rejected with 403, so person-scoped routes fail without
+/// any per-route allowlist (docs/access-tokens-bible.md D6). Org routes that
+/// accept tokens keep extracting [`AuthContext`] directly.
+pub(crate) struct UserPrincipal(pub(crate) AuthContext);
+
+impl UserPrincipal {
+    pub(crate) fn user_id(&self) -> Uuid {
+        self.0.expect_user_id()
+    }
+}
+
+impl std::ops::Deref for UserPrincipal {
+    type Target = AuthContext;
+
+    fn deref(&self) -> &AuthContext {
+        &self.0
+    }
+}
+
+impl<S> FromRequestParts<S> for UserPrincipal
+where
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        match parts.extensions.get::<AuthContext>() {
+            Some(AuthContext::User(_)) => {
+                let auth = parts
+                    .extensions
+                    .get::<AuthContext>()
+                    .expect("checked above")
+                    .clone();
+                Ok(UserPrincipal(auth))
+            }
+            Some(AuthContext::Token(_)) => Err((
+                StatusCode::FORBIDDEN,
+                "this route requires a user account, not an access token",
+            )
+                .into_response()),
+            None => Err((StatusCode::UNAUTHORIZED, "authentication required").into_response()),
         }
     }
 }
@@ -246,10 +378,25 @@ pub(crate) enum CheckOrgAccessError {
 #[tracing::instrument(skip_all)]
 pub(crate) async fn check_org_access(
     db: &PgPool,
-    user_id: Uuid,
+    auth: &AuthContext,
     org_id: Uuid,
 ) -> Result<types::UserRole, CheckOrgAccessError> {
     use CheckOrgAccessErrorCtx as Ctx;
+
+    // A token is a member-equivalent of exactly the organization it is bound to
+    // (D1/D6), and never an owner.
+    let user_id = match auth {
+        AuthContext::Token(token) => {
+            return if token.organization_id == org_id {
+                Ok(types::UserRole::Member)
+            } else {
+                Err(CheckOrgAccessError::Forbidden {
+                    location: std::panic::Location::caller(),
+                })
+            };
+        }
+        AuthContext::User(user) => user.user_id,
+    };
 
     let member: Option<(types::UserRole,)> = sqlx::query_as(
         "SELECT role FROM organization_members
@@ -294,9 +441,15 @@ pub(crate) enum GetUserPrimaryOrgError {
 #[tracing::instrument(skip_all)]
 pub(crate) async fn get_user_primary_org(
     db: &PgPool,
-    user_id: Uuid,
+    auth: &AuthContext,
 ) -> Result<Uuid, GetUserPrimaryOrgError> {
     use GetUserPrimaryOrgErrorCtx as Ctx;
+
+    // A token's organization is the one it is bound to (D1).
+    let user_id = match auth {
+        AuthContext::Token(token) => return Ok(token.organization_id),
+        AuthContext::User(user) => user.user_id,
+    };
 
     let org_id: Option<(Uuid,)> = sqlx::query_as(
         "SELECT organization_id FROM organization_members
@@ -920,14 +1073,14 @@ impl IntoResponse for ListCloudCredentialsError {
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 async fn list_cloud_credentials(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
 ) -> Result<Json<Vec<cloud_credentials::CloudCredential>>, ListCloudCredentialsError> {
     use ListCloudCredentialsErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::primary_org_lookup())?;
 
@@ -979,10 +1132,10 @@ impl IntoResponse for CreateCloudCredentialError {
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 async fn create_cloud_credential(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Json(req): Json<cloud_credentials::CreateCredentialRequest>,
 ) -> Result<Json<cloud_credentials::CloudCredential>, CreateCloudCredentialError> {
     use CreateCloudCredentialErrorCtx as Ctx;
@@ -994,12 +1147,12 @@ async fn create_cloud_credential(
         }
     })?;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::primary_org_lookup())?;
 
     let credential =
-        cloud_credentials::create_credential(&state.db, encryptor, org_id, auth.user_id, req)
+        cloud_credentials::create_credential(&state.db, encryptor, org_id, auth.user_id(), req)
             .await
             .with_context(Ctx::internal())?;
     Ok(Json(credential))
@@ -1052,12 +1205,12 @@ impl IntoResponse for GetCloudCredentialError {
 #[tracing::instrument(skip_all, err(Debug), fields(credential_id = %credential_id))]
 async fn get_cloud_credential(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(credential_id): Path<Uuid>,
 ) -> Result<Json<cloud_credentials::CloudCredential>, GetCloudCredentialError> {
     use GetCloudCredentialErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::primary_org_lookup())?;
 
@@ -1119,12 +1272,12 @@ impl IntoResponse for DeleteCloudCredentialError {
 #[tracing::instrument(skip_all, err(Debug), fields(credential_id = %credential_id))]
 async fn delete_cloud_credential(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(credential_id): Path<Uuid>,
 ) -> Result<StatusCode, DeleteCloudCredentialError> {
     use DeleteCloudCredentialErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::primary_org_lookup())?;
 
@@ -1189,12 +1342,12 @@ impl IntoResponse for SetDefaultCloudCredentialError {
 #[tracing::instrument(skip_all, err(Debug), fields(credential_id = %credential_id))]
 async fn set_default_cloud_credential(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(credential_id): Path<Uuid>,
 ) -> Result<StatusCode, SetDefaultCloudCredentialError> {
     use SetDefaultCloudCredentialErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::primary_org_lookup())?;
 
@@ -1387,7 +1540,7 @@ impl IntoResponse for CreateManagedOnpremResourceError {
 #[tracing::instrument(skip_all, err(Debug))]
 async fn create_managed_onprem_resource(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     body: String,
 ) -> Result<Json<serde_json::Value>, CreateManagedOnpremResourceError> {
     use CreateManagedOnpremResourceErrorCtx as Ctx;
@@ -1422,7 +1575,7 @@ async fn create_managed_onprem_resource(
         }
     })?;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::primary_org_lookup())?;
 
@@ -1544,7 +1697,7 @@ async fn create_managed_onprem_resource(
         .with_context(Ctx::delete_old_credential())?;
 
         let credential =
-            cloud_credentials::create_credential(&state.db, encryptor, org_id, auth.user_id, req)
+            cloud_credentials::create_credential(&state.db, encryptor, org_id, auth.user_id(), req)
                 .await
                 .with_context(Ctx::credential_internal())?;
 
@@ -1612,7 +1765,7 @@ async fn create_managed_onprem_resource(
         .bind(&resource_slug)
         .bind(types::ResourceState::Initialized)
         .bind(&configuration)
-        .bind(auth.user_id)
+        .bind(auth.user_id())
         .bind(lifecycle)
         .fetch_one(&state.db)
         .await
@@ -1623,7 +1776,7 @@ async fn create_managed_onprem_resource(
         req.resource_id = Some(resource_id);
 
         let credential =
-            cloud_credentials::create_credential(&state.db, encryptor, org_id, auth.user_id, req)
+            cloud_credentials::create_credential(&state.db, encryptor, org_id, auth.user_id(), req)
                 .await
                 .with_context(Ctx::credential_internal())?;
 
@@ -2146,12 +2299,12 @@ impl IntoResponse for GetBuilderConfigError {
 #[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 async fn get_builder_config(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(resource_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, GetBuilderConfigError> {
     use GetBuilderConfigErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::primary_org_lookup())?;
 
@@ -2227,7 +2380,7 @@ impl IntoResponse for SetBuilderConfigError {
 #[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 async fn set_builder_config(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(resource_id): Path<Uuid>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, SetBuilderConfigError> {
@@ -2235,7 +2388,7 @@ async fn set_builder_config(
 
     let builder_size = validated_types::builder_size_from_request(&body)?;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::primary_org_lookup())?;
 
@@ -2985,7 +3138,7 @@ impl DeployLogicError {
 #[tracing::instrument(skip_all, fields(org_id = %req.org_id, app_id = %req.app_id))]
 async fn deploy_handler(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     validated_types::Validated(req): validated_types::Validated<DeployRequest>,
 ) -> Response {
     use sentry_middleware::{REQUEST_ID, capture_error_with_breadcrumbs, drain_breadcrumbs};
@@ -3012,7 +3165,7 @@ async fn deploy_handler(
             request_id,
             deploy_logic(
                 state,
-                auth,
+                auth.0,
                 req,
                 deploy_attempt_id,
                 progress.clone(),
@@ -3883,7 +4036,7 @@ async fn deploy_logic(
 
     tracing::info!(
         "Deployment request: user_id={}, org_id={}, app_id={}",
-        auth.user_id,
+        auth.expect_user_id(),
         req.org_id,
         req.app_id
     );
@@ -3900,7 +4053,7 @@ async fn deploy_logic(
             WHERE user_id = $1 AND organization_id = $2
         )",
     )
-    .bind(auth.user_id)
+    .bind(auth.user_id())
     .bind(req.org_id)
     .fetch_optional(&state.db)
     .await
@@ -4701,7 +4854,7 @@ async fn deploy_logic(
                 &build_request,
                 &cache_key,
                 &tx,
-                auth.user_id,
+                auth.expect_user_id(),
             )
             .await;
             if matches!(
@@ -4850,7 +5003,7 @@ async fn deploy_logic(
         let reservation = fully_managed_capacity::reserve_capacity(
             &state.db,
             req.org_id,
-            auth.user_id,
+            auth.expect_user_id(),
             resource_id,
             &capacity_requirements,
             region_pin,
@@ -5067,7 +5220,7 @@ async fn deploy_logic(
                 &state,
                 &deployment_result.instance_id,
                 req.org_id,
-                Some(auth.user_id),
+                Some(auth.expect_user_id()),
                 resource_id,
                 Some(deployment_id),
                 "aws",
@@ -5256,7 +5409,7 @@ async fn deploy_logic(
         &state,
         &deployment_result.instance_id,
         req.org_id,
-        Some(auth.user_id),
+        Some(auth.expect_user_id()),
         resource_id,
         None,
         "aws",
@@ -5910,6 +6063,12 @@ async fn main() -> Result<(), MainError> {
     let organization_bootstrap_routes = Router::new()
         .route("/organizations", get(organizations::list_organizations))
         .route("/organizations", post(organizations::create_organization))
+        // Reachable by tokens: the token equivalent of /users/me, outside the
+        // RBAC-gated group so a token can always read its own identity (D6).
+        .route(
+            "/access-tokens/me",
+            get(access_tokens::handlers::token_identity),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             middleware::legal_middleware,

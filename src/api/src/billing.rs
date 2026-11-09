@@ -350,14 +350,14 @@ impl IntoResponse for GetBillingUsageError {
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn get_billing_usage(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
 ) -> Result<Json<serde_json::Value>, GetBillingUsageError> {
     use GetBillingUsageErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::org_lookup())?;
 
@@ -668,14 +668,14 @@ impl IntoResponse for GetBillingInvoicesError {
 }
 
 /// Get billing invoices
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn get_billing_invoices(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
 ) -> Result<Json<serde_json::Value>, GetBillingInvoicesError> {
     use GetBillingInvoicesErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::org_lookup())?;
 
@@ -1058,14 +1058,14 @@ impl IntoResponse for GetPaymentMethodsError {
 }
 
 /// Get all active payment methods
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn get_payment_methods(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
 ) -> Result<Json<serde_json::Value>, GetPaymentMethodsError> {
     use GetPaymentMethodsErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::org_lookup())?;
 
@@ -1197,15 +1197,15 @@ impl IntoResponse for DeletePaymentMethodError {
 }
 
 /// Delete a specific payment method by ID
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id, method_id = %method_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id(), method_id = %method_id))]
 pub async fn delete_payment_method(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(method_id): Path<Uuid>,
 ) -> Result<StatusCode, DeletePaymentMethodError> {
     use DeletePaymentMethodErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::org_lookup())?;
 
@@ -1347,15 +1347,15 @@ impl IntoResponse for SetPrimaryPaymentMethodError {
 }
 
 /// Set a payment method as primary
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id, method_id = %method_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id(), method_id = %method_id))]
 pub async fn set_primary_payment_method(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(method_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, SetPrimaryPaymentMethodError> {
     use SetPrimaryPaymentMethodErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::org_lookup())?;
 
@@ -1445,10 +1445,10 @@ impl IntoResponse for GetPaddleClientTokenError {
 }
 
 /// Get Paddle client token and customer ID for frontend Paddle.js initialization
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn get_paddle_client_token(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
 ) -> Result<Json<serde_json::Value>, GetPaddleClientTokenError> {
     use GetPaddleClientTokenErrorCtx as Ctx;
 
@@ -1459,7 +1459,7 @@ pub async fn get_paddle_client_token(
         }
     })?;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::org_lookup())?;
 
@@ -1496,7 +1496,7 @@ pub async fn get_paddle_client_token(
     let checkout_custom_data = state
         .internal_service_secret
         .as_deref()
-        .map(|secret| build_paddle_checkout_custom_data(secret, auth.user_id, org_id));
+        .map(|secret| build_paddle_checkout_custom_data(secret, auth.user_id(), org_id));
 
     Ok(Json(serde_json::json!({
         "client_token": client_token,
@@ -1900,15 +1900,15 @@ impl IntoResponse for PaddleTransactionCompletedError {
 }
 
 /// Frontend callback after Paddle checkout completion — records payment method reference locally
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn paddle_transaction_completed(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Json(req): Json<PaddleTransactionCompletedRequest>,
 ) -> Result<Json<serde_json::Value>, PaddleTransactionCompletedError> {
     use PaddleTransactionCompletedErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::org_lookup())?;
 
@@ -1936,7 +1936,7 @@ pub async fn paddle_transaction_completed(
 
     let user_email: Option<String> = if existing_paddle_customer_id.is_none() {
         sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
-            .bind(auth.user_id)
+            .bind(auth.user_id())
             .fetch_optional(&state.db)
             .await
             .with_context(Ctx::database())?
@@ -1956,7 +1956,7 @@ pub async fn paddle_transaction_completed(
                     location: std::panic::Location::caller(),
                 }
             })?;
-            match validate_paddle_checkout_binding(&txn, secret, auth.user_id, org_id) {
+            match validate_paddle_checkout_binding(&txn, secret, auth.user_id(), org_id) {
                 Ok(()) => true,
                 Err(source) => {
                     return Err(PaddleTransactionCompletedError::BindingRejected {
@@ -2316,14 +2316,14 @@ impl IntoResponse for GetCreditBalanceError {
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn get_credit_balance(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
 ) -> Result<Json<serde_json::Value>, GetCreditBalanceError> {
     use GetCreditBalanceErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::org_lookup())?;
 
@@ -2566,10 +2566,10 @@ impl IntoResponse for PurchaseCreditsError {
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn purchase_credits(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Json(req): Json<PurchaseCreditsRequest>,
 ) -> Result<Json<serde_json::Value>, PurchaseCreditsError> {
     use PurchaseCreditsErrorCtx as Ctx;
@@ -2582,7 +2582,7 @@ pub async fn purchase_credits(
     ) {
         Ok(purchase) => purchase,
         Err(source) => {
-            tracing::warn!(user_id = %auth.user_id, error = %source, "invalid credit purchase request");
+            tracing::warn!(user_id = ?auth.user_id(), error = %source, "invalid credit purchase request");
             return Err(PurchaseCreditsError::RequestInvalid {
                 source: Box::new(source),
                 location: std::panic::Location::caller(),
@@ -2590,7 +2590,7 @@ pub async fn purchase_credits(
         }
     };
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::org_lookup())?;
 
@@ -2633,7 +2633,7 @@ pub async fn purchase_credits(
             None
         };
 
-        let custom_data = build_credit_purchase_custom_data(org_id, auth.user_id, &purchase);
+        let custom_data = build_credit_purchase_custom_data(org_id, auth.user_id(), &purchase);
         let item = build_credit_purchase_transaction_item(&purchase);
         let mut body = serde_json::json!({
             "items": [item],
@@ -2690,7 +2690,7 @@ pub async fn purchase_credits(
         )
         .bind(&transaction_id)
         .bind(org_id)
-        .bind(auth.user_id)
+        .bind(auth.user_id())
         .bind(purchase.purchase_cents)
         .bind(purchase.credit_cents)
         .bind(purchase.price_id.as_deref())
@@ -2753,7 +2753,7 @@ pub async fn purchase_credits(
             .with_context(Ctx::paddle_transport())?;
 
         if let Err(source) =
-            validate_credit_purchase_transaction(&verify_data, org_id, auth.user_id, &purchase)
+            validate_credit_purchase_transaction(&verify_data, org_id, auth.user_id(), &purchase)
         {
             tracing::warn!(transaction_id = %transaction_id, error = %source, "credit purchase validation failed");
             return Err(PurchaseCreditsError::TransactionRejected {
@@ -2901,14 +2901,14 @@ pub async fn purchase_credits(
     tracing::info!(
         "Credit purchase: org={}, user={}, txn={}, +{} cents, new_balance={}",
         org_id,
-        auth.user_id,
+        auth.user_id(),
         transaction_id,
         purchase.credit_cents,
         new_balance
     );
 
     if new_balance > 0
-        && let Ok(org_id) = get_user_primary_org(&state.db, auth.user_id).await
+        && let Ok(org_id) = get_user_primary_org(&state.db, &auth).await
     {
         let suspended: Option<chrono::DateTime<chrono::Utc>> =
             sqlx::query_scalar("SELECT credit_suspended_at FROM organizations WHERE id = $1")
@@ -2983,14 +2983,14 @@ impl IntoResponse for GetCreditLedgerError {
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn get_credit_ledger(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
 ) -> Result<Json<serde_json::Value>, GetCreditLedgerError> {
     use GetCreditLedgerErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::org_lookup())?;
 
@@ -3080,16 +3080,16 @@ impl IntoResponse for RedeemCreditCodeError {
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn redeem_credit_code(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, RedeemCreditCodeError> {
     use RedeemCreditCodeError as E;
     use RedeemCreditCodeErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::org_lookup())?;
 
@@ -3132,7 +3132,7 @@ pub async fn redeem_credit_code(
     };
 
     sqlx::query("UPDATE credit_codes SET redeemed_by = $1, redeemed_at = NOW() WHERE id = $2")
-        .bind(auth.user_id)
+        .bind(auth.user_id())
         .bind(code_id)
         .execute(&mut *tx)
         .await
@@ -3156,7 +3156,7 @@ pub async fn redeem_credit_code(
 
     tracing::info!(
         "Credit code redeemed: user={}, code_id={}, +{} cents, new_balance={}",
-        auth.user_id,
+        auth.user_id(),
         code_id,
         amount_cents,
         new_balance

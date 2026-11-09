@@ -9,9 +9,9 @@ use super::{
     certificates::{DeriveError, VerifyProofError},
     generate_org_quorum_bundle, list_participants,
 };
-use crate::{AppState, AuthContext, cryptographic_bundles::QuorumBundle, get_user_primary_org};
+use crate::{AppState, cryptographic_bundles::QuorumBundle, get_user_primary_org};
 use axum::{
-    Extension, Json,
+    Json,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -60,20 +60,20 @@ impl IntoResponse for ListOrgQuorumParticipantsError {
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub(crate) async fn list_org_quorum_participants(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
 ) -> Result<Json<Vec<OrgQuorumMember>>, ListOrgQuorumParticipantsError> {
     use ListOrgQuorumParticipantsErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
-        .with_context(Ctx::primary_org_lookup(auth.user_id))?;
+        .with_context(Ctx::primary_org_lookup(auth.user_id()))?;
 
     let participants = list_participants(&state.db, org_id)
         .await
-        .with_context(Ctx::list_participants(org_id, auth.user_id))?;
+        .with_context(Ctx::list_participants(org_id, auth.user_id()))?;
     Ok(Json(participants))
 }
 
@@ -255,20 +255,20 @@ fn send_client_response(error: Option<&SendError>) -> (StatusCode, &'static str)
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub(crate) async fn create_org_user_quorum_bundle(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Json(req): Json<GenerateOrgQuorumBundleRequest>,
 ) -> Result<Json<QuorumBundle>, CreateOrgUserQuorumBundleError> {
     use CreateOrgUserQuorumBundleErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
-        .with_context(Ctx::primary_org_lookup(auth.user_id))?;
+        .with_context(Ctx::primary_org_lookup(auth.user_id()))?;
 
-    let bundle = generate_org_quorum_bundle(&state.db, org_id, auth.user_id, req)
+    let bundle = generate_org_quorum_bundle(&state.db, org_id, auth.user_id(), req)
         .await
-        .with_context(Ctx::generate(org_id, auth.user_id))?;
+        .with_context(Ctx::generate(org_id, auth.user_id()))?;
     Ok(Json(bundle))
 }

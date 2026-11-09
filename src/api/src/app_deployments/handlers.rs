@@ -10,9 +10,9 @@ use super::LIFECYCLE_DEPLOYMENTS;
 use super::account;
 use super::lifecycle::{Role, role_for};
 use super::summary;
-use crate::{AppState, AuthContext};
+use crate::AppState;
 use axum::{
-    Extension, Json,
+    Json,
     extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -374,13 +374,13 @@ pub(crate) struct ListQuery {
 
 pub(crate) async fn list_handler(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(app_id): Path<Uuid>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<DeploymentView>>, ListDeploymentsError> {
     load_views(
         &state,
-        auth.user_id,
+        auth.user_id(),
         Some(app_id),
         None,
         query.retained == Some(1),
@@ -428,14 +428,14 @@ impl IntoResponse for GetDeploymentInAppError {
 /// 404 unless the deployment belongs to that app.
 pub(crate) async fn get_in_app_handler(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path((app_id, deployment_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<DeploymentView>, GetDeploymentInAppError> {
     use GetDeploymentInAppErrorCtx as Ctx;
 
     load_views(
         &state,
-        auth.user_id,
+        auth.user_id(),
         Some(app_id),
         Some(deployment_id),
         false,
@@ -487,12 +487,12 @@ impl IntoResponse for GetDeploymentError {
 /// For callers that know only the deployment ID: the app is derived from it.
 pub(crate) async fn get_handler(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(deployment_id): Path<Uuid>,
 ) -> Result<Json<DeploymentView>, GetDeploymentError> {
     use GetDeploymentErrorCtx as Ctx;
 
-    load_views(&state, auth.user_id, None, Some(deployment_id), false)
+    load_views(&state, auth.user_id(), None, Some(deployment_id), false)
         .await
         .with_context(Ctx::load(deployment_id))?
         .pop()

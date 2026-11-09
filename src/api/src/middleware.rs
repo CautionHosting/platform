@@ -19,7 +19,7 @@ use crate::{AppState, AuthContext};
 
 /// Maps a gateway-reported auth method to a known static value.
 pub(crate) fn parse_auth_method(value: &str) -> Option<&'static str> {
-    ["passkey", "session", "ssh_signed"]
+    ["passkey", "session", "ssh_signed", "token"]
         .into_iter()
         .find(|method| *method == value)
 }
@@ -122,6 +122,27 @@ pub async fn auth_middleware(
             });
         }
 
+        // An organization access token: no user id, a token id and org id
+        // instead (docs/access-tokens-bible.md D5).
+        let token_id = headers
+            .get("x-caution-token-id")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|value| Uuid::parse_str(value).ok());
+        let token_organization_id = headers
+            .get("x-caution-organization-id")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|value| Uuid::parse_str(value).ok());
+        if let (Some(token_id), Some(organization_id)) = (token_id, token_organization_id) {
+            tracing::debug!(
+                "Auth middleware: internal service auth for access token {}",
+                token_id
+            );
+            request
+                .extensions_mut()
+                .insert(AuthContext::token(token_id, organization_id));
+            return Ok(next.run(request).await);
+        }
+
         let Some(user_id_str) = headers
             .get("x-authenticated-user-id")
             .and_then(|h| h.to_str().ok())
@@ -154,11 +175,9 @@ pub async fn auth_middleware(
             .get("x-caution-signed-request-id")
             .and_then(|h| h.to_str().ok())
             .and_then(|value| Uuid::parse_str(value).ok());
-        request.extensions_mut().insert(AuthContext {
-            user_id,
-            auth_method,
-            signed_request_id,
-        });
+        request
+            .extensions_mut()
+            .insert(AuthContext::user(user_id, auth_method, signed_request_id));
         return Ok(next.run(request).await);
     }
 
@@ -331,7 +350,7 @@ impl IntoResponse for OnboardingMiddlewareError {
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn onboarding_middleware(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -340,7 +359,13 @@ pub async fn onboarding_middleware(
 ) -> Result<Response, OnboardingMiddlewareError> {
     use OnboardingMiddlewareErrorCtx as Ctx;
 
-    let org = ensure_user_has_org(&state.db, auth.user_id).await;
+    // A token principal is org-owned and carries its own organization; it is
+    // not subject to user onboarding.
+    let Some(user_id) = auth.user_id() else {
+        return Ok(next.run(request).await);
+    };
+
+    let org = ensure_user_has_org(&state.db, user_id).await;
     if let Err(ref error) = org
         && matches!(error, EnsureUserHasOrgError::NotOnboarded { .. })
     {
@@ -401,7 +426,7 @@ struct LegalAcceptanceRequiredBody {
     message: &'static str,
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn legal_middleware(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -410,13 +435,18 @@ pub async fn legal_middleware(
 ) -> Result<Response, LegalMiddlewareError> {
     use LegalMiddlewareErrorCtx as Ctx;
 
+    // Tokens are machine principals and do not accept legal documents.
+    let Some(user_id) = auth.user_id() else {
+        return Ok(next.run(request).await);
+    };
+
     let blocking_document =
-        crate::legal::get_blocking_document_requiring_acceptance(&state.db, auth.user_id)
+        crate::legal::get_blocking_document_requiring_acceptance(&state.db, user_id)
             .await
             .inspect_err(|e| {
                 tracing::error!(
                     "Failed to evaluate legal enforcement for user {}: {:?}",
-                    auth.user_id,
+                    user_id,
                     e
                 );
             })
@@ -504,11 +534,9 @@ pub async fn internal_auth_middleware(
         .and_then(|h| h.to_str().ok())
         && let Ok(user_id) = Uuid::parse_str(user_id_str)
     {
-        request.extensions_mut().insert(AuthContext {
-            user_id,
-            auth_method: None,
-            signed_request_id: None,
-        });
+        request
+            .extensions_mut()
+            .insert(AuthContext::user(user_id, None, None));
     }
 
     Ok(next.run(request).await)

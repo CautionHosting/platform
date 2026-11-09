@@ -5,9 +5,9 @@
 //! operations (`deployment_events`: the request and its latest outcome),
 //! newest first, tenant-scoped, keyset-paged on (time, id).
 
-use crate::{AppState, AuthContext};
+use crate::AppState;
 use axum::{
-    Extension, Json,
+    Json,
     extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -189,7 +189,7 @@ pub(crate) async fn history_page(
 
 pub(crate) async fn history_handler(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(app_id): Path<Uuid>,
     Query(query): Query<HistoryQuery>,
 ) -> Result<Response, HistoryError> {
@@ -203,7 +203,7 @@ pub(crate) async fn history_handler(
     Ok(
         match history_page(
             &state.db,
-            auth.user_id,
+            auth.user_id(),
             app_id,
             cursor,
             history_limit(query.limit),

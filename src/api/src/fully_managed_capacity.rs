@@ -4,7 +4,7 @@
 use axum::{
     Json,
     body::Body,
-    extract::{Extension, Path, State},
+    extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -15,7 +15,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{AppState, AuthContext, deployment, ec2, validation};
+use crate::{AppState, deployment, ec2, validation};
 
 const CAPACITY_LOCK_ID: i64 = 7_650_001;
 const STANDARD_ON_DEMAND_VCPU_QUOTA_CODE: &str = "L-1216C47A";
@@ -621,13 +621,13 @@ impl IntoResponse for JoinWaitlistError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub(crate) async fn join_waitlist(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Path(org_id): Path<Uuid>,
     Json(payload): Json<WaitlistRequest>,
 ) -> Result<Json<WaitlistResponse>, JoinWaitlistError> {
     use JoinWaitlistErrorCtx as Ctx;
 
-    crate::check_org_access(&state.db, auth.user_id, org_id)
+    crate::check_org_access(&state.db, &auth, org_id)
         .await
         .with_context(Ctx::organization_access())?;
 
@@ -660,7 +660,7 @@ pub(crate) async fn join_waitlist(
          RETURNING TRUE",
     )
     .bind(org_id)
-    .bind(auth.user_id)
+    .bind(auth.user_id())
     .bind(&email)
     .bind(payload.requested_enclave_vcpus.map(|v| v as i32))
     .bind(required_host_vcpus)
@@ -672,7 +672,7 @@ pub(crate) async fn join_waitlist(
     if joined {
         send_capacity_waitlist_alert(
             org_id,
-            auth.user_id,
+            auth.user_id(),
             email.clone(),
             payload.requested_enclave_vcpus,
             required_host_vcpus,

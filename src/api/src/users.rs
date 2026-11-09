@@ -11,7 +11,7 @@
 
 use axum::{
     Json,
-    extract::{Extension, State},
+    extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -22,9 +22,9 @@ use sqlx::FromRow;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::AppState;
 use crate::validated_types;
 use crate::validated_types::UpdateUserRequest;
-use crate::{AppState, AuthContext};
 
 #[derive(Debug, Serialize, Deserialize, FromRow)]
 pub struct User {
@@ -100,10 +100,10 @@ impl IntoResponse for GetCurrentUserError {
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn get_current_user(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
 ) -> Result<Json<CurrentUserResponse>, GetCurrentUserError> {
     use GetCurrentUserErrorCtx as Ctx;
 
@@ -122,10 +122,10 @@ pub async fn get_current_user(
          LEFT JOIN organization_members om ON om.user_id = u.id
          WHERE u.id = $1",
     )
-    .bind(auth.user_id)
+    .bind(auth.user_id())
     .fetch_one(&state.db)
     .await
-    .with_context(Ctx::not_found(auth.user_id))?;
+    .with_context(Ctx::not_found(auth.user_id()))?;
 
     Ok(Json(CurrentUserResponse {
         user: User {
@@ -195,10 +195,10 @@ impl IntoResponse for UpdateCurrentUserError {
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn update_current_user(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     validated_types::Validated(payload): validated_types::Validated<UpdateUserRequest>,
 ) -> Result<Json<UpdateUserResponse>, UpdateCurrentUserError> {
     use UpdateCurrentUserErrorCtx as Ctx;
@@ -225,7 +225,7 @@ pub async fn update_current_user(
              FROM users
              WHERE id = $1",
         )
-        .bind(auth.user_id)
+        .bind(auth.user_id())
         .fetch_optional(&state.db)
         .await
         .with_context(Ctx::throttle_query())?
@@ -263,7 +263,7 @@ pub async fn update_current_user(
                            updated_at",
             )
             .bind(username)
-            .bind(auth.user_id)
+            .bind(auth.user_id())
             .fetch_one(&state.db)
             .await
         }
@@ -287,7 +287,7 @@ pub async fn update_current_user(
                        updated_at",
             )
             .bind(username)
-            .bind(auth.user_id)
+            .bind(auth.user_id())
             .fetch_one(&state.db)
             .await
         }
@@ -316,7 +316,7 @@ pub async fn update_current_user(
             .bind(email)
             .bind(&token)
             .bind(expires_at)
-            .bind(auth.user_id)
+            .bind(auth.user_id())
             .fetch_one(&state.db)
             .await;
             verification_token = Some(token);
@@ -336,7 +336,7 @@ pub async fn update_current_user(
         let email_request = serde_json::json!({
             "email": email,
             "token": token,
-            "user_id": auth.user_id,
+            "user_id": auth.user_id(),
         });
 
         match client
@@ -410,15 +410,15 @@ impl IntoResponse for DeleteCurrentUserError {
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn delete_current_user(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
 ) -> Result<StatusCode, DeleteCurrentUserError> {
     use DeleteCurrentUserErrorCtx as Ctx;
 
     sqlx::query("UPDATE users SET is_active = false WHERE id = $1")
-        .bind(auth.user_id)
+        .bind(auth.user_id())
         .execute(&state.db)
         .await
         .with_context(Ctx::query())?;

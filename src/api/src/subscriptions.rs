@@ -39,12 +39,12 @@ pub(crate) enum RequireBillingManagerError {
 #[tracing::instrument(skip_all)]
 async fn require_billing_manager(
     state: &AppState,
-    user_id: Uuid,
+    auth: &AuthContext,
     org_id: Uuid,
 ) -> Result<(), RequireBillingManagerError> {
     use RequireBillingManagerErrorCtx as Ctx;
 
-    let role = check_org_access(&state.db, user_id, org_id)
+    let role = check_org_access(&state.db, auth, org_id)
         .await
         .with_context(Ctx::access_denied())?;
     if !can_manage_org(&role) {
@@ -310,14 +310,14 @@ impl IntoResponse for GetSubscriptionError {
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn get_subscription(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
 ) -> Result<Json<serde_json::Value>, GetSubscriptionError> {
     use GetSubscriptionErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::primary_org_query())?;
     let row = sqlx::query(
@@ -488,10 +488,10 @@ impl IntoResponse for CheckoutSubscriptionError {
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn checkout_subscription(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Json(req): Json<SubscribeRequest>,
 ) -> Result<Json<serde_json::Value>, CheckoutSubscriptionError> {
     perform_checkout(&state, &auth, &req).await
@@ -538,11 +538,11 @@ async fn perform_checkout(
         }
     })?;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::internal())?;
 
-    require_billing_manager(state, auth.user_id, org_id)
+    require_billing_manager(state, &auth, org_id)
         .await
         .with_context(Ctx::internal())?;
 
@@ -610,7 +610,7 @@ async fn perform_checkout(
              VALUES ($1, $2, 'subscribe', $3, $4) RETURNING id",
         )
         .bind(org_id)
-        .bind(auth.user_id)
+        .bind(auth.user_id())
         .bind(&req.tier_id)
         .bind(tier.enclaves)
         .fetch_one(&mut *tx)
@@ -697,10 +697,10 @@ async fn perform_checkout(
     })))
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn subscribe(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Json(req): Json<SubscribeRequest>,
 ) -> Result<Json<serde_json::Value>, CheckoutSubscriptionError> {
     use CheckoutSubscriptionErrorCtx as Ctx;
@@ -717,7 +717,7 @@ pub async fn subscribe(
             location: std::panic::Location::caller(),
         })?;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::internal())?;
 
@@ -766,7 +766,7 @@ pub async fn subscribe(
          VALUES ($1, $2, $3, 'monthly', $4, $5, $6, 0, 0, 0, $7, TIMESTAMPTZ '9999-12-31 23:59:59+00')
          RETURNING id",
     )
-    .bind(auth.user_id)
+    .bind(auth.user_id())
     .bind(org_id)
     .bind(&req.tier_id)
     .bind(LEGACY_MAX_VCPUS_PLACEHOLDER)
@@ -897,7 +897,7 @@ async fn change_paddle_subscription(
 ) -> Result<Json<serde_json::Value>, ChangeSubscriptionTierError> {
     use ChangeSubscriptionTierErrorCtx as Ctx;
 
-    require_billing_manager(state, auth.user_id, organization_id)
+    require_billing_manager(state, &auth, organization_id)
         .await
         .with_context(Ctx::internal())?;
     let new_tier = state
@@ -954,7 +954,7 @@ async fn change_paddle_subscription(
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id",
     )
     .bind(organization_id)
-    .bind(auth.user_id)
+    .bind(auth.user_id())
     .bind(operation)
     .bind(subscription_id)
     .bind(paddle_subscription_id)
@@ -1040,10 +1040,10 @@ async fn change_paddle_subscription(
     })))
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn change_subscription_tier(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
     Json(req): Json<ChangeTierRequest>,
 ) -> Result<Json<serde_json::Value>, ChangeSubscriptionTierError> {
     use ChangeSubscriptionTierErrorCtx as Ctx;
@@ -1056,11 +1056,11 @@ pub async fn change_subscription_tier(
             location: std::panic::Location::caller(),
         })?;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::internal())?;
 
-    require_billing_manager(&state, auth.user_id, org_id)
+    require_billing_manager(&state, &auth, org_id)
         .await
         .with_context(Ctx::internal())?;
     let sub: Option<(Uuid, String, String, Option<String>, i32)> = sqlx::query_as(
@@ -1284,18 +1284,18 @@ impl IntoResponse for CancelSubscriptionError {
     }
 }
 
-#[tracing::instrument(skip_all, err(Debug), fields(user_id = %auth.user_id))]
+#[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn cancel_subscription(
     State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    auth: crate::UserPrincipal,
 ) -> Result<Json<serde_json::Value>, CancelSubscriptionError> {
     use CancelSubscriptionErrorCtx as Ctx;
 
-    let org_id = get_user_primary_org(&state.db, auth.user_id)
+    let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .with_context(Ctx::internal())?;
 
-    require_billing_manager(&state, auth.user_id, org_id)
+    require_billing_manager(&state, &auth, org_id)
         .await
         .with_context(Ctx::internal())?;
     let sub: Option<(Uuid, String, Option<String>, bool)> = sqlx::query_as(
@@ -1348,7 +1348,7 @@ pub async fn cancel_subscription(
              VALUES ($1, $2, 'cancel', $3, $4) RETURNING id",
         )
         .bind(org_id)
-        .bind(auth.user_id)
+        .bind(auth.user_id())
         .bind(sub_id)
         .bind(&paddle_subscription_id)
         .fetch_one(&state.db)
