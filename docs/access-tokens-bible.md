@@ -109,11 +109,13 @@ Defaults we will assume unless a decision below changes them.
    attributable in request history; the plaintext is shown exactly once.
 9. **Deny by default.** A token with no roles can do nothing beyond a minimal
    self endpoint. Tokens never get owner god-mode implicitly.
+10. **Roles fixed at mint.** A token's RBAC roles are chosen when it is created
+    and cannot be changed afterward; changing authority means mint + revoke.
 
 ## Significant decisions
 
-Each needs a call before implementation. D1 is settled; the rest carry a
-recommendation and remain open.
+Each needs a call before implementation. D1 and D2 are settled; D2a/D2b and the
+rest carry a recommendation and remain open.
 
 ### D1. Token principal: user-bound vs org-owned - DECIDED (org-owned)
 
@@ -137,29 +139,45 @@ Consequences: the token is bound to exactly one organization; the creator is
 attribution only, not the authority (see D10, D11); the API must accept a
 non-user principal (see D5); no owner bypass (see D12).
 
-### D2. Authorization source for a token
+### D2. Authorization source for a token - DECIDED (RBAC roles, immutable)
 
-How a token's permissions are expressed.
+How a token's permissions are expressed. Decided 2026-11-09: **reuse RBAC roles,
+chosen at creation, immutable thereafter.** The token carries zero or more
+`rbac_roles` of its own organization; the same matcher that serves users decides
+its requests.
 
-* **A. Assign RBAC roles to the token (recommended).** Reuse `rbac_roles` /
-  `rbac_role_rules`. A token carries zero or more roles; the *same* matcher
-  decides. One permission model, one editor.
-* **B. Token-inline rules.** Rules attached directly to the token, no roles.
-  More flexible, second permission surface to validate and render.
-* **C. Coarse fixed scopes.** `read` / `write` / `deploy` etc. Simple, but a
-  third model divorced from RBAC and prone to scope creep.
+* **A. Assign RBAC roles to the token. CHOSEN.** Reuse `rbac_roles` /
+  `rbac_role_rules`. One permission model, one editor.
+* **B. Token-inline rules. REJECTED.** Second permission surface to validate and
+  render.
+* **C. Coarse fixed scopes. REJECTED.** A third model divorced from RBAC and
+  prone to scope creep.
 
-**Recommendation: A.** Because `rbac_member_roles` FK-targets members, this
-requires either a generalized assignment table
-(`rbac_principal_roles (organization_id, principal_kind, principal_id, role_id)`)
-or token-specific rows. That schema move is the main cost and a decision in its
-own right.
+Because `rbac_member_roles` FK-targets `organization_members`, this needs a
+separate assignment table for tokens (for example
+`organization_access_token_roles (organization_id, token_id, role_id)`), not a
+row in `rbac_member_roles`.
 
-**Escalation bound (join with D8).** If a token's roles must be a subset of the
-minting user's effective roles, a low-privilege member cannot mint a token more
-powerful than themselves. This is the single most important safety rule; the
-alternative (any creator may grant any role) turns token creation into
-privilege escalation.
+**Immutability.** The role set is fixed when the token is minted. There is no
+"edit token roles" endpoint; changing a token's authority means minting a new
+token and revoking the old one (the rotation flow in D7). Enforcement: no
+`UPDATE` path on the assignment rows; the only writes are the inserts performed
+by the mint transaction, and cascade deletes from token/role removal.
+
+**Open sub-decision (D2a): what "immutable" freezes.** Whether immutability
+covers only the token's *role list* (the roles stay live and mutable, so editing
+or deleting a held role changes the token's effective permissions), or also
+*snapshots the rules* onto the token at mint time (the token keeps the exact
+rules it was granted even if the role is later edited). Recommendation: freeze
+the role list only (simpler, keeps one source of truth per rule), and document
+that editing a role changes every principal holding it, tokens included. If
+exact reproducibility is required instead, a snapshot is the alternative.
+
+**Escalation bound (D2b, join with D8).** If a token's roles must be a subset of
+the minting user's effective roles, a low-privilege member cannot mint a token
+more powerful than themselves. This is the single most important safety rule;
+the alternative (any creator may grant any role) turns token creation into
+privilege escalation. Still open.
 
 ### D3. Where tokens are validated
 
@@ -282,7 +300,7 @@ RBAC editor.
 
 ## Data model sketch (not final)
 
-Illustrative only; blocked on D2.
+Illustrative only; principal plumbing (D5) still open.
 
 ```sql
 CREATE TABLE organization_access_tokens (
@@ -298,15 +316,31 @@ CREATE TABLE organization_access_tokens (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- D2: roles chosen at mint, immutable. Separate from rbac_member_roles, which
+-- FK-targets organization_members. Composite FKs keep role and token in the
+-- same organization. No UPDATE path: rows are inserted by the mint transaction
+-- and removed only by cascade.
+CREATE TABLE organization_access_token_roles (
+    organization_id UUID NOT NULL,
+    token_id UUID NOT NULL,
+    role_id UUID NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (organization_id, token_id, role_id),
+    FOREIGN KEY (organization_id, token_id)
+        REFERENCES organization_access_tokens (organization_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (organization_id, role_id)
+        REFERENCES rbac_roles (organization_id, id) ON DELETE CASCADE
+);
 ```
 
-Role assignment and gateway/API principal plumbing are intentionally omitted
-until D2/D5 are settled.
+This needs `organization_access_tokens` to carry a `UNIQUE (organization_id, id)`
+(like `rbac_roles`) as the composite FK target.
 
 ## Open questions / blockers
 
-* D1 is settled (org-owned principal). D2 and D5 are the next keystones; D8 and
-  D12 follow from them.
+* D1 and D2 are settled (org-owned principal; immutable RBAC roles chosen at
+  mint). D5 is the next keystone; D2a (live roles vs snapshot) and D8/D12 follow.
 * Does any existing CLI flow assume user auth in a way that blocks token use
   (e.g. `/users/me`, quorum approval, passkey-signed deploys)? Not yet surveyed.
 * Whether the RBAC editor UI is the right place to manage token roles, or
@@ -318,6 +352,12 @@ until D2/D5 are settled.
 
 Record decisions here as they are made, newest first.
 
+* **2026-11-09** - A token's **RBAC roles are chosen at creation and are
+  immutable** (D2). Authority is the same `rbac_roles` model as users, via a
+  separate token-role assignment table; changing a token means mint + revoke,
+  not edit. Open sub-decisions: D2a (do held roles stay live or is the rule set
+  snapshotted) and D2b (must a token's roles be a subset of the creator's).
+
 * **2026-11-09** - Tokens are **org-scoped, not user-scoped** (D1). A token
   authenticates as a service principal of its organization; the creator is
   attribution only. Rejects user-bound PATs and any implicit owner power.
@@ -326,7 +366,9 @@ Record decisions here as they are made, newest first.
 
 Newest first.
 
-* **2026-11-09** - Created this document: auth/RBAC current-state inventory,
-  starting parameters, and the open decisions above. No implementation.
+* **2026-11-09** - Decided D2: token RBAC roles chosen at creation, immutable.
+  Added the token-role assignment table to the data-model sketch (D2a/D2b open).
 * **2026-11-09** - Decided D1: org-owned service principal (org-scoped, not
   user-scoped). Dependent sections updated.
+* **2026-11-09** - Created this document: auth/RBAC current-state inventory,
+  starting parameters, and the open decisions above. No implementation.
