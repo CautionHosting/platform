@@ -579,10 +579,23 @@ Newest first.
   token's org/name/expiry/roles and is reachable by tokens. `api` and `gateway`
   compile.
 
-  Interim limitation: most org routes still extract `UserPrincipal`, so a token
-  currently reaches only `/access-tokens/me`; enabling tokens on specific org
-  routes (resources, quorum, switch, credentials, deploy) is the next step, per
-  the D6 survey. The earlier stashed WIP was popped and is no longer needed.
+  Still token-blocked: most org routes extract `UserPrincipal`, which rejects a
+  token with 403. Enabling the rest (quorum, credentials, deploy, app
+  deployments) is ongoing, per the D6 survey. The earlier stashed WIP was popped
+  and is no longer needed.
+
+  Token-enabled so far: `GET /access-tokens/me`, `GET /organizations/{id}`,
+  `GET /organizations/{id}/settings`, `GET /organizations/{id}/members`,
+  `GET /resources`, `POST /resources`, `GET /resources/{id}`,
+  `PATCH /resources/{id}`, `DELETE /resources/{id}`. These authorize by the
+  caller's organization (one org per user makes this equivalent to the old
+  membership joins) so a token reaches its own org's data only. Actor columns
+  (`compute_resources.created_by`) are NULL for tokens pending the principals
+  table.
+
+  Next: `app_deployments` reads/writes (`query_rows_with` still joins on
+  `om.user_id`; converting needs the test call sites to pass an org), then
+  quorum/credentials/builder/deploy, then D13.
 
 * **2026-11-09** - Decided D13: tokens authorize the passkey-required routes
   (`apps switch`, quorum bundles). Updated the CLI survey and server-work list
