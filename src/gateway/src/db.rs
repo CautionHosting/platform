@@ -1098,6 +1098,55 @@ pub async fn validate_auth_session(
     Ok(Some((session.credential_id, session.user_id)))
 }
 
+/// SHA-256 (lowercase hex) of the presented token string. Stored as
+/// `organization_access_tokens.token_hash`; the plaintext is never persisted.
+pub fn hash_access_token(plaintext: &str) -> String {
+    hex::encode(Sha256::digest(plaintext.as_bytes()))
+}
+
+/// Resolves a presented access token to `(token_id, organization_id)`.
+///
+/// Returns `None` when the hash is unknown, the token is revoked, or it has
+/// expired. `last_used_at` is updated best-effort, mirroring session handling.
+#[tracing::instrument(skip_all)]
+pub async fn validate_access_token(
+    pool: &PgPool,
+    token_hash: &str,
+) -> Result<Option<(Uuid, Uuid)>, DbError> {
+    let row: Option<(Uuid, Uuid, Option<OffsetDateTime>)> = sqlx::query_as(
+        "SELECT id, organization_id, expires_at
+         FROM organization_access_tokens
+         WHERE token_hash = $1 AND revoked_at IS NULL",
+    )
+    .bind(token_hash)
+    .fetch_optional(pool)
+    .await
+    .with_context(DbErrorCtx::new(
+        DbErrorKind::QueryFailed,
+        "validate_access_token",
+    ))?;
+
+    let Some((token_id, organization_id, expires_at)) = row else {
+        return Ok(None);
+    };
+
+    if expires_at.is_some_and(|expires_at| OffsetDateTime::now_utc() > expires_at) {
+        return Ok(None);
+    }
+
+    if let Err(e) = sqlx::query(
+        "UPDATE organization_access_tokens SET last_used_at = NOW() WHERE id = $1",
+    )
+    .bind(token_id)
+    .execute(pool)
+    .await
+    {
+        tracing::warn!("Failed to update last_used_at for access token: {}", e);
+    }
+
+    Ok(Some((token_id, organization_id)))
+}
+
 pub async fn delete_auth_session(pool: &PgPool, session_id: &str) -> Result<(), DbError> {
     sqlx::query("DELETE FROM auth_sessions WHERE session_id = $1")
         .bind(session_id)

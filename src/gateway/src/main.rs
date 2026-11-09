@@ -585,6 +585,10 @@ async fn main() -> Result<(), MainError> {
             state.clone(),
             auth_middleware::fido2_sign_middleware,
         ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware::access_token_auth_middleware,
+        ))
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024))
         .with_state(state.clone())
         .layer(cors.clone());
@@ -613,6 +617,10 @@ async fn main() -> Result<(), MainError> {
         .layer(middleware::from_fn_with_state(
             state.clone(),
             auth_middleware::fido2_sign_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware::access_token_auth_middleware,
         ))
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024))
         .with_state(state.clone())

@@ -10,7 +10,7 @@ use axum::{
 use std::net::SocketAddr;
 
 use crate::request_id::RequestId;
-use crate::types::{AppState, AuthMethod, AuthenticatedUserId, VerifiedSignedRequestId};
+use crate::types::{AppState, AuthMethod, AuthenticatedAccessToken, AuthenticatedUserId, VerifiedSignedRequestId};
 
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB
 
@@ -209,6 +209,23 @@ pub async fn metering_proxy_handler(
 /// Identity headers for the API: read from middleware extensions only, never
 /// from the caller's request, and sent only with the internal secret.
 fn trusted_identity_headers(extensions: &axum::http::Extensions) -> Vec<(&'static str, String)> {
+    // A token principal carries no user id and wins over any user identity
+    // (D5/D9/D12). The token id and its organization are forwarded instead.
+    if let Some(AuthenticatedAccessToken {
+        token_id,
+        organization_id,
+    }) = extensions.get::<AuthenticatedAccessToken>()
+    {
+        return vec![
+            ("X-Caution-Token-ID", token_id.to_string()),
+            ("X-Caution-Organization-ID", organization_id.to_string()),
+            (
+                "X-Caution-Auth-Method",
+                AuthMethod::Token.as_str().to_string(),
+            ),
+        ];
+    }
+
     let Some(AuthenticatedUserId(user_id)) = extensions.get::<AuthenticatedUserId>() else {
         return Vec::new();
     };

@@ -18,7 +18,7 @@ use uuid::Uuid;
 use webauthn_rs::prelude::*;
 
 use crate::db;
-use crate::types::{AppState, AuthMethod, AuthenticatedUserId, VerifiedSignedRequestId};
+use crate::types::{AppState, AuthMethod, AuthenticatedAccessToken, AuthenticatedUserId, VerifiedSignedRequestId};
 
 const SSH_SIGNING_NAMESPACE: &str = "caution-api";
 const SSH_SIGNATURE_WINDOW_SECS: i64 = 300;
@@ -558,6 +558,7 @@ pub async fn fido2_auth_middleware(
     // strips them from incoming requests before setting them after verification.
     if req.headers().get("X-Fido2-Signed").is_some()
         || req.headers().get(SSH_AUTHENTICATED_HEADER).is_some()
+        || req.extensions().get::<AuthenticatedAccessToken>().is_some()
     {
         return Ok(next.run(req).await);
     }
@@ -1263,6 +1264,103 @@ impl IntoResponse for Fido2SignError {
     }
 }
 
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum AccessTokenAuthError {
+    #[error("invalid or expired access token [{location}]")]
+    Invalid {
+        #[location]
+        location: &'static Location<'static>,
+    },
+
+    #[error("access token lookup failed [{location}]")]
+    Lookup {
+        #[location]
+        location: &'static Location<'static>,
+        #[source]
+        source: Box<dyn Error + Send + Sync + 'static>,
+    },
+}
+
+impl IntoResponse for AccessTokenAuthError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            Self::Invalid { .. } => {
+                tracing::debug!(?self, "Access token missing/invalid");
+                (StatusCode::UNAUTHORIZED, "authentication required")
+            }
+            Self::Lookup { .. } => {
+                tracing::error!(?self, "Access token lookup failed");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "An internal error occurred",
+                )
+            }
+        };
+        sentry_middleware::error_response(status, body, self)
+    }
+}
+
+/// Extracts the token from an `Authorization: Bearer <token>` header.
+fn bearer_token(req: &Request) -> Option<&str> {
+    let value = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    value
+        .strip_prefix("Bearer ")
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+}
+
+/// Authenticates an organization access token presented as a bearer credential.
+///
+/// Runs as the outermost auth layer so a token wins over any session or signed
+/// request also present (docs/access-tokens-bible.md D9/D12). Requests with no
+/// bearer header pass through unchanged. A token principal carries no user id;
+/// downstream person-scoped routes therefore fail on their own (D6).
+#[allow(clippy::result_large_err)]
+#[tracing::instrument(skip_all, err(Debug))]
+pub async fn access_token_auth_middleware(
+    State(state): State<AppState>,
+    mut req: Request,
+    next: Next,
+) -> Result<Response, AccessTokenAuthError> {
+    use AccessTokenAuthError as E;
+    use AccessTokenAuthErrorCtx as Ctx;
+
+    let Some(token) = bearer_token(&req) else {
+        return Ok(next.run(req).await);
+    };
+
+    let token_hash = db::hash_access_token(token);
+    let found = db::validate_access_token(&state.db, &token_hash)
+        .await
+        .with_context(Ctx::lookup())?;
+
+    let Some((token_id, organization_id)) = found else {
+        return Err(E::Invalid {
+            location: std::panic::Location::caller(),
+        });
+    };
+
+    // Token identity wins: never let a stale user id header survive.
+    req.headers_mut().remove("X-Authenticated-User-ID");
+    req.extensions_mut().insert(AuthenticatedAccessToken {
+        token_id,
+        organization_id,
+    });
+    req.extensions_mut().insert(AuthMethod::Token);
+
+    tracing::debug!(
+        token_id = %token_id,
+        organization_id = %organization_id,
+        "Authenticated request with organization access token"
+    );
+
+    Ok(next.run(req).await)
+}
+
 #[allow(clippy::result_large_err)]
 #[tracing::instrument(skip_all, err(Debug))]
 pub async fn fido2_sign_middleware(
@@ -1278,6 +1376,13 @@ pub async fn fido2_sign_middleware(
     req.headers_mut().remove("X-Authenticated-User-ID");
     req.headers_mut().remove("X-Fido2-Signed");
     req.headers_mut().remove(SSH_AUTHENTICATED_HEADER);
+
+    // A token already authenticated this request (D9/D12). Skip the FIDO2
+    // signature requirement so token-authorized routes (e.g. switch,
+    // quorum-bundle writes; D13) do not demand a passkey assertion.
+    if req.extensions().get::<AuthenticatedAccessToken>().is_some() {
+        return Ok(next.run(req).await);
+    }
 
     // Apply authorization only to paths that the backend will receive unchanged.
     // In particular, URL parsing removes literal and percent-encoded dot segments.

@@ -32,6 +32,8 @@ pub enum AuthMethod {
     Passkey,
     Session,
     SshSigned,
+    /// An organization access token, presented as `Authorization: Bearer`.
+    Token,
 }
 
 impl AuthMethod {
@@ -40,8 +42,18 @@ impl AuthMethod {
             Self::Passkey => "passkey",
             Self::Session => "session",
             Self::SshSigned => "ssh_signed",
+            Self::Token => "token",
         }
     }
+}
+
+/// The organization-owned principal a request authenticated with an access
+/// token. Carries no user id: a token authenticates an organization, not a
+/// person (see docs/access-tokens-bible.md D1/D5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AuthenticatedAccessToken {
+    pub token_id: Uuid,
+    pub organization_id: Uuid,
 }
 
 /// Audit record created by the signing middleware for the verified request.
