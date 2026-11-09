@@ -68,8 +68,9 @@ only `passkey|session|ssh_signed`. It rejects a missing user id
 Session tokens are opaque and DB-backed: `auth_sessions (session_id PK,
 credential_id, user_id, expires_at, created_at, last_used_at)`
 (`src/api/migrations/001_initial.sql:326`, `057_session_user_id.sql`), validated
-per request and expired by a periodic delete. The hashed-opaque-token precedent
-is `webauthn_reset_tokens (token_hash PK, user_id, expires_at, used_at)`
+per request and reaped by `run_cleanups` (`src/gateway/src/db.rs:1114`). The
+hashed-opaque-token precedent is
+`webauthn_reset_tokens (token_hash PK, user_id, expires_at, used_at)`
 (`053_webauthn_reset_tokens.sql`): plaintext returned once, SHA-256 hash at rest.
 
 ### Authorization
