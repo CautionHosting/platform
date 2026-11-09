@@ -114,8 +114,9 @@ Defaults we will assume unless a decision below changes them.
 
 ## Significant decisions
 
-Each needs a call before implementation. D1-D8 are settled; the rest carry a
-recommendation and remain open.
+Each needs a call before implementation. D1-D12 are settled; the design has no
+remaining open decisions (micro-points and validation tasks are tracked under
+Open questions).
 
 ### D1. Token principal: user-bound vs org-owned - DECIDED (org-owned)
 
@@ -283,43 +284,56 @@ than that: a hard `is_owner` gate, so no RBAC rule can delegate it. This mirrors
 the owner-only powers already enforced server-side for granting ownership,
 demoting/removing an owner, and deleting the organization.
 
-### D9. Transport details and precedence
+### D9. Transport details and precedence - DECIDED
+
+Decided 2026-11-09, as recommended:
 
 * `Authorization: Bearer` only; reject tokens presented as cookies.
 * If a request carries both a valid session and a bearer token, the **token
-  wins** and the session is ignored (or, stricter: reject the mix). Recommendation:
-  token wins, matching the gateway's existing "signature middleware takes
-  precedence" shape.
+  wins** and the session is ignored, matching the gateway's existing
+  "signature middleware takes precedence" shape. See D12 for the owner case.
 * No CSRF requirement for bearer requests; keep CSRF for cookie sessions.
 * Rate-limit token auth failures separately from session failures.
 
-### D10. Audit, attribution, and secrets in logs
+### D10. Audit, attribution, and secrets in logs - DECIDED
+
+Decided 2026-11-09, as recommended:
 
 * `created_by` (user id) and, if rotating, `replaced_by`/`replaces`.
-* Requests authenticated by a token should be attributable in
-  `signed_request_audit`/deployment history as *token X of org Y*, not silently
-  as the creator. Recommendation: extend the audit actor to a principal
-  (`user` or `token`); do not attribute token actions to `created_by`.
+* Requests authenticated by a token are attributable in
+  `signed_request_audit`/deployment history as *token X of org Y*, not as the
+  creator. The audit actor becomes a principal (`user` or `token`); token actions
+  are not attributed to `created_by`.
 * Never log the bearer or its hash.
 
-### D11. Org/creator deletion semantics
+### D11. Org/creator deletion semantics - DECIDED
+
+Decided 2026-11-09, as recommended:
 
 * Token is deleted when its organization is deleted (FK cascade).
 * Token **survives** its creator's removal from the org (org-owned per D1), but
   operators should be able to see "created by <user no longer a member>".
-  Recommendation: `created_by REFERENCES users(id) ON DELETE SET NULL`, matching
+  `created_by REFERENCES users(id) ON DELETE SET NULL`, matching
   `rbac_member_roles.granted_by`.
 
-### D12. Relationship to owner bypass
+### D12. Relationship to owner bypass - DECIDED (no bypass; token wins for owners)
 
-Owners bypass RBAC. Tokens must **not** inherit any bypass. A token is only ever
-as powerful as its assigned rules; an `allow * on *` rule is the only way to
-make a token owner-equivalent, and that is a deliberate, visible choice in the
-RBAC editor.
+Decided 2026-11-09:
+
+* Owners bypass RBAC for **user** sessions. Tokens do **not** inherit any bypass.
+  A token is only ever as powerful as its assigned rules; an `allow * on *` rule
+  is the only way to make a token owner-equivalent, and that is a deliberate,
+  visible choice in the RBAC editor.
+* **When an owner presents a token, authenticate as the token, not the owner
+  session.** This is mandatory: it is how an owner tests a newly created token
+  and sees its real authority instead of their own god-mode. In other words, the
+  token principal always wins over session/owner identity (D9); an owner using a
+  token is a token, so the token's rules decide and the account-level owner
+  bypass does not apply.
 
 ## Data model sketch (not final)
 
-Illustrative only; principal plumbing (D5) still open.
+Illustrative only; principal plumbing per D5.
 
 ```sql
 CREATE TABLE organization_access_tokens (
@@ -358,8 +372,7 @@ This needs `organization_access_tokens` to carry a `UNIQUE (organization_id, id)
 
 ## Open questions / blockers
 
-* D1-D8 are settled. D9-D12 still carry recommendations (transport/precedence,
-  audit attribution, creator-deletion semantics, no owner bypass for tokens).
+* All decisions D1-D12 are settled.
 * Expiry micro-point (D7): confirm non-expiring tokens are not offered, and
   whether the 90-day default is changeable per token at mint.
 * CLI survey (needed for D6): identify every CLI flow that today calls a
@@ -373,6 +386,13 @@ This needs `organization_access_tokens` to carry a `UNIQUE (organization_id, id)
 ## Decision log
 
 Record decisions here as they are made, newest first.
+
+* **2026-11-09** - D9, D10, D11 confirmed as recommended (bearer-only transport
+  with token-over-session precedence; principal-aware audit attribution; org
+  cascade delete with `created_by ON DELETE SET NULL`).
+* **2026-11-09** - D12 decided: tokens get **no owner bypass**, and when an owner
+  presents a token the **token wins** over the owner session, so owners can test
+  a token's real authority. Mandatory.
 
 * **2026-11-09** - D8 confirmed: **owners only** mint tokens, via a hard
   `is_owner` gate (not delegable through an RBAC rule). Needed because minting
@@ -410,6 +430,10 @@ Record decisions here as they are made, newest first.
 ## Progress log
 
 Newest first.
+
+* **2026-11-09** - Confirmed D9/D10/D11; decided D12 (token wins over owner
+  session so owners can test tokens; no owner bypass for tokens). All decisions
+  D1-D12 now settled.
 
 * **2026-11-09** - Confirmed D8: owner-only token minting (`is_owner`), not
   RBAC-delegable. Noted that role routes are RBAC-gated today but token minting
