@@ -331,6 +331,80 @@ Decided 2026-11-09:
   token is a token, so the token's rules decide and the account-level owner
   bypass does not apply.
 
+## CLI access-token survey (D6)
+
+Scan of `src/cli` (the `caution` binary) for where tokens need specialization.
+Verified against source 2026-11-09.
+
+### How the CLI authenticates today
+
+Three mechanisms, chosen per call:
+
+1. **Session** (`X-Session-ID`) for most calls, from `caution login` (passkey or
+   QR). Stored in the CLI config (`ApiClient` / `require_existing_authenticated_config`).
+2. **Passkey-signed request** (`/auth/sign-request` + assertion) for routes the
+   gateway marks passkey-required (`requires_fido2_signature`,
+   `src/gateway/src/auth_middleware.rs:986`).
+3. **SSH-signed request** (`--this-is-a-ci-machine`) for `GET`/`DELETE` on
+   `/resources/{app}[/deployments[/{deployment}]]` and for
+   `POST`/`DELETE` `/ssh-keys` (`is_ssh_signed_resource_request`,
+   `auth_middleware.rs:732`). This is the existing non-interactive CI path.
+
+The gateway's passkey-required set is: `PATCH`/`DELETE` `/quorum-bundles/*`,
+`POST` `/quorum-bundles` and `/quorum-bundles/from-org-users`,
+`PATCH`/`PUT` `/organizations/*/settings`, `POST`/`DELETE` `/ssh-keys*`,
+`POST` `/pgp-keys` and `DELETE` `/pgp-keys/*`, `POST` `/passkeys/register/begin`
+and `DELETE` `/passkeys/*`, and deployment switch. A token cannot satisfy these;
+they demand a FIDO2 assertion.
+
+### Command classification
+
+| Command | Endpoint(s) | Scope | Token readiness |
+|---------|-------------|-------|-----------------|
+| `login`/`register`/`logout` | `/auth/*` | person | Not applicable (interactive) |
+| `account id` | `GET /api/organizations` | person (membership list) | **Needs token variant** (org from token) |
+| `init`/`teardown` (BYOC) | `/api/resources`, `/api/resources/managed-onprem` | org (RBAC) | Works with a rule (client must send Bearer) |
+| `apps create` | `POST /api/resources` | org (RBAC) | Works with a rule |
+| `apps list` | `GET /api/resources` | org (RBAC) | Works with a rule |
+| `apps get` | `GET /api/resources/{id}`, `/history` | org (RBAC) | Works with a rule |
+| `apps rename` | `PATCH /api/resources/{id}` | org (RBAC) | Works with a rule |
+| `apps destroy` | `DELETE /api/resources/{id}` | org (RBAC) | Works with a rule |
+| `apps download-eif` | `GET /api/resources/{id}/eif/download` | org (RBAC) | Works with a rule |
+| `apps switch` | `POST /api/resources/{id}/deployments/{d}/switch` | org, **passkey-required** | **Needs token variant or stays human-only** |
+| `credentials add/list/remove/set-default` | `/api/credentials` | org (via caller's primary org) | **Needs token variant** (org from token) |
+| `capacity` | `POST /api/organizations/{id}/fully-managed/waitlist` | org (RBAC) | Works once token membership is accepted (org is in the path) |
+| `secret` (bundle create/upload/rename/labels) | `/api/quorum-bundles*` | org, **passkey-required** | **Needs token variant or stays human-only** |
+| `secret encrypt` / `inspect` | local | n/a | n/a |
+| `ssh-keys *`, `pgp-keys *` | gateway `/ssh-keys`, `/pgp-keys` | account | Not applicable (a token is not a person) |
+| `account`/`verify` attestation | public endpoints, `/.well-known/...` | public | No auth needed |
+| `git push caution` (deploy) | gateway SSH server | account/org SSH key | Unrelated to tokens (stays SSH) |
+
+### What actually needs new server work
+
+Most org-scoped flows are already token-compatible once the CLI can present a
+Bearer credential and resolve the org from the token; no new route is required
+for them. The server-side gaps are:
+
+1. **Org resolution without a user id.** `account id` and
+   `credentials *` (and the capacity waitlist, which is path-scoped) rely on
+   `GET /api/organizations` / `get_user_primary_org`, which need `user_id`.
+   Provide an org-from-token path, e.g. `GET /access-tokens/me` (org id, name,
+   roles).
+2. **Passkey-required routes.** `apps switch` and quorum-bundle
+   create/update/delete cannot be driven by a token. Either leave them
+   human-only or add an explicit access-token variant.
+
+Everything account-scoped (SSH keys, PGP keys, passkeys, `/users/me`,
+`/user/username`, `/api/user/status`) is intentionally out of reach and needs no
+variant.
+
+### Client-side work (no new route)
+
+The CLI needs a token credential path: accept a token (flag or env such as
+`CAUTION_ACCESS_TOKEN`), send `Authorization: Bearer`, skip login/session
+requirements, and resolve org/identity from the token identity endpoint. Existing
+session and SSH-signed paths stay.
+
 ## Data model sketch (not final)
 
 Illustrative only; principal plumbing per D5.
@@ -376,9 +450,10 @@ This needs `organization_access_tokens` to carry a `UNIQUE (organization_id, id)
 * All decisions D1-D12 are settled.
 * D7 expiry: implemented as an expiry toggle at mint (default 90 days when on);
   turning it off is allowed but the UI must warn.
-* CLI survey (needed for D6): identify every CLI flow that today calls a
-  person-scoped route (`/users/me`, quorum approval, passkey-signed deploys,
-  etc.) and decide which needs an access-token route variant. Not yet surveyed.
+* CLI survey (D6) is complete: see [CLI access-token survey](#cli-access-token-survey-d6).
+  Server gaps: org-from-token resolution (`account id`, `credentials *`) and a
+  decision on passkey-required routes (`apps switch`, quorum-bundle writes).
+  Everything else is CLI client work (send Bearer, resolve identity from token).
 * Whether the RBAC editor UI is the right place to manage token roles, or
   tokens get their own page.
 * Naming: "access token" vs "API token" vs "service account" in user-facing
@@ -435,6 +510,12 @@ Record decisions here as they are made, newest first.
 ## Progress log
 
 Newest first.
+
+* **2026-11-09** - Completed the D6 CLI survey (section added). Findings: most
+  org-scoped CLI flows are token-compatible with a rule and a client Bearer
+  path; only org-resolution (`account id`, `credentials *`) needs a server
+  token variant, and passkey-required routes (`apps switch`, quorum-bundle
+  writes) need a variant or stay human-only.
 
 * **2026-11-09** - Refined D7 expiry: optional (toggle, default 90 days) with a
   warning when disabled. Made `expires_at` nullable again in the sketch.
