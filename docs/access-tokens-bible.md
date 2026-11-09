@@ -663,17 +663,23 @@ Newest first.
   Next: deploy (`POST /resources/{id}/deployments`), D13 token authorization on
   `switch` (needs the `signed_request_audit` change), then CLI, frontend, tests.
 
-  Actor-blocked (need the principals/actor work, not just auth):
-  - **deploy** writes `eif_builds.user_id` (`024:user_id NOT NULL`) and
-    `fully_managed_capacity.user_id` (`043:33 NOT NULL`) via the builder and
-    `reserve_capacity`, both `Uuid`. These `NOT NULL` user FKs (unlike the
-    nullable `created_by` columns) are why deploy stays user-only for now.
-  - **switch** (D13) records `signed_request_audit` whose `user_id` is
-    `NOT NULL` (`047:10`) and whose other columns are passkey-specific; a token
-    switch needs either that table generalized (nullable user + token id) or a
-    separate token audit row.
-  Both resolve cleanly under the proposed principals table / token-actor design
-  (D14) and are the reason it is the next structural step.
+  Actor analysis (corrected 2026-11-09):
+  - **deploy is not schema-blocked.** `eif_builds.user_id` is nullable
+    (`024` adds it with no `NOT NULL`; the builder can bind `NULL`),
+    `fully_managed_capacity_reservations` has no `user_id` at all, and
+    `reserve_capacity`'s `user_id` is only used for a waitlist lookup. Metering's
+    `upsert_tracked_resource` already takes `Option<Uuid>`. So deploy needs code
+    changes only: make the waitlist lookup accept `None`, and pass
+    `auth.user_id()` (already `Option`) through the actor binds.
+  - **switch (D13) is the only schema blocker.** It writes
+    `signed_request_audit`, whose `user_id` is `NOT NULL` (`047:10`) and whose
+    other columns are passkey-specific; and `deployment_events.auth_method`'s
+    CHECK allows only `('passkey','session','ssh_signed')` (`058`), so a token
+    actor needs `'token'` added. A token switch needs `signed_request_audit`
+    generalized (nullable user + token id, or a separate token audit row) and
+    the `auth_method` CHECK widened.
+  This is why D14 is scoped to *attribution* columns and why only switch truly
+  waits on it.
 
 * **2026-11-09** - Decided D13: tokens authorize the passkey-required routes
   (`apps switch`, quorum bundles). Updated the CLI survey and server-work list
