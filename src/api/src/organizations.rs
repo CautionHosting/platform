@@ -11,7 +11,7 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -371,7 +371,7 @@ impl IntoResponse for GetOrganizationError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn get_organization(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
     Path(org_id): Path<Uuid>,
 ) -> Result<Json<Organization>, GetOrganizationError> {
     use GetOrganizationErrorCtx as Ctx;
@@ -583,7 +583,7 @@ impl IntoResponse for GetOrgSettingsError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn get_org_settings(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
     Path(org_id): Path<Uuid>,
 ) -> Result<Json<OrgSettings>, GetOrgSettingsError> {
     use GetOrgSettingsErrorCtx as Ctx;
@@ -737,7 +737,7 @@ impl IntoResponse for ListMembersError {
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub async fn list_members(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
     Path(org_id): Path<Uuid>,
 ) -> Result<Json<Vec<OrganizationMember>>, ListMembersError> {
     use ListMembersErrorCtx as Ctx;

@@ -8,7 +8,7 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -317,7 +317,7 @@ impl IntoResponse for ListResourcesError {
 #[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub async fn list_resources(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
 ) -> Result<Json<Vec<serde_json::Value>>, ListResourcesError> {
     use ListResourcesErrorCtx as Ctx;
 
@@ -325,11 +325,7 @@ pub async fn list_resources(
         .await
         .with_context(Ctx::primary_org_lookup())?;
 
-    tracing::info!(
-        "Listing resources for user {} in org {}",
-        auth.user_id(),
-        org_id
-    );
+    tracing::info!("Listing resources in org {}", org_id);
 
     let resources = sqlx::query_as::<_, ComputeResource>(
         "SELECT id, organization_id, provider_account_id, resource_type_id,
