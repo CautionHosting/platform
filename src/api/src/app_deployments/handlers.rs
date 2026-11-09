@@ -13,7 +13,7 @@ use super::summary;
 use crate::AppState;
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -211,13 +211,24 @@ pub(super) async fn query_rows(
     app_id: Option<Uuid>,
     deployment_id: Option<Uuid>,
 ) -> Result<Vec<DeploymentRow>, QueryRowsError> {
-    query_rows_with(db, user_id, app_id, deployment_id, false).await
+    // Resolve the user's organization, then delegate. Keeps the test call sites
+    // user-based while the query itself is org-scoped.
+    let org: Option<(Uuid,)> =
+        sqlx::query_as("SELECT organization_id FROM organization_members WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_optional(db)
+            .await
+            .with_context(QueryRowsErrorCtx::database())?;
+    let Some((org_id,)) = org else {
+        return Ok(Vec::new());
+    };
+    query_rows_with(db, org_id, app_id, deployment_id, false).await
 }
 
 /// [`query_rows`], optionally only the retained rows (`summary::is_retained`).
 pub(super) async fn query_rows_with(
     db: &PgPool,
-    user_id: Uuid,
+    org_id: Uuid,
     app_id: Option<Uuid>,
     deployment_id: Option<Uuid>,
     retained_only: bool,
@@ -234,9 +245,8 @@ pub(super) async fn query_rows_with(
                 (cr.app_network->>'scope_tag') IS NOT NULL AS linked
          FROM app_deployments d
          JOIN compute_resources cr ON cr.id = d.app_id
-         JOIN organization_members om
-              ON om.organization_id = cr.organization_id AND om.user_id = $1
-         WHERE cr.lifecycle = $4 AND cr.destroyed_at IS NULL
+         WHERE cr.organization_id = $1
+           AND cr.lifecycle = $4 AND cr.destroyed_at IS NULL
            AND ($2::uuid IS NULL OR d.app_id = $2)
            AND ($3::uuid IS NULL OR d.id = $3)
            AND (NOT $5::boolean
@@ -244,7 +254,7 @@ pub(super) async fn query_rows_with(
                 OR (d.status = 'failed' AND d.cleaned_up_at IS NULL))
          ORDER BY d.created_at DESC, d.id"
     )))
-    .bind(user_id)
+    .bind(org_id)
     .bind(app_id)
     .bind(deployment_id)
     .bind(LIFECYCLE_DEPLOYMENTS)
@@ -316,12 +326,15 @@ fn instance_hourly_usd(
 
 async fn load_views(
     state: &AppState,
-    user_id: Uuid,
+    auth: &crate::AuthContext,
     app_id: Option<Uuid>,
     deployment_id: Option<Uuid>,
     retained_only: bool,
 ) -> Result<Vec<DeploymentView>, QueryRowsError> {
-    let rows = query_rows_with(&state.db, user_id, app_id, deployment_id, retained_only).await?;
+    let org_id = crate::get_user_primary_org(&state.db, auth)
+        .await
+        .with_context(QueryRowsErrorCtx::database())?;
+    let rows = query_rows_with(&state.db, org_id, app_id, deployment_id, retained_only).await?;
     let addresses = futures::future::join_all(rows.iter().map(|row| async {
         if row.needs_instance_ip() {
             current_instance_ip(state, row).await
@@ -374,20 +387,14 @@ pub(crate) struct ListQuery {
 
 pub(crate) async fn list_handler(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
     Path(app_id): Path<Uuid>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Vec<DeploymentView>>, ListDeploymentsError> {
-    load_views(
-        &state,
-        auth.user_id(),
-        Some(app_id),
-        None,
-        query.retained == Some(1),
-    )
-    .await
-    .map(Json)
-    .with_context(ListDeploymentsErrorCtx::new(app_id))
+    load_views(&state, &auth, Some(app_id), None, query.retained == Some(1))
+        .await
+        .map(Json)
+        .with_context(ListDeploymentsErrorCtx::new(app_id))
 }
 
 /// Failure modes for [`get_in_app_handler`].
@@ -428,27 +435,21 @@ impl IntoResponse for GetDeploymentInAppError {
 /// 404 unless the deployment belongs to that app.
 pub(crate) async fn get_in_app_handler(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
     Path((app_id, deployment_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<DeploymentView>, GetDeploymentInAppError> {
     use GetDeploymentInAppErrorCtx as Ctx;
 
-    load_views(
-        &state,
-        auth.user_id(),
-        Some(app_id),
-        Some(deployment_id),
-        false,
-    )
-    .await
-    .with_context(Ctx::load(app_id, deployment_id))?
-    .pop()
-    .map(Json)
-    .ok_or_else(|| GetDeploymentInAppError::NotFound {
-        app_id,
-        deployment_id,
-        location: std::panic::Location::caller(),
-    })
+    load_views(&state, &auth, Some(app_id), Some(deployment_id), false)
+        .await
+        .with_context(Ctx::load(app_id, deployment_id))?
+        .pop()
+        .map(Json)
+        .ok_or_else(|| GetDeploymentInAppError::NotFound {
+            app_id,
+            deployment_id,
+            location: std::panic::Location::caller(),
+        })
 }
 
 /// Failure modes for [`get_handler`].
@@ -487,12 +488,12 @@ impl IntoResponse for GetDeploymentError {
 /// For callers that know only the deployment ID: the app is derived from it.
 pub(crate) async fn get_handler(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
     Path(deployment_id): Path<Uuid>,
 ) -> Result<Json<DeploymentView>, GetDeploymentError> {
     use GetDeploymentErrorCtx as Ctx;
 
-    load_views(&state, auth.user_id(), None, Some(deployment_id), false)
+    load_views(&state, &auth, None, Some(deployment_id), false)
         .await
         .with_context(Ctx::load(deployment_id))?
         .pop()

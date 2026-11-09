@@ -152,7 +152,7 @@ async fn the_switch_handler_records_only_signed_switches(pool: &PgPool) {
     let call = |auth| {
         crate::app_deployments::switch::switch_handler(
             axum::extract::State(state.clone()),
-            axum::Extension(auth),
+            crate::UserPrincipal(auth),
             axum::extract::Path((f.app, f.target)),
             axum::Json(switch_request(Some(Uuid::new_v4()))),
         )
@@ -513,8 +513,9 @@ async fn history_is_tenant_scoped_and_paged(pool: &PgPool) {
         .unwrap();
         events::finish(pool, operation, Outcome::Succeeded, None).await;
     }
-    let page =
-        |cursor| crate::app_deployments::history::history_page(pool, f.user, f.app, cursor, 2);
+    let page = |cursor| {
+        crate::app_deployments::history::history_page_for_user(pool, f.user, f.app, cursor, 2)
+    };
     let first = page(None).await.unwrap().unwrap();
     assert_eq!(first.entries.len(), 2);
     assert!(first.entries.iter().all(|entry| entry.kind == "operation"
@@ -540,7 +541,7 @@ async fn history_is_tenant_scoped_and_paged(pool: &PgPool) {
     // A non-member sees nothing, not even that the app exists.
     let stranger = member(pool, organization(pool).await).await;
     assert!(
-        crate::app_deployments::history::history_page(pool, stranger, f.app, None, 20)
+        crate::app_deployments::history::history_page_for_user(pool, stranger, f.app, None, 20)
             .await
             .unwrap()
             .is_none()
@@ -588,10 +589,11 @@ async fn history_never_shows_another_apps_deployment(pool: &PgPool) {
     )
     .await
     .unwrap();
-    let page = crate::app_deployments::history::history_page(pool, f.user, f.app, None, 20)
-        .await
-        .unwrap()
-        .unwrap();
+    let page =
+        crate::app_deployments::history::history_page_for_user(pool, f.user, f.app, None, 20)
+            .await
+            .unwrap()
+            .unwrap();
     let entry = |id: Uuid| page.entries.iter().find(|entry| entry.id == id).unwrap();
     let foreign = entry(foreign);
     assert!(foreign.target_deployment_id.is_none() && foreign.previous_deployment_id.is_none());

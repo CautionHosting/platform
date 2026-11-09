@@ -8,7 +8,7 @@
 use crate::AppState;
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -148,7 +148,7 @@ const HISTORY: &str = "SELECT h.* FROM (
 /// `None` when the user is no member of the app's organization.
 pub(crate) async fn history_page(
     db: &PgPool,
-    user_id: Uuid,
+    org_id: Uuid,
     app_id: Uuid,
     cursor: Option<HistoryCursor>,
     limit: i64,
@@ -156,11 +156,10 @@ pub(crate) async fn history_page(
     let ctx = || HistoryErrorCtx::new(app_id);
     let member: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM compute_resources cr
-             JOIN organization_members om ON om.organization_id = cr.organization_id AND om.user_id = $2
-             WHERE cr.id = $1)",
+             WHERE cr.id = $1 AND cr.organization_id = $2)",
     )
     .bind(app_id)
-    .bind(user_id)
+    .bind(org_id)
     .fetch_one(db)
     .await
     .with_context(ctx())?;
@@ -187,12 +186,37 @@ pub(crate) async fn history_page(
     Ok(Some(HistoryPage { entries, next }))
 }
 
+/// Test-only wrapper: resolves a user's organization, then delegates. Keeps the
+/// existing test call sites user-based while the query is org-scoped.
+#[cfg(test)]
+pub(crate) async fn history_page_for_user(
+    db: &PgPool,
+    user_id: Uuid,
+    app_id: Uuid,
+    cursor: Option<HistoryCursor>,
+    limit: i64,
+) -> Result<Option<HistoryPage>, HistoryError> {
+    let org: Option<(Uuid,)> =
+        sqlx::query_as("SELECT organization_id FROM organization_members WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_optional(db)
+            .await
+            .with_context(HistoryErrorCtx::new(app_id))?;
+    let Some((org_id,)) = org else {
+        return Ok(None);
+    };
+    history_page(db, org_id, app_id, cursor, limit).await
+}
+
 pub(crate) async fn history_handler(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
     Path(app_id): Path<Uuid>,
     Query(query): Query<HistoryQuery>,
 ) -> Result<Response, HistoryError> {
+    let org_id = crate::get_user_primary_org(&state.db, &auth)
+        .await
+        .with_context(HistoryErrorCtx::new(app_id))?;
     let Ok(cursor) = history_cursor(query.before_at, query.before_id) else {
         return Ok((
             StatusCode::BAD_REQUEST,
@@ -203,7 +227,7 @@ pub(crate) async fn history_handler(
     Ok(
         match history_page(
             &state.db,
-            auth.user_id(),
+            org_id,
             app_id,
             cursor,
             history_limit(query.limit),
