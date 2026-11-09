@@ -346,9 +346,10 @@ Three mechanisms, chosen per call:
    gateway marks passkey-required (`requires_fido2_signature`,
    `src/gateway/src/auth_middleware.rs:986`).
 3. **SSH-signed request** (`--this-is-a-ci-machine`) for `GET`/`DELETE` on
-   `/resources/{app}[/deployments[/{deployment}]]` and for
-   `POST`/`DELETE` `/ssh-keys` (`is_ssh_signed_resource_request`,
-   `auth_middleware.rs:732`). This is the existing non-interactive CI path.
+   `/resources/{app}[/deployments[/{deployment}]]` only
+   (`is_ssh_signed_resource_request`, `auth_middleware.rs:732`; note it does
+   not cover `/ssh-keys`, which is passkey-required). This is the existing
+   non-interactive CI path.
 
 The gateway's passkey-required set is: `PATCH`/`DELETE` `/quorum-bundles/*`,
 `POST` `/quorum-bundles` and `/quorum-bundles/from-org-users`,
@@ -362,16 +363,16 @@ they demand a FIDO2 assertion.
 | Command | Endpoint(s) | Scope | Token readiness |
 |---------|-------------|-------|-----------------|
 | `login`/`register`/`logout` | `/auth/*` | person | Not applicable (interactive) |
-| `account id` | `GET /api/organizations` | person (membership list) | **Needs token variant** (org from token) |
-| `init`/`teardown` (BYOC) | `/api/resources`, `/api/resources/managed-onprem` | org (RBAC) | Works with a rule (client must send Bearer) |
-| `apps create` | `POST /api/resources` | org (RBAC) | Works with a rule |
-| `apps list` | `GET /api/resources` | org (RBAC) | Works with a rule |
-| `apps get` | `GET /api/resources/{id}`, `/history` | org (RBAC) | Works with a rule |
-| `apps rename` | `PATCH /api/resources/{id}` | org (RBAC) | Works with a rule |
-| `apps destroy` | `DELETE /api/resources/{id}` | org (RBAC) | Works with a rule |
-| `apps download-eif` | `GET /api/resources/{id}/eif/download` | org (RBAC) | Works with a rule |
+| `account id` | `GET /api/organizations` | person (membership list) | **Needs org-from-token** |
+| `init`/`teardown` (BYOC) | `/api/resources`, `/api/resources/managed-onprem` | org (primary org) | **Needs org-from-token** |
+| `apps create` | `POST /api/resources` | org (primary org) | **Needs org-from-token** |
+| `apps list` | `GET /api/resources` | org (primary org) | **Needs org-from-token** |
+| `apps get` | `GET /api/resources/{id}`, `/history` | org (membership) | Works with a rule (id-scoped) |
+| `apps rename` | `PATCH /api/resources/{id}` | org (membership) | Works with a rule (id-scoped) |
+| `apps destroy` | `DELETE /api/resources/{id}` | org (membership) | Works with a rule (id-scoped) |
+| `apps download-eif` | `GET /api/resources/{id}/eif/download` | org (primary org) | **Needs org-from-token** |
 | `apps switch` | `POST /api/resources/{id}/deployments/{d}/switch` | org, **passkey-required** | **Needs token variant or stays human-only** |
-| `credentials add/list/remove/set-default` | `/api/credentials` | org (via caller's primary org) | **Needs token variant** (org from token) |
+| `credentials add/list/remove/set-default` | `/api/credentials` | org (primary org) | **Needs org-from-token** |
 | `capacity` | `POST /api/organizations/{id}/fully-managed/waitlist` | org (RBAC) | Works once token membership is accepted (org is in the path) |
 | `secret` (bundle create/upload/rename/labels) | `/api/quorum-bundles*` | org, **passkey-required** | **Needs token variant or stays human-only** |
 | `secret encrypt` / `inspect` | local | n/a | n/a |
@@ -381,18 +382,26 @@ they demand a FIDO2 assertion.
 
 ### What actually needs new server work
 
-Most org-scoped flows are already token-compatible once the CLI can present a
-Bearer credential and resolve the org from the token; no new route is required
-for them. The server-side gaps are:
+Two categories, plus the passkey question:
 
-1. **Org resolution without a user id.** `account id` and
-   `credentials *` (and the capacity waitlist, which is path-scoped) rely on
-   `GET /api/organizations` / `get_user_primary_org`, which need `user_id`.
-   Provide an org-from-token path, e.g. `GET /access-tokens/me` (org id, name,
-   roles).
-2. **Passkey-required routes.** `apps switch` and quorum-bundle
-   create/update/delete cannot be driven by a token. Either leave them
-   human-only or add an explicit access-token variant.
+1. **Token-principal membership (D5), pervasive.** Every user-keyed org helper
+   must accept a `Principal::Token`: `check_org_access`, the
+   `om.user_id = $1` membership joins, `get_user_primary_org`, and the
+   org-in-path guards. Routes scoped by an id in the path
+   (`GET`/`PATCH`/`DELETE` `/api/resources/{id}`) then work with a rule.
+2. **Org-from-token.** Routes that resolve the caller's own org
+   (`get_user_primary_org`) have no user to resolve from: creating/listing
+   resources (`src/api/src/resources.rs:132,325`), `/api/credentials`
+   (`src/api/src/main.rs:929,996,...`), EIF download
+   (`src/api/src/eif_download.rs:480`), managed-onprem creation
+   (`main.rs:1424`), and builder config (`main.rs:2153,2237`). These need the
+   org taken from the token, exposed via an identity endpoint such as
+   `GET /access-tokens/me` and/or `get_user_primary_org` generalized to the
+   principal.
+3. **Passkey-required routes.** `apps switch` and quorum-bundle
+   create/update/delete demand a FIDO2 assertion the gateway enforces, so a
+   token cannot drive them. Either leave them human-only or add an explicit
+   access-token variant.
 
 Everything account-scoped (SSH keys, PGP keys, passkeys, `/users/me`,
 `/user/username`, `/api/user/status`) is intentionally out of reach and needs no
@@ -451,9 +460,11 @@ This needs `organization_access_tokens` to carry a `UNIQUE (organization_id, id)
 * D7 expiry: implemented as an expiry toggle at mint (default 90 days when on);
   turning it off is allowed but the UI must warn.
 * CLI survey (D6) is complete: see [CLI access-token survey](#cli-access-token-survey-d6).
-  Server gaps: org-from-token resolution (`account id`, `credentials *`) and a
-  decision on passkey-required routes (`apps switch`, quorum-bundle writes).
-  Everything else is CLI client work (send Bearer, resolve identity from token).
+  Server gaps: generalize user-keyed org helpers to the token principal (D5),
+  provide org-from-token for primary-org routes (create/list resources,
+  credentials, EIF download, managed-onprem, builder config), and decide on
+  passkey-required routes (`apps switch`, quorum-bundle writes). Everything
+  else is CLI client work (send Bearer, resolve identity from token).
 * Whether the RBAC editor UI is the right place to manage token roles, or
   tokens get their own page.
 * Naming: "access token" vs "API token" vs "service account" in user-facing
@@ -511,11 +522,11 @@ Record decisions here as they are made, newest first.
 
 Newest first.
 
-* **2026-11-09** - Completed the D6 CLI survey (section added). Findings: most
-  org-scoped CLI flows are token-compatible with a rule and a client Bearer
-  path; only org-resolution (`account id`, `credentials *`) needs a server
-  token variant, and passkey-required routes (`apps switch`, quorum-bundle
-  writes) need a variant or stay human-only.
+* **2026-11-09** - Completed the D6 CLI survey (section added), then corrected
+  it: the main server work is the pervasive token-principal generalization of
+  user-keyed org helpers, plus org-from-token for primary-org routes. Only
+  passkey-required routes (`apps switch`, quorum-bundle writes) need a route
+  variant or stay human-only.
 
 * **2026-11-09** - Refined D7 expiry: optional (toggle, default 90 days) with a
   warning when disabled. Made `expires_at` nullable again in the sketch.
