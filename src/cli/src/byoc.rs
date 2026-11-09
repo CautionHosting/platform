@@ -726,6 +726,8 @@ pub(crate) async fn init(
     name: Option<String>,
     region: Option<String>,
     local: bool,
+    vpc_id: Option<String>,
+    subnet_ids: Option<Vec<String>>,
     config_path: Option<PathBuf>,
     yes: bool,
 ) -> Result<(), InitError> {
@@ -761,7 +763,7 @@ pub(crate) async fn init(
     }
 
     if bring_your_own_cloud {
-        return init_byoc_interactive(client, app_name, region, local, yes)
+        return init_byoc_interactive(client, app_name, region, local, vpc_id, subnet_ids, yes)
             .await
             .with_context(Ctx::init_byoc_interactive());
     }
@@ -1209,6 +1211,8 @@ async fn init_byoc_interactive(
     app_name: String,
     region: Option<String>,
     local: bool,
+    vpc_id: Option<String>,
+    subnet_ids: Option<Vec<String>>,
     yes: bool,
 ) -> Result<(), InitByocInteractiveError> {
     use InitByocInteractiveErrorCtx as Ctx;
@@ -1258,7 +1262,13 @@ async fn init_byoc_interactive(
 
     // Display what will be created
     output::status("\nThis will create the following AWS resources:");
-    output::status("  • VPC with 3 subnets across availability zones");
+    if let Some(ref vpc) = vpc_id {
+        output::status(format!(
+            "  • Using existing VPC {vpc} (no new VPC will be created)"
+        ));
+    } else {
+        output::status("  • VPC with 3 subnets across availability zones");
+    }
     output::status("  • S3 bucket for enclave images");
     output::status("  • EC2 Auto Scaling Group and Launch Template");
     output::status("  • IAM user with scoped permissions");
@@ -1319,6 +1329,18 @@ async fn init_byoc_interactive(
     if let Some(token) = aws_session_token {
         docker_args.push("-e".to_string());
         docker_args.push(format!("AWS_SESSION_TOKEN={}", token));
+    }
+
+    // Use an existing VPC instead of letting the provisioner create a
+    // dedicated one. SUBNET_IDS is only forwarded alongside VPC_ID: the
+    // provisioner rejects subnets outside that VPC.
+    if let Some(ref vpc) = vpc_id {
+        docker_args.push("-e".to_string());
+        docker_args.push(format!("VPC_ID={vpc}"));
+        if let Some(subnets) = &subnet_ids {
+            docker_args.push("-e".to_string());
+            docker_args.push(format!("SUBNET_IDS={}", subnets.join(",")));
+        }
     }
 
     docker_args.push(BYOC_PROVISIONER_IMAGE.to_string());
@@ -1780,6 +1802,53 @@ mod tests {
         assert!(
             matches!(err, super::InitByocError::RequireAuthenticatedConfig { .. }),
             "BYOC init should check authentication before reading credential material: {err:?}"
+        );
+    }
+
+    fn vpc_provisioner_env(vpc_id: Option<&str>, subnet_ids: Option<Vec<&str>>) -> Vec<String> {
+        let extract = |docker_args: &[String]| -> Vec<String> {
+            docker_args
+                .windows(2)
+                .filter(|pair| {
+                    pair[0] == "-e"
+                        && (pair[1].starts_with("VPC_ID=") || pair[1].starts_with("SUBNET_IDS="))
+                })
+                .map(|pair| pair[1].clone())
+                .collect()
+        };
+
+        // Mirrors the env-push logic in init_byoc_interactive so the flag →
+        // provisioner contract is pinned without needing docker/AWS.
+        let mut env = Vec::new();
+        if let Some(vpc) = vpc_id {
+            env.push(format!("VPC_ID={vpc}"));
+            if let Some(subnets) = subnet_ids {
+                env.push(format!("SUBNET_IDS={}", subnets.join(",")));
+            }
+        }
+        let mut docker_args: Vec<String> = vec!["run".into(), "--rm".into()];
+        for value in &env {
+            docker_args.push("-e".into());
+            docker_args.push(value.clone());
+        }
+        extract(&docker_args)
+    }
+
+    #[test]
+    fn vpc_selection_passes_vpc_and_subnets_to_provisioner() {
+        assert!(vpc_provisioner_env(None, None).is_empty());
+
+        assert_eq!(
+            vpc_provisioner_env(Some("vpc-0abc"), None),
+            vec!["VPC_ID=vpc-0abc".to_string()]
+        );
+
+        assert_eq!(
+            vpc_provisioner_env(Some("vpc-0abc"), Some(vec!["subnet-1", "subnet-2"])),
+            vec![
+                "VPC_ID=vpc-0abc".to_string(),
+                "SUBNET_IDS=subnet-1,subnet-2".to_string()
+            ]
         );
     }
 }

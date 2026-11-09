@@ -463,6 +463,19 @@ enum Commands {
         #[arg(
             long,
             requires = "bring_your_own_cloud",
+            help = "Existing AWS VPC ID to deploy into instead of creating a dedicated VPC"
+        )]
+        vpc_id: Option<String>,
+        #[arg(
+            long,
+            requires = "vpc_id",
+            value_delimiter = ',',
+            help = "Comma-separated subnet IDs to use from --vpc-id (default: all subnets in the VPC)"
+        )]
+        subnet_ids: Option<Vec<String>>,
+        #[arg(
+            long,
+            requires = "bring_your_own_cloud",
             help = "Path to encrypted credentials file from manual BYOC setup"
         )]
         config: Option<PathBuf>,
@@ -3793,6 +3806,8 @@ pub async fn run() -> Result<(), RunError> {
             name,
             region,
             local,
+            vpc_id,
+            subnet_ids,
             config,
             yes,
         } => {
@@ -3808,6 +3823,8 @@ pub async fn run() -> Result<(), RunError> {
                 name,
                 region,
                 local,
+                vpc_id,
+                subnet_ids,
                 config,
                 yes,
             )
