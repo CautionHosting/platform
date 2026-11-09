@@ -1153,6 +1153,145 @@ make build-cli
       </form>
     </div>
 
+    <!-- Access Tokens Tab -->
+    <div v-if="activeTab === 'tokens'" class="content-card content-card--dashboard-tab">
+      <div class="content-header">
+        <div class="content-header-text">
+          <h2 class="content-header-title">Access tokens</h2>
+          <p class="content-header-description">
+            Organization-scoped bearer credentials for the CLI and CI. Each token
+            carries a fixed set of roles chosen when it is created and cannot be
+            changed afterwards; rotating means minting a new token and revoking
+            the old one. Only owners can create or revoke tokens.
+          </p>
+        </div>
+        <button
+          v-if="isOwner && !showTokenForm"
+          type="button"
+          class="btn-primary"
+          @click="openTokenForm"
+        >
+          Create token
+        </button>
+      </div>
+
+      <!-- One-time plaintext reveal -->
+      <div v-if="mintedToken" class="message message--warning" role="alert">
+        <p>
+          Copy this token now. It is shown only once and cannot be retrieved later.
+        </p>
+        <div class="rbac-rule-form">
+          <code class="access-token-secret">{{ mintedToken.token }}</code>
+          <button type="button" class="btn-secondary" @click="copyMintedToken">
+            {{ mintedTokenCopied ? "Copied" : "Copy" }}
+          </button>
+        </div>
+      </div>
+
+      <!-- Create form -->
+      <form v-if="showTokenForm" class="rbac-role-form" @submit.prevent="submitTokenForm">
+        <label class="rbac-field">
+          <span>Name</span>
+          <input
+            v-model="tokenForm.name"
+            type="text"
+            class="form-input"
+            maxlength="100"
+            placeholder="e.g. CI deploy"
+          />
+        </label>
+        <label class="rbac-field">
+          <span>Description (optional)</span>
+          <input
+            v-model="tokenForm.description"
+            type="text"
+            class="form-input"
+            maxlength="500"
+            placeholder="What this token is for"
+          />
+        </label>
+        <label class="rbac-field rbac-field--inline">
+          <input v-model="tokenForm.expiryEnabled" type="checkbox" />
+          <span>Expires</span>
+          <input
+            v-model="tokenForm.expiryDays"
+            type="number"
+            class="form-input access-token-days"
+            min="1"
+            max="3650"
+            :disabled="!tokenForm.expiryEnabled"
+          />
+          <span>days after creation</span>
+        </label>
+        <p v-if="!tokenForm.expiryEnabled" class="list-item-empty">
+          Non-expiring tokens are allowed but discouraged.
+        </p>
+        <fieldset class="rbac-field">
+          <legend>Roles (chosen now, immutable)</legend>
+          <p v-if="roles.length === 0" class="list-item-empty">
+            No roles exist yet. Create one on the Roles tab first.
+          </p>
+          <label v-for="role in roles" :key="role.id" class="rbac-field--inline">
+            <input type="checkbox" :value="role.id" v-model="tokenForm.roleIds" />
+            <span>{{ role.name }}</span>
+          </label>
+        </fieldset>
+        <div v-if="tokenFormError" class="message message--error">{{ tokenFormError }}</div>
+        <div class="rbac-rule-form-actions">
+          <button type="submit" class="btn-primary" :disabled="savingToken">
+            {{ savingToken ? "Creating..." : "Create token" }}
+          </button>
+          <button type="button" class="btn-secondary" :disabled="savingToken" @click="closeTokenForm">
+            Cancel
+          </button>
+        </div>
+      </form>
+
+      <div v-if="accessTokensError" class="message message--error">{{ accessTokensError }}</div>
+      <div v-if="accessTokensLoading && !accessTokensLoaded" class="list-item-empty">
+        Loading tokens...
+      </div>
+      <div v-else-if="accessTokens.length === 0" class="list-item-empty">
+        No access tokens yet.
+      </div>
+      <table v-else class="rbac-rules-table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Roles</th>
+            <th>Expiry</th>
+            <th>Last used</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="token in accessTokens" :key="token.id">
+            <td>
+              <div>{{ token.name }}</div>
+              <div v-if="token.description" class="list-item-empty">{{ token.description }}</div>
+            </td>
+            <td>
+              <span v-for="role in token.roles" :key="role.id" class="rbac-chip">{{ role.name }}</span>
+              <span v-if="!token.roles || token.roles.length === 0" class="list-item-empty">None</span>
+            </td>
+            <td>{{ describeAccessTokenExpiry(token.expires_at) }}</td>
+            <td>{{ token.last_used_at ? formatDateTime(token.last_used_at) : "Never" }}</td>
+            <td>
+              <button
+                v-if="isOwner"
+                type="button"
+                class="btn-secondary"
+                :disabled="revokingTokenId === token.id"
+                @click="revokeAccessToken(token)"
+              >
+                {{ revokingTokenId === token.id ? "Revoking..." : "Revoke" }}
+              </button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
     <!-- SSH Keys Tab -->
     <div v-if="activeTab === 'ssh'" class="content-card content-card--dashboard-tab">
       <div class="content-header">
@@ -2356,6 +2495,11 @@ import {
   pathParameterNames,
   validateRule,
 } from "../utils/rbac.js";
+import {
+  buildAccessTokenPayload,
+  describeAccessTokenExpiry,
+  validateAccessTokenForm,
+} from "../utils/accessTokens.js";
 import { getSubscriptionPlanAction } from "../utils/subscriptionPlan.js";
 import { getCurrentTheme } from "../utils/theme.js";
 import { isLegacyBundle, getQuorumBundleFiles, getQuorumBundleSummary, serializeQuorumBundle, bundleTitle, bundleIdentifiers, getEmbeddedBundleId, selectBundles } from "../utils/quorumBundle.js";
@@ -2418,6 +2562,7 @@ export default {
       security: "security",
       users: "users",
       roles: "roles",
+      tokens: "tokens",
       account: "account",
       billing: "billing",
       credentials: "credentials",
@@ -3261,6 +3406,126 @@ export default {
         promotingMember.value = null;
       }
     };
+
+    // --- Access tokens -------------------------------------------------
+    const accessTokens = ref([]);
+    const accessTokensLoading = ref(false);
+    const accessTokensLoaded = ref(false);
+    const accessTokensError = ref("");
+    const showTokenForm = ref(false);
+    const tokenForm = ref({ name: "", description: "", expiryEnabled: true, expiryDays: 90, roleIds: [] });
+    const tokenFormError = ref("");
+    const savingToken = ref(false);
+    const mintedToken = ref(null);
+    const mintedTokenCopied = ref(false);
+    const revokingTokenId = ref(null);
+
+    const loadAccessTokens = async () => {
+      accessTokensLoading.value = true;
+      accessTokensError.value = "";
+      try {
+        const orgId = await ensureCurrentOrgId();
+        if (!orgId) {
+          accessTokens.value = [];
+          return;
+        }
+        const response = await authFetch(`/api/organizations/${orgId}/access-tokens`, {
+          cache: "no-store",
+        });
+        if (!response.ok) {
+          throw new Error(await readResponseError(response, "Failed to load access tokens"));
+        }
+        accessTokens.value = await response.json();
+      } catch (err) {
+        accessTokensError.value = err.message || "Failed to load access tokens";
+      } finally {
+        accessTokensLoading.value = false;
+        accessTokensLoaded.value = true;
+      }
+    };
+
+    const openTokenForm = () => {
+      tokenForm.value = { name: "", description: "", expiryEnabled: true, expiryDays: 90, roleIds: [] };
+      tokenFormError.value = "";
+      mintedToken.value = null;
+      mintedTokenCopied.value = false;
+      showTokenForm.value = true;
+    };
+
+    const closeTokenForm = () => {
+      showTokenForm.value = false;
+      tokenFormError.value = "";
+    };
+
+    const submitTokenForm = async () => {
+      tokenFormError.value = "";
+      const invalid = validateAccessTokenForm(tokenForm.value);
+      if (invalid) {
+        tokenFormError.value = invalid;
+        return;
+      }
+      savingToken.value = true;
+      try {
+        const orgId = await ensureCurrentOrgId();
+        if (!orgId) throw new Error("No organization selected");
+        const response = await authFetch(`/api/organizations/${orgId}/access-tokens`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(buildAccessTokenPayload(tokenForm.value)),
+        });
+        if (!response.ok) {
+          throw new Error(await readResponseError(response, "Failed to create token"));
+        }
+        const created = await response.json();
+        mintedToken.value = { token: created.token, name: created.name };
+        mintedTokenCopied.value = false;
+        showTokenForm.value = false;
+        await loadAccessTokens();
+      } catch (err) {
+        tokenFormError.value = err.message || "Failed to create token";
+      } finally {
+        savingToken.value = false;
+      }
+    };
+
+    const copyMintedToken = async () => {
+      if (!mintedToken.value) return;
+      try {
+        await navigator.clipboard.writeText(mintedToken.value.token);
+        mintedTokenCopied.value = true;
+      } catch {
+        // Clipboard unavailable; the value stays visible to copy by hand.
+      }
+    };
+
+    const revokeAccessToken = async (token) => {
+      revokingTokenId.value = token.id;
+      accessTokensError.value = "";
+      try {
+        const orgId = await ensureCurrentOrgId();
+        if (!orgId) throw new Error("No organization selected");
+        const response = await authFetch(`/api/organizations/${orgId}/access-tokens/${token.id}`, {
+          method: "DELETE",
+        });
+        if (!response.ok) {
+          throw new Error(await readResponseError(response, "Failed to revoke token"));
+        }
+        if (mintedToken.value && mintedToken.value.name === token.name) {
+          mintedToken.value = null;
+        }
+        await loadAccessTokens();
+      } catch (err) {
+        accessTokensError.value = err.message || "Failed to revoke token";
+      } finally {
+        revokingTokenId.value = null;
+      }
+    };
+
+    watch(activeTab, (tab) => {
+      if (tab === "tokens" && !accessTokensLoaded.value) {
+        loadAccessTokens();
+      }
+    });
 
     const loadRoles = async () => {
       loadingRoles.value = true;
@@ -6314,6 +6579,23 @@ export default {
       roleToAssign,
       savingAssignment,
       assignableRoles,
+      accessTokens,
+      accessTokensLoading,
+      accessTokensLoaded,
+      accessTokensError,
+      showTokenForm,
+      tokenForm,
+      tokenFormError,
+      savingToken,
+      mintedToken,
+      mintedTokenCopied,
+      revokingTokenId,
+      openTokenForm,
+      closeTokenForm,
+      submitTokenForm,
+      copyMintedToken,
+      revokeAccessToken,
+      describeAccessTokenExpiry,
       roleNameFor,
       toggleMemberRoles,
       assignRole,

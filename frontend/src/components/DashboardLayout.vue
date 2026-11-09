@@ -182,6 +182,28 @@
             <span>Roles</span>
           </button>
 
+          <button
+            :class="['nav-item', { active: activeTab === 'tokens' }]"
+            @click="selectTab('tokens')"
+          >
+            <svg
+              class="nav-icon"
+              width="30"
+              height="30"
+              viewBox="0 0 30 30"
+              fill="none"
+              xmlns="http://www.w3.org/2000/svg"
+              aria-hidden="true"
+            >
+              <rect v-if="activeTab === 'tokens'" width="30" height="30" rx="15" fill="white"/>
+              <g transform="translate(5,5) scale(0.85)">
+                <path d="M14 7a4 4 0 1 0 0 8 4 4 0 0 0 0-8z" :stroke="activeTab === 'tokens' ? '#0F0F0F' : '#535455'" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M17 12h5M19 12v3M21.5 12v2" :stroke="activeTab === 'tokens' ? '#0F0F0F' : '#535455'" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+              </g>
+            </svg>
+            <span>Tokens</span>
+          </button>
+
           <div class="nav-group" :class="{ 'is-open': securityNavOpen }">
             <button
               :class="['nav-item', 'nav-item--parent', { active: isSecurityNavActive }]"
