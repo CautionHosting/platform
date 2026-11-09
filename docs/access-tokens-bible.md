@@ -252,10 +252,10 @@ deliberately no curated deny-list to keep in sync.
 
 Decided 2026-11-09:
 
-* **Expiry.** Tokens expire. Set at mint, **default 90 days**. The proposed
-  tenant-configurable maximum-lifetime cap is dropped. Open micro-point: whether a
-  non-expiring token may be requested (default expiry implies every token has
-  one); assume not unless told otherwise.
+* **Expiry.** Not required, but **strongly recommended**. Expiry is a toggle at
+  mint; when on, the value defaults to **90 days**. When an operator turns expiry
+  off (a non-expiring token), show an explicit warning note in the UI. The
+  proposed tenant-configurable maximum-lifetime cap is dropped.
 * **Rotation.** **Recreate, no overlap.** Rotating means minting a replacement
   and revoking the old token; there is no overlapping-validity window. Because
   revocation is immediate, the old token stops working at once, so callers must
@@ -343,7 +343,8 @@ CREATE TABLE organization_access_tokens (
     name TEXT NOT NULL,
     description TEXT,
     created_by UUID REFERENCES users(id) ON DELETE SET NULL,
-    expires_at TIMESTAMPTZ NOT NULL,          -- mint default now()+90d (see D7)
+    expires_at TIMESTAMPTZ,                   -- NULL = no expiry; mint default
+                                              -- now()+90d when expiry is on (D7)
     last_used_at TIMESTAMPTZ,
     revoked_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -373,8 +374,8 @@ This needs `organization_access_tokens` to carry a `UNIQUE (organization_id, id)
 ## Open questions / blockers
 
 * All decisions D1-D12 are settled.
-* Expiry micro-point (D7): confirm non-expiring tokens are not offered, and
-  whether the 90-day default is changeable per token at mint.
+* D7 expiry: implemented as an expiry toggle at mint (default 90 days when on);
+  turning it off is allowed but the UI must warn.
 * CLI survey (needed for D6): identify every CLI flow that today calls a
   person-scoped route (`/users/me`, quorum approval, passkey-signed deploys,
   etc.) and decide which needs an access-token route variant. Not yet surveyed.
@@ -386,6 +387,10 @@ This needs `organization_access_tokens` to carry a `UNIQUE (organization_id, id)
 ## Decision log
 
 Record decisions here as they are made, newest first.
+
+* **2026-11-09** - D7 expiry refined: expiry is **optional but strongly
+  recommended**, an on/off toggle at mint defaulting to 90 days, with a UI
+  warning when turned off (non-expiring token).
 
 * **2026-11-09** - D9, D10, D11 confirmed as recommended (bearer-only transport
   with token-over-session precedence; principal-aware audit attribution; org
@@ -430,6 +435,9 @@ Record decisions here as they are made, newest first.
 ## Progress log
 
 Newest first.
+
+* **2026-11-09** - Refined D7 expiry: optional (toggle, default 90 days) with a
+  warning when disabled. Made `expires_at` nullable again in the sketch.
 
 * **2026-11-09** - Confirmed D9/D10/D11; decided D12 (token wins over owner
   session so owners can test tokens; no owner bypass for tokens). All decisions
