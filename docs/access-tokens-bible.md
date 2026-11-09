@@ -103,8 +103,9 @@ Defaults we will assume unless a decision below changes them.
 6. **Validation point.** The gateway terminates token auth and reports it across
    the trust boundary as a new `AuthMethod::Token` / `"token"`, alongside a token
    id and organization id. The API never sees the bearer value.
-7. **Revocation.** Immediate and hard: deleting the row invalidates the token on
-   the next request (DB lookup per request, like sessions).
+7. **Revocation.** Immediate and soft: revoking sets `revoked_at`, and the
+   gateway rejects the token on the next request (DB lookup per request, like
+   sessions). The row is kept so its role assignment and attribution survive.
 8. **Audit.** Tokens record `created_by`, `created_at`, `last_used_at`, and are
    attributable in request history; the plaintext is shown exactly once.
 9. **Deny by default.** A token with no roles can do nothing beyond a minimal
@@ -264,7 +265,10 @@ Decided 2026-11-09:
   optional description for operators.
 * **Last used.** Track `last_used_at`, updated best-effort like sessions
   (`auth_sessions.last_used_at`), so operators can find stale tokens.
-* **Revocation.** Hard delete; no soft-delete/recycle.
+* **Revocation.** **Revoked, not deleted** (revised 2026-11-09). Revoking sets
+  `revoked_at`; the row, its role assignment, and any attribution survive, and
+  the gateway rejects the token on the next request. No soft-delete recycle or
+  purge.
 
 ### D8. Who may mint a token - DECIDED (owner-only)
 
@@ -534,9 +538,11 @@ the user:
    user, and change only the FK targets (no data rewrite). Recommendation: (b),
    as it is far less invasive; the `kind`/nullable columns disambiguate, and a
    user id colliding with a token id is astronomically unlikely.
-2. **Token tombstone.** Tokens are hard-deleted (D7). Recommendation: keep the
-   principal row and its denormalized `label` so attribution outlives the token;
-   `token_id` set NULL on delete (or stored as a plain UUID with no FK).
+2. **Token tombstone.** Tokens are revoked, not deleted (D7); a token row is
+   only removed when its organization is deleted (FK cascade). Recommendation:
+   keep the principal row and its denormalized `label` so attribution outlives
+   even that; `token_id` set NULL on delete (or stored as a plain UUID with no
+   FK).
 
 Scope: only actor columns (`compute_resources.created_by`,
 `cloud_credentials.created_by`, `quorum_bundles`/`secrets_bundles.created_by`,
@@ -550,6 +556,12 @@ columns).
 ## Decision log
 
 Record decisions here as they are made, newest first.
+
+* **2026-11-09** - D7 revised: tokens are **revoked, not deleted**. Revoking
+  sets `revoked_at`; the row, its role assignment, and audit attribution
+  survive. `DELETE /organizations/{id}/access-tokens/{token_id}` now marks the
+  token revoked. Principal ids in D14 stay distinct (surrogate), with the
+  actor-column backfill.
 
 * **2026-11-09** - D13 decided: `apps switch` and the quorum-bundle routes are
   **drivable by a token**. A token principal substitutes for the FIDO2 signed

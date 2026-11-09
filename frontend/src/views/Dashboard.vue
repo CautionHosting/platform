@@ -1274,11 +1274,11 @@ make build-cli
               <span v-for="role in token.roles" :key="role.id" class="rbac-chip">{{ role.name }}</span>
               <span v-if="!token.roles || token.roles.length === 0" class="list-item-empty">None</span>
             </td>
-            <td>{{ describeAccessTokenExpiry(token.expires_at) }}</td>
+            <td>{{ token.revoked_at ? "Revoked" : describeAccessTokenExpiry(token.expires_at) }}</td>
             <td>{{ token.last_used_at ? formatDateTime(token.last_used_at) : "Never" }}</td>
             <td>
               <button
-                v-if="isOwner"
+                v-if="isOwner && !token.revoked_at"
                 type="button"
                 class="btn-secondary"
                 :disabled="revokingTokenId === token.id"
@@ -1286,6 +1286,7 @@ make build-cli
               >
                 {{ revokingTokenId === token.id ? "Revoking..." : "Revoke" }}
               </button>
+              <span v-else-if="token.revoked_at" class="list-item-empty">Revoked</span>
             </td>
           </tr>
         </tbody>

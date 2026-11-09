@@ -88,6 +88,7 @@ pub(crate) struct AccessTokenRow {
     pub(crate) created_by: Option<Uuid>,
     pub(crate) expires_at: Option<DateTime<Utc>>,
     pub(crate) last_used_at: Option<DateTime<Utc>>,
+    pub(crate) revoked_at: Option<DateTime<Utc>>,
     pub(crate) created_at: DateTime<Utc>,
 }
 
@@ -185,7 +186,7 @@ pub(crate) async fn list_access_tokens(
 
     let tokens = sqlx::query_as::<_, AccessTokenRow>(
         "SELECT id, organization_id, name, description, created_by,
-                expires_at, last_used_at, created_at
+                expires_at, last_used_at, revoked_at, created_at
          FROM organization_access_tokens
          WHERE organization_id = $1
          ORDER BY created_at DESC, id",
@@ -437,7 +438,7 @@ pub(crate) async fn get_access_token(
 
     let token = sqlx::query_as::<_, AccessTokenRow>(
         "SELECT id, organization_id, name, description, created_by,
-                expires_at, last_used_at, created_at
+                expires_at, last_used_at, revoked_at, created_at
          FROM organization_access_tokens
          WHERE id = $1 AND organization_id = $2",
     )
@@ -495,7 +496,7 @@ pub(crate) enum DeleteAccessTokenError {
     #[error("access token not found [{location}]")]
     NotFound { location: Location },
 
-    #[error("failed to delete the access token [{location}]")]
+    #[error("failed to revoke the access token [{location}]")]
     Query {
         #[location]
         location: Location,
@@ -511,7 +512,10 @@ impl_error_response!(DeleteAccessTokenError {
     DeleteAccessTokenError::Query { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string()),
 });
 
-/// Revokes a token by hard delete (D7). The next request presenting it fails.
+/// Revokes a token (D7, reversed 2026-11-09): the row is kept and marked with
+/// `revoked_at`, so its role assignment and audit attribution survive. The next
+/// request presenting the token fails. Already-revoked or unknown tokens are a
+/// 404.
 #[tracing::instrument(skip_all, err(Debug), fields(org_id = %org_id))]
 pub(crate) async fn delete_access_token(
     State(state): State<Arc<AppState>>,
@@ -523,7 +527,8 @@ pub(crate) async fn delete_access_token(
     ensure_owner!(state, &auth, org_id, DeleteAccessTokenError);
 
     let result = sqlx::query(
-        "DELETE FROM organization_access_tokens WHERE id = $1 AND organization_id = $2",
+        "UPDATE organization_access_tokens SET revoked_at = NOW()
+         WHERE id = $1 AND organization_id = $2 AND revoked_at IS NULL",
     )
     .bind(token_id)
     .bind(org_id)

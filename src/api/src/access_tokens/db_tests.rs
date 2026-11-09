@@ -138,3 +138,58 @@ async fn deleting_a_token_cascades_its_roles() {
 
     pool.close().await;
 }
+
+#[tokio::test]
+#[ignore = "run bash tests/e2e/test_app_deployments_db.sh (isolated PostgreSQL)"]
+async fn revoking_keeps_the_row_and_its_roles() {
+    let pool = test_pool().await;
+    let org = create_org(&pool).await;
+    let token = create_token(&pool, org).await;
+    let role = create_role(&pool, org).await;
+
+    sqlx::query(
+        "INSERT INTO organization_access_token_roles (organization_id, token_id, role_id)
+         VALUES ($1, $2, $3)",
+    )
+    .bind(org)
+    .bind(token)
+    .bind(role)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Revoke (D7, revised): mark, do not delete.
+    sqlx::query("UPDATE organization_access_tokens SET revoked_at = NOW() WHERE id = $1")
+        .bind(token)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let row: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM organization_access_tokens WHERE id = $1")
+            .bind(token)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(row, 1, "a revoked token row is retained");
+
+    let active: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM organization_access_tokens WHERE id = $1 AND revoked_at IS NULL",
+    )
+    .bind(token)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(active, 0, "the gateway's active-token lookup excludes it");
+
+    let roles: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM organization_access_token_roles WHERE token_id = $1",
+    )
+    .bind(token)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(roles, 1, "revocation keeps the token's role assignment");
+
+    pool.close().await;
+}
