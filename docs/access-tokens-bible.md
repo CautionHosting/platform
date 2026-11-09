@@ -600,6 +600,18 @@ Newest first.
   Next: deploy (`POST /resources/{id}/deployments`), D13 token authorization on
   `switch` (needs the `signed_request_audit` change), then CLI, frontend, tests.
 
+  Actor-blocked (need the principals/actor work, not just auth):
+  - **deploy** writes `eif_builds.user_id` (`024:user_id NOT NULL`) and
+    `fully_managed_capacity.user_id` (`043:33 NOT NULL`) via the builder and
+    `reserve_capacity`, both `Uuid`. These `NOT NULL` user FKs (unlike the
+    nullable `created_by` columns) are why deploy stays user-only for now.
+  - **switch** (D13) records `signed_request_audit` whose `user_id` is
+    `NOT NULL` (`047:10`) and whose other columns are passkey-specific; a token
+    switch needs either that table generalized (nullable user + token id) or a
+    separate token audit row.
+  Both resolve cleanly under the proposed principals table / token-actor design
+  (D14) and are the reason it is the next structural step.
+
 * **2026-11-09** - Decided D13: tokens authorize the passkey-required routes
   (`apps switch`, quorum bundles). Updated the CLI survey and server-work list
   accordingly.
