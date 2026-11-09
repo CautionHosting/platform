@@ -114,7 +114,7 @@ Defaults we will assume unless a decision below changes them.
 
 ## Significant decisions
 
-Each needs a call before implementation. D1-D7 are settled; the rest carry a
+Each needs a call before implementation. D1-D8 are settled; the rest carry a
 recommendation and remain open.
 
 ### D1. Token principal: user-bound vs org-owned - DECIDED (org-owned)
@@ -265,24 +265,23 @@ Decided 2026-11-09:
   (`auth_sessions.last_used_at`), so operators can find stale tokens.
 * **Revocation.** Hard delete; no soft-delete/recycle.
 
-### D8. Who may mint a token
+### D8. Who may mint a token - DECIDED (owner-only)
 
-D2b decided there is **no subset requirement**: whoever may mint may attach any
-role. Minting is therefore a role-granting operation, and the mint gate is the
-only control against escalation.
+Decided 2026-11-09: **owners only**, enforced by an `is_owner` check, not merely
+by RBAC rules.
 
-* **A. Owner-only (recommended for v1).** Fewest sharp edges; `is_owner` gate.
-  An owner already has god powers, so letting them mint any role grants nothing
-  new.
-* **B. RBAC-gated.** Any member with a matching rule may mint, attaching any
-  role. Capable and consistent with the rest of RBAC, but the rule permitting
-  `POST /organizations/{id}/access-tokens` must be understood as granting
-  "create a principal with arbitrary roles", i.e. near-owner escalation.
+* **A. Owner-only. CHOSEN.** An owner already has god powers, so letting them
+  mint a token with any role grants nothing new. Because minting attaches
+  arbitrary roles (D2b), it must not be reachable by a delegated member.
+* **B. RBAC-gated. REJECTED.** A member with a matching `POST .../access-tokens`
+  rule could create a principal holding any role, i.e. near-owner escalation.
 
-**Recommendation: A for v1.** B remains possible, but if chosen the mint rule
-should be treated with the same care as ownership grants and documented as such.
-Ties directly to [To-fix #2 in the RBAC bible](rbac-bible.md) (delegated members
-have no UI).
+Enforcement note: today the role-management routes are ordinary RBAC-gated
+routes (a member reaches them only with a matching rule; owners bypass), and the
+**UI** shows role controls to owners only (`isOwner`). Token minting is stricter
+than that: a hard `is_owner` gate, so no RBAC rule can delegate it. This mirrors
+the owner-only powers already enforced server-side for granting ownership,
+demoting/removing an owner, and deleting the organization.
 
 ### D9. Transport details and precedence
 
@@ -359,8 +358,8 @@ This needs `organization_access_tokens` to carry a `UNIQUE (organization_id, id)
 
 ## Open questions / blockers
 
-* D1-D7 are settled. D8 (mint gate) is the escalation control and the next
-  keystone; D9-D12 still carry recommendations.
+* D1-D8 are settled. D9-D12 still carry recommendations (transport/precedence,
+  audit attribution, creator-deletion semantics, no owner bypass for tokens).
 * Expiry micro-point (D7): confirm non-expiring tokens are not offered, and
   whether the 90-day default is changeable per token at mint.
 * CLI survey (needed for D6): identify every CLI flow that today calls a
@@ -374,6 +373,10 @@ This needs `organization_access_tokens` to carry a `UNIQUE (organization_id, id)
 ## Decision log
 
 Record decisions here as they are made, newest first.
+
+* **2026-11-09** - D8 confirmed: **owners only** mint tokens, via a hard
+  `is_owner` gate (not delegable through an RBAC rule). Needed because minting
+  attaches arbitrary roles (D2b).
 
 * **2026-11-09** - D7 confirmed. Tokens expire (default 90 days, set at mint).
   Rotation is **recreate with no overlap** (mint new + revoke old). **No per-org
@@ -407,6 +410,10 @@ Record decisions here as they are made, newest first.
 ## Progress log
 
 Newest first.
+
+* **2026-11-09** - Confirmed D8: owner-only token minting (`is_owner`), not
+  RBAC-delegable. Noted that role routes are RBAC-gated today but token minting
+  is stricter.
 
 * **2026-11-09** - Confirmed D7: default 90-day expiry, recreate-with-no-overlap
   rotation, no per-org token cap, `last_used_at` tracking, hard-delete
