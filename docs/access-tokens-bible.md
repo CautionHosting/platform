@@ -114,7 +114,7 @@ Defaults we will assume unless a decision below changes them.
 
 ## Significant decisions
 
-Each needs a call before implementation. D1-D12 are settled; the design has no
+Each needs a call before implementation. D1-D13 are settled; the design has no
 remaining open decisions (micro-points and validation tasks are tracked under
 Open questions).
 
@@ -331,6 +331,31 @@ Decided 2026-11-09:
   token is a token, so the token's rules decide and the account-level owner
   bypass does not apply.
 
+### D13. Tokens authorize passkey-required routes - DECIDED
+
+Decided 2026-11-09: **`apps switch` and the quorum-bundle routes must be
+drivable by a token.** The token is the authorization: for these routes a valid
+token principal substitutes for the FIDO2 signed request.
+
+* **Gateway.** `requires_fido2_signature` (`auth_middleware.rs:986`) must not
+  force an assertion when the request is authenticated by a token. Token auth is
+  evaluated, and the passkey requirement is waived for a token principal.
+* **API.** Handlers that demand `auth.signed_request_id` (currently
+  `app_deployments/switch.rs:330`) must accept a token principal instead,
+  recording the **token** as the actor rather than a `signed_request_audit` row
+  (D10). The same applies to the quorum-bundle handlers that today only run under
+  a signed request.
+* **Authorization unchanged.** The token still needs a matching RBAC rule (deny
+  by default) and the org-in-path rule; owner bypass never applies to tokens
+  (D12). So a token can switch or manage bundles only if an owner attached a role
+  granting those routes.
+* **Assurance note.** This lowers the request-level assurance for these
+  operations from "human passkey" to "org token". That is the intent of tying
+  them to a token. Holder-approval ceremonies *inside* quorum creation
+  (key-service / WebAuthn / PGP) are a separate layer and are unaffected.
+* **Passkey still works.** These routes remain passkey-capable: a human session
+  with a passkey assertion still authorizes them exactly as today.
+
 ## CLI access-token survey (D6)
 
 Scan of `src/cli` (the `caution` binary) for where tokens need specialization.
@@ -371,10 +396,10 @@ they demand a FIDO2 assertion.
 | `apps rename` | `PATCH /api/resources/{id}` | org (membership) | Works with a rule (id-scoped) |
 | `apps destroy` | `DELETE /api/resources/{id}` | org (membership) | Works with a rule (id-scoped) |
 | `apps download-eif` | `GET /api/resources/{id}/eif/download` | org (primary org) | **Needs org-from-token** |
-| `apps switch` | `POST /api/resources/{id}/deployments/{d}/switch` | org, **passkey-required** | **Needs token variant or stays human-only** |
+| `apps switch` | `POST /api/resources/{id}/deployments/{d}/switch` | org, passkey-required | Token-authorized (D13) |
 | `credentials add/list/remove/set-default` | `/api/credentials` | org (primary org) | **Needs org-from-token** |
 | `capacity` | `POST /api/organizations/{id}/fully-managed/waitlist` | org (RBAC) | Works once token membership is accepted (org is in the path) |
-| `secret` (bundle create/upload/rename/labels) | `/api/quorum-bundles*` | org, **passkey-required** | **Needs token variant or stays human-only** |
+| `secret` (bundle create/upload/rename/labels) | `/api/quorum-bundles*` | org, passkey-required | Token-authorized (D13) |
 | `secret encrypt` / `inspect` | local | n/a | n/a |
 | `ssh-keys *`, `pgp-keys *` | gateway `/ssh-keys`, `/pgp-keys` | account | Not applicable (a token is not a person) |
 | `account`/`verify` attestation | public endpoints, `/.well-known/...` | public | No auth needed |
@@ -382,7 +407,7 @@ they demand a FIDO2 assertion.
 
 ### What actually needs new server work
 
-Two categories, plus the passkey question:
+Three categories:
 
 1. **Token-principal membership (D5), pervasive.** Every user-keyed org helper
    must accept a `Principal::Token`: `check_org_access`, the
@@ -398,10 +423,11 @@ Two categories, plus the passkey question:
    org taken from the token, exposed via an identity endpoint such as
    `GET /access-tokens/me` and/or `get_user_primary_org` generalized to the
    principal.
-3. **Passkey-required routes.** `apps switch` and quorum-bundle
-   create/update/delete demand a FIDO2 assertion the gateway enforces, so a
-   token cannot drive them. Either leave them human-only or add an explicit
-   access-token variant.
+3. **Token-authorized passkey routes (D13).** `apps switch` and the
+   quorum-bundle routes must accept a token principal in place of the FIDO2
+   assertion: waive `requires_fido2_signature` for a token, and let the relevant
+   handlers (`app_deployments/switch.rs:330`; quorum-bundle writes) run under a
+   token actor instead of `signed_request_id`.
 
 Everything account-scoped (SSH keys, PGP keys, passkeys, `/users/me`,
 `/user/username`, `/api/user/status`) is intentionally out of reach and needs no
@@ -456,14 +482,14 @@ This needs `organization_access_tokens` to carry a `UNIQUE (organization_id, id)
 
 ## Open questions / blockers
 
-* All decisions D1-D12 are settled.
+* All decisions D1-D13 are settled.
 * D7 expiry: implemented as an expiry toggle at mint (default 90 days when on);
   turning it off is allowed but the UI must warn.
 * CLI survey (D6) is complete: see [CLI access-token survey](#cli-access-token-survey-d6).
   Server gaps: generalize user-keyed org helpers to the token principal (D5),
   provide org-from-token for primary-org routes (create/list resources,
-  credentials, EIF download, managed-onprem, builder config), and decide on
-  passkey-required routes (`apps switch`, quorum-bundle writes). Everything
+  credentials, EIF download, managed-onprem, builder config), and token-authorize
+  the passkey routes `apps switch` and quorum-bundle writes (D13). Everything
   else is CLI client work (send Bearer, resolve identity from token).
 * Whether the RBAC editor UI is the right place to manage token roles, or
   tokens get their own page.
@@ -473,6 +499,12 @@ This needs `organization_access_tokens` to carry a `UNIQUE (organization_id, id)
 ## Decision log
 
 Record decisions here as they are made, newest first.
+
+* **2026-11-09** - D13 decided: `apps switch` and the quorum-bundle routes are
+  **drivable by a token**. A token principal substitutes for the FIDO2 signed
+  request on those routes; the token still needs a matching RBAC rule, and the
+  operation is audited to the token. This deliberately lowers request assurance
+  from "human passkey" to "org token" for these operations.
 
 * **2026-11-09** - D7 expiry refined: expiry is **optional but strongly
   recommended**, an on/off toggle at mint defaulting to 90 days, with a UI
@@ -521,6 +553,10 @@ Record decisions here as they are made, newest first.
 ## Progress log
 
 Newest first.
+
+* **2026-11-09** - Decided D13: tokens authorize the passkey-required routes
+  (`apps switch`, quorum bundles). Updated the CLI survey and server-work list
+  accordingly.
 
 * **2026-11-09** - Completed the D6 CLI survey (section added), then corrected
   it: the main server work is the pervasive token-principal generalization of
