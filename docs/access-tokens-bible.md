@@ -554,6 +554,22 @@ Record decisions here as they are made, newest first.
 
 Newest first.
 
+* **2026-11-09** - Implementation started. Landed: migration
+  `064_organization_access_tokens.sql` (tokens + immutable token-role join);
+  gateway bearer validation (`db::validate_access_token`/`hash_access_token`,
+  `access_token_auth_middleware` as the outermost auth layer,
+  `AuthMethod::Token`, token identity headers on the proxy); and the owner-only
+  management API (`GET/POST /organizations/{id}/access-tokens`,
+  `GET/DELETE .../access-tokens/{token_id}`). `api` and `gateway` compile.
+
+  Remaining (not yet implemented): (a) the API principal generalization so the
+  API accepts `X-Caution-Token-ID`/`X-Caution-Organization-ID` instead of
+  requiring a user id (`AuthContext`, `parse_auth_method`, `check_org_access`,
+  `rbac_middleware`, `get_user_primary_org`); until then a token request gets a
+  clean 401 at the API (`MissingUserId`). (b) `GET /access-tokens/me`. (c) D13
+  handler support on `switch`/quorum routes. (d) CLI token path. (e) frontend.
+  (f) tests.
+
 * **2026-11-09** - Decided D13: tokens authorize the passkey-required routes
   (`apps switch`, quorum bundles). Updated the CLI survey and server-work list
   accordingly.
