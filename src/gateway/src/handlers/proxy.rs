@@ -10,7 +10,9 @@ use axum::{
 use std::net::SocketAddr;
 
 use crate::request_id::RequestId;
-use crate::types::{AppState, AuthMethod, AuthenticatedAccessToken, AuthenticatedUserId, VerifiedSignedRequestId};
+use crate::types::{
+    AppState, AuthMethod, AuthenticatedAccessToken, AuthenticatedUserId, VerifiedSignedRequestId,
+};
 
 const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB
 

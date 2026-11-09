@@ -1134,12 +1134,11 @@ pub async fn validate_access_token(
         return Ok(None);
     }
 
-    if let Err(e) = sqlx::query(
-        "UPDATE organization_access_tokens SET last_used_at = NOW() WHERE id = $1",
-    )
-    .bind(token_id)
-    .execute(pool)
-    .await
+    if let Err(e) =
+        sqlx::query("UPDATE organization_access_tokens SET last_used_at = NOW() WHERE id = $1")
+            .bind(token_id)
+            .execute(pool)
+            .await
     {
         tracing::warn!("Failed to update last_used_at for access token: {}", e);
     }

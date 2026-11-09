@@ -18,7 +18,9 @@ use uuid::Uuid;
 use webauthn_rs::prelude::*;
 
 use crate::db;
-use crate::types::{AppState, AuthMethod, AuthenticatedAccessToken, AuthenticatedUserId, VerifiedSignedRequestId};
+use crate::types::{
+    AppState, AuthMethod, AuthenticatedAccessToken, AuthenticatedUserId, VerifiedSignedRequestId,
+};
 
 const SSH_SIGNING_NAMESPACE: &str = "caution-api";
 const SSH_SIGNATURE_WINDOW_SECS: i64 = 300;

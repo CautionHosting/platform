@@ -27,6 +27,7 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 use uuid::Uuid;
 
+mod access_tokens;
 mod app_deployments;
 mod billing;
 mod builder;
@@ -5994,6 +5995,16 @@ async fn main() -> Result<(), MainError> {
         .route(
             "/organizations/{id}/members/{user_id}/roles/{role_id}",
             delete(rbac::handlers::detach_role),
+        )
+        .route(
+            "/organizations/{id}/access-tokens",
+            get(access_tokens::handlers::list_access_tokens)
+                .post(access_tokens::handlers::create_access_token),
+        )
+        .route(
+            "/organizations/{id}/access-tokens/{token_id}",
+            get(access_tokens::handlers::get_access_token)
+                .delete(access_tokens::handlers::delete_access_token),
         )
         .route("/routes", get(rbac::inventory::list_routes))
         .route("/resources", post(resources::create_resource))
