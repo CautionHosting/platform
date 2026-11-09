@@ -214,6 +214,29 @@ pub(crate) enum PreparePgpPublicKeyForUploadError {
     },
 }
 
+/// Validate `--vpc-id` early so a typo fails before the image pull and
+/// container run instead of inside the provisioner.
+fn parse_vpc_id(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if !trimmed.starts_with("vpc-") {
+        return Err(format!(
+            "invalid VPC ID `{value}`: AWS VPC IDs start with `vpc-`"
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Validate `--subnet-id` entries the same way as `--vpc-id`.
+fn parse_subnet_id(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if !trimmed.starts_with("subnet-") {
+        return Err(format!(
+            "invalid subnet ID `{value}`: AWS subnet IDs start with `subnet-`"
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
 fn prepare_pgp_public_key_for_upload(
     public_key: &str,
 ) -> Result<(String, String), PreparePgpPublicKeyForUploadError> {
@@ -463,13 +486,17 @@ enum Commands {
         #[arg(
             long,
             requires = "bring_your_own_cloud",
+            conflicts_with = "config",
+            value_parser = parse_vpc_id,
             help = "Existing AWS VPC ID to deploy into instead of creating a dedicated VPC"
         )]
         vpc_id: Option<String>,
         #[arg(
             long,
             requires = "vpc_id",
+            conflicts_with = "config",
             value_delimiter = ',',
+            value_parser = parse_subnet_id,
             help = "Comma-separated subnet IDs to use from --vpc-id (default: all subnets in the VPC)"
         )]
         subnet_ids: Option<Vec<String>>,
@@ -3822,11 +3849,12 @@ pub async fn run() -> Result<(), RunError> {
                 bring_your_own_cloud,
                 name,
                 region,
-                local,
-                vpc_id,
-                subnet_ids,
+                byoc::ByocInitOptions {
+                    local,
+                    vpc: byoc::VpcSelection { vpc_id, subnet_ids },
+                    yes,
+                },
                 config,
-                yes,
             )
             .await
             .with_context(Ctx::command_dispatch())?;
