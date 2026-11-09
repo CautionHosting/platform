@@ -503,6 +503,50 @@ This needs `organization_access_tokens` to carry a `UNIQUE (organization_id, id)
 * Naming: "access token" vs "API token" vs "service account" in user-facing
   copy; the route/table names above follow "access token".
 
+## D14 (open). Principals table for actor attribution
+
+Proposed (by the user): point actor columns at a `principals` table that relays
+to either a user or a token, so both humans and tokens have a first-class "who
+did this". This is the one structural step left; it unblocks the `NOT NULL` user
+FKs on deploy (`eif_builds.user_id`, `fully_managed_capacity.user_id`) and switch
+(`signed_request_audit.user_id`).
+
+Shape:
+
+```sql
+CREATE TABLE principals (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    kind TEXT NOT NULL CHECK (kind IN ('user','token')),
+    user_id  UUID REFERENCES users(id) ON DELETE SET NULL,
+    token_id UUID REFERENCES organization_access_tokens(id) ON DELETE SET NULL,
+    label TEXT NOT NULL,               -- denormalized actor label captured at creation
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK ((user_id IS NOT NULL) <> (token_id IS NOT NULL))
+);
+```
+
+Two decisions gate implementation; both are consequential, so they are left to
+the user:
+
+1. **Backfill vs id-preserving.** (a) create a principal per user and rewrite
+   every existing actor value, or (b) make `principals.id` equal `users.id` for
+   user principals and the token id for token principals, insert a guard row per
+   user, and change only the FK targets (no data rewrite). Recommendation: (b),
+   as it is far less invasive; the `kind`/nullable columns disambiguate, and a
+   user id colliding with a token id is astronomically unlikely.
+2. **Token tombstone.** Tokens are hard-deleted (D7). Recommendation: keep the
+   principal row and its denormalized `label` so attribution outlives the token;
+   `token_id` set NULL on delete (or stored as a plain UUID with no FK).
+
+Scope: only actor columns (`compute_resources.created_by`,
+`cloud_credentials.created_by`, `quorum_bundles`/`secrets_bundles.created_by`,
+`app_deployments.pushed_by`, `deployment_events` actor,
+`rbac_member_roles.granted_by`, `credit_codes.redeemed_by`,
+`organization_access_tokens.created_by`, `signed_request_audit`, `eif_builds`,
+`fully_managed_capacity`). Do not convert identity/ownership FKs
+(`organization_members`, sessions, keys, subscriptions/legal/capacity payer
+columns).
+
 ## Decision log
 
 Record decisions here as they are made, newest first.
