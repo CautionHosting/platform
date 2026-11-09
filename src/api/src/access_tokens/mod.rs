@@ -7,3 +7,6 @@
 //! `resource_routes` group; the gateway authenticates the tokens themselves.
 
 pub(crate) mod handlers;
+
+#[cfg(test)]
+mod db_tests;

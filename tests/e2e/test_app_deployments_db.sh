@@ -46,6 +46,10 @@ cargo test -p api organizations::db_tests --locked \
 AWS_ACCOUNT_ID=900896541515 \
     cargo test -p api provider_account_db_tests --locked \
     -- --ignored --test-threads=1 --nocapture
+# The organization access token schema's constraints (unique hash, same-org role
+# FKs, cascade) must hold on the migrated database.
+cargo test -p api access_tokens::db_tests --locked \
+    -- --ignored --test-threads=1 --nocapture
 # The gateway creates users (and their organization) at signup; these use sqlx::test to build
 # disposable databases, so DATABASE_URL points at any database whose role can create databases
 # (the container's default `postgres` database).
