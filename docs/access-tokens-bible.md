@@ -114,8 +114,8 @@ Defaults we will assume unless a decision below changes them.
 
 ## Significant decisions
 
-Each needs a call before implementation. D1 and D2 (including D2a/D2b) are
-settled; the rest carry a recommendation and remain open.
+Each needs a call before implementation. D1-D4 are settled; the rest carry a
+recommendation and remain open.
 
 ### D1. Token principal: user-bound vs org-owned - DECIDED (org-owned)
 
@@ -176,33 +176,37 @@ privilege escalation. If minting is not owner-only, the rule that permits
 `POST /organizations/{id}/access-tokens` effectively grants the ability to hold
 any role, and must be treated and labelled as such.
 
-### D3. Where tokens are validated
+### D3. Where tokens are validated - DECIDED (gateway)
 
-* **A. Gateway (recommended).** The gateway looks up `sha256(bearer)`, checks
-  expiry, and forwards a token principal over the internal secret. Preserves the
-  invariant that the API is never internet-facing for credential material and
-  keeps one auth front door.
-* **B. API.** Token validation in `src/api/src/middleware.rs`. Cheaper
-  plumbing (no gateway change; `parse_auth_method` already forwards
-  `auth_method`), but it makes the API directly exposed to bearer credentials
-  and splits auth authority across two services.
+Decided 2026-11-09: **the gateway validates tokens.** The gateway looks up
+`sha256(bearer)`, checks expiry and revocation, and forwards a token principal to
+the API over the internal secret. The API never receives or validates bearer
+material.
 
-**Recommendation: A.** Consistency with passkey/session/SSH outweighs the extra
-gateway code. B is a real fallback if gateway work is gated.
+* **A. Gateway. CHOSEN.** Preserves the invariant that the API is not
+  internet-facing for credential material, and keeps one auth front door.
+* **B. API. REJECTED.** Token validation in `src/api/src/middleware.rs` would
+  make the API directly exposed to bearer credentials and split auth authority
+  across two services.
 
-### D4. Token format and storage
+Consequences: the gateway gains a bearer-token auth path alongside
+passkey/session/SSH (`src/gateway/src/auth_middleware.rs`), and the token lookup
+runs on the gateway's database path (`src/gateway/src/db.rs`, next to
+`validate_auth_session`). The API side is D5.
 
-Opaque-hashed vs JWT/stateless.
+### D4. Token format and storage - DECIDED (opaque, hash-at-rest)
 
-* **A. Opaque, hash-at-rest (recommended).** Instant revocation, no signing-key
+Decided 2026-11-09: tokens are **opaque and hashed at rest**. A 256-bit random
+value, base64url, prefixed `caut_oat_`; only `sha256(plaintext)` is stored.
+
+* **A. Opaque, hash-at-rest. CHOSEN.** Instant revocation, no signing-key
   management or rotation, matches sessions and reset tokens.
-* **B. JWT.** Stateless validation, no per-request DB read, but revocation needs
-  a denylist anyway and key rotation becomes a project.
+* **B. JWT. REJECTED.** Stateless validation saves one indexed lookup, but
+  revocation needs a denylist anyway and key rotation becomes a project.
 
-**Recommendation: A.** Tokens are long-lived and revocation matters more than
-saving one indexed lookup. `sha256` is sufficient for a 256-bit random value (no
-slow KDF needed; there is nothing to brute-force). A public, non-secret token-id
-prefix is optional for UI/admin lookup and can be added later.
+`sha256` is sufficient for a 256-bit random value (nothing to brute-force, so no
+slow KDF). A public, non-secret token-id prefix for UI/admin lookup is optional
+and can be added later.
 
 ### D5. Principal propagation across the trust boundary
 
@@ -344,9 +348,10 @@ This needs `organization_access_tokens` to carry a `UNIQUE (organization_id, id)
 
 ## Open questions / blockers
 
-* D1, D2, D2a, and D2b are settled (org-owned principal; RBAC roles chosen at
-  mint, association immutable, roles themselves live, no subset requirement). D5
-  is the next keystone; D8 (mint gate) is the escalation control and follows.
+* D1-D4 are settled (org-owned principal; RBAC roles chosen at mint,
+  association immutable, roles themselves live, no subset requirement; gateway
+  validation; opaque hash-at-rest). D5 is the next keystone; D8 (mint gate) is
+  the escalation control and follows.
 * Does any existing CLI flow assume user auth in a way that blocks token use
   (e.g. `/users/me`, quorum approval, passkey-signed deploys)? Not yet surveyed.
 * Whether the RBAC editor UI is the right place to manage token roles, or
@@ -357,6 +362,10 @@ This needs `organization_access_tokens` to carry a `UNIQUE (organization_id, id)
 ## Decision log
 
 Record decisions here as they are made, newest first.
+
+* **2026-11-09** - D3 and D4 confirmed. Tokens are validated at the **gateway**
+  (not the API), and are **opaque, hash-at-rest** (`sha256`, `caut_oat_` prefix),
+  not JWTs.
 
 * **2026-11-09** - D2a and D2b clarified. Immutability applies only to the
   token-to-role **association**; a role's rules can be edited after and the
@@ -376,6 +385,9 @@ Record decisions here as they are made, newest first.
 ## Progress log
 
 Newest first.
+
+* **2026-11-09** - Confirmed D3 (gateway validation) and D4 (opaque,
+  hash-at-rest). Recorded consequences for the gateway auth path and lookup.
 
 * **2026-11-09** - Resolved D2a (association immutable only; roles stay live) and
   D2b (no creator-subset requirement). Reworked D8 to match.
