@@ -112,26 +112,30 @@ Defaults we will assume unless a decision below changes them.
 
 ## Significant decisions
 
-Each needs a call before implementation. Recommendation given; **all open**.
+Each needs a call before implementation. D1 is settled; the rest carry a
+recommendation and remain open.
 
-### D1. Token principal: user-bound vs org-owned
+### D1. Token principal: user-bound vs org-owned - DECIDED (org-owned)
 
-What the token authenticates *as*.
+What the token authenticates *as*. Decided 2026-11-09: **org-owned**, not
+user-bound. A token authenticates as the organization that owns it; it is not a
+credential for a person.
 
-* **A. User-bound (PAT).** Gateway resolves the token to an existing `user_id`;
-  everything downstream is unchanged. Cheapest. But it is not
-  "organization-based": the token lives and dies with a person, inherits their
-  ownership, and a departing admin's token is a standing backdoor.
-* **B. Org-owned service principal (recommended).** Token resolves to
+* **A. User-bound (PAT). REJECTED.** Gateway would resolve the token to an
+  existing `user_id`; everything downstream unchanged. Cheapest, but not
+  "organization-based": the token lives and dies with a person and would inherit
+  their ownership.
+* **B. Org-owned service principal. CHOSEN.** Token resolves to
   `(organization_id, token_id)`. The API gains a `Principal::Token` as an
-  alternative to `Principal::User`. Matches "organization-based"; survives the
-  creator leaving; auditable as a machine identity.
-* **C. Org-owned + implicit owner.** Token acts as org owner. Rejected: an
-  org owner credential that never re-authenticates is a large blast radius.
+  alternative to `Principal::User`; it survives the creator leaving and is
+  auditable as a machine identity.
+* **C. Org-owned + implicit owner. REJECTED.** Token acts as org owner. An org
+  owner credential that never re-authenticates is too large a blast radius, and
+  it would bypass the RBAC model entirely.
 
-**Recommendation: B.** It is the only option that is actually org-based, and it
-composes with the existing per-org RBAC roles instead of inventing a parallel
-permission system. Cost: the API must accept a non-user principal (see D5).
+Consequences: the token is bound to exactly one organization; the creator is
+attribution only, not the authority (see D10, D11); the API must accept a
+non-user principal (see D5); no owner bypass (see D12).
 
 ### D2. Authorization source for a token
 
@@ -264,7 +268,7 @@ members have no UI).
 ### D11. Org/creator deletion semantics
 
 * Token is deleted when its organization is deleted (FK cascade).
-* Token **survives** its creator's removal from the org (org-owned in D1-B), but
+* Token **survives** its creator's removal from the org (org-owned per D1), but
   operators should be able to see "created by <user no longer a member>".
   Recommendation: `created_by REFERENCES users(id) ON DELETE SET NULL`, matching
   `rbac_member_roles.granted_by`.
@@ -278,7 +282,7 @@ RBAC editor.
 
 ## Data model sketch (not final)
 
-Illustrative only; blocked on D1/D2.
+Illustrative only; blocked on D2.
 
 ```sql
 CREATE TABLE organization_access_tokens (
@@ -297,11 +301,12 @@ CREATE TABLE organization_access_tokens (
 ```
 
 Role assignment and gateway/API principal plumbing are intentionally omitted
-until D1/D2/D5 are settled.
+until D2/D5 are settled.
 
 ## Open questions / blockers
 
-* D1 principal model is the keystone; D2, D5, D8, D12 all depend on it.
+* D1 is settled (org-owned principal). D2 and D5 are the next keystones; D8 and
+  D12 follow from them.
 * Does any existing CLI flow assume user auth in a way that blocks token use
   (e.g. `/users/me`, quorum approval, passkey-signed deploys)? Not yet surveyed.
 * Whether the RBAC editor UI is the right place to manage token roles, or
@@ -313,7 +318,9 @@ until D1/D2/D5 are settled.
 
 Record decisions here as they are made, newest first.
 
-* (none yet)
+* **2026-11-09** - Tokens are **org-scoped, not user-scoped** (D1). A token
+  authenticates as a service principal of its organization; the creator is
+  attribution only. Rejects user-bound PATs and any implicit owner power.
 
 ## Progress log
 
@@ -321,3 +328,5 @@ Newest first.
 
 * **2026-11-09** - Created this document: auth/RBAC current-state inventory,
   starting parameters, and the open decisions above. No implementation.
+* **2026-11-09** - Decided D1: org-owned service principal (org-scoped, not
+  user-scoped). Dependent sections updated.
