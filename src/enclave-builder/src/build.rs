@@ -127,8 +127,8 @@ pub fn resolve_tool_commits() -> ToolCommits {
             repo: STEVE_REPO,
         },
         caddy: ToolSource {
-            repo: CADDY_REPO,
             commit: resolve_caddy_commit(),
+            repo: CADDY_REPO,
         },
         locksmith: ToolSource {
             commit: resolve_locksmith_commit(),
@@ -394,10 +394,6 @@ pub async fn stage_eif_components(
         .as_ref()
         .and_then(|m| m.steve_commit.clone())
         .unwrap_or_else(resolve_steve_commit);
-    // Caddy is only built from source when the manifest records the component:
-    // TLS manifests from before the component existed pin the prebuilt
-    // stagex/user-caddy image, and verifying them must keep using it.
-    let caddy = manifest.as_ref().is_some_and(|m| m.caddy_commit.is_some());
     let caddy_commit = manifest
         .as_ref()
         .and_then(|m| m.caddy_commit.clone())
@@ -423,7 +419,7 @@ pub async fn stage_eif_components(
         }
         manifest.steve_key_exchange =
             (e2e && e2e_key_exchange != DEFAULT_KEY_EXCHANGE).then(|| e2e_key_exchange.to_string());
-        if caddy {
+        if e2e_mode == "tls" {
             manifest.caddy_commit.get_or_insert(caddy_commit.clone());
         }
         if locksmith {
@@ -494,7 +490,7 @@ pub async fn stage_eif_components(
     let containerfile_content = render_containerfile_template(
         &containerfile_template,
         e2e,
-        e2e_mode == "tls" && caddy,
+        e2e_mode == "tls",
         locksmith,
         egress,
         &bootproof_commit,
@@ -1104,8 +1100,9 @@ pub async fn build_eif_from_filesystems(
             Some(path) => path.to_path_buf(),
             None => resolve_templates_dir().with_context(Ctx::components())?,
         };
-        // Gate on the recorded component, not the mode flag alone: TLS manifests
-        // from before the Caddy component existed pin the prebuilt user-caddy image.
+        // Gate only the component selection on the recorded component: TLS
+        // manifests from before the Caddy component existed pin the prebuilt
+        // user-caddy image, which their (historical) template keeps building in.
         let caddy = selected_manifest.caddy_commit.is_some();
         crate::component_stage::configure(
             &stage_dir,

@@ -4653,6 +4653,7 @@ async fn deploy_logic(
                             e2e,
                             config_file.has_vault_env(),
                             egress,
+                            e2e_mode_value == "tls",
                         ),
                     )
                     .await

@@ -213,13 +213,30 @@ fn validate_startup_pins(
         Some(&tools.locksmith.commit),
     )
     .with_context(Ctx::new("validate active source pins"))?;
-    for (component, commit) in [
-        (Component::Init, &tools.enclaveos.commit),
-        (Component::Bootproof, &tools.bootproof.commit),
-        (Component::TapFramer, &framework),
-        (Component::Steve, &tools.steve.commit),
-        (Component::Locksmith, &tools.locksmith.commit),
-    ] {
+    // Every component present in the loaded set must match the active recipe —
+    // including optional ones like Caddy, or a stale/stangled recipe in the set
+    // would be silently accepted.
+    for component in Component::ALL {
+        let Some(artifact) = set.get(component) else {
+            continue;
+        };
+        let commit = match component {
+            Component::Init => &tools.enclaveos.commit,
+            Component::Bootproof => &tools.bootproof.commit,
+            Component::TapFramer => &framework,
+            Component::Steve => &tools.steve.commit,
+            Component::Caddy => &tools.caddy.commit,
+            Component::Locksmith => &tools.locksmith.commit,
+            // `Component` is non-exhaustive; sets from newer builders cannot be
+            // validated here without a matching active revision.
+            _ => {
+                return Err(ComponentPinsError::RecipeMismatch {
+                    component: component.as_str().to_owned(),
+                    location: std::panic::Location::caller(),
+                })
+                .with_context(Ctx::new("validate active recipes"));
+            }
+        };
         let recipe = enclave_builder::components::recipe::render_component(
             include_str!("../../enclave-builder/templates/Containerfile.eif"),
             component,
@@ -228,10 +245,7 @@ fn validate_startup_pins(
         )
         .with_context(Ctx::new("render active component recipe"))?;
         let expected = enclave_builder::components::sha256(recipe.as_bytes());
-        if set
-            .get(component)
-            .is_none_or(|artifact| artifact.spec().recipe_sha256() != expected)
-        {
+        if artifact.spec().recipe_sha256() != expected {
             return Err(ComponentPinsError::RecipeMismatch {
                 component: component.as_str().to_owned(),
                 location: std::panic::Location::caller(),
@@ -320,11 +334,17 @@ impl BuildComponentArtifacts {
 }
 
 #[tracing::instrument(skip_all)]
-pub(crate) fn required_components(steve: bool, locksmith: bool, egress: bool) -> Vec<Component> {
+pub(crate) fn required_components(
+    steve: bool,
+    locksmith: bool,
+    egress: bool,
+    tls: bool,
+) -> Vec<Component> {
     Component::ALL
         .into_iter()
         .filter(|component| match component {
             Component::Steve => steve,
+            Component::Caddy => tls,
             Component::Locksmith => locksmith,
             Component::TapFramer => egress,
             _ => true,
@@ -716,7 +736,8 @@ mod tests {
         let (set, _) = fixture();
         for steve in [false, true] {
             for locksmith in [false, true] {
-                let required = required_components(steve, locksmith, true);
+                let required = required_components(steve, locksmith, true, true);
+                assert!(required.contains(&Component::Caddy));
                 assert!(Component::REQUIRED.iter().all(|c| required.contains(c)));
                 assert_eq!(required.contains(&Component::Steve), steve);
                 assert_eq!(required.contains(&Component::Locksmith), locksmith);
@@ -726,7 +747,7 @@ mod tests {
                     &"a".repeat(40),
                     &"a".repeat(40),
                     steve.then_some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-                    steve.then_some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+                    steve.then_some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
                     locksmith.then_some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
                 )
                 .unwrap();
@@ -738,7 +759,8 @@ mod tests {
     fn no_egress_component_selection_omits_only_the_host_guest_tunnel() {
         for steve in [false, true] {
             for locksmith in [false, true] {
-                let required = required_components(steve, locksmith, false);
+                let required = required_components(steve, locksmith, false, false);
+                assert!(!required.contains(&Component::Caddy));
                 assert!(required.contains(&Component::Init));
                 assert!(required.contains(&Component::Bootproof));
                 assert!(!required.contains(&Component::TapFramer));
@@ -857,7 +879,7 @@ mod tests {
                 .stage_for_builder(
                     client,
                     "platform-bucket".into(),
-                    &required_components(false, false, egress),
+                    &required_components(false, false, egress, false),
                 )
                 .await;
             server.abort();
