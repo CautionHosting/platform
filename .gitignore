@@ -27,3 +27,5 @@ patch
 .worktrees/
 .caution
 .claude
+
+__pycache__/
