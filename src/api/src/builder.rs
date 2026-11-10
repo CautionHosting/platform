@@ -1560,6 +1560,8 @@ fn generate_builder_userdata(
             &enclave_builder::build::resolve_bootproof_commit(),
             &request.framework_commit,
             request.e2e.then_some(request.steve_commit.as_str()),
+            (request.e2e_mode == "tls")
+                .then_some(enclave_builder::build::resolve_caddy_commit().as_str()),
             request
                 .locksmith
                 .then_some(enclave_builder::build::resolve_locksmith_commit().as_str()),
@@ -1594,6 +1596,7 @@ fn generate_builder_userdata(
     // STEVE and Platform are resolved before the cache lookup and carried on
     // BuildRequest, so the cache key, manifest, and EIF build use the same commits.
     let bootproof_commit = enclave_builder::build::resolve_bootproof_commit();
+    let caddy_commit = enclave_builder::build::resolve_caddy_commit();
     let locksmith_commit = enclave_builder::build::resolve_locksmith_commit();
 
     let e2e_flag = if request.e2e { "true" } else { "false" };
@@ -1652,6 +1655,9 @@ fn generate_builder_userdata(
     if request.locksmith {
         manifest.locksmith = true;
         manifest.locksmith_commit = Some(locksmith_commit);
+    }
+    if request.e2e_mode == "tls" {
+        manifest.caddy_commit = Some(caddy_commit);
     }
     manifest.tls_await_app_address = request.tls_await_app_address;
     let manifest_json =

@@ -67,6 +67,9 @@ struct PublicationArguments {
     bootproof_commit: String,
     #[arg(long, default_value_t = build::resolve_steve_commit())]
     steve_commit: String,
+    /// Exact upstream Caddy pin for TLS component sets.
+    #[arg(long, default_value_t = build::resolve_caddy_commit())]
+    caddy_commit: String,
     #[arg(long, default_value_t = build::resolve_locksmith_commit())]
     locksmith_commit: String,
     /// Atomic local manifest write after all uploads and verification succeed.
@@ -147,6 +150,7 @@ async fn prepare(args: Arguments) -> Result<(), PrepareError> {
         &args.enclave_commit,
         &args.bootproof_commit,
         &args.steve_commit,
+        &args.caddy_commit,
         &args.locksmith_commit,
     ] {
         validate_commit(commit).with_context(Ctx::operation("validate selected revision"))?;
@@ -167,6 +171,7 @@ async fn prepare(args: Arguments) -> Result<(), PrepareError> {
             "containerfiles/Containerfile.init",
             "containerfiles/Containerfile.bootproof",
             "containerfiles/Containerfile.steve",
+            "containerfiles/Containerfile.caddy",
             "containerfiles/Containerfile.locksmith",
             "containerfiles/Containerfile.tap-framer",
             TAP_PATH,
@@ -236,6 +241,7 @@ async fn prepare(args: Arguments) -> Result<(), PrepareError> {
         (Component::Init, &args.enclave_commit),
         (Component::Bootproof, &args.bootproof_commit),
         (Component::Steve, &args.steve_commit),
+        (Component::Caddy, &args.caddy_commit),
         (Component::Locksmith, &args.locksmith_commit),
         (Component::TapFramer, &args.framework_commit),
     ] {

@@ -4519,6 +4519,8 @@ async fn deploy_logic(
                 &enclave_builder::build::resolve_bootproof_commit(),
                 &framework_commit,
                 e2e.then_some(steve_commit.as_str()),
+                (e2e_mode_value == "tls")
+                    .then_some(enclave_builder::build::resolve_caddy_commit().as_str()),
                 config_file
                     .has_vault_env()
                     .then_some(enclave_builder::build::resolve_locksmith_commit().as_str()),

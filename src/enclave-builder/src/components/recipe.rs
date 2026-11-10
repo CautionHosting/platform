@@ -811,7 +811,16 @@ mod tests {
 
     #[test]
     fn extracts_every_real_component_and_exact_export_paths() {
-        for component in Component::ALL {
+        // The frozen template predates the Caddy component: TLS history pinned
+        // the prebuilt user-caddy image, so Caddy has no inline builder here.
+        let inline_components = [
+            Component::Init,
+            Component::Bootproof,
+            Component::Steve,
+            Component::Locksmith,
+            Component::TapFramer,
+        ];
+        for component in inline_components {
             let rendered = render_component(TEMPLATE, component, COMMIT, Some(TAP_RECIPE)).unwrap();
             let parsed = parse_stages(&rendered).unwrap();
             assert!(parsed.iter().all(|s| s.base.contains("@sha256:")

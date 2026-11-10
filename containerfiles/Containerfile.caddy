@@ -32,9 +32,9 @@ ENV GOTOOLCHAIN=local
 ARG CADDY_COMMIT
 
 WORKDIR /build-caddy
-# A failed clone leaves the directory empty, so the mirror can retry in place.
-RUN (git clone https://github.com/caddyserver/caddy.git . || \
-     git clone https://gitmirror.hyperreal.coffee/caddy.git .) && \
+RUN git init -q . && \
+    git remote add origin https://github.com/caddyserver/caddy.git && \
+    git fetch -q origin "$CADDY_COMMIT" && \
     git checkout "$CADDY_COMMIT"
 
 # The patch is part of the fingerprinted recipe (the standalone-source contract
@@ -51,22 +51,24 @@ RUN cat > /build-caddy/h2c.patch <<'PATCH'
 # per-stream buffer at 256 KiB; the per-connection buffer keeps its default
 # so one stalled stream cannot starve other clients sharing the upstream
 # connection.
+#
+# Tracking upstream: https://github.com/caddyserver/caddy/issues/7632
+diff --git a/modules/caddyhttp/reverseproxy/httptransport.go b/modules/caddyhttp/reverseproxy/httptransport.go
+index 78544257..44414440 100644
 --- a/modules/caddyhttp/reverseproxy/httptransport.go
 +++ b/modules/caddyhttp/reverseproxy/httptransport.go
-@@ -535,9 +535,13 @@
+@@ -533,6 +533,10 @@ func (h *HTTPTransport) NewTransport(caddyCtx caddy.Context) (*http.Transport, e
+ 
  	// if h2/c is enabled, configure it explicitly
  	if slices.Contains(h.Versions, "2") || slices.Contains(h.Versions, "h2c") {
 +		rt.HTTP2 = &http.HTTP2Config{
-+			// Bound per-stream upstream response buffering (see file header).
++			// Bound per-stream upstream response buffering (256 KiB; see the
++			// patch header in containerfiles/Containerfile.caddy for rationale).
 +			MaxReceiveBufferPerStream: 256 << 10,
 +		}
  		// TODO: Migrate to http.Transport.Protocols once transport behaviour is covered.
  		//nolint:staticcheck
  		if err := http2.ConfigureTransport(rt); err != nil {
- 			return nil, err
- 		}
-
- 		// DisableCompression from h2 is configured by http2.ConfigureTransport
 PATCH
 RUN patch -p1 < h2c.patch && rm h2c.patch
 

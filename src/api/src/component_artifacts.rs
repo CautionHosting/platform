@@ -150,6 +150,7 @@ pub(crate) fn validate_source_pins(
     bootproof: &str,
     framework: &str,
     steve: Option<&str>,
+    caddy: Option<&str>,
     locksmith: Option<&str>,
 ) -> Result<(), ComponentPinsError> {
     use ComponentPinsErrorCtx as Ctx;
@@ -159,6 +160,7 @@ pub(crate) fn validate_source_pins(
         (Component::Bootproof, Some(bootproof)),
         (Component::TapFramer, Some(framework)),
         (Component::Steve, steve),
+        (Component::Caddy, caddy),
         (Component::Locksmith, locksmith),
     ] {
         if let Some(expected) = expected
@@ -206,6 +208,8 @@ fn validate_startup_pins(
         &tools.bootproof.commit,
         &framework,
         Some(&tools.steve.commit),
+        set.get(Component::Caddy)
+            .map(|_| tools.caddy.commit.as_str()),
         Some(&tools.locksmith.commit),
     )
     .with_context(Ctx::new("validate active source pins"))?;
@@ -475,6 +479,10 @@ mod tests {
                 commit: "a".repeat(40),
                 repo: enclave_builder::build::STEVE_REPO,
             },
+            caddy: ToolSource {
+                commit: "a".repeat(40),
+                repo: enclave_builder::build::CADDY_REPO,
+            },
             locksmith: ToolSource {
                 commit: "a".repeat(40),
                 repo: enclave_builder::build::LOCKSMITH_REPO,
@@ -576,6 +584,7 @@ mod tests {
                 &tools.bootproof.commit,
                 &framework,
                 Some(&tools.steve.commit),
+                Some(&tools.caddy.commit),
                 Some(&tools.locksmith.commit),
             )
             .unwrap();
@@ -717,6 +726,7 @@ mod tests {
                     &"a".repeat(40),
                     &"a".repeat(40),
                     steve.then_some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                    steve.then_some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
                     locksmith.then_some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
                 )
                 .unwrap();
