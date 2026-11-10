@@ -208,8 +208,10 @@ fn validate_startup_pins(
         &tools.bootproof.commit,
         &framework,
         Some(&tools.steve.commit),
-        set.get(Component::Caddy)
-            .map(|_| tools.caddy.commit.as_str()),
+        // Required, not conditional: if the API upgraded before the set was
+        // re-prepared, TLS deploys would fail at runtime against the older
+        // set. Refusing to start enforces publish-the-set-first ordering.
+        Some(&tools.caddy.commit),
         Some(&tools.locksmith.commit),
     )
     .with_context(Ctx::new("validate active source pins"))?;
@@ -747,7 +749,7 @@ mod tests {
                     &"a".repeat(40),
                     &"a".repeat(40),
                     steve.then_some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-                    steve.then_some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+                    Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
                     locksmith.then_some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
                 )
                 .unwrap();

@@ -23,7 +23,7 @@ assert SPEC is not None and SPEC.loader is not None
 PREP = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PREP)
 HEAD, IMAGE = 'a' * 40, 'sha256:' + 'b' * 64
-PINS = dict(zip(('enclaveos', 'bootproof', 'steve', 'locksmith'), (c * 40 for c in '1234')))
+PINS = dict(zip(('enclaveos', 'bootproof', 'steve', 'caddy', 'locksmith'), (c * 40 for c in '12345')))
 ACCEPTED, PUBLISHED = b'{"fixture":"independently accepted"}\n', b'{"fixture":"published"}\n'
 OPERATOR_VALUES = {'AWS_ACCESS_KEY_ID': 'reader', 'AWS_SECRET_ACCESS_KEY': 'reader-secret',
                    'EIF_S3_BUCKET': 'fixture-bucket', 'STEVE_COMMIT': '9' * 40}

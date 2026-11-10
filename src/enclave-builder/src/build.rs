@@ -429,10 +429,11 @@ pub async fn stage_eif_components(
         // existed pin the prebuilt stagex/user-caddy image, and rewriting
         // their manifests would break PCR verification.
         let caddy_selected = e2e_mode == "tls"
-            && templates_dir.join("Containerfile.eif").exists()
             && fs::read_to_string(templates_dir.join("Containerfile.eif"))
                 .await
-                .is_ok_and(|content| content.contains("{{CADDY_CONTAINERFILE}}"));
+                .is_ok_and(|content| {
+                    content.contains(crate::components::Component::Caddy.containerfile_marker())
+                });
         if caddy_selected {
             manifest.caddy_commit.get_or_insert(caddy_commit.clone());
         }

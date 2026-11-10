@@ -16,7 +16,7 @@ import subprocess
 import tempfile
 import uuid
 
-PINS = ('enclaveos', 'bootproof', 'steve', 'locksmith')
+PINS = ('enclaveos', 'bootproof', 'steve', 'caddy', 'locksmith')
 PUBLISHER_ENV = frozenset((
     'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN',
     'AWS_REGION', 'AWS_DEFAULT_REGION', 'AWS_ACCOUNT_ID',
@@ -157,7 +157,8 @@ def prepare(image, network, work, selection_file=None):
             '--bucket', bucket, '--framework-source', source, '--framework-commit', head,
             '--enclave-source', enclave, '--enclave-commit', inputs['enclaveos']['commit'],
             '--bootproof-commit', inputs['bootproof']['commit'],
-            '--steve-commit', inputs['steve']['commit'], '--locksmith-commit', inputs['locksmith']['commit'],
+            '--steve-commit', inputs['steve']['commit'], '--caddy-commit', inputs['caddy']['commit'],
+            '--locksmith-commit', inputs['locksmith']['commit'],
             '--output-lock', lock, '--build-log-dir', logs, *arguments)
         canonical = lock.read_bytes()
         digest = hashlib.sha256(canonical).hexdigest()
