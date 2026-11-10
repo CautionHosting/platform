@@ -406,6 +406,11 @@ pub async fn stage_eif_components(
     // reproduces it from the attested manifest.
     let tls_await_app_address = manifest.as_ref().is_some_and(|m| m.tls_await_app_address);
 
+    let templates_dir = match templates_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => resolve_templates_dir().with_context(Ctx::resolve_templates())?,
+    };
+
     if let Some(mut manifest) = manifest {
         manifest
             .enclaveos_commit
@@ -419,7 +424,16 @@ pub async fn stage_eif_components(
         }
         manifest.steve_key_exchange =
             (e2e && e2e_key_exchange != DEFAULT_KEY_EXCHANGE).then(|| e2e_key_exchange.to_string());
-        if e2e_mode == "tls" {
+        // Only record the pin when the selected template builds Caddy from
+        // source: templates of TLS deployments built before the component
+        // existed pin the prebuilt stagex/user-caddy image, and rewriting
+        // their manifests would break PCR verification.
+        let caddy_selected = e2e_mode == "tls"
+            && templates_dir.join("Containerfile.eif").exists()
+            && fs::read_to_string(templates_dir.join("Containerfile.eif"))
+                .await
+                .is_ok_and(|content| content.contains("{{CADDY_CONTAINERFILE}}"));
+        if caddy_selected {
             manifest.caddy_commit.get_or_insert(caddy_commit.clone());
         }
         if locksmith {
@@ -440,11 +454,6 @@ pub async fn stage_eif_components(
     }
 
     // Read and render templates
-    let templates_dir = match templates_dir {
-        Some(dir) => dir.to_path_buf(),
-        None => resolve_templates_dir().with_context(Ctx::resolve_templates())?,
-    };
-
     let run_sh_template = templates_dir.join("run.sh.template");
     if !run_sh_template.exists() {
         return Err(StageEifComponentsError::RunShTemplateNotFound {
@@ -2136,6 +2145,77 @@ mod tests {
         let manifest = stage_test_manifest(DEFAULT_KEY_EXCHANGE).await;
 
         assert!(manifest.steve_key_exchange.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_stage_old_tls_manifest_is_not_rewritten_with_caddy_pin() {
+        // A TLS deployment built before the Caddy component existed pins the
+        // prebuilt stagex/user-caddy image in its historical template; staging
+        // it for verification must not inject a caddy_commit, or the manifest
+        // inside the rebuilt enclave changes and PCR verification fails.
+        let root = tempfile::tempdir().unwrap();
+        let user_dir = root.path().join("user");
+        let enclave_dir = root.path().join("enclave");
+        let templates = root.path().join("historical-templates");
+        for directory in [&user_dir, &enclave_dir, &templates] {
+            fs::create_dir_all(&directory).await.unwrap();
+        }
+        // Historical TLS template: CADDY block enabled but no component source.
+        std::fs::write(
+            templates.join("Containerfile.eif"),
+            "# historical TLS template\nFROM scratch AS eif\n",
+        )
+        .unwrap();
+        std::fs::write(
+            templates.join("run.sh.template"),
+            "#!/bin/sh\n# {CADDY\necho caddy\n# }CADDY\n{{USER_CMD}}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            templates.join("caddy-certfp.sh"),
+            "#!/bin/sh\necho historical-certfp\n",
+        )
+        .unwrap();
+
+        let mut manifest = test_manifest();
+        manifest.enclaveos_commit = Some("historical-enclaveos".into());
+        manifest.bootproof_commit = Some("historical-bootproof".into());
+        let expected_manifest = serde_json::to_vec_pretty(&manifest).unwrap();
+
+        let stage = stage_eif_components(
+            &user_dir,
+            &enclave_dir,
+            root.path(),
+            Some("/app/server".to_string()),
+            Some(manifest),
+            &[8080],
+            Some(8080),
+            false,
+            "tls",
+            DEFAULT_KEY_EXCHANGE,
+            false,
+            Some("history.example.com"),
+            "http",
+            false,
+            None,
+            true,
+            Some(&templates),
+        )
+        .await
+        .expect("stage historical TLS build");
+
+        let staged = EnclaveManifest::read_from_file(&stage.join("manifest.json"))
+            .await
+            .unwrap();
+        assert!(
+            staged.caddy_commit.is_none(),
+            "old TLS manifests must not gain a caddy_commit"
+        );
+        // Nothing else in the manifest moved either.
+        assert_eq!(
+            std::fs::read(stage.join("manifest.json")).unwrap(),
+            expected_manifest
+        );
     }
 
     #[tokio::test]

@@ -52,14 +52,15 @@ RUN cat > /build-caddy/h2c.patch <<'PATCH'
 # so one stalled stream cannot starve other clients sharing the upstream
 # connection.
 #
-# Upstream: the HTTP/2 flow-control knob used here is not yet exposed by Caddy
-# (or x/net's http2 transport config); an upstream report/PR is pending. Once
-# one exists, link it here and drop this patch.
+# Upstream: x/net's http transport config exposes this knob
+# (http.HTTP2Config.MaxReceiveBufferPerStream, set below), but Caddy never
+# sets it; an upstream report/PR is pending. Once one exists, link it here
+# and drop this patch.
 diff --git a/modules/caddyhttp/reverseproxy/httptransport.go b/modules/caddyhttp/reverseproxy/httptransport.go
 index 78544257..44414440 100644
 --- a/modules/caddyhttp/reverseproxy/httptransport.go
 +++ b/modules/caddyhttp/reverseproxy/httptransport.go
-@@ -533,6 +533,10 @@ func (h *HTTPTransport) NewTransport(caddyCtx caddy.Context) (*http.Transport, e
+@@ -533,6 +533,11 @@ func (h *HTTPTransport) NewTransport(caddyCtx caddy.Context) (*http.Transport, e
  
  	// if h2/c is enabled, configure it explicitly
  	if slices.Contains(h.Versions, "2") || slices.Contains(h.Versions, "h2c") {
@@ -72,7 +73,8 @@ index 78544257..44414440 100644
  		//nolint:staticcheck
  		if err := http2.ConfigureTransport(rt); err != nil {
 PATCH
-RUN patch -p1 < h2c.patch && rm h2c.patch
+RUN patch -p1 < h2c.patch && rm h2c.patch && \
+    grep -q 'MaxReceiveBufferPerStream: 256 << 10' modules/caddyhttp/reverseproxy/httptransport.go
 
 # xcaddy-less deterministic build: only the standard library is needed.
 # CGO is disabled: the go pallet has no C toolchain and Caddy doesn't need it.
