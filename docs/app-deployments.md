@@ -130,10 +130,19 @@ Set these in `~/.config/caution/.env`, then restart the API (`env.example` lists
   The provisioner, its policy and existing linked accounts are unchanged. Its Auto
   Scaling group and launch template are not used (they stay at zero instances) and
   `caution teardown --byoc` removes them as before.
+- **VPC selection.** By default the provisioner creates a dedicated VPC with subnets
+  across availability zones. `caution init --byoc --vpc-id <vpc-id>` deploys into an
+  existing VPC instead, leaving it untouched by teardown. Add
+  `--subnet-ids <id,id,...>` to restrict the deployment to specific subnets of that
+  VPC (they must belong to `--vpc-id`; when omitted, every subnet in the VPC is a
+  candidate). The flags are exclusive with `--config` and the IDs are validated
+  (`vpc-…`/`subnet-…` prefixes) before the provisioner image is pulled. Teardown only
+  deletes resources carrying the deployment scope tag — an existing VPC survives and
+  can be reused by a later `init`.
 - **Network.** The first push creates only the app Elastic IP there (the app state at
   the usual key). It also picks the first provisioner subnet whose zone offers the
   instance type. Later candidates reuse both. The VPC and instance profile are the
-  provisioner's.
+  provisioner's, or the VPC selected at init when `--vpc-id` was given.
 - **Scope tag.** The delegated policy only terminates, edits and associates resources
   tagged `caution:deployment-id = <provisioner deployment ID>`, so the Elastic IP,
   security groups and instances carry it from creation.
