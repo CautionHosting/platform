@@ -33,7 +33,7 @@ use crate::{
 };
 
 const BYOC_PROVISIONER_IMAGE: &str =
-    "codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest";
+    "git.caution.co/public/caution-managed-on-prem-aws-provisioner:latest";
 const BYOC_STATE_FILE_NAME: &str = "bring-your-own-compute.json";
 // Legacy state file name, kept for backward compatibility so that deployments
 // created before the bring-your-own-cloud -> bring-your-own-compute rename can

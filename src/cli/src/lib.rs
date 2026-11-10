@@ -3155,7 +3155,7 @@ enclave "default" {{
 
         let source_url = self
             .detect_source_url()
-            .unwrap_or_else(|| "git@codeberg.org:user/repo.git".to_string());
+            .unwrap_or_else(|| "git@git.caution.co:public/repo.git".to_string());
 
         let hcl_content = Self::generate_config_hcl(&source_url, byoc);
 
@@ -5333,7 +5333,7 @@ containerfile: Missing.Containerfile\n",
     #[test]
     fn generated_config_hcl_parses_as_valid_configuration_file() {
         for byoc in [false, true] {
-            let hcl = ApiClient::generate_config_hcl("git@codeberg.org:user/repo.git", byoc);
+            let hcl = ApiClient::generate_config_hcl("git@git.caution.co:public/repo.git", byoc);
             let config = ConfigurationFile::from_str(&hcl);
             assert!(
                 config.is_ok(),

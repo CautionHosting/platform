@@ -47,7 +47,7 @@ async fn source_and_prebuilt_use_production_composition() {
             commit: Some(enclave_pin.clone()),
         },
         FrameworkSource::GitArchive {
-            url: format!("https://codeberg.org/caution/platform/archive/{framework_pin}.tar.gz"),
+            url: format!("https://git.caution.co/public/platform/archive/{framework_pin}.tar.gz"),
             commit: Some(framework_pin),
         },
         None,

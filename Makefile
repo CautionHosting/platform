@@ -732,7 +732,7 @@ E2E_LOCK_FILE ?= /tmp/caution-platform-e2e.lock
 # E2E_JOBS accepts 1-6; use 1 for serial diagnosis.
 E2E_JOBS ?= 6
 ONPREM_PROVISIONER_DIR ?= ../bring-your-own-compute-setup
-ONPREM_PROVISIONER_IMAGE ?= codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest
+ONPREM_PROVISIONER_IMAGE ?= git.caution.co/public/caution-managed-on-prem-aws-provisioner:latest
 DESTROY_ALL_SCRIPT := tests/e2e/destroy-all-apps.sh
 TEST_STARTUP_TIMEOUT ?= 60
 
