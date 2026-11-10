@@ -214,6 +214,29 @@ pub(crate) enum PreparePgpPublicKeyForUploadError {
     },
 }
 
+/// Validate `--vpc-id` early so a typo fails before the image pull and
+/// container run instead of inside the provisioner.
+fn parse_vpc_id(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if !trimmed.starts_with("vpc-") {
+        return Err(format!(
+            "invalid VPC ID `{value}`: AWS VPC IDs start with `vpc-`"
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Validate `--subnet-id` entries the same way as `--vpc-id`.
+fn parse_subnet_id(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if !trimmed.starts_with("subnet-") {
+        return Err(format!(
+            "invalid subnet ID `{value}`: AWS subnet IDs start with `subnet-`"
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
 fn prepare_pgp_public_key_for_upload(
     public_key: &str,
 ) -> Result<(String, String), PreparePgpPublicKeyForUploadError> {
@@ -460,6 +483,23 @@ enum Commands {
             help = "Use local provisioner image (skip docker pull)"
         )]
         local: bool,
+        #[arg(
+            long,
+            requires = "bring_your_own_cloud",
+            conflicts_with = "config",
+            value_parser = parse_vpc_id,
+            help = "Existing AWS VPC ID to deploy into instead of creating a dedicated VPC"
+        )]
+        vpc_id: Option<String>,
+        #[arg(
+            long,
+            requires = "vpc_id",
+            conflicts_with = "config",
+            value_delimiter = ',',
+            value_parser = parse_subnet_id,
+            help = "Comma-separated subnet IDs to use from --vpc-id (default: all subnets in the VPC)"
+        )]
+        subnet_ids: Option<Vec<String>>,
         #[arg(
             long,
             requires = "bring_your_own_cloud",
@@ -3115,7 +3155,7 @@ enclave "default" {{
 
         let source_url = self
             .detect_source_url()
-            .unwrap_or_else(|| "git@codeberg.org:user/repo.git".to_string());
+            .unwrap_or_else(|| "git@git.caution.co:public/repo.git".to_string());
 
         let hcl_content = Self::generate_config_hcl(&source_url, byoc);
 
@@ -3793,6 +3833,8 @@ pub async fn run() -> Result<(), RunError> {
             name,
             region,
             local,
+            vpc_id,
+            subnet_ids,
             config,
             yes,
         } => {
@@ -3807,9 +3849,12 @@ pub async fn run() -> Result<(), RunError> {
                 bring_your_own_cloud,
                 name,
                 region,
-                local,
+                byoc::ByocInitOptions {
+                    local,
+                    vpc: byoc::VpcSelection { vpc_id, subnet_ids },
+                    yes,
+                },
                 config,
-                yes,
             )
             .await
             .with_context(Ctx::command_dispatch())?;
@@ -5288,7 +5333,7 @@ containerfile: Missing.Containerfile\n",
     #[test]
     fn generated_config_hcl_parses_as_valid_configuration_file() {
         for byoc in [false, true] {
-            let hcl = ApiClient::generate_config_hcl("git@codeberg.org:user/repo.git", byoc);
+            let hcl = ApiClient::generate_config_hcl("git@git.caution.co:public/repo.git", byoc);
             let config = ConfigurationFile::from_str(&hcl);
             assert!(
                 config.is_ok(),

@@ -428,8 +428,8 @@ independently prove that an archive matches its claimed Git commit.
 New builds record the new canonical source locations and migration-only STEVE
 and Locksmith revisions; rebuild and verify their PCRs before approving them.
 Existing manifests and trusted PCR policies are not migrated automatically.
-The BYOC provisioner image remains in the Codeberg registry until its separate
-registry migration.
+The BYOC provisioner image is pulled from
+`git.caution.co/public/caution-managed-on-prem-aws-provisioner:latest`.
 
 **Option B: Verify against known PCR hashes**
 

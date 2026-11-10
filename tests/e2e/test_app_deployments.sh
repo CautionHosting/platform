@@ -67,7 +67,7 @@ E2E_STRICT_VERIFY="${E2E_STRICT_VERIFY:-1}"
 # and a stack with APP_DEPLOYMENTS_BYOC_ENABLED=true: make test-e2e-app-deployments-byoc.
 E2E_BYOC="${E2E_BYOC:-0}"
 ONPREM_TEST_REGION="${ONPREM_TEST_REGION:-us-east-1}"
-ONPREM_PROVISIONER_IMAGE="${ONPREM_PROVISIONER_IMAGE:-codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest}"
+ONPREM_PROVISIONER_IMAGE="${ONPREM_PROVISIONER_IMAGE:-git.caution.co/public/caution-managed-on-prem-aws-provisioner:latest}"
 PROVISIONER_DEPLOYMENT_ID=""
 BYOC_ENVIRONMENT_UP=false
 # Size of the blob of the interrupted push: large enough that the client is still

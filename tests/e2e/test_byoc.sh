@@ -115,7 +115,7 @@ cleanup() {
             -e "AWS_REGION=$ONPREM_TEST_REGION" \
             -e "TEARDOWN=true" \
             -e "DEPLOYMENT_ID=$PROVISIONER_DEPLOYMENT_ID" \
-            codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest 2>/dev/null || true
+            git.caution.co/public/caution-managed-on-prem-aws-provisioner:latest 2>/dev/null || true
     fi
 
     # Remove temp work dir

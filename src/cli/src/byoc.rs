@@ -33,7 +33,7 @@ use crate::{
 };
 
 const BYOC_PROVISIONER_IMAGE: &str =
-    "codeberg.org/caution/caution-managed-on-prem-aws-provisioner:latest";
+    "git.caution.co/public/caution-managed-on-prem-aws-provisioner:latest";
 const BYOC_STATE_FILE_NAME: &str = "bring-your-own-compute.json";
 // Legacy state file name, kept for backward compatibility so that deployments
 // created before the bring-your-own-cloud -> bring-your-own-compute rename can
@@ -720,14 +720,29 @@ pub(crate) enum TeardownError {
     },
 }
 
+/// Existing-VPC selection for BYOC init: forward `VPC_ID`/`SUBNET_IDS` to
+/// the provisioner instead of letting it create a dedicated VPC.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct VpcSelection {
+    pub(crate) vpc_id: Option<String>,
+    pub(crate) subnet_ids: Option<Vec<String>>,
+}
+
+/// BYOC-specific `init` options beyond the shared arguments.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct ByocInitOptions {
+    pub(crate) local: bool,
+    pub(crate) vpc: VpcSelection,
+    pub(crate) yes: bool,
+}
+
 pub(crate) async fn init(
     client: &ApiClient,
     bring_your_own_cloud: bool,
     name: Option<String>,
     region: Option<String>,
-    local: bool,
+    byoc: ByocInitOptions,
     config_path: Option<PathBuf>,
-    yes: bool,
 ) -> Result<(), InitError> {
     use InitErrorCtx as Ctx;
 
@@ -761,7 +776,7 @@ pub(crate) async fn init(
     }
 
     if bring_your_own_cloud {
-        return init_byoc_interactive(client, app_name, region, local, yes)
+        return init_byoc_interactive(client, app_name, region, byoc)
             .await
             .with_context(Ctx::init_byoc_interactive());
     }
@@ -1204,14 +1219,35 @@ fn parse_aws_config_region(content: &str, profile: &str) -> Option<String> {
 }
 
 /// Interactive bring-your-own-compute initialization
+/// Docker `-e` args forwarding `VPC_ID`/`SUBNET_IDS` to the provisioner.
+/// `SUBNET_IDS` is only forwarded alongside `VPC_ID`: the provisioner
+/// rejects subnets outside that VPC. Shared by the runtime docker-args
+/// construction and the tests that pin the flag -> env contract.
+fn vpc_selection_env_args(vpc_id: Option<&str>, subnet_ids: Option<&[String]>) -> Vec<String> {
+    let Some(vpc) = vpc_id else {
+        return Vec::new();
+    };
+    let mut args = vec!["-e".to_string(), format!("VPC_ID={vpc}")];
+    if let Some(subnets) = subnet_ids {
+        args.push("-e".to_string());
+        args.push(format!("SUBNET_IDS={}", subnets.join(",")));
+    }
+    args
+}
+
 async fn init_byoc_interactive(
     client: &ApiClient,
     app_name: String,
     region: Option<String>,
-    local: bool,
-    yes: bool,
+    byoc: ByocInitOptions,
 ) -> Result<(), InitByocInteractiveError> {
     use InitByocInteractiveErrorCtx as Ctx;
+
+    let ByocInitOptions {
+        local,
+        vpc: VpcSelection { vpc_id, subnet_ids },
+        yes,
+    } = byoc;
 
     output::status("\n╔══════════════════════════════════════════════════════════════════╗");
     output::status("║          Bring-Your-Own-Compute Deployment Setup (AWS)           ║");
@@ -1258,7 +1294,13 @@ async fn init_byoc_interactive(
 
     // Display what will be created
     output::status("\nThis will create the following AWS resources:");
-    output::status("  • VPC with 3 subnets across availability zones");
+    if let Some(ref vpc) = vpc_id {
+        output::status(format!(
+            "  • Using existing VPC {vpc} (no new VPC will be created)"
+        ));
+    } else {
+        output::status("  • VPC with 3 subnets across availability zones");
+    }
     output::status("  • S3 bucket for enclave images");
     output::status("  • EC2 Auto Scaling Group and Launch Template");
     output::status("  • IAM user with scoped permissions");
@@ -1320,6 +1362,14 @@ async fn init_byoc_interactive(
         docker_args.push("-e".to_string());
         docker_args.push(format!("AWS_SESSION_TOKEN={}", token));
     }
+
+    // Use an existing VPC instead of letting the provisioner create a
+    // dedicated one. SUBNET_IDS is only forwarded alongside VPC_ID: the
+    // provisioner rejects subnets outside that VPC.
+    docker_args.extend(vpc_selection_env_args(
+        vpc_id.as_deref(),
+        subnet_ids.as_deref(),
+    ));
 
     docker_args.push(BYOC_PROVISIONER_IMAGE.to_string());
 
@@ -1600,7 +1650,9 @@ pub(crate) async fn teardown(
     if !force {
         output::warning("\n⚠️  WARNING: This will permanently destroy:");
         output::warning("    • The Caution app and all deployment data");
-        output::warning("    • AWS VPC and all associated resources");
+        output::warning(
+            "    • The provisioner's dedicated VPC and all associated resources (an existing VPC passed via --vpc-id is left untouched)",
+        );
         output::warning("    • S3 bucket and all stored images");
         output::warning("    • IAM user, role, and policies");
         output::warning("\n    This action cannot be undone!\n");
@@ -1780,6 +1832,34 @@ mod tests {
         assert!(
             matches!(err, super::InitByocError::RequireAuthenticatedConfig { .. }),
             "BYOC init should check authentication before reading credential material: {err:?}"
+        );
+    }
+
+    fn vpc_provisioner_env(vpc_id: Option<&str>, subnet_ids: Option<Vec<&str>>) -> Vec<String> {
+        // Runs the real env-forwarding helper used by init_byoc_interactive
+        // so the flag → provisioner contract is pinned without docker/AWS.
+        let subnets: Option<Vec<String>> =
+            subnet_ids.map(|ids| ids.into_iter().map(str::to_string).collect());
+        super::vpc_selection_env_args(vpc_id, subnets.as_deref())
+    }
+
+    #[test]
+    fn vpc_selection_passes_vpc_and_subnets_to_provisioner() {
+        assert!(vpc_provisioner_env(None, None).is_empty());
+
+        assert_eq!(
+            vpc_provisioner_env(Some("vpc-0abc"), None),
+            vec!["-e".to_string(), "VPC_ID=vpc-0abc".to_string()]
+        );
+
+        assert_eq!(
+            vpc_provisioner_env(Some("vpc-0abc"), Some(vec!["subnet-1", "subnet-2"])),
+            vec![
+                "-e".to_string(),
+                "VPC_ID=vpc-0abc".to_string(),
+                "-e".to_string(),
+                "SUBNET_IDS=subnet-1,subnet-2".to_string()
+            ]
         );
     }
 }
