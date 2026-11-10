@@ -52,7 +52,9 @@ RUN cat > /build-caddy/h2c.patch <<'PATCH'
 # so one stalled stream cannot starve other clients sharing the upstream
 # connection.
 #
-# Tracking upstream: https://github.com/caddyserver/caddy/issues/7632
+# Upstream: the HTTP/2 flow-control knob used here is not yet exposed by Caddy
+# (or x/net's http2 transport config); an upstream report/PR is pending. Once
+# one exists, link it here and drop this patch.
 diff --git a/modules/caddyhttp/reverseproxy/httptransport.go b/modules/caddyhttp/reverseproxy/httptransport.go
 index 78544257..44414440 100644
 --- a/modules/caddyhttp/reverseproxy/httptransport.go
