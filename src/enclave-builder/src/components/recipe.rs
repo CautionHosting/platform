@@ -521,10 +521,8 @@ pub fn append_source_verification(
         }
         let stage = selected_stage(&stages, *component)?;
         let original = &template[stage.start..stage.end];
-        if stage.base == "scratch"
-            || original.contains("COPY prebuilt/")
-            || !original.contains("cargo build")
-        {
+        let builds_from_source = original.contains("cargo build") || original.contains("go build");
+        if stage.base == "scratch" || original.contains("COPY prebuilt/") || !builds_from_source {
             return Err(invalid_recipe(
                 stage.name,
                 "verification requires a source compiler stage",
@@ -824,7 +822,10 @@ mod tests {
                 .iter()
                 .find(|s| s.name == component.stage_name())
                 .unwrap();
-            assert!(rendered[selected.start..selected.end].contains("cargo build"));
+            assert!(
+                rendered[selected.start..selected.end].contains("cargo build")
+                    || rendered[selected.start..selected.end].contains("go build")
+            );
             assert_eq!(parsed.last().unwrap().name, "output");
             for filename in component.filenames() {
                 assert!(rendered.contains(

@@ -35,6 +35,7 @@ pub(crate) async fn configure(
     manifest: Option<&EnclaveManifest>,
     prebuilt: Option<&Path>,
     steve: bool,
+    caddy: bool,
     locksmith: bool,
 ) -> Result<(), ComponentStageError> {
     use ComponentStageErrorCtx as Ctx;
@@ -106,6 +107,14 @@ pub(crate) async fn configure(
             Component::Steve,
             pinned(manifest.steve_commit.as_deref())
                 .with_context(Ctx::new("resolve STEVE revision for"))?,
+            None,
+        ));
+    }
+    if caddy {
+        selected.push(SelectedComponent::new(
+            Component::Caddy,
+            pinned(manifest.caddy_commit.as_deref())
+                .with_context(Ctx::new("resolve Caddy revision for"))?,
             None,
         ));
     }
@@ -249,6 +258,7 @@ mod tests {
             Component::Bootproof,
             Component::TapFramer,
             Component::Steve,
+            Component::Caddy,
             Component::Locksmith,
         ] {
             let fragment = component.source_subdir().map(|p| dir.path().join(p));
@@ -284,6 +294,7 @@ mod tests {
         manifest.enclaveos_commit = Some(commit.clone());
         manifest.bootproof_commit = Some(commit.clone());
         manifest.steve_commit = Some(commit.clone());
+        manifest.caddy_commit = Some(commit.clone());
         manifest.locksmith_commit = Some(commit);
         manifest.component_set = Some(ComponentSet::new(artifacts).unwrap());
         (dir, manifest)
@@ -311,6 +322,7 @@ mod tests {
                 &dir.path().join("src/enclave-builder/templates"),
                 Some(&manifest),
                 prebuilt.then_some(downloads.as_path()),
+                true,
                 true,
                 true,
             )
@@ -345,6 +357,7 @@ mod tests {
                 Some(&manifest),
                 None,
                 true,
+                true,
                 true
             )
             .await
@@ -361,6 +374,7 @@ mod tests {
             &dir.path().join("src/enclave-builder/templates"),
             Some(&manifest),
             None,
+            true,
             true,
             true,
         )
@@ -381,6 +395,7 @@ mod tests {
             &dir.path().join("src/enclave-builder/templates"),
             Some(&manifest),
             Some(&dir.path().join("downloads")),
+            true,
             true,
             true,
         )
@@ -458,6 +473,7 @@ mod tests {
                     Some(&manifest),
                     Some(&dir.path().join("downloads")),
                     true,
+                    true,
                     true
                 )
                 .await
@@ -491,6 +507,7 @@ mod tests {
                     Some(&manifest),
                     Some(&dir.path().join("downloads")),
                     steve,
+                    true,
                     locksmith,
                 )
                 .await
@@ -523,6 +540,7 @@ mod tests {
             Some(&manifest),
             Some(&dir.path().join("downloads")),
             false,
+            false,
             false
         )
         .await
@@ -533,6 +551,7 @@ mod tests {
             &dir.path().join("absent-templates"),
             Some(&manifest),
             None,
+            false,
             false,
             false,
         )

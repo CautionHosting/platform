@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: 2026 Caution SEZC
+# SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Caution-Commercial
+
+# Enclave Caddy is built from a pinned upstream revision carrying one local
+# security patch (embedded below, also upstreamed): the h2c reverse_proxy
+# transport otherwise buffers up to 4 MiB of upstream response per stalled
+# stream, letting one client with a few hundred zero-window streams OOM a
+# 2 GiB enclave.
+
+FROM stagex/pallet-go@sha256:35d936e6fcbd73efc2dc3471a015b1ac5a5bb6d2c0eae6e84550f6352857457d AS go
+FROM stagex/core-musl@sha256:42fd2ed18ac4d6336f08f1b6345e0bb7bc5570450a40e7255b6da79868bd2d6b AS musl
+FROM stagex/core-zlib@sha256:5a21327b58c2ceeb3283a960540e19d9c35944961c68a7254e36056bf6f7d2d9 AS zlib
+FROM stagex/core-openssl@sha256:04a0d15071ca64b6f4855bb7790a306caa33b6259b522c44898a41975a67562e AS openssl
+FROM stagex/core-curl@sha256:bc8bab43d96a9167fbb85022ea773644a45ef335e7a9b747f203078973fa988e AS curl
+FROM stagex/core-git@sha256:6b3e0055f6aeaa8465f207a871db2c63a939cd7406113e9d769ff3b37239f3d0 AS git
+FROM stagex/core-ca-certificates@sha256:d135f1189e9b232eb7316626bf7858534c5540b2fc53dced80a4c9a95f26493e AS ca-certificates
+
+FROM go AS caddy-builder
+
+# pallet-go ships no dynamic loader or runtime libs; git (dynamically linked
+# against musl/zlib/openssl/curl) needs these to run.
+COPY --from=musl . /
+COPY --from=zlib . /
+COPY --from=openssl . /
+COPY --from=curl . /
+COPY --from=git . /
+COPY --from=ca-certificates . /
+
+ENV SOURCE_DATE_EPOCH=1
+ENV GOTOOLCHAIN=local
+
+ARG CADDY_COMMIT
+
+WORKDIR /build-caddy
+# A failed clone leaves the directory empty, so the mirror can retry in place.
+RUN (git clone https://github.com/caddyserver/caddy.git . || \
+     git clone https://gitmirror.hyperreal.coffee/caddy.git .) && \
+    git checkout "$CADDY_COMMIT"
+
+# The patch is part of the fingerprinted recipe (the standalone-source contract
+# forbids extra build-context COPY inputs), so embed and apply it in one RUN.
+RUN cat > /build-caddy/h2c.patch <<'PATCH'
+# Bound the h2c upstream transport's per-stream receive buffer.
+#
+# Caddy's reverse_proxy calls http2.ConfigureTransport without setting
+# rt.HTTP2, so the h2c transport advertises x/net's default 4 MiB per-stream
+# receive window. A client that opens streams to a streaming response and
+# advertises a zero receive window makes Caddy's copy loop block on the
+# downstream write while the upstream keeps filling that 4 MiB buffer per
+# stream; a few hundred stalled streams OOM a 2 GiB enclave. Cap the
+# per-stream buffer at 256 KiB; the per-connection buffer keeps its default
+# so one stalled stream cannot starve other clients sharing the upstream
+# connection.
+--- a/modules/caddyhttp/reverseproxy/httptransport.go
++++ b/modules/caddyhttp/reverseproxy/httptransport.go
+@@ -535,9 +535,13 @@
+ 	// if h2/c is enabled, configure it explicitly
+ 	if slices.Contains(h.Versions, "2") || slices.Contains(h.Versions, "h2c") {
++		rt.HTTP2 = &http.HTTP2Config{
++			// Bound per-stream upstream response buffering (see file header).
++			MaxReceiveBufferPerStream: 256 << 10,
++		}
+ 		// TODO: Migrate to http.Transport.Protocols once transport behaviour is covered.
+ 		//nolint:staticcheck
+ 		if err := http2.ConfigureTransport(rt); err != nil {
+ 			return nil, err
+ 		}
+
+ 		// DisableCompression from h2 is configured by http2.ConfigureTransport
+PATCH
+RUN patch -p1 < h2c.patch && rm h2c.patch
+
+# xcaddy-less deterministic build: only the standard library is needed.
+# CGO is disabled: the go pallet has no C toolchain and Caddy doesn't need it.
+RUN CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags "-s -w -buildid=" \
+      -mod=readonly \
+      -o /binaries/caddy ./cmd/caddy && \
+    chmod 0755 /binaries/caddy
+
+FROM scratch AS caddy-export
+COPY --from=caddy-builder /binaries/caddy /caddy

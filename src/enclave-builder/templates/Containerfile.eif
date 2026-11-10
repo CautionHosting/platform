@@ -12,7 +12,7 @@ FROM stagex/user-eif_build@sha256:935032172a23772ea1a35c6334aa98aa7b0c46f9e34a04
 FROM stagex/user-linux-nitro@sha256:aa1006d91a7265b33b86160031daad2fdf54ec2663ed5ccbd312567cc9beff2c AS linux-nitro
 FROM stagex/user-nit@sha256:60b6eef4534ea6ea78d9f29e4c7feb27407b615424f20ad8943d807191688be7 AS nit
 # {CADDY
-FROM stagex/user-caddy@sha256:c456c636b92d84d30b2f195a15c110909da0b27a73b65224a364631c09ea28c2 AS caddy
+{{CADDY_CONTAINERFILE}}
 # }CADDY
 
 # {STEVE
@@ -60,7 +60,7 @@ COPY --from=locksmith-builder /binaries/locksmithd /build/binaries/locksmithd
 COPY --from=locksmith-builder /binaries/locksmith-oneshot /build/binaries/locksmith-oneshot
 # }LOCKSMITH
 # {CADDY
-COPY --from=caddy /usr/bin/caddy /build/binaries/caddy
+COPY --from=caddy-export /caddy /build/binaries/caddy
 # }CADDY
 
 COPY --from=linux-nitro /bzImage /build/kernel/bzImage

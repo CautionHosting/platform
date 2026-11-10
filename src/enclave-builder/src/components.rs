@@ -33,6 +33,8 @@ pub enum Component {
     Bootproof,
     /// Optional STEVE daemon.
     Steve,
+    /// Optional enclave Caddy TLS ingress.
+    Caddy,
     /// Optional Locksmith daemon and its inseparable oneshot companion.
     Locksmith,
     /// Frame-preserving guest and host tunnel helper.
@@ -41,10 +43,11 @@ pub enum Component {
 
 impl Component {
     /// Every supported component.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Init,
         Self::Bootproof,
         Self::Steve,
+        Self::Caddy,
         Self::Locksmith,
         Self::TapFramer,
     ];
@@ -57,6 +60,7 @@ impl Component {
             Self::Init => "init",
             Self::Bootproof => "bootproof",
             Self::Steve => "steve",
+            Self::Caddy => "caddy",
             Self::Locksmith => "locksmith",
             Self::TapFramer => "tap-framer",
         }
@@ -68,6 +72,7 @@ impl Component {
             Self::Init => "enclave-builder",
             Self::Bootproof => "bootproof-builder",
             Self::Steve => "steve-builder",
+            Self::Caddy => "caddy-builder",
             Self::Locksmith => "locksmith-builder",
             Self::TapFramer => "tap-framer-builder",
         }
@@ -79,6 +84,7 @@ impl Component {
             Self::Init => "{{INIT_CONTAINERFILE}}",
             Self::Bootproof => "{{BOOTPROOF_CONTAINERFILE}}",
             Self::Steve => "{{STEVE_CONTAINERFILE}}",
+            Self::Caddy => "{{CADDY_CONTAINERFILE}}",
             Self::Locksmith => "{{LOCKSMITH_CONTAINERFILE}}",
             Self::TapFramer => "{{TAP_FRAMER_CONTAINERFILE}}",
         }
@@ -96,6 +102,7 @@ impl Component {
             Self::Init => include_str!("../../../containerfiles/Containerfile.init"),
             Self::Bootproof => include_str!("../../../containerfiles/Containerfile.bootproof"),
             Self::Steve => include_str!("../../../containerfiles/Containerfile.steve"),
+            Self::Caddy => include_str!("../../../containerfiles/Containerfile.caddy"),
             Self::Locksmith => include_str!("../../../containerfiles/Containerfile.locksmith"),
             Self::TapFramer => include_str!("../../../containerfiles/Containerfile.tap-framer"),
         }
@@ -106,6 +113,7 @@ impl Component {
         match self {
             Self::Bootproof => Some("BOOTPROOF_COMMIT"),
             Self::Steve => Some("STEVE_COMMIT"),
+            Self::Caddy => Some("CADDY_COMMIT"),
             Self::Locksmith => Some("LOCKSMITH_COMMIT"),
             Self::Init | Self::TapFramer => None,
         }
@@ -117,6 +125,7 @@ impl Component {
             Self::Init => &["init"],
             Self::Bootproof => &["bootproofd"],
             Self::Steve => &["steve"],
+            Self::Caddy => &["caddy"],
             Self::Locksmith => &["locksmithd", "locksmith-oneshot"],
             Self::TapFramer => &["tap-framer"],
         }
@@ -127,7 +136,7 @@ impl Component {
         match self {
             Self::Init => Some("enclave"),
             Self::TapFramer => Some("src/tap-framer"),
-            Self::Bootproof | Self::Steve | Self::Locksmith => None,
+            Self::Bootproof | Self::Steve | Self::Caddy | Self::Locksmith => None,
         }
     }
 }

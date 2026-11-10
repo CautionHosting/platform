@@ -42,6 +42,8 @@ pub struct EnclaveManifest {
     pub bootproof_commit: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub steve_commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caddy_commit: Option<String>,
     /// STEVE key exchange, recorded only when it differs from STEVE's default,
     /// so manifests for existing deployments stay byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -90,6 +92,8 @@ impl Serialize for EnclaveManifest {
             #[serde(skip_serializing_if = "Option::is_none")]
             steve_commit: &'a Option<String>,
             #[serde(skip_serializing_if = "Option::is_none")]
+            caddy_commit: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
             steve_key_exchange: &'a Option<String>,
             #[serde(skip_serializing_if = "is_false")]
             steve_allow_plaintext_fallback: bool,
@@ -126,6 +130,7 @@ impl Serialize for EnclaveManifest {
             enclaveos_commit: &self.enclaveos_commit,
             bootproof_commit: &self.bootproof_commit,
             steve_commit: &self.steve_commit,
+            caddy_commit: &self.caddy_commit,
             steve_key_exchange: &self.steve_key_exchange,
             steve_allow_plaintext_fallback: self.steve_allow_plaintext_fallback,
             locksmith: self.locksmith,
@@ -244,6 +249,7 @@ impl EnclaveManifest {
             enclaveos_commit: None,
             bootproof_commit: None,
             steve_commit: None,
+            caddy_commit: None,
             steve_key_exchange: None,
             steve_allow_plaintext_fallback: false,
             locksmith: false,
@@ -302,6 +308,8 @@ mod tests {
         pub bootproof_commit: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         pub steve_commit: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub caddy_commit: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub steve_key_exchange: Option<String>,
         #[serde(default, skip_serializing_if = "is_false")]
@@ -360,6 +368,7 @@ mod tests {
         manifest.enclaveos_commit = Some("a".repeat(40));
         manifest.bootproof_commit = Some("a".repeat(40));
         manifest.steve_commit = Some("a".repeat(40));
+        manifest.caddy_commit = Some("a".repeat(40));
         manifest.steve_key_exchange = Some("XWING-DRAFT10".to_owned());
         manifest.steve_allow_plaintext_fallback = true;
         manifest.locksmith = true;

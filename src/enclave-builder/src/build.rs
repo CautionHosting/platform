@@ -23,12 +23,17 @@ const DEFAULT_ENCLAVEOS_COMMIT: &str = "9582e25239430070667fdd0a6b64d887f1c308df
 const DEFAULT_BOOTPROOF_COMMIT: &str = "b03721957e3850931f5b53627e7c3d1c302a06fe";
 const DEFAULT_STEVE_COMMIT: &str = "694b5afbd6cf6f9ec743e27266097921d4102b09";
 const DEFAULT_LOCKSMITH_COMMIT: &str = "ab0d2160017dc22860ef0968aa7883cd2c509d11";
+const DEFAULT_CADDY_COMMIT: &str = "0d98caea58f794f88e709b1bef2880996a471bca";
 
 // Kept in sync with the git clone URLs in templates/Containerfile.eif.
 pub const ENCLAVEOS_REPO: &str = "https://git.caution.co/public/enclaveos.git";
 pub const BOOTPROOF_REPO: &str = "https://git.caution.co/public/bootproof.git";
 pub const STEVE_REPO: &str = "https://git.caution.co/public/steve.git";
 pub const LOCKSMITH_REPO: &str = "https://git.caution.co/public/locksmith.git";
+
+/// Upstream Caddy repository; the enclave binary carries one local security
+/// patch until upstream merges it.
+pub const CADDY_REPO: &str = "https://github.com/caddyserver/caddy.git";
 
 /// STEVE's built-in default key exchange. Must match
 /// `caution_config::KeyExchange::X25519.steve_env_value()`.
@@ -84,6 +89,12 @@ pub fn resolve_locksmith_commit() -> String {
     resolve_commit("LOCKSMITH_COMMIT", DEFAULT_LOCKSMITH_COMMIT)
 }
 
+/// Upstream Caddy revision; the enclave binary carries one local security
+/// patch until upstream merges it.
+pub fn resolve_caddy_commit() -> String {
+    resolve_commit("CADDY_COMMIT", DEFAULT_CADDY_COMMIT)
+}
+
 /// A build-input tool paired with the repo it's cloned from, so the commit and
 /// its source URL can never be matched up wrong downstream.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -97,6 +108,7 @@ pub struct ToolCommits {
     pub enclaveos: ToolSource,
     pub bootproof: ToolSource,
     pub steve: ToolSource,
+    pub caddy: ToolSource,
     pub locksmith: ToolSource,
 }
 
@@ -111,12 +123,16 @@ pub fn resolve_tool_commits() -> ToolCommits {
             repo: BOOTPROOF_REPO,
         },
         steve: ToolSource {
-            commit: resolve_steve_commit(),
             repo: STEVE_REPO,
+            commit: resolve_steve_commit(),
+        },
+        caddy: ToolSource {
+            repo: CADDY_REPO,
+            commit: resolve_caddy_commit(),
         },
         locksmith: ToolSource {
-            commit: resolve_locksmith_commit(),
             repo: LOCKSMITH_REPO,
+            commit: resolve_locksmith_commit(),
         },
     }
 }
@@ -378,6 +394,10 @@ pub async fn stage_eif_components(
         .as_ref()
         .and_then(|m| m.steve_commit.clone())
         .unwrap_or_else(resolve_steve_commit);
+    let caddy_commit = manifest
+        .as_ref()
+        .and_then(|m| m.caddy_commit.clone())
+        .unwrap_or_else(resolve_caddy_commit);
     let locksmith_commit = manifest
         .as_ref()
         .and_then(|m| m.locksmith_commit.clone())
@@ -472,6 +492,7 @@ pub async fn stage_eif_components(
         egress,
         &bootproof_commit,
         &steve_commit,
+        &caddy_commit,
         &locksmith_commit,
     )
     .await
@@ -814,6 +835,7 @@ async fn render_containerfile_template(
     egress: bool,
     bootproof_commit: &str,
     steve_commit: &str,
+    caddy_commit: &str,
     locksmith_commit: &str,
 ) -> Result<String, RenderContainerfileTemplateError> {
     use RenderContainerfileTemplateErrorCtx as Ctx;
@@ -851,6 +873,7 @@ async fn render_containerfile_template(
     for (component, commit) in [
         (Component::Bootproof, bootproof_commit),
         (Component::Steve, steve_commit),
+        (Component::Caddy, caddy_commit),
         (Component::Locksmith, locksmith_commit),
     ] {
         processed = recipe::pin_source_revision(&processed, component, commit);
@@ -1080,6 +1103,7 @@ pub async fn build_eif_from_filesystems(
             Some(&selected_manifest),
             prebuilt_components,
             e2e,
+            e2e_mode == "tls",
             locksmith,
         )
         .await
@@ -2639,6 +2663,7 @@ mod tests {
             let enabled = |component| match component {
                 Component::Init | Component::Bootproof => true,
                 Component::Steve => steve,
+                Component::Caddy => caddy,
                 Component::Locksmith => locksmith,
                 Component::TapFramer => egress,
             };
@@ -2651,7 +2676,7 @@ mod tests {
                 std::fs::write(path, component.embedded_containerfile()).unwrap();
             }
             let rendered = render_containerfile_template(
-                &template, steve, caddy, locksmith, egress, &commit, &commit, &commit,
+                &template, steve, caddy, locksmith, egress, &commit, &commit, &commit, &commit,
             )
             .await
             .unwrap();
@@ -2703,6 +2728,7 @@ mod tests {
             false,
             "bootproof",
             "steve",
+            "caddy",
             "locksmith",
         )
         .await
@@ -2718,6 +2744,7 @@ mod tests {
                 false,
                 "bootproof",
                 "steve",
+                "caddy",
                 "locksmith",
             )
             .await
@@ -2753,6 +2780,7 @@ mod tests {
             true,
             "bootproof",
             "steve",
+            "caddy",
             "locksmith",
         )
         .await
@@ -2767,6 +2795,7 @@ mod tests {
             false,
             "bootproof",
             "steve",
+            "caddy",
             "locksmith",
         )
         .await
@@ -2781,6 +2810,7 @@ mod tests {
                 true,
                 "bootproof",
                 "steve",
+                "caddy",
                 "locksmith",
             )
             .await
@@ -2812,6 +2842,7 @@ mod tests {
                     egress,
                     "bootproof-commit",
                     "steve-commit",
+                    "caddy-commit",
                     "locksmith-commit",
                 )
                 .await
@@ -2833,13 +2864,20 @@ mod tests {
             true,
             "bootproof-commit",
             "steve-commit",
+            "caddy-commit",
             "locksmith-commit",
         )
         .await
         .unwrap();
 
         assert!(rendered.contains("COPY caddy-certfp.sh /build/caddy-certfp.sh"));
-        assert!(rendered.contains("FROM stagex/user-caddy@sha256:"));
+        assert!(rendered.contains("FROM stagex/pallet-go@"));
+        // The selected standalone recipe binds a literal pinned checkout.
+        assert!(rendered.contains("git checkout caddy-commit"));
+        assert!(!rendered.contains("git checkout \"$CADDY_COMMIT\""));
+        // The h2c per-stream receive-buffer patch is embedded in the recipe.
+        assert!(rendered.contains("h2c.patch"));
+        assert!(rendered.contains("MaxReceiveBufferPerStream: 256 << 10"));
         assert!(rendered.contains("cp /usr/lib/libssl.so.3"));
         assert!(rendered.contains("cp /usr/lib/libcrypto.so.3"));
         assert!(rendered.contains("chroot /build/initramfs /caddy version"));
@@ -3401,7 +3439,8 @@ mod tests {
 
         for enabled_blocks in [&[][..], &["STEVE"][..]] {
             let rendered = process_template_blocks(&template, enabled_blocks);
-            assert!(!rendered.contains("FROM stagex/user-caddy@sha256:"));
+            assert!(!rendered.contains("stagex/user-caddy"));
+            assert!(!rendered.contains("{{CADDY_CONTAINERFILE}}"));
             for applet in ["cut", "tr", "mv", "rm"] {
                 assert!(!rendered.contains(&format!("ln -sf busybox {applet}")));
             }
