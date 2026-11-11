@@ -223,7 +223,7 @@ pub async fn create_resource(
     .bind(types::ResourceState::Initialized)
     .bind(&configuration)
     // NULL for a token principal: actor columns stay users-only until the
-    // principals table lands (docs/access-tokens-bible.md D10).
+    // principals table lands (docs/access-tokens-spec.md D10).
     .bind(auth.user_id())
     .bind(lifecycle)
     .fetch_one(&state.db)
@@ -456,7 +456,7 @@ pub async fn get_resource(
     use GetResourceErrorCtx as Ctx;
 
     // Authorization is org-scoped so both users and tokens are scoped to the
-    // caller's organization (docs/access-tokens-bible.md D6).
+    // caller's organization (docs/access-tokens-spec.md D6).
     let org_id = get_user_primary_org(&state.db, &auth)
         .await
         .map_err(|source| GetResourceError::AccessQuery {
@@ -609,7 +609,7 @@ pub async fn proxy_attestation(
     use ProxyAttestationErrorCtx as Ctx;
 
     // Authorization is org-scoped so both users and tokens are scoped to the
-    // caller's organization (docs/access-tokens-bible.md D6).
+    // caller's organization (docs/access-tokens-spec.md D6).
     let caller_org = get_user_primary_org(&state.db, &auth)
         .await
         .map_err(|source| ProxyAttestationError::AccessQuery {

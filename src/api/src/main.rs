@@ -207,7 +207,7 @@ pub(crate) struct AppState {
 }
 
 /// The authenticated principal of a request: either a user or an organization
-/// access token (docs/access-tokens-bible.md D1/D5). A token carries no user id.
+/// access token (docs/access-tokens-spec.md D1/D5). A token carries no user id.
 #[derive(Clone)]
 pub(crate) enum AuthContext {
     User(UserAuthContext),
@@ -314,7 +314,7 @@ impl AuthContext {
 /// Extractor for handlers that require a user account.
 ///
 /// A token principal is rejected with 403, so person-scoped routes fail without
-/// any per-route allowlist (docs/access-tokens-bible.md D6). Org routes that
+/// any per-route allowlist (docs/access-tokens-spec.md D6). Org routes that
 /// accept tokens keep extracting [`AuthContext`] directly.
 pub(crate) struct UserPrincipal(pub(crate) AuthContext);
 
@@ -4076,7 +4076,7 @@ async fn deploy_logic(
     let app_id_str = req.app_id.to_string();
 
     // Membership: a token must match the requested organization; a user must be
-    // a member (docs/access-tokens-bible.md D6).
+    // a member (docs/access-tokens-spec.md D6).
     let in_org = match &auth {
         AuthContext::Token(token) => token.organization_id == req.org_id,
         AuthContext::User(_) => {

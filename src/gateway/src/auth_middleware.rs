@@ -1318,7 +1318,7 @@ fn bearer_token(req: &Request) -> Option<&str> {
 /// Authenticates an organization access token presented as a bearer credential.
 ///
 /// Runs as the outermost auth layer so a token wins over any session or signed
-/// request also present (docs/access-tokens-bible.md D9/D12). Requests with no
+/// request also present (docs/access-tokens-spec.md D9/D12). Requests with no
 /// bearer header pass through unchanged. A token principal carries no user id;
 /// downstream person-scoped routes therefore fail on their own (D6).
 #[allow(clippy::result_large_err)]

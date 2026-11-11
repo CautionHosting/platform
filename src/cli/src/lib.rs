@@ -1425,7 +1425,7 @@ struct ApiClient {
     qr: bool,
     /// Organization access token from `CAUTION_ACCESS_TOKEN`, presented as
     /// `Authorization: Bearer`. When set, the CLI authenticates as the token's
-    /// organization and skips interactive login (docs/access-tokens-bible.md).
+    /// organization and skips interactive login (docs/access-tokens-spec.md).
     access_token: Option<String>,
     workdir: Option<PathBuf>,
 }

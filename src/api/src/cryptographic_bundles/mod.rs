@@ -189,7 +189,7 @@ pub async fn create_quorum_bundle(
     .bind(&req.data)
     .bind(&req.name)
     .bind(&labels)
-    // NULL for a token principal (docs/access-tokens-bible.md D10).
+    // NULL for a token principal (docs/access-tokens-spec.md D10).
     .bind(created_by)
     .fetch_one(pool)
     .await
@@ -375,7 +375,7 @@ pub async fn create_secrets_bundle(
     )
     .bind(org_id)
     .bind(&req.data)
-    // NULL for a token principal (docs/access-tokens-bible.md D10).
+    // NULL for a token principal (docs/access-tokens-spec.md D10).
     .bind(created_by)
     .fetch_one(pool)
     .await

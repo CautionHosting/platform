@@ -6,7 +6,7 @@
  *
  * Mirrors the API's validation so the mint form can flag a bad value before
  * saving, and builds the create payload. The API stays authoritative
- * (docs/access-tokens-bible.md D2/D7).
+ * (docs/access-tokens-spec.md D2/D7).
  */
 
 export const DEFAULT_EXPIRY_DAYS = 90

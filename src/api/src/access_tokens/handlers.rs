@@ -3,7 +3,7 @@
 
 //! Organization access tokens: mint, list, inspect, and revoke.
 //!
-//! Owner-only (docs/access-tokens-bible.md D8). Every handler verifies the
+//! Owner-only (docs/access-tokens-spec.md D8). Every handler verifies the
 //! caller is an owner of the organization in the path, so no RBAC rule can
 //! delegate token minting (minting attaches arbitrary roles, D2b). The plaintext
 //! is returned exactly once, at mint; only its SHA-256 hash is stored (D4).

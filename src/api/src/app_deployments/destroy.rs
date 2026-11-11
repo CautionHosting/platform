@@ -677,7 +677,7 @@ pub(super) async fn begin_destroy(
         .await
         .with_context(Ctx::database())?;
     // Resolve the caller's organization so tokens are scoped to their own org
-    // (docs/access-tokens-bible.md D6).
+    // (docs/access-tokens-spec.md D6).
     let caller_org = crate::get_user_primary_org(db, actor)
         .await
         .map_err(|source| DestroyError::Database {

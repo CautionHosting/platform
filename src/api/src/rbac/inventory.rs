@@ -5,7 +5,7 @@
 //!
 //! The role editor builds its route table from this. The list is maintained
 //! alongside the `resource_routes` group in `main.rs`; see the "route/rule
-//! drift" item in `docs/rbac-bible.md` for the plan to keep them in step.
+//! drift" item in `docs/rbac-spec.md` for the plan to keep them in step.
 
 use axum::Json;
 use serde::Serialize;

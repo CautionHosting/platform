@@ -529,7 +529,7 @@ pub async fn create_credential(
     .bind(req.config())
     .bind(req.is_default)
     // NULL for a token principal (actor columns are users-only pending the
-    // principals table; docs/access-tokens-bible.md D10).
+    // principals table; docs/access-tokens-spec.md D10).
     .bind(created_by)
     .fetch_one(pool)
     .await

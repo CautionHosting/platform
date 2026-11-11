@@ -123,7 +123,7 @@ pub async fn auth_middleware(
         }
 
         // An organization access token: no user id, a token id and org id
-        // instead (docs/access-tokens-bible.md D5).
+        // instead (docs/access-tokens-spec.md D5).
         let token_id = headers
             .get("x-caution-token-id")
             .and_then(|h| h.to_str().ok())

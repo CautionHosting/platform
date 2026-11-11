@@ -49,7 +49,7 @@ impl AuthMethod {
 
 /// The organization-owned principal a request authenticated with an access
 /// token. Carries no user id: a token authenticates an organization, not a
-/// person (see docs/access-tokens-bible.md D1/D5).
+/// person (see docs/access-tokens-spec.md D1/D5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AuthenticatedAccessToken {
     pub token_id: Uuid,

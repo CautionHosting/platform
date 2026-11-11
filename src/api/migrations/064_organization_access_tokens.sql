@@ -1,5 +1,5 @@
 -- Organization access tokens: org-owned service credentials, bearer-presented
--- and hashed at rest. See docs/access-tokens-bible.md (D1-D13).
+-- and hashed at rest. See docs/access-tokens-spec.md (D1-D13).
 --
 -- Migrations re-run on every start (see utils/makefile-run-migrations.sh), so
 -- every statement is idempotent.
