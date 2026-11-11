@@ -344,11 +344,12 @@ token principal substitutes for the FIDO2 signed request.
 * **Gateway.** `requires_fido2_signature` (`auth_middleware.rs:986`) must not
   force an assertion when the request is authenticated by a token. Token auth is
   evaluated, and the passkey requirement is waived for a token principal.
-* **API.** Handlers that demand `auth.signed_request_id` (currently
-  `app_deployments/switch.rs:330`) must accept a token principal instead,
-  recording the **token** as the actor rather than a `signed_request_audit` row
-  (D10). The same applies to the quorum-bundle handlers that today only run under
-  a signed request.
+* **API (implemented 2026-11-11).** The API no longer re-checks the signature:
+  `signed_switch_request` and its `SwitchError::Unsigned` were removed, so
+  `switch_handler` and the quorum-bundle handlers accept a token principal and
+  record whatever `signed_request_id` was forwarded (present for a passkey flow,
+  absent for a token), attributing the write to the token per D10. The gateway
+  is the **sole** signature gate.
 * **Authorization unchanged.** The token still needs a matching RBAC rule (deny
   by default) and the org-in-path rule; owner bypass never applies to tokens
   (D12). So a token can switch or manage bundles only if an owner attached a role
@@ -557,6 +558,12 @@ columns).
 
 Record decisions here as they are made, newest first.
 
+* **2026-11-11** - Switch signature is checked **only at the gateway**. The API
+  re-check (`signed_switch_request` and `SwitchError::Unsigned`) was removed;
+  `switch_handler` now accepts tokens and records whatever `signed_request_id`
+  was forwarded (present for passkey, absent for token). This makes switch
+  token-capable without the `signed_request_audit` schema change.
+
 * **2026-11-09** - D7 revised: tokens are **revoked, not deleted**. Revoking
   sets `revoked_at`; the row, its role assignment, and audit attribution
   survive. `DELETE /organizations/{id}/access-tokens/{token_id}` now marks the
@@ -659,7 +666,8 @@ Newest first.
   `GET`/`PATCH /resources/{id}/builder-config`,
   `/credentials` (list/create/get/delete/set-default),
   `/quorum-bundles` and `/secrets-bundles` (list/create/get/update/delete),
-  `/quorum-bundles/participants`, `POST /resources/managed-onprem`. These
+  `/quorum-bundles/participants`, `POST /resources/managed-onprem`,
+  `POST /resources/{id}/deployments/{deployment_id}/switch`. These
   authorize by the caller's organization (one org per user makes this equivalent
   to the old membership joins) so a token reaches its own org's data only. Actor
   columns (`created_by`, `pushed_by`, `actor_user_id`) are NULL for tokens
@@ -669,16 +677,13 @@ Newest first.
   Still user-only / blocked:
   - `fully_managed_capacity::join_waitlist` - the waitlist table's `user_id` is
     `NOT NULL` (`043`), so it needs the same nullable-actor change.
-  - `app_deployments::switch` (D13) - `signed_request_audit.user_id` is
-    `NOT NULL`; needs the D14/audit change.
   - Person/account (users, onboarding, legal), billing/subscriptions, and the
     token-management and RBAC/org-management routes, by design or policy.
 
-  Next: D13 token authorization on `switch` (needs the `signed_request_audit`
-  change), `join_waitlist` (nullable waitlist actor), and the management-surface
+  Next: `join_waitlist` (nullable waitlist actor) and the management-surface
   policy call.
 
-  Actor analysis (corrected 2026-11-09):
+  Actor analysis (corrected 2026-11-09, switch updated 2026-11-11):
   - **deploy is not schema-blocked.** `eif_builds.user_id` is nullable
     (`024` adds it with no `NOT NULL`; the builder can bind `NULL`),
     `fully_managed_capacity_reservations` has no `user_id` at all, and
@@ -687,14 +692,12 @@ Newest first.
     changes only (now landed): make the waitlist lookup accept `None`, and pass
     `auth.user_id()` (already `Option`) through the actor binds. `join_waitlist`
     itself still needs the waitlist table's `NOT NULL user_id` made nullable.
-  - **switch (D13) is the other schema blocker.** It writes
-    `signed_request_audit`, whose `user_id` is `NOT NULL` (`047:10`) and whose
-    other columns are passkey-specific. (`deployment_events.auth_method` was
-    widened to include `'token'` by migration 065, so only the audit row is
-    left.) A token switch needs `signed_request_audit` generalized (nullable
-    user + token id, or a separate token audit row).
-  This is why D14 is scoped to *attribution* columns and why only switch truly
-  waits on it.
+  - **switch is no longer schema-blocked.** The API re-check was removed
+    (`signed_switch_request` / `SwitchError::Unsigned`), so the gateway is the
+    sole signature gate (D13); `deployment_events.auth_method` accepts `'token'`
+    (065), and the passkey audit row is only written for passkey flows. The
+    `signed_request_audit` generalization (D14) is therefore no longer required
+    for switch.
 
 * **2026-11-09** - Decided D13: tokens authorize the passkey-required routes
   (`apps switch`, quorum bundles). Updated the CLI survey and server-work list
