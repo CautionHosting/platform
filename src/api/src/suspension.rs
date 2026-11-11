@@ -116,7 +116,7 @@ impl IntoResponse for SuspendManagedResourcesError {
 pub async fn suspend_managed_resources(
     State(state): State<Arc<AppState>>,
     Path(org_id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, SuspendManagedResourcesError> {
+) -> Result<Response, SuspendManagedResourcesError> {
     use SuspendManagedResourcesErrorCtx as Ctx;
 
     tracing::info!(
@@ -207,11 +207,26 @@ pub async fn suspend_managed_resources(
         stopped += 1;
     }
 
-    Ok(Json(serde_json::json!({
+    let body = Json(serde_json::json!({
         "stopped": stopped,
         "total": resources.len(),
         "errors": errors,
-    })))
+    }));
+
+    // Metering treats success as "everything is stopped" and only then marks
+    // the org credit-suspended. A partial stop must not look like success, or
+    // the still-running resources would keep billing with no retry.
+    if errors.is_empty() {
+        Ok(body.into_response())
+    } else {
+        tracing::error!(
+            "Partial credit suspension for org {}: {} of {} stopped",
+            org_id,
+            stopped,
+            resources.len()
+        );
+        Ok((StatusCode::BAD_GATEWAY, body).into_response())
+    }
 }
 
 /// Failure modes for [`suspend_org_resources`].
