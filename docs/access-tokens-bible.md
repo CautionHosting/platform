@@ -653,25 +653,41 @@ Newest first.
   `PATCH /resources/{id}`, `DELETE /resources/{id}`,
   `GET /resources/{id}/deployments` (+ `/{deployment_id}`), `GET /deployments/{id}`,
   `GET /resources/{id}/deployments/history`,
+  `POST /resources/{id}/deployments` (deploy),
+  `DELETE /resources/{id}/deployments/{deployment_id}` (deployment destroy),
+  `GET /resources/{id}/eif/download`, the attestation proxy,
+  `GET`/`PATCH /resources/{id}/builder-config`,
   `/credentials` (list/create/get/delete/set-default),
-  `/quorum-bundles` and `/secrets-bundles` (list/create/get/update/delete), and
-  `POST /resources/managed-onprem`. These authorize by the caller's organization
-  (one org per user makes this equivalent to the old membership joins) so a token
-  reaches its own org's data only. Actor columns (`created_by`, `pushed_by`) are
-  NULL for tokens pending the principals table.
+  `/quorum-bundles` and `/secrets-bundles` (list/create/get/update/delete),
+  `/quorum-bundles/participants`, `POST /resources/managed-onprem`. These
+  authorize by the caller's organization (one org per user makes this equivalent
+  to the old membership joins) so a token reaches its own org's data only. Actor
+  columns (`created_by`, `pushed_by`, `actor_user_id`) are NULL for tokens
+  pending the principals table, and `deployment_events.auth_method` accepts
+  `'token'` (migration 065).
 
-  Next: deploy (`POST /resources/{id}/deployments`), D13 token authorization on
-  `switch` (needs the `signed_request_audit` change), then CLI, frontend, tests.
+  Still user-only / blocked:
+  - `fully_managed_capacity::join_waitlist` - the waitlist table's `user_id` is
+    `NOT NULL` (`043`), so it needs the same nullable-actor change.
+  - `app_deployments::switch` (D13) - `signed_request_audit.user_id` is
+    `NOT NULL`; needs the D14/audit change.
+  - Person/account (users, onboarding, legal), billing/subscriptions, and the
+    token-management and RBAC/org-management routes, by design or policy.
+
+  Next: D13 token authorization on `switch` (needs the `signed_request_audit`
+  change), `join_waitlist` (nullable waitlist actor), and the management-surface
+  policy call.
 
   Actor analysis (corrected 2026-11-09):
   - **deploy is not schema-blocked.** `eif_builds.user_id` is nullable
     (`024` adds it with no `NOT NULL`; the builder can bind `NULL`),
     `fully_managed_capacity_reservations` has no `user_id` at all, and
     `reserve_capacity`'s `user_id` is only used for a waitlist lookup. Metering's
-    `upsert_tracked_resource` already takes `Option<Uuid>`. So deploy needs code
-    changes only: make the waitlist lookup accept `None`, and pass
-    `auth.user_id()` (already `Option`) through the actor binds.
-  - **switch (D13) is the only schema blocker.** It writes
+    `upsert_tracked_resource` already takes `Option<Uuid>`. So deploy needed code
+    changes only (now landed): make the waitlist lookup accept `None`, and pass
+    `auth.user_id()` (already `Option`) through the actor binds. `join_waitlist`
+    itself still needs the waitlist table's `NOT NULL user_id` made nullable.
+  - **switch (D13) is the other schema blocker.** It writes
     `signed_request_audit`, whose `user_id` is `NOT NULL` (`047:10`) and whose
     other columns are passkey-specific; and `deployment_events.auth_method`'s
     CHECK allows only `('passkey','session','ssh_signed')` (`058`), so a token
