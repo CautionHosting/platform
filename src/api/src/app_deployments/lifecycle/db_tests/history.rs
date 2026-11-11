@@ -5,14 +5,12 @@
 
 use super::*;
 use crate::app_deployments::events::{self, NewOperation, Operation, Outcome};
-use crate::app_deployments::switch::signed_switch_request;
 
 #[tokio::test]
 #[ignore = "run bash tests/e2e/test_app_deployments_db.sh (isolated PostgreSQL)"]
 async fn history() {
     let pool = test_pool().await;
     let state = test_state(&pool, "/nonexistent");
-    switch_requires_the_callers_pending_signed_request(&pool).await;
     rejected_switches_keep_their_signed_request_link(&pool).await;
     the_switch_handler_records_only_signed_switches(&pool).await;
     interrupted_operations_are_settled_by_reconciliation(&pool).await;
@@ -58,51 +56,6 @@ async fn latest_outcome(pool: &PgPool, operation_id: Uuid) -> String {
     .unwrap()
 }
 
-async fn switch_requires_the_callers_pending_signed_request(pool: &PgPool) {
-    let f = fixture(pool, "running").await;
-    let path = format!("/resources/{}/deployments/{}/switch", f.app, f.target);
-    let own = signed_request(pool, f.user, "POST", &path).await;
-    assert_eq!(
-        signed_switch_request(pool, &signed(f.user, Some(own)), f.app, f.target)
-            .await
-            .unwrap(),
-        own
-    );
-    // Another member's proof, another path, another method, a completed request
-    // or no proof at all is refused.
-    let other_user = member(pool, f.org).await;
-    let theirs = signed_request(pool, other_user, "POST", &path).await;
-    let other_path = signed_request(
-        pool,
-        f.user,
-        "POST",
-        &format!("/resources/{}/deployments/{}/switch", f.app, Uuid::new_v4()),
-    )
-    .await;
-    let get = signed_request(pool, f.user, "GET", &path).await;
-    let done = signed_request(pool, f.user, "POST", &path).await;
-    sqlx::query(
-        "UPDATE signed_request_audit SET response_status = 200, completed_at = NOW() WHERE id = $1",
-    )
-    .bind(done)
-    .execute(pool)
-    .await
-    .unwrap();
-    for id in [
-        Some(theirs),
-        Some(other_path),
-        Some(get),
-        Some(done),
-        Some(Uuid::new_v4()),
-        None,
-    ] {
-        assert!(matches!(
-            signed_switch_request(pool, &signed(f.user, id), f.app, f.target).await,
-            Err(SwitchError::Unsigned { .. })
-        ));
-    }
-}
-
 /// Covers what the recorder stores for a rejected switch; which errors become
 /// `rejected` is pinned by `switch.rs`'s `moved_nothing_is_true_only_before_the_address_moves`.
 async fn rejected_switches_keep_their_signed_request_link(pool: &PgPool) {
@@ -142,23 +95,10 @@ async fn rejected_switches_keep_their_signed_request_link(pool: &PgPool) {
     assert_eq!(latest_outcome(pool, operation).await, "rejected");
 }
 
-/// The real handler: an unsigned switch writes nothing; a stale signed one is
-/// refused before any AWS call and answered `rejected`, linked to its proof.
+/// The real handler records the switch's outcome. Signature verification is the
+/// gateway's job only: an unsigned (e.g. token) call still runs and is recorded
+/// with no proof link, while a signed call records its `signed_request_audit` id.
 async fn the_switch_handler_records_only_signed_switches(pool: &PgPool) {
-    let state = test_state(pool, "/nonexistent");
-    let f = fixture(pool, "running").await;
-    let path = format!("/resources/{}/deployments/{}/switch", f.app, f.target);
-    let id = signed_request(pool, f.user, "POST", &path).await;
-    let call = |auth| {
-        crate::app_deployments::switch::switch_handler(
-            axum::extract::State(state.clone()),
-            crate::UserPrincipal(auth),
-            axum::extract::Path((f.app, f.target)),
-            axum::Json(switch_request(Some(Uuid::new_v4()))),
-        )
-    };
-    let unsigned = call(crate::AuthContext::session(f.user)).await;
-    assert_eq!(unsigned.into_response().status(), StatusCode::FORBIDDEN);
     let recorded = |app| {
         sqlx::query_as::<_, (String, Option<Uuid>, Option<String>)>(
             "SELECT outcome, signed_request_id, error FROM deployment_events
@@ -167,11 +107,42 @@ async fn the_switch_handler_records_only_signed_switches(pool: &PgPool) {
         .bind(app)
         .fetch_all(pool)
     };
-    assert!(recorded(f.app).await.unwrap().is_empty());
-
-    let stale = call(signed(f.user, Some(id))).await;
-    assert_eq!(stale.into_response().status(), StatusCode::CONFLICT);
     let stale_message = "The live deployment changed; review and confirm again.";
+
+    // Unsigned: no proof id, still refused by the precondition and recorded.
+    let unsigned_fixture = fixture(pool, "running").await;
+    let unsigned = crate::app_deployments::switch::switch_handler(
+        axum::extract::State(test_state(pool, "/nonexistent")),
+        axum::Extension(crate::AuthContext::session(unsigned_fixture.user)),
+        axum::extract::Path((unsigned_fixture.app, unsigned_fixture.target)),
+        axum::Json(switch_request(Some(Uuid::new_v4()))),
+    )
+    .await;
+    assert_eq!(unsigned.into_response().status(), StatusCode::CONFLICT);
+    assert_eq!(
+        recorded(unsigned_fixture.app).await.unwrap(),
+        [
+            ("requested".to_string(), None, None),
+            (
+                "rejected".to_string(),
+                None,
+                Some(stale_message.to_string())
+            ),
+        ]
+    );
+
+    // Signed: the audit id is recorded on the requested row.
+    let f = fixture(pool, "running").await;
+    let path = format!("/resources/{}/deployments/{}/switch", f.app, f.target);
+    let id = signed_request(pool, f.user, "POST", &path).await;
+    let stale = crate::app_deployments::switch::switch_handler(
+        axum::extract::State(test_state(pool, "/nonexistent")),
+        axum::Extension(signed(f.user, Some(id))),
+        axum::extract::Path((f.app, f.target)),
+        axum::Json(switch_request(Some(Uuid::new_v4()))),
+    )
+    .await;
+    assert_eq!(stale.into_response().status(), StatusCode::CONFLICT);
     assert_eq!(
         recorded(f.app).await.unwrap(),
         [

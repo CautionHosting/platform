@@ -12,7 +12,7 @@ use super::{LIFECYCLE_DEPLOYMENTS, lock_app_operations};
 use crate::{AppState, AuthContext, ec2};
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -148,8 +148,6 @@ pub(crate) enum SwitchError {
         #[source]
         source: BoxError,
     },
-    #[error("switch request carries no valid passkey signature [{location}]")]
-    Unsigned { location: Location },
     #[error(
         "Elastic IP is unassigned or held by an unexpected instance before the move [{location}]"
     )]
@@ -213,10 +211,6 @@ impl SwitchError {
             Self::Aws { .. } | Self::Inspect { .. } | Self::Database { .. } => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Switch failed.")
             }
-            Self::Unsigned { .. } => (
-                StatusCode::FORBIDDEN,
-                "This operation requires signature verification",
-            ),
             Self::Task { .. } => (StatusCode::INTERNAL_SERVER_ERROR, "Switch failed."),
         }
     }
@@ -237,7 +231,6 @@ impl SwitchError {
             Self::NotFound { .. }
                 | Self::Rejected { .. }
                 | Self::Unhealthy { .. }
-                | Self::Unsigned { .. }
                 | Self::HolderMismatch { .. }
                 | Self::Inspect { .. }
         )
@@ -278,10 +271,9 @@ fn switch_row_sql(suffix: &'static str) -> sqlx::AssertSqlSafe<String> {
         l.instance_id AS live_instance_id, l.status AS live_status,
         l.failure_kind AS live_failure_kind
      FROM compute_resources cr
-     JOIN organization_members om ON om.organization_id = cr.organization_id AND om.user_id = $3
      JOIN app_deployments d ON d.app_id = cr.id AND d.id = $2
      LEFT JOIN app_deployments l ON l.id = cr.live_deployment_id
-     WHERE cr.id = $1 AND cr.lifecycle = $4 AND cr.destroyed_at IS NULL{suffix}"
+     WHERE cr.id = $1 AND cr.organization_id = $3 AND cr.lifecycle = $4 AND cr.destroyed_at IS NULL{suffix}"
     ))
 }
 
@@ -315,39 +307,9 @@ fn check(
     Ok((plan, region, instance_id))
 }
 
-/// The gateway requires a passkey for switch and forwards its audit ID. The API
-/// accepts only the caller's own pending signed POST of exactly this path:
-/// never a caller-provided claim, never another request's proof.
-pub(crate) async fn signed_switch_request(
-    db: &PgPool,
-    auth: &AuthContext,
-    app_id: Uuid,
-    deployment_id: Uuid,
-) -> Result<Uuid, SwitchError> {
-    let unsigned = || SwitchError::Unsigned {
-        location: std::panic::Location::caller(),
-    };
-    let id = auth.signed_request_id().ok_or_else(unsigned)?;
-    let bound: bool = sqlx::query_scalar(
-        "SELECT EXISTS (
-             SELECT 1 FROM signed_request_audit
-             WHERE id = $1 AND user_id = $2 AND request_method = 'POST'
-               AND lower(request_path) = lower($3) AND completed_at IS NULL)",
-    )
-    .bind(id)
-    .bind(auth.user_id())
-    .bind(format!(
-        "/resources/{app_id}/deployments/{deployment_id}/switch"
-    ))
-    .fetch_one(db)
-    .await
-    .with_context(SwitchErrorCtx::database())?;
-    if bound { Ok(id) } else { Err(unsigned()) }
-}
-
 pub(crate) async fn switch_handler(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
     Path((app_id, deployment_id)): Path<(Uuid, Uuid)>,
     Json(request): Json<SwitchRequest>,
 ) -> Result<Json<SwitchResponse>, SwitchError> {
@@ -370,10 +332,16 @@ async fn switch(
 ) -> Result<SwitchResponse, SwitchError> {
     // 1. Validate and health-check without locks: the health wait can take
     //    ~70 s and must not block pushes, destroys or other switches.
+    let caller_org = crate::get_user_primary_org(&state.db, auth)
+        .await
+        .map_err(|source| SwitchError::Database {
+            location: std::panic::Location::caller(),
+            source: Box::new(source),
+        })?;
     let row: Option<SwitchRow> = sqlx::query_as(switch_row_sql(""))
         .bind(app_id)
         .bind(deployment_id)
-        .bind(auth.user_id())
+        .bind(caller_org)
         .bind(LIFECYCLE_DEPLOYMENTS)
         .fetch_optional(&state.db)
         .await
@@ -383,7 +351,10 @@ async fn switch(
             location: std::panic::Location::caller(),
         });
     };
-    let signed_request_id = signed_switch_request(&state.db, auth, app_id, deployment_id).await?;
+    // The gateway is the sole signature gate for switch; a passkey flow
+    // forwards its audit id here and a token flow has none. It is recorded for
+    // attribution but no longer re-verified in the API.
+    let signed_request_id = auth.signed_request_id();
     let operation_id = events::begin(
         &state.db,
         events::NewOperation {
@@ -393,7 +364,7 @@ async fn switch(
             actor: auth,
             previous_deployment_id: row.live_deployment_id,
             target_deployment_id: Some(deployment_id),
-            signed_request_id: Some(signed_request_id),
+            signed_request_id,
         },
     )
     .await
@@ -431,6 +402,13 @@ async fn execute(
 ) -> Result<SwitchResponse, SwitchError> {
     use SwitchErrorCtx as Ctx;
 
+    let caller_org = crate::get_user_primary_org(&state.db, auth)
+        .await
+        .map_err(|source| SwitchError::Database {
+            location: std::panic::Location::caller(),
+            source: Box::new(source),
+        })?;
+
     let (plan, region, instance_id) = check(row, deployment_id, request)?;
     // A failed account read moved nothing (`Inspect`).
     let ec2 = account::app_account(state, app_id, &region)
@@ -462,7 +440,7 @@ async fn execute(
         &state.db,
         state.managed_dns.is_some(),
         &ec2,
-        auth.expect_user_id(),
+        caller_org,
         app_id,
         deployment_id,
         request,
@@ -502,7 +480,7 @@ pub(super) async fn commit_switch(
     db: &PgPool,
     managed_dns_enabled: bool,
     address: &impl AppAddressMover,
-    user_id: Uuid,
+    org_id: Uuid,
     app_id: Uuid,
     deployment_id: Uuid,
     request: &SwitchRequest,
@@ -516,7 +494,7 @@ pub(super) async fn commit_switch(
     let row: Option<SwitchRow> = sqlx::query_as(switch_row_sql(" FOR UPDATE OF cr, d"))
         .bind(app_id)
         .bind(deployment_id)
-        .bind(user_id)
+        .bind(org_id)
         .bind(LIFECYCLE_DEPLOYMENTS)
         .fetch_optional(&mut *tx)
         .await
@@ -711,7 +689,6 @@ mod tests {
                 location,
                 source: source(),
             },
-            SwitchError::Unsigned { location },
             SwitchError::HolderMismatch { location },
             SwitchError::Inspect {
                 location,
