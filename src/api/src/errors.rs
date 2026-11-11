@@ -107,6 +107,12 @@ pub enum ValidationError {
     CommitShaInvalid {
         location: &'static Location<'static>,
     },
+
+    DescriptionTooLong {
+        max: usize,
+        actual: usize,
+        location: &'static Location<'static>,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -225,6 +231,14 @@ impl fmt::Display for ValidationError {
                 "invalid commit_sha: must be 40 hex characters [{}]",
                 self.location()
             ),
+
+            Self::DescriptionTooLong { max, actual, .. } => write!(
+                f,
+                "description must be at most {} characters (got {}) [{}]",
+                max,
+                actual,
+                self.location()
+            ),
         }
     }
 }
@@ -252,7 +266,8 @@ impl ValidationError {
             | Self::InvalidRole { location, .. }
             | Self::BranchNameLength { location, .. }
             | Self::BranchNameInvalidChars { location }
-            | Self::CommitShaInvalid { location } => location,
+            | Self::CommitShaInvalid { location }
+            | Self::DescriptionTooLong { location, .. } => location,
         }
     }
 
@@ -284,6 +299,8 @@ impl ValidationError {
             Self::BranchNameInvalidChars { .. } => "branch_name_invalid_chars",
 
             Self::CommitShaInvalid { .. } => "commit_sha_invalid",
+
+            Self::DescriptionTooLong { .. } => "description_too_long",
         }
     }
 }

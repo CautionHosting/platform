@@ -5996,6 +5996,10 @@ async fn main() -> Result<(), MainError> {
         .route("/resources/{id}", patch(resources::rename_resource))
         .route("/resources/{id}", delete(resources::delete_resource))
         .route(
+            "/resources/{id}/description",
+            patch(resources::update_resource_description),
+        )
+        .route(
             "/resources/{id}/deployments",
             get(app_deployments::handlers::list_handler),
         )

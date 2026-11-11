@@ -2480,7 +2480,58 @@ async fn deployment_reads() {
 
     reads_are_scoped_to_the_callers_deployments_apps(&pool).await;
     app_views_carry_the_lifecycle_and_live_pointer(&state).await;
+    app_descriptions_are_set_and_cleared(&state).await;
     pool.close().await;
+}
+
+/// A member sets and clears an app's description; an unknown app is not found.
+async fn app_descriptions_are_set_and_cleared(state: &Arc<AppState>) {
+    use crate::resources::{UpdateResourceDescriptionError, update_resource_description};
+    use crate::validated_types::{UpdateResourceDescriptionRequest, Validated};
+    use axum::extract::{Path, State};
+
+    let pool = &state.db;
+    let org = organization(pool).await;
+    let app = deployments_app(pool, org).await;
+    let user = member(pool, org).await;
+    let set = |app: Uuid, description: Option<&str>| {
+        update_resource_description(
+            State(state.clone()),
+            axum::Extension(crate::AuthContext::session(user)),
+            Path(app),
+            Validated(UpdateResourceDescriptionRequest {
+                description: description.map(str::to_string),
+            }),
+        )
+    };
+
+    let updated = set(app, Some("  billing worker, owned by infra  "))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(updated.id, app);
+    assert_eq!(
+        updated.description.as_deref(),
+        Some("billing worker, owned by infra")
+    );
+
+    // Whitespace-only clears, as does null.
+    assert_eq!(set(app, Some("   ")).await.unwrap().0.description, None);
+    assert_eq!(
+        set(app, Some("again"))
+            .await
+            .unwrap()
+            .0
+            .description
+            .as_deref(),
+        Some("again")
+    );
+    assert_eq!(set(app, None).await.unwrap().0.description, None);
+
+    assert!(matches!(
+        set(Uuid::new_v4(), Some("ghost")).await,
+        Err(UpdateResourceDescriptionError::NotFound { .. })
+    ));
 }
 
 /// Every app read the CLI uses answers with the lifecycle and the live pointer.

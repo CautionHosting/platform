@@ -263,6 +263,30 @@ impl Validate for RenameResourceRequest {
     }
 }
 
+const DESCRIPTION_MAX_LEN: usize = 500;
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateResourceDescriptionRequest {
+    /// `None` (or `null`) clears the description.
+    pub description: Option<String>,
+}
+
+impl Validate for UpdateResourceDescriptionRequest {
+    fn validate(&self) -> Result<(), ValidationError> {
+        if let Some(description) = &self.description {
+            let actual = description.chars().count();
+            if actual > DESCRIPTION_MAX_LEN {
+                return Err(ValidationError::DescriptionTooLong {
+                    max: DESCRIPTION_MAX_LEN,
+                    actual,
+                    location: std::panic::Location::caller(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct UpdateOrgSettingsRequest {
     pub require_pin: Option<bool>,
@@ -296,8 +320,8 @@ pub(crate) fn builder_size_from_request(
 #[cfg(test)]
 mod tests {
     use super::{
-        AddMemberRequest, CreateResourceRequest, DeployRequest, UpdateUserRequest, Validate,
-        builder_size_from_request,
+        AddMemberRequest, CreateResourceRequest, DESCRIPTION_MAX_LEN, DeployRequest,
+        UpdateResourceDescriptionRequest, UpdateUserRequest, Validate, builder_size_from_request,
     };
     use crate::SetBuilderConfigError;
     use crate::validation::ValidationError;
@@ -408,5 +432,24 @@ mod tests {
         let err = req.validate().unwrap_err();
 
         assert!(matches!(err, ValidationError::CmdEmpty { .. }));
+    }
+
+    #[test]
+    fn description_is_limited_in_characters_not_bytes() {
+        let at_limit = UpdateResourceDescriptionRequest {
+            description: Some("é".repeat(DESCRIPTION_MAX_LEN)),
+        };
+        assert!(at_limit.validate().is_ok());
+
+        let over = UpdateResourceDescriptionRequest {
+            description: Some("a".repeat(DESCRIPTION_MAX_LEN + 1)),
+        };
+        assert!(matches!(
+            over.validate().unwrap_err(),
+            ValidationError::DescriptionTooLong { .. }
+        ));
+
+        let clear = UpdateResourceDescriptionRequest { description: None };
+        assert!(clear.validate().is_ok());
     }
 }

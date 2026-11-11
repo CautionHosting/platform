@@ -22,6 +22,7 @@ use uuid::Uuid;
 use crate::validated_types;
 use crate::validated_types::{
     CreateResourceRequest, CreateResourceResponse, RenameResourceRequest,
+    UpdateResourceDescriptionRequest,
 };
 use crate::{
     AppState, AuthContext, get_or_create_provider_account, get_or_create_resource_type,
@@ -781,6 +782,113 @@ pub async fn rename_resource(
     );
 
     Ok(Json(updated_resource))
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct ResourceDescription {
+    pub id: Uuid,
+    pub description: Option<String>,
+}
+
+/// Failure modes for [`update_resource_description`].
+#[derive(Debug, thiserror::Error, CtxError)]
+pub enum UpdateResourceDescriptionError {
+    #[error("resource not found [{location}]")]
+    NotFound {
+        resource_id: Uuid,
+        location: Location,
+    },
+
+    #[error("failed to look up resource [{location}]")]
+    Lookup {
+        resource_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
+    #[error("failed to update resource description [{location}]")]
+    Update {
+        resource_id: Uuid,
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+}
+
+impl IntoResponse for UpdateResourceDescriptionError {
+    fn into_response(self) -> Response {
+        let (status, body) = match &self {
+            UpdateResourceDescriptionError::NotFound { .. } => (StatusCode::NOT_FOUND, "not found"),
+            UpdateResourceDescriptionError::Lookup { .. }
+            | UpdateResourceDescriptionError::Update { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
+        };
+        sentry_middleware::error_response(status, body, self)
+    }
+}
+
+/// Sets (or, with `null`, clears) the free-text description of an app.
+#[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
+pub async fn update_resource_description(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(resource_id): Path<Uuid>,
+    validated_types::Validated(payload): validated_types::Validated<
+        UpdateResourceDescriptionRequest,
+    >,
+) -> Result<Json<ResourceDescription>, UpdateResourceDescriptionError> {
+    use UpdateResourceDescriptionErrorCtx as Ctx;
+
+    // Verify user has access to this resource via organization membership
+    let exists: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT cr.id
+         FROM compute_resources cr
+         INNER JOIN organization_members om ON om.user_id = $2
+         WHERE cr.id = $1 AND cr.destroyed_at IS NULL
+         LIMIT 1",
+    )
+    .bind(resource_id)
+    .bind(auth.user_id)
+    .fetch_optional(&state.db)
+    .await
+    .with_context(Ctx::lookup(resource_id))?;
+
+    if exists.is_none() {
+        return Err(UpdateResourceDescriptionError::NotFound {
+            resource_id,
+            location: std::panic::Location::caller(),
+        });
+    }
+
+    // Empty or whitespace-only input clears the description.
+    let description = payload
+        .description
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty());
+
+    let updated = sqlx::query_as::<_, ResourceDescription>(
+        "UPDATE compute_resources
+         SET description = $2, updated_at = NOW()
+         WHERE id = $1
+         RETURNING id, description",
+    )
+    .bind(resource_id)
+    .bind(&description)
+    .fetch_one(&state.db)
+    .await
+    .with_context(Ctx::update(resource_id))?;
+
+    tracing::info!(
+        "Resource {} description updated by user {}",
+        resource_id,
+        auth.user_id
+    );
+
+    Ok(Json(updated))
 }
 
 #[derive(Debug, Deserialize)]
