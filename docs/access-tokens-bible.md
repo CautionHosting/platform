@@ -689,11 +689,10 @@ Newest first.
     itself still needs the waitlist table's `NOT NULL user_id` made nullable.
   - **switch (D13) is the other schema blocker.** It writes
     `signed_request_audit`, whose `user_id` is `NOT NULL` (`047:10`) and whose
-    other columns are passkey-specific; and `deployment_events.auth_method`'s
-    CHECK allows only `('passkey','session','ssh_signed')` (`058`), so a token
-    actor needs `'token'` added. A token switch needs `signed_request_audit`
-    generalized (nullable user + token id, or a separate token audit row) and
-    the `auth_method` CHECK widened.
+    other columns are passkey-specific. (`deployment_events.auth_method` was
+    widened to include `'token'` by migration 065, so only the audit row is
+    left.) A token switch needs `signed_request_audit` generalized (nullable
+    user + token id, or a separate token audit row).
   This is why D14 is scoped to *attribution* columns and why only switch truly
   waits on it.
 
