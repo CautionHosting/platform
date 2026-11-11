@@ -12,7 +12,7 @@ use super::{LIFECYCLE_DEPLOYMENTS, PROCESS_ID, admission, lock_app_operations};
 use crate::{AppState, AuthContext, deployment, ec2};
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Extension, Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -589,7 +589,7 @@ struct DestroyRow {
 
 pub(crate) async fn destroy_handler(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
     Path((app_id, deployment_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode, DestroyError> {
     use DestroyErrorCtx as Ctx;
@@ -676,19 +676,26 @@ pub(super) async fn begin_destroy(
     lock_app_operations(&mut tx, app_id)
         .await
         .with_context(Ctx::database())?;
-    // Membership join as in the switch.
+    // Resolve the caller's organization so tokens are scoped to their own org
+    // (docs/access-tokens-bible.md D6).
+    let caller_org = crate::get_user_primary_org(db, actor)
+        .await
+        .map_err(|source| DestroyError::Database {
+            location: std::panic::Location::caller(),
+            source: Box::new(source),
+        })?;
     let row: Option<DestroyRow> = sqlx::query_as(
         "SELECT cr.live_deployment_id, COALESCE(cr.region, d.region) AS region,
                 d.status, d.instance_id, cr.state::text AS app_state
          FROM compute_resources cr
-         JOIN organization_members om ON om.organization_id = cr.organization_id AND om.user_id = $3
          JOIN app_deployments d ON d.app_id = cr.id AND d.id = $2
-         WHERE cr.id = $1 AND cr.lifecycle = $4 AND cr.destroyed_at IS NULL
+         WHERE cr.id = $1 AND cr.organization_id = $3
+           AND cr.lifecycle = $4 AND cr.destroyed_at IS NULL
          FOR UPDATE OF cr, d",
     )
     .bind(app_id)
     .bind(deployment_id)
-    .bind(actor.expect_user_id())
+    .bind(caller_org)
     .bind(LIFECYCLE_DEPLOYMENTS)
     .fetch_optional(&mut *tx)
     .await

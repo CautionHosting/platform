@@ -204,7 +204,7 @@ pub(crate) enum CapacityError {
 pub(crate) async fn reserve_capacity(
     pool: &PgPool,
     org_id: Uuid,
-    user_id: Uuid,
+    user_id: Option<Uuid>,
     resource_id: Uuid,
     requirements: &DeploymentRequirements,
     region_pin: Option<&str>,
@@ -507,9 +507,14 @@ pub(crate) enum UserHasWaitlistEntryError {
 async fn user_has_waitlist_entry(
     tx: &mut Transaction<'_, Postgres>,
     org_id: Uuid,
-    user_id: Uuid,
+    user_id: Option<Uuid>,
 ) -> Result<bool, UserHasWaitlistEntryError> {
     use UserHasWaitlistEntryErrorCtx as Ctx;
+
+    // A token principal has no user id, so it cannot have a waitlist entry.
+    let Some(user_id) = user_id else {
+        return Ok(false);
+    };
 
     sqlx::query_scalar(
         "SELECT EXISTS (

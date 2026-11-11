@@ -145,7 +145,7 @@ async fn participant_queries(pool: &PgPool, org: Uuid, other_org: Uuid, alice: U
     );
     let before = request_log().len();
     assert!(
-        generate_org_quorum_bundle(pool, org, alice, r)
+        generate_org_quorum_bundle(pool, org, Some(alice), r)
             .await
             .is_err()
     );
@@ -165,7 +165,7 @@ async fn credentials(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid) {
     );
     let before = request_log().len();
     assert!(
-        generate_org_quorum_bundle(pool, org, user, r.clone())
+        generate_org_quorum_bundle(pool, org, Some(user), r.clone())
             .await
             .is_err()
     );
@@ -197,7 +197,7 @@ async fn credentials(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid) {
     // An enrolled credential alone is insufficient; no service request is sent.
     let before = request_log().len();
     assert!(
-        generate_org_quorum_bundle(pool, org, user, r.clone())
+        generate_org_quorum_bundle(pool, org, Some(user), r.clone())
             .await
             .is_err()
     );
@@ -236,7 +236,7 @@ async fn credentials(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid) {
         .unwrap();
     }
     let before = request_log().len();
-    let error = generate_org_quorum_bundle(pool, org, user, r.clone())
+    let error = generate_org_quorum_bundle(pool, org, Some(user), r.clone())
         .await
         .unwrap_err();
     assert!(error.to_string().contains("64"));
@@ -264,7 +264,7 @@ async fn credentials(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid) {
     .unwrap();
     let before = request_log().len();
     assert!(
-        generate_org_quorum_bundle(pool, org, user, r.clone())
+        generate_org_quorum_bundle(pool, org, Some(user), r.clone())
             .await
             .is_err()
     );
@@ -297,7 +297,7 @@ async fn credentials(pool: &PgPool, org: Uuid, other_org: Uuid, user: Uuid) {
             .any(|m| m.user_id == user)
     );
     let before = request_log().len();
-    let error = generate_org_quorum_bundle(pool, org, user, r.clone())
+    let error = generate_org_quorum_bundle(pool, org, Some(user), r.clone())
         .await
         .unwrap_err();
     assert!(matches!(
@@ -467,7 +467,7 @@ async fn hosted_pgp(pool: &PgPool, org: Uuid, user: Uuid) {
         r.labels = json!({"test_response":mode});
         let before = request_log().len();
         eprintln!("hosted PGP orchestration: {selection}, {mode}");
-        let error = generate_org_quorum_bundle(pool, org, user, r)
+        let error = generate_org_quorum_bundle(pool, org, Some(user), r)
             .await
             .unwrap_err();
         if mode == "invalid-proof" {
@@ -479,7 +479,7 @@ async fn hosted_pgp(pool: &PgPool, org: Uuid, user: Uuid) {
         // Assert the real handler mapping, not a re-implementation of it.
         let response = crate::org_quorum::handlers::CreateOrgUserQuorumBundleError::Generate {
             org_id: org,
-            user_id: user,
+            user_id: Some(user),
             location: std::panic::Location::caller(),
             source: Box::new(error),
         }

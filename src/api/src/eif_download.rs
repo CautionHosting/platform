@@ -8,7 +8,7 @@
 
 use axum::{
     body::Body,
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -470,7 +470,7 @@ pub(crate) async fn build_for_key(
 #[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 pub(crate) async fn download_eif(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
     Path(resource_id): Path<Uuid>,
     Query(params): Query<DownloadEifParams>,
     req: axum::extract::Request,

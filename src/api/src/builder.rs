@@ -910,7 +910,7 @@ pub async fn execute_remote_build(
     request: &BuildRequest,
     cache_key: &str,
     tx: &tokio::sync::mpsc::Sender<Result<bytes::Bytes, std::io::Error>>,
-    user_id: Uuid,
+    user_id: Option<Uuid>,
 ) -> Result<BuildResult, ExecuteRemoteBuildError> {
     use ExecuteRemoteBuildErrorCtx as Ctx;
 

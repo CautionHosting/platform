@@ -515,6 +515,14 @@ pub async fn get_resource(
 /// Failure modes for [`proxy_attestation`].
 #[derive(Debug, thiserror::Error, CtxError)]
 pub enum ProxyAttestationError {
+    #[error("failed to resolve the caller's organization [{location}]")]
+    AccessQuery {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+
     #[error("resource not found [{location}]")]
     ResourceNotFound {
         resource_id: Uuid,
@@ -565,6 +573,9 @@ pub enum ProxyAttestationError {
 impl IntoResponse for ProxyAttestationError {
     fn into_response(self) -> Response {
         let (status, body) = match &self {
+            ProxyAttestationError::AccessQuery { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+            }
             ProxyAttestationError::ResourceNotFound { .. } => {
                 (StatusCode::NOT_FOUND, "resource not found")
             }
@@ -591,21 +602,29 @@ impl IntoResponse for ProxyAttestationError {
 #[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 pub async fn proxy_attestation(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
     Path(resource_id): Path<Uuid>,
     body: axum::body::Bytes,
 ) -> Result<Json<serde_json::Value>, ProxyAttestationError> {
     use ProxyAttestationErrorCtx as Ctx;
 
+    // Authorization is org-scoped so both users and tokens are scoped to the
+    // caller's organization (docs/access-tokens-bible.md D6).
+    let caller_org = get_user_primary_org(&state.db, &auth)
+        .await
+        .map_err(|source| ProxyAttestationError::AccessQuery {
+            location: std::panic::Location::caller(),
+            source: Box::new(source),
+        })?;
+
     // Get the resource to verify ownership and get the public IP
     let public_ip: Option<String> = sqlx::query_scalar(
         "SELECT cr.public_ip
          FROM compute_resources cr
-         INNER JOIN organization_members om ON cr.organization_id = om.organization_id
-         WHERE cr.id = $1 AND om.user_id = $2 AND cr.destroyed_at IS NULL",
+         WHERE cr.id = $1 AND cr.organization_id = $2 AND cr.destroyed_at IS NULL",
     )
     .bind(resource_id)
-    .bind(auth.user_id())
+    .bind(caller_org)
     .fetch_one(&state.db)
     .await
     .with_context(Ctx::resource_not_found(resource_id))?;

@@ -874,7 +874,7 @@ pub(crate) enum GenerateOrgQuorumBundleError {
     #[error("invalid quorum request [{location}]")]
     ValidateRequest {
         org_id: Uuid,
-        user_id: Uuid,
+        user_id: Option<Uuid>,
         #[location]
         location: Location,
         #[source]
@@ -883,7 +883,7 @@ pub(crate) enum GenerateOrgQuorumBundleError {
     #[error("invalid client Keymaker policy [{location}]")]
     ClientPolicy {
         org_id: Uuid,
-        user_id: Uuid,
+        user_id: Option<Uuid>,
         #[location]
         location: Location,
         #[source]
@@ -892,7 +892,7 @@ pub(crate) enum GenerateOrgQuorumBundleError {
     #[error("unable to resolve quorum holders [{location}]")]
     ResolveHolders {
         org_id: Uuid,
-        user_id: Uuid,
+        user_id: Option<Uuid>,
         #[location]
         location: Location,
         #[source]
@@ -989,7 +989,7 @@ pub(crate) enum GenerateOrgQuorumBundleError {
     #[error("unable to store the verified quorum bundle [{location}]")]
     Store {
         org_id: Uuid,
-        user_id: Uuid,
+        user_id: Option<Uuid>,
         #[location]
         location: Location,
         #[source]
@@ -1001,7 +1001,7 @@ pub(crate) enum GenerateOrgQuorumBundleError {
 pub async fn generate_org_quorum_bundle(
     pool: &PgPool,
     org_id: Uuid,
-    created_by: Uuid,
+    created_by: Option<Uuid>,
     request: GenerateOrgQuorumBundleRequest,
 ) -> Result<crate::cryptographic_bundles::QuorumBundle, GenerateOrgQuorumBundleError> {
     use GenerateOrgQuorumBundleErrorCtx as Ctx;
@@ -1052,7 +1052,7 @@ pub async fn generate_org_quorum_bundle(
     crate::cryptographic_bundles::create_quorum_bundle(
         pool,
         org_id,
-        Some(created_by),
+        created_by,
         crate::cryptographic_bundles::CreateBundleRequest {
             allow_legacy: false,
             data,

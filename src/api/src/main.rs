@@ -2327,7 +2327,7 @@ impl IntoResponse for GetBuilderConfigError {
 #[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 async fn get_builder_config(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<AuthContext>,
     Path(resource_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, GetBuilderConfigError> {
     use GetBuilderConfigErrorCtx as Ctx;
@@ -2408,7 +2408,7 @@ impl IntoResponse for SetBuilderConfigError {
 #[tracing::instrument(skip_all, err(Debug), fields(resource_id = %resource_id))]
 async fn set_builder_config(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<AuthContext>,
     Path(resource_id): Path<Uuid>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, SetBuilderConfigError> {
@@ -3166,7 +3166,7 @@ impl DeployLogicError {
 #[tracing::instrument(skip_all, fields(org_id = %req.org_id, app_id = %req.app_id))]
 async fn deploy_handler(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<AuthContext>,
     validated_types::Validated(req): validated_types::Validated<DeployRequest>,
 ) -> Response {
     use sentry_middleware::{REQUEST_ID, capture_error_with_breadcrumbs, drain_breadcrumbs};
@@ -3193,7 +3193,7 @@ async fn deploy_handler(
             request_id,
             deploy_logic(
                 state,
-                auth.0,
+                auth,
                 req,
                 deploy_attempt_id,
                 progress.clone(),
@@ -4063,8 +4063,8 @@ async fn deploy_logic(
     use DeployLogicErrorCtx as Ctx;
 
     tracing::info!(
-        "Deployment request: user_id={}, org_id={}, app_id={}",
-        auth.expect_user_id(),
+        "Deployment request: user_id={:?}, org_id={}, app_id={}",
+        auth.user_id(),
         req.org_id,
         req.app_id
     );
@@ -4075,19 +4075,27 @@ async fn deploy_logic(
 
     let app_id_str = req.app_id.to_string();
 
-    let user_in_org: Option<bool> = sqlx::query_scalar(
-        "SELECT EXISTS(
-            SELECT 1 FROM organization_members 
-            WHERE user_id = $1 AND organization_id = $2
-        )",
-    )
-    .bind(auth.user_id())
-    .bind(req.org_id)
-    .fetch_optional(&state.db)
-    .await
-    .with_context(Ctx::org_membership())?;
+    // Membership: a token must match the requested organization; a user must be
+    // a member (docs/access-tokens-bible.md D6).
+    let in_org = match &auth {
+        AuthContext::Token(token) => token.organization_id == req.org_id,
+        AuthContext::User(_) => {
+            let user_in_org: Option<bool> = sqlx::query_scalar(
+                "SELECT EXISTS(
+                    SELECT 1 FROM organization_members 
+                    WHERE user_id = $1 AND organization_id = $2
+                )",
+            )
+            .bind(auth.user_id())
+            .bind(req.org_id)
+            .fetch_optional(&state.db)
+            .await
+            .with_context(Ctx::org_membership())?;
+            user_in_org == Some(true)
+        }
+    };
 
-    if user_in_org != Some(true) {
+    if !in_org {
         return Err(DeployLogicError::NotOrgMember {
             location: std::panic::Location::caller(),
         });
@@ -4882,7 +4890,7 @@ async fn deploy_logic(
                 &build_request,
                 &cache_key,
                 &tx,
-                auth.expect_user_id(),
+                auth.user_id(),
             )
             .await;
             if matches!(
@@ -5031,7 +5039,7 @@ async fn deploy_logic(
         let reservation = fully_managed_capacity::reserve_capacity(
             &state.db,
             req.org_id,
-            auth.expect_user_id(),
+            auth.user_id(),
             resource_id,
             &capacity_requirements,
             region_pin,
@@ -5248,7 +5256,7 @@ async fn deploy_logic(
                 &state,
                 &deployment_result.instance_id,
                 req.org_id,
-                Some(auth.expect_user_id()),
+                auth.user_id(),
                 resource_id,
                 Some(deployment_id),
                 "aws",
@@ -5437,7 +5445,7 @@ async fn deploy_logic(
         &state,
         &deployment_result.instance_id,
         req.org_id,
-        Some(auth.expect_user_id()),
+        auth.user_id(),
         resource_id,
         None,
         "aws",

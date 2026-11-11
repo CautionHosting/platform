@@ -1271,7 +1271,7 @@ async fn live_deployment_is_never_destroyed(state: &Arc<AppState>) {
     // The real handler refuses before any AWS or OpenTofu call.
     let response = destroy::destroy_handler(
         axum::extract::State(state.clone()),
-        crate::UserPrincipal(crate::AuthContext::session(f.user)),
+        axum::Extension(crate::AuthContext::session(f.user)),
         axum::extract::Path((f.app, f.target)),
     )
     .await
@@ -2798,7 +2798,7 @@ async fn deploy(
             Uuid::new_v4(),
             crate::deploy_handler(
                 axum::extract::State(state.clone()),
-                crate::UserPrincipal(crate::AuthContext::session(user)),
+                axum::Extension(crate::AuthContext::session(user)),
                 crate::validated_types::Validated(crate::validated_types::DeployRequest {
                     org_id: org,
                     app_id: app,

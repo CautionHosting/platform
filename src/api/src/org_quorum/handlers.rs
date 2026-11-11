@@ -12,7 +12,7 @@ use super::{
 use crate::{AppState, cryptographic_bundles::QuorumBundle, get_user_primary_org};
 use axum::{
     Json,
-    extract::State,
+    extract::{Extension, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -24,9 +24,9 @@ use uuid::Uuid;
 /// branch. Both callees return their own typed errors, boxed here at the boundary.
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum ListOrgQuorumParticipantsError {
-    #[error("could not look up the primary organization for user {user_id} [{location}]")]
+    #[error("could not look up the primary organization for user {user_id:?} [{location}]")]
     PrimaryOrgLookup {
-        user_id: Uuid,
+        user_id: Option<Uuid>,
         #[location]
         location: Location,
         #[source]
@@ -36,7 +36,7 @@ pub(crate) enum ListOrgQuorumParticipantsError {
     #[error("failed to list quorum participants for organization {org_id} [{location}]")]
     ListParticipants {
         org_id: Uuid,
-        user_id: Uuid,
+        user_id: Option<Uuid>,
         #[location]
         location: Location,
         #[source]
@@ -63,7 +63,7 @@ impl IntoResponse for ListOrgQuorumParticipantsError {
 #[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub(crate) async fn list_org_quorum_participants(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
 ) -> Result<Json<Vec<OrgQuorumMember>>, ListOrgQuorumParticipantsError> {
     use ListOrgQuorumParticipantsErrorCtx as Ctx;
 
@@ -82,9 +82,9 @@ pub(crate) async fn list_org_quorum_participants(
 /// source to choose the client status; the callee itself is status-free.
 #[derive(Debug, thiserror::Error, CtxError)]
 pub(crate) enum CreateOrgUserQuorumBundleError {
-    #[error("could not look up the primary organization for user {user_id} [{location}]")]
+    #[error("could not look up the primary organization for user {user_id:?} [{location}]")]
     PrimaryOrgLookup {
-        user_id: Uuid,
+        user_id: Option<Uuid>,
         #[location]
         location: Location,
         #[source]
@@ -94,7 +94,7 @@ pub(crate) enum CreateOrgUserQuorumBundleError {
     #[error("failed to generate a quorum bundle for organization {org_id} [{location}]")]
     Generate {
         org_id: Uuid,
-        user_id: Uuid,
+        user_id: Option<Uuid>,
         #[location]
         location: Location,
         #[source]
@@ -258,7 +258,7 @@ fn send_client_response(error: Option<&SendError>) -> (StatusCode, &'static str)
 #[tracing::instrument(skip_all, err(Debug), fields(user_id = ?auth.user_id()))]
 pub(crate) async fn create_org_user_quorum_bundle(
     State(state): State<Arc<AppState>>,
-    auth: crate::UserPrincipal,
+    Extension(auth): Extension<crate::AuthContext>,
     Json(req): Json<GenerateOrgQuorumBundleRequest>,
 ) -> Result<Json<QuorumBundle>, CreateOrgUserQuorumBundleError> {
     use CreateOrgUserQuorumBundleErrorCtx as Ctx;
