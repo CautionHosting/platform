@@ -27,6 +27,7 @@ use crate::{
     AppliedPricing,
     deployment::{AwsCredentials, ManagedOnPremConfig},
     ec2::{Ec2Client, Filter, RunInstancesParams},
+    encryption::Encryptor,
 };
 
 const REMOTE_BUILDER_HELPER: &str = "remote-build-helper";
@@ -907,6 +908,8 @@ pub async fn execute_remote_build(
     ec2: &Ec2Client,
     s3: &aws_sdk_s3::Client,
     config: &BuilderConfig,
+    builder_credential_id: Option<Uuid>,
+    uses_customer_credentials: bool,
     request: &BuildRequest,
     cache_key: &str,
     tx: &tokio::sync::mpsc::Sender<Result<bytes::Bytes, std::io::Error>>,
@@ -961,8 +964,8 @@ pub async fn execute_remote_build(
 
     // 2. Insert pending build row and commit, releasing the lock.
     sqlx::query(
-        "INSERT INTO eif_builds (id, organization_id, app_id, user_id, commit_sha, procfile_hash, cache_key, builder_instance_type, component_artifacts, status, started_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', NOW())"
+        "INSERT INTO eif_builds (id, organization_id, app_id, user_id, commit_sha, procfile_hash, cache_key, builder_instance_type, builder_credential_id, builder_uses_customer_credentials, builder_region, component_artifacts, status, started_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'pending', NOW())"
     )
     .bind(build_id)
     .bind(request.org_id)
@@ -972,6 +975,9 @@ pub async fn execute_remote_build(
     .bind(&procfile_hash)
     .bind(cache_key)
     .bind(instance_type)
+    .bind(builder_credential_id)
+    .bind(uses_customer_credentials)
+    .bind(&config.region)
     .bind(component_artifacts.as_ref().map(sqlx::types::Json))
     .execute(&mut *db_tx)
     .await
@@ -1958,17 +1964,134 @@ async fn bill_builder_usage(
 }
 
 #[tracing::instrument(skip_all)]
+async fn reaper_ec2_client(
+    db: &PgPool,
+    platform_ec2: &Ec2Client,
+    encryptor: Option<&Encryptor>,
+    org_id: Uuid,
+    app_id: Option<Uuid>,
+    builder_credential_id: Option<Uuid>,
+    uses_customer_credentials: Option<bool>,
+    builder_region: Option<&str>,
+) -> Result<Ec2Client, ReaperEc2ClientError> {
+    use ReaperEc2ClientErrorCtx as Ctx;
+
+    if uses_customer_credentials == Some(false) {
+        return Ok(builder_region
+            .map(|region| platform_ec2.for_region(region))
+            .unwrap_or_else(|| platform_ec2.for_region(platform_ec2.region())));
+    }
+    let credential_id = if uses_customer_credentials == Some(true) {
+        builder_credential_id.ok_or_else(|| ReaperEc2ClientError::CredentialIdMissing {
+            location: std::panic::Location::caller(),
+        })?
+    } else {
+        let Some(app_id) = app_id else {
+            return Ok(builder_region
+                .map(|region| platform_ec2.for_region(region))
+                .unwrap_or_else(|| platform_ec2.for_region(platform_ec2.region())));
+        };
+        let credential = crate::cloud_credentials::get_credential_by_resource(db, org_id, app_id)
+            .await
+            .with_context(Ctx::lookup())?;
+        let Some(credential) = credential.filter(|credential| {
+            credential.managed_on_prem
+                && credential.config["builder_instance_profile_name"]
+                    .as_str()
+                    .is_some_and(|profile| !profile.is_empty())
+        }) else {
+            return Ok(builder_region
+                .map(|region| platform_ec2.for_region(region))
+                .unwrap_or_else(|| platform_ec2.for_region(platform_ec2.region())));
+        };
+        credential.id
+    };
+    let encryptor = encryptor.ok_or_else(|| ReaperEc2ClientError::EncryptorMissing {
+        location: std::panic::Location::caller(),
+    })?;
+    let customer = crate::cloud_credentials::get_managed_onprem_credential(
+        db,
+        encryptor,
+        org_id,
+        credential_id,
+    )
+    .await
+    .with_context(Ctx::load())?
+    .ok_or_else(|| ReaperEc2ClientError::CredentialMissing {
+        credential_id,
+        location: std::panic::Location::caller(),
+    })?;
+    let credentials = AwsCredentials {
+        access_key_id: customer.aws_access_key_id,
+        secret_access_key: customer.aws_secret_access_key,
+        region: builder_region.unwrap_or(&customer.aws_region).to_string(),
+    };
+
+    Ok(Ec2Client::new(&credentials))
+}
+
+#[derive(Debug, thiserror::Error, CtxError)]
+enum ReaperEc2ClientError {
+    #[error("failed to look up builder cloud credential [{location}]")]
+    Lookup {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("cloud credential decryption is unavailable for BYOC builder cleanup [{location}]")]
+    EncryptorMissing { location: Location },
+    #[error("BYOC builder row has no persisted cloud credential ID [{location}]")]
+    CredentialIdMissing { location: Location },
+    #[error("failed to load BYOC builder cloud credential [{location}]")]
+    Load {
+        #[location]
+        location: Location,
+        #[source]
+        source: BoxError,
+    },
+    #[error("BYOC builder cloud credential {credential_id} no longer exists [{location}]")]
+    CredentialMissing {
+        credential_id: Uuid,
+        location: Location,
+    },
+}
+
+#[tracing::instrument(skip_all)]
 pub async fn reap_orphaned_builders(
     db: &PgPool,
-    ec2: &Ec2Client,
+    platform_ec2: &Ec2Client,
+    encryptor: Option<&Encryptor>,
     instance_pricing: impl Fn(&str) -> Option<AppliedPricing>,
 ) {
-    let rows = match sqlx::query_as::<_, (Uuid, Option<String>, Uuid, Option<Uuid>, Option<String>, Option<chrono::DateTime<chrono::Utc>>, String)>(
-        "SELECT id, builder_instance_id, organization_id, app_id, builder_instance_type, started_at, status FROM eif_builds
-         WHERE created_at < NOW() - INTERVAL '30 minutes'"
+    let rows = match sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            Option<String>,
+            Uuid,
+            Option<Uuid>,
+            Option<String>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            String,
+            Option<Uuid>,
+            Option<bool>,
+            Option<String>,
+        ),
+    >(
+        "SELECT builds.id, builds.builder_instance_id, builds.organization_id, builds.app_id,
+                builds.builder_instance_type, builds.started_at, builds.status,
+                builds.builder_credential_id, builds.builder_uses_customer_credentials,
+                COALESCE(builds.builder_region, tracked.region)
+         FROM eif_builds AS builds
+         LEFT JOIN tracked_resources AS tracked
+           ON tracked.resource_id = builds.builder_instance_id
+          AND tracked.organization_id = builds.organization_id
+         WHERE builds.created_at < NOW() - INTERVAL '30 minutes'",
     )
     .fetch_all(db)
-    .await {
+    .await
+    {
         Ok(rows) => rows,
         Err(e) => {
             tracing::error!("Failed to query orphaned builds: {}", e);
@@ -1977,7 +2100,41 @@ pub async fn reap_orphaned_builders(
     };
 
     let mut orphaned_per_org: HashMap<Uuid, usize> = HashMap::new();
-    for (build_id, instance_id, org_id, app_id, instance_type, started_at, status) in rows {
+    for (
+        build_id,
+        instance_id,
+        org_id,
+        app_id,
+        instance_type,
+        started_at,
+        status,
+        builder_credential_id,
+        uses_customer_credentials,
+        region,
+    ) in rows
+    {
+        let ec2 = match reaper_ec2_client(
+            db,
+            platform_ec2,
+            encryptor,
+            org_id,
+            app_id,
+            builder_credential_id,
+            uses_customer_credentials,
+            region.as_deref(),
+        )
+        .await
+        {
+            Ok(ec2) => ec2,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to resolve AWS ownership for orphaned build {}; keeping it for a later scan: {}",
+                    build_id,
+                    e
+                );
+                continue;
+            }
+        };
         // Every build older than 30 minutes is a candidate regardless of build
         // status: a builder instance can be left behind by a timeout, a
         // failure, or even a successful build. Only builds still stuck in
@@ -2040,11 +2197,11 @@ pub async fn reap_orphaned_builders(
         // a terminal state, or one reaped on an earlier pass, has no instance
         // left to clean up.
         let Some(iid) = instance_id else { continue };
-        let still_exists = match ec2
+        let instances = match ec2
             .describe_instances(&[Filter::new("instance-id", &[iid.as_str()])])
             .await
         {
-            Ok(instances) => !instances.is_empty(),
+            Ok(instances) => instances,
             Err(e) => {
                 tracing::error!(
                     "Failed to check instance {} existence for build {}: {}",
@@ -2055,11 +2212,30 @@ pub async fn reap_orphaned_builders(
                 continue;
             }
         };
-        if !still_exists {
+        if instances.is_empty() {
             tracing::debug!(
                 "Skipping build {} (instance {} no longer exists)",
                 build_id,
                 iid
+            );
+            continue;
+        }
+        let owned_instance_exists = instances.iter().any(|instance| {
+            instance.instance_id == iid
+                && instance
+                    .tags
+                    .get(MANAGED_BY_TAG)
+                    .is_some_and(|value| value == MANAGED_BY_BUILDER)
+                && instance
+                    .tags
+                    .get(BUILD_ID_TAG)
+                    .is_some_and(|value| value == &build_id.to_string())
+        });
+        if !owned_instance_exists {
+            tracing::error!(
+                "Instance {} for build {} did not have the expected builder ownership tags; refusing to terminate it",
+                iid,
+                build_id
             );
             continue;
         }

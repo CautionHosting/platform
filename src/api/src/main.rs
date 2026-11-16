@@ -1921,6 +1921,8 @@ struct ResolvedBuilderTarget {
     config: builder::BuilderConfig,
     aws_credentials: deployment::AwsCredentials,
     cache_app_id: Option<Uuid>,
+    credential_id: Option<Uuid>,
+    uses_customer_credentials: bool,
 }
 
 #[tracing::instrument(skip_all)]
@@ -2058,6 +2060,7 @@ async fn resolve_builder_target(
     default_config: &builder::BuilderConfig,
     managed_onprem: Option<&deployment::ManagedOnPremConfig>,
     managed_onprem_credentials: Option<&deployment::AwsCredentials>,
+    managed_onprem_credential_id: Option<Uuid>,
     resource_id: Uuid,
 ) -> Result<ResolvedBuilderTarget, ResolveBuilderTargetError> {
     use ResolveBuilderTargetErrorCtx as Ctx;
@@ -2068,6 +2071,11 @@ async fn resolve_builder_target(
                 location: std::panic::Location::caller(),
             })?;
         let managed_onprem_credentials = managed_onprem_credentials.ok_or_else(|| {
+            ResolveBuilderTargetError::MissingCredentials {
+                location: std::panic::Location::caller(),
+            }
+        })?;
+        let managed_onprem_credential_id = managed_onprem_credential_id.ok_or_else(|| {
             ResolveBuilderTargetError::MissingCredentials {
                 location: std::panic::Location::caller(),
             }
@@ -2092,6 +2100,8 @@ async fn resolve_builder_target(
             config,
             aws_credentials: managed_onprem_credentials.clone(),
             cache_app_id: Some(resource_id),
+            credential_id: Some(managed_onprem_credential_id),
+            uses_customer_credentials: true,
         })
     } else {
         if let Some(managed_onprem) = managed_onprem {
@@ -2105,6 +2115,8 @@ async fn resolve_builder_target(
             config: default_config.clone(),
             aws_credentials: platform_builder_credentials(),
             cache_app_id: None,
+            credential_id: None,
+            uses_customer_credentials: false,
         })
     }
 }
@@ -4505,6 +4517,7 @@ async fn deploy_logic(
         builder_cfg,
         managed_onprem_config.as_ref(),
         deployment_credentials.as_ref(),
+        cred.as_ref().map(|credential| credential.id),
         resource_id,
     )
     .await
@@ -4720,6 +4733,8 @@ async fn deploy_logic(
                 &ec2_client,
                 &s3_client,
                 &builder_target.config,
+                builder_target.credential_id,
+                builder_target.uses_customer_credentials,
                 &build_request,
                 &cache_key,
                 &tx,
@@ -6225,9 +6240,12 @@ async fn main() -> Result<(), MainError> {
                 region: std::env::var("AWS_REGION").unwrap_or_else(|_| "us-west-2".to_string()),
             };
             let ec2 = crate::ec2::Ec2Client::new(&platform_creds);
-            builder::reap_orphaned_builders(&reaper_state.db, &ec2, |itype| {
-                reaper_state.pricing.instance_pricing(itype)
-            })
+            builder::reap_orphaned_builders(
+                &reaper_state.db,
+                &ec2,
+                reaper_state.encryptor.as_deref(),
+                |itype| reaper_state.pricing.instance_pricing(itype),
+            )
             .await;
             builder::reap_unattributed_builders(&reaper_state.db, &ec2).await;
             tokio::time::sleep(std::time::Duration::from_secs(300)).await;
