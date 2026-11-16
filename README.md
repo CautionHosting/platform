@@ -178,7 +178,7 @@ start the real stack with `make up`, generate an access code with
 1. Register using Passkey (via terminal or web browser):
 
    ```bash
-   caution register --alpha-code <access_code>
+   caution register
    ```
 
 2. Add an SSH key (can be done in browser as well):
