@@ -465,8 +465,7 @@
                 <pre ref="codeInstall">
 git clone https://git.caution.co/public/platform
 cd platform
-make build-cli
-./utils/install.sh</pre
+make install-cli</pre
                 >
               </div>
             </div>

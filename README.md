@@ -178,13 +178,13 @@ start the real stack with `make up`, generate an access code with
 1. Register using Passkey (via terminal or web browser):
 
    ```bash
-   caution register
+   caution register --alpha-code <access_code>
    ```
 
 2. Add an SSH key (can be done in browser as well):
 
    ```bash
-   caution ssh-keys add --title <name_of_key> --key <pub_key_string>
+   caution ssh-keys add --name <name_of_key> --key <pub_key_string>
    ```
 
 3. Initialize a project within a Dockerized repo:
