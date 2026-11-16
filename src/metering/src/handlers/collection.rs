@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only OR LicenseRef-Commercial
 
 use dterror::{BoxError, Location, ResultExt as _};
+use sqlx::{pool::PoolConnection, Postgres};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -95,23 +96,62 @@ pub(crate) enum CollectNetworkEgressError {
     },
 }
 
-/// Try to acquire an advisory lock, run the closure, and release the lock.
-/// Returns None if the lock is already held by another instance.
+pub(crate) struct AdvisoryLock {
+    connection: Option<PoolConnection<Postgres>>,
+    lock_id: i64,
+}
+
+impl Drop for AdvisoryLock {
+    fn drop(&mut self) {
+        if let Some(connection) = &mut self.connection {
+            connection.close_on_drop();
+        }
+    }
+}
+
+/// Try to acquire an advisory lock, retaining its database connection.
+/// Returns None if the lock is already held by another instance or cannot be acquired.
 #[tracing::instrument(skip_all)]
-pub(crate) async fn try_advisory_lock(pool: &sqlx::PgPool, lock_id: i64) -> bool {
-    sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+pub(crate) async fn try_advisory_lock(pool: &sqlx::PgPool, lock_id: i64) -> Option<AdvisoryLock> {
+    let mut lock = AdvisoryLock {
+        connection: Some(pool.acquire().await.ok()?),
+        lock_id,
+    };
+    let acquired = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
         .bind(lock_id)
-        .fetch_one(pool)
-        .await
-        .unwrap_or(false)
+        .fetch_one(
+            &mut **lock
+                .connection
+                .as_mut()
+                .expect("advisory lock always retains its connection"),
+        )
+        .await;
+
+    match acquired {
+        Ok(true) => Some(lock),
+        Ok(false) => {
+            let _ = lock.connection.take();
+            None
+        }
+        Err(_) => None,
+    }
 }
 
 #[tracing::instrument(skip_all)]
-pub(crate) async fn advisory_unlock(pool: &sqlx::PgPool, lock_id: i64) {
-    let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
-        .bind(lock_id)
-        .execute(pool)
+pub(crate) async fn advisory_unlock(mut lock: AdvisoryLock) {
+    let released = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
+        .bind(lock.lock_id)
+        .fetch_one(
+            &mut **lock
+                .connection
+                .as_mut()
+                .expect("advisory lock always retains its connection"),
+        )
         .await;
+
+    if matches!(released, Ok(true)) {
+        let _ = lock.connection.take();
+    }
 }
 
 #[tracing::instrument(skip_all, err(Debug))]
@@ -120,9 +160,7 @@ pub async fn trigger_collection(
 ) -> Result<(StatusCode, Json<serde_json::Value>), TriggerCollectionError> {
     use TriggerCollectionErrorCtx as Ctx;
 
-    // Bypass advisory lock for explicitly triggered collections — the lock only
-    // prevents duplicate background loop runs, not manual API invocations.
-    let count = run_collection_cycle_inner(&state)
+    let count = run_collection_cycle(&state)
         .await
         .with_context(Ctx::database())?;
 
@@ -146,12 +184,12 @@ pub async fn run_collection_loop(state: Arc<AppState>, interval_secs: u64) {
 
 #[tracing::instrument(skip_all)]
 async fn run_collection_cycle(state: &AppState) -> Result<usize, CollectionCycleError> {
-    if !try_advisory_lock(&state.pool, LOCK_COLLECTION).await {
+    let Some(lock) = try_advisory_lock(&state.pool, LOCK_COLLECTION).await else {
         tracing::debug!("Collection cycle skipped — another instance holds the lock");
         return Ok(0);
-    }
+    };
     let result = run_collection_cycle_inner(state).await;
-    advisory_unlock(&state.pool, LOCK_COLLECTION).await;
+    advisory_unlock(lock).await;
     result
 }
 
@@ -312,15 +350,17 @@ pub(crate) async fn collect_resource_usage(
 ) -> Result<bool, CollectResourceUsageError> {
     use CollectResourceUsageErrorCtx as Ctx;
 
+    let mut tx = state.pool.begin().await.with_context(Ctx::database())?;
     let resource = sqlx::query_as::<_, TrackedResource>(
         r#"
         SELECT resource_id, organization_id, user_id, application_id, provider, instance_type, region, metadata, status, started_at, stopped_at, last_billed_at
         FROM tracked_resources
         WHERE resource_id = $1
+        FOR UPDATE
         "#,
     )
     .bind(resource_id)
-    .fetch_optional(&state.pool)
+    .fetch_optional(&mut *tx)
     .await
     .with_context(Ctx::database())?
     .ok_or_else(|| CollectResourceUsageError::NotFound {
@@ -369,9 +409,6 @@ pub(crate) async fn collect_resource_usage(
         }
     })?;
     let cost = pricing.total_cost_usd(usage.quantity);
-
-    // Record usage and advance last_billed_at atomically to prevent double-counting
-    let mut tx = state.pool.begin().await.with_context(Ctx::database())?;
 
     sqlx::query(
         r#"

@@ -190,12 +190,12 @@ async fn close_open_subscription_segment(
 /// Run the monthly billing cycle
 #[tracing::instrument(skip_all)]
 async fn run_monthly_billing_cycle(state: &AppState) -> Result<(), MonthlyBillingCycleError> {
-    if !try_advisory_lock(&state.pool, LOCK_MONTHLY_BILLING).await {
+    let Some(lock) = try_advisory_lock(&state.pool, LOCK_MONTHLY_BILLING).await else {
         tracing::debug!("Monthly billing skipped — another instance holds the lock");
         return Ok(());
-    }
+    };
     let result = run_monthly_billing_cycle_inner(state).await;
-    advisory_unlock(&state.pool, LOCK_MONTHLY_BILLING).await;
+    advisory_unlock(lock).await;
     result
 }
 
@@ -415,12 +415,12 @@ async fn run_monthly_billing_cycle_inner(state: &AppState) -> Result<(), Monthly
 async fn run_subscription_maintenance(
     state: &AppState,
 ) -> Result<(), SubscriptionMaintenanceError> {
-    if !try_advisory_lock(&state.pool, LOCK_SUBSCRIPTION_BILLING).await {
+    let Some(lock) = try_advisory_lock(&state.pool, LOCK_SUBSCRIPTION_BILLING).await else {
         tracing::debug!("Subscription maintenance skipped — another instance holds the lock");
         return Ok(());
-    }
+    };
     let result = run_subscription_maintenance_inner(state).await;
-    advisory_unlock(&state.pool, LOCK_SUBSCRIPTION_BILLING).await;
+    advisory_unlock(lock).await;
     result
 }
 
