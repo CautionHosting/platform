@@ -53,6 +53,7 @@ async fn run_dunning_cycle(state: &AppState) -> Result<(), RunDunningCycleError>
         FROM subscriptions s
         JOIN organizations o ON o.id = s.organization_id
         WHERE s.status = 'past_due'
+          AND s.billing_source <> 'enterprise'
           AND o.payment_failed_at IS NULL
         "#,
     )
@@ -199,7 +200,7 @@ async fn run_dunning_cycle(state: &AppState) -> Result<(), RunDunningCycleError>
                     org_id,
                     days_overdue
                 );
-                suspend_org(state, *org_id).await;
+                suspend_managed_resources(state, *org_id).await;
             }
             _ => {}
         }
@@ -262,9 +263,9 @@ async fn check_payment_resolved(
     Ok(has_balance)
 }
 
-/// Call the API service to suspend all running resources for an org.
+/// Call the API service to suspend fully-managed resources for an org.
 #[tracing::instrument(skip_all)]
-async fn suspend_org(state: &AppState, org_id: uuid::Uuid) {
+async fn suspend_managed_resources(state: &AppState, org_id: uuid::Uuid) {
     let api_url = std::env::var("API_URL").unwrap_or_else(|_| "http://api:8080".to_string());
     // We need a user_id for internal auth — use any org member
     let user_id: Option<uuid::Uuid> = sqlx::query_scalar(
@@ -286,7 +287,10 @@ async fn suspend_org(state: &AppState, org_id: uuid::Uuid) {
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
     let resp = client
-        .post(format!("{}/internal/org/{}/suspend", api_url, org_id))
+        .post(format!(
+            "{}/internal/org/{}/suspend-managed",
+            api_url, org_id
+        ))
         .header(
             "x-internal-service-secret",
             state.internal_service_secret.as_str(),
@@ -297,7 +301,20 @@ async fn suspend_org(state: &AppState, org_id: uuid::Uuid) {
 
     match resp {
         Ok(r) if r.status().is_success() => {
-            tracing::info!("Successfully suspended org {}", org_id);
+            tracing::info!(
+                "Successfully suspended fully-managed resources for org {}",
+                org_id
+            );
+            if let Err(e) =
+                sqlx::query("UPDATE organizations SET dunning_stage = 'suspended' WHERE id = $1")
+                    .bind(org_id)
+                    .execute(&state.pool)
+                    .await
+            {
+                tracing::error!("Failed to update dunning_stage for org {}: {}", org_id, e);
+                return;
+            }
+
             // Send suspension notice email
             let app_count: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM compute_resources WHERE organization_id = $1 AND state = 'stopped'"

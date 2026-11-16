@@ -1009,6 +1009,7 @@ async fn handle_payment_failed(
             JOIN invoices i ON sl.invoice_id = i.id
             WHERE i.paddle_transaction_id = $1
         )
+          AND billing_source <> 'enterprise'
         "#,
     )
     .bind(transaction_id)
