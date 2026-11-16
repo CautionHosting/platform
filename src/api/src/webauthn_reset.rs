@@ -164,14 +164,8 @@ pub async fn reset_webauthn_credentials(
         })
         .with_context(Ctx::database())?;
 
-    tx.commit()
-        .await
-        .inspect_err(|e| {
-            tracing::error!("Failed to commit reset token transaction: {:?}", e);
-        })
-        .with_context(Ctx::database())?;
-
-    // Send the reset email.
+    // Send the reset email before committing credential deletion. A delivery
+    // failure drops this transaction and keeps the existing credentials valid.
     let token_hex = hex::encode(token_bytes);
     let frontend_url =
         std::env::var("FRONTEND_URL").unwrap_or_else(|_| "http://localhost:8000".to_string());
@@ -235,6 +229,13 @@ pub async fn reset_webauthn_credentials(
             location: std::panic::Location::caller(),
         });
     }
+
+    tx.commit()
+        .await
+        .inspect_err(|e| {
+            tracing::error!("Failed to commit reset token transaction: {:?}", e);
+        })
+        .with_context(Ctx::database())?;
 
     Ok(WebauthnResetResponse {
         status: "ok",
