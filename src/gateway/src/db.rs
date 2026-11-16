@@ -810,7 +810,11 @@ pub async fn get_user_ids_by_credential(
     credential_id: &[u8],
 ) -> Result<Vec<Uuid>, DbError> {
     let user_ids: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT user_id FROM fido2_credentials WHERE credential_id = $1 ORDER BY user_id",
+        "SELECT credentials.user_id
+         FROM fido2_credentials credentials
+         JOIN users ON users.id = credentials.user_id
+         WHERE credentials.credential_id = $1 AND users.is_active
+         ORDER BY credentials.user_id",
     )
     .bind(credential_id)
     .fetch_all(pool)
@@ -831,14 +835,15 @@ pub async fn get_user_id_by_username(
     pool: &PgPool,
     username: &str,
 ) -> Result<Option<Uuid>, DbError> {
-    let user_id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM users WHERE username = $1")
-        .bind(username)
-        .fetch_optional(pool)
-        .await
-        .with_context(DbErrorCtx::new(
-            DbErrorKind::QueryFailed,
-            "get_user_id_by_username",
-        ))?;
+    let user_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM users WHERE username = $1 AND is_active")
+            .bind(username)
+            .fetch_optional(pool)
+            .await
+            .with_context(DbErrorCtx::new(
+                DbErrorKind::QueryFailed,
+                "get_user_id_by_username",
+            ))?;
 
     Ok(user_id)
 }
@@ -851,7 +856,11 @@ pub async fn get_credential_public_keys_by_user_id(
     user_id: Uuid,
 ) -> Result<Vec<Vec<u8>>, DbError> {
     let rows: Vec<(Vec<u8>,)> = sqlx::query_as(
-        "SELECT public_key FROM fido2_credentials WHERE user_id = $1 ORDER BY created_at DESC",
+        "SELECT credentials.public_key
+         FROM fido2_credentials credentials
+         JOIN users ON users.id = credentials.user_id
+         WHERE credentials.user_id = $1 AND users.is_active
+         ORDER BY credentials.created_at DESC",
     )
     .bind(user_id)
     .fetch_all(pool)
@@ -1070,7 +1079,7 @@ pub fn hash_bound_token(token: &str) -> Vec<u8> {
 /// flight with it do not get a 401.
 const CREDENTIAL_GRACE_SECS: i64 = 60;
 
-/// Resolve a presented credential to a live session. `token` is the raw
+/// Resolve a presented credential to a live session for an active user. `token` is the raw
 /// `session_id` of an unbound session, the current DBSC bound token, or the
 /// credential that a bind or rotation replaced, within its grace. Once a
 /// session is bound, its raw `session_id` stops resolving after that grace.
@@ -1081,12 +1090,13 @@ pub async fn validate_auth_session(
     token: &str,
 ) -> Result<Option<ValidatedSession>, DbError> {
     let session: Option<ValidatedSession> = sqlx::query_as(
-        "SELECT session_id, credential_id, user_id
-         FROM auth_sessions
-         WHERE expires_at > NOW() AND (
-               (session_id = $1 AND dbsc_public_key IS NULL)
-            OR (bound_token_hash = $2 AND bound_token_expires_at > NOW())
-            OR (prev_credential_hash = $2 AND prev_credential_expires_at > NOW()))",
+        "SELECT s.session_id, s.credential_id, s.user_id
+         FROM auth_sessions s
+         JOIN users u ON u.id = s.user_id
+         WHERE s.expires_at > NOW() AND u.is_active AND (
+               (s.session_id = $1 AND s.dbsc_public_key IS NULL)
+            OR (s.bound_token_hash = $2 AND s.bound_token_expires_at > NOW())
+            OR (s.prev_credential_hash = $2 AND s.prev_credential_expires_at > NOW()))",
     )
     .bind(token)
     .bind(hash_bound_token(token))
@@ -1292,12 +1302,17 @@ pub async fn get_ssh_public_key_by_fingerprint(
 
 /// Check if an SSH key fingerprint exists for any user
 pub async fn ssh_key_exists(pool: &PgPool, fingerprint: &str) -> Result<bool, DbError> {
-    let exists: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM ssh_keys WHERE fingerprint = $1)")
-            .bind(fingerprint)
-            .fetch_one(pool)
-            .await
-            .with_context(DbErrorCtx::new(DbErrorKind::QueryFailed, "ssh_key_exists"))?;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM ssh_keys keys
+             JOIN users ON users.id = keys.user_id
+             WHERE keys.fingerprint = $1 AND users.is_active
+         )",
+    )
+    .bind(fingerprint)
+    .fetch_one(pool)
+    .await
+    .with_context(DbErrorCtx::new(DbErrorKind::QueryFailed, "ssh_key_exists"))?;
 
     Ok(exists)
 }
@@ -1306,6 +1321,7 @@ pub async fn ssh_key_exists(pool: &PgPool, fingerprint: &str) -> Result<bool, Db
 /// This finds the user who:
 /// 1. Has the given SSH key fingerprint registered
 /// 2. Is a member of the organization that owns the app
+/// 3. Has an active account
 pub async fn get_user_for_app_by_ssh_key(
     pool: &PgPool,
     fingerprint: &str,
@@ -1321,8 +1337,10 @@ pub async fn get_user_for_app_by_ssh_key(
     let result: Option<(Uuid, Uuid)> = sqlx::query_as(
         "SELECT om.user_id, om.organization_id
          FROM ssh_keys sk
+         JOIN users u ON u.id = sk.user_id
          JOIN organization_members om ON sk.user_id = om.user_id
          WHERE sk.fingerprint = $1
+           AND u.is_active
            AND om.organization_id = (
                SELECT organization_id FROM compute_resources WHERE id = $2
            )",
@@ -1910,8 +1928,11 @@ pub async fn get_auth_session(
     session_id: &str,
 ) -> Result<Option<crate::types::DbSession>, DbError> {
     let session = sqlx::query_as(
-        "SELECT session_id, credential_id, user_id, expires_at, created_at, last_used_at
-         FROM auth_sessions WHERE session_id = $1",
+        "SELECT s.session_id, s.credential_id, s.user_id,
+                s.expires_at, s.created_at, s.last_used_at
+         FROM auth_sessions s
+         JOIN users u ON u.id = s.user_id
+         WHERE s.session_id = $1 AND u.is_active",
     )
     .bind(session_id)
     .fetch_optional(pool)
@@ -1956,9 +1977,11 @@ pub async fn get_dbsc_session_by_session_id(
     session_id: &str,
 ) -> Result<Option<DbscSession>, DbError> {
     sqlx::query_as(
-        "SELECT session_id, dbsc_id, dbsc_public_key, dbsc_challenge,
-                dbsc_challenge_expires_at, expires_at
-         FROM auth_sessions WHERE session_id = $1",
+        "SELECT s.session_id, s.dbsc_id, s.dbsc_public_key, s.dbsc_challenge,
+                s.dbsc_challenge_expires_at, s.expires_at
+         FROM auth_sessions s
+         JOIN users u ON u.id = s.user_id
+         WHERE s.session_id = $1 AND u.is_active",
     )
     .bind(session_id)
     .fetch_optional(pool)
@@ -1974,9 +1997,11 @@ pub async fn get_dbsc_session_by_dbsc_id(
     dbsc_id: &str,
 ) -> Result<Option<DbscSession>, DbError> {
     sqlx::query_as(
-        "SELECT session_id, dbsc_id, dbsc_public_key, dbsc_challenge,
-                dbsc_challenge_expires_at, expires_at
-         FROM auth_sessions WHERE dbsc_id = $1",
+        "SELECT s.session_id, s.dbsc_id, s.dbsc_public_key, s.dbsc_challenge,
+                s.dbsc_challenge_expires_at, s.expires_at
+         FROM auth_sessions s
+         JOIN users u ON u.id = s.user_id
+         WHERE s.dbsc_id = $1 AND u.is_active",
     )
     .bind(dbsc_id)
     .fetch_optional(pool)

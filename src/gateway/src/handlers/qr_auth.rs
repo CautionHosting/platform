@@ -646,7 +646,7 @@ pub async fn qr_login_status_handler(
                 .await
                 .with_context(QrCtx::db_get_session())?;
 
-            let session_expires = session.map(|s| s.expires_at.to_string());
+            let session_expires = session.as_ref().map(|s| s.expires_at.to_string());
 
             // Consume last: atomically NULLs session_id and confirms we won any
             // concurrent-poll race. Only hand back the session if we did.
@@ -654,7 +654,7 @@ pub async fn qr_login_status_handler(
                 .await
                 .with_context(QrCtx::db_get_token())?;
 
-            if consumed.is_some() {
+            if consumed.is_some() && session.is_some() {
                 return Ok(Json(crate::types::QrLoginStatusResponse {
                     status: QrStatus::Completed,
                     session_id: Some(sid),

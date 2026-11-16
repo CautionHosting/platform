@@ -373,11 +373,27 @@ pub async fn delete_current_user(
 ) -> Result<StatusCode, DeleteCurrentUserError> {
     use DeleteCurrentUserErrorCtx as Ctx;
 
+    let mut transaction = state.db.begin().await.with_context(Ctx::query())?;
+
     sqlx::query("UPDATE users SET is_active = false WHERE id = $1")
         .bind(auth.user_id)
-        .execute(&state.db)
+        .execute(&mut *transaction)
         .await
         .with_context(Ctx::query())?;
+
+    sqlx::query("DELETE FROM auth_sessions WHERE user_id = $1")
+        .bind(auth.user_id)
+        .execute(&mut *transaction)
+        .await
+        .with_context(Ctx::query())?;
+
+    sqlx::query("DELETE FROM ssh_keys WHERE user_id = $1")
+        .bind(auth.user_id)
+        .execute(&mut *transaction)
+        .await
+        .with_context(Ctx::query())?;
+
+    transaction.commit().await.with_context(Ctx::query())?;
 
     Ok(StatusCode::NO_CONTENT)
 }
